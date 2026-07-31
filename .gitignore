@@ -1,0 +1,10 @@
+*.zip
+*zip.*
+.env
+.env.local
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+node_modules/
+backend/logs/
