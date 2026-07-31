@@ -37,8 +37,10 @@ from app.services import (
     event_bus,
     health_monitor,
     notification_service,
+    protocol_manager,
     snapshot_service,
 )
+from app.models.deployment import DeploymentLog
 
 DEVICE_TYPE_MAP = {
     "cisco": "cisco_ios",
@@ -62,6 +64,26 @@ def target_device_ids(cr: ChangeRequest) -> list[uuid.UUID]:
             if extra_id not in ids:
                 ids.append(extra_id)
     return ids
+
+
+def _log_deployment(db: Session, deployment_id: uuid.UUID, step: str, message: str, level: str = "INFO"):
+    log = DeploymentLog(deployment_id=deployment_id, step=step, level=level, message=message)
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    
+    event_bus.publish_event(
+        "deployment_log",
+        deployment_id=str(deployment_id),
+        log={
+            "id": str(log.id),
+            "step": log.step,
+            "level": log.level,
+            "message": log.message,
+            "timestamp": log.timestamp.isoformat(),
+        }
+    )
+
 
 
 def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UUID, actor_email: str) -> Deployment:
@@ -93,6 +115,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         db.add(deployment)
         db.commit()
         db.refresh(deployment)
+        _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Failed to retrieve credentials: {exc}", "ERROR")
         audit_service.record_event(
             db, actor="system", action="Credential Retrieval", result="Failed",
             device_hostname=device.hostname, change_request_id=cr.id, detail=str(exc),
@@ -101,7 +124,20 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
+    # We have a valid device, proceed to create the Deployment early to attach logs
+    deployment = Deployment(
+        change_request_id=cr.id, device_id=device.id,
+        status=DeploymentStatus.IN_PROGRESS, protocol="ssh",
+    )
+    db.add(deployment)
+    db.commit()
+    db.refresh(deployment)
+    event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+    
+    _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Starting deployment pipeline for CR {str(cr.id)[:8]} on {device.hostname}")
+
     # --- 1. Automatic Configuration Snapshot (FR-7) ---
+    _log_deployment(db, deployment.id, "SNAPSHOT", "Generating configuration snapshot...")
     version = str(int(uuid.uuid4().int % 1_000_000))
     snapshot_payload = snapshot_service.build_snapshot_payload(
         running_config=cr.current_config or "! (no prior running-config on file)",
@@ -113,52 +149,37 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     db.commit()
     db.refresh(snapshot)
 
+    deployment.snapshot_id = snapshot.id
+    db.commit()
+
+    _log_deployment(db, deployment.id, "SNAPSHOT", f"Snapshot {snapshot.version} completed securely (checksum: {snapshot.checksum[:12]}...)")
     audit_service.record_event(
         db, actor="system", action="Snapshot", result="Completed",
         device_hostname=device.hostname, change_request_id=cr.id,
         detail=f"version={snapshot.version} checksum={snapshot.checksum[:12]}...",
     )
 
-    deployment = Deployment(
-        change_request_id=cr.id, device_id=device.id, snapshot_id=snapshot.id,
-        status=DeploymentStatus.IN_PROGRESS, protocol="ssh",
-    )
-    db.add(deployment)
-    db.commit()
-    db.refresh(deployment)
-    event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
-
-    # --- 2. Configuration Deployment (FR-8), with retry (deployment_engine) ---
-    config_commands = [line for line in cr.proposed_config.splitlines() if line.strip()]
-    deploy_result = deployment_engine.deploy_config(
-        hostname=device.hostname,
-        ip_address=device.ip_address,
-        device_type=netmiko_type,
-        username=device.ssh_username or "admin",
-        password=ssh_password,
-        config_commands=config_commands,
-    )
+    # --- 2. Configuration Deployment (FR-8) via ProtocolManager ---
+    _log_deployment(db, deployment.id, "DEPLOY", "Deploying requested configuration lines...")
+    pm = protocol_manager.ProtocolManager(db, device, operator=actor_email)
+    
+    # We pass the proposed_config to deploy_config
+    deploy_result = pm.deploy_config(cr.proposed_config)
+    deployment.protocol = deploy_result.protocol.value if hasattr(deploy_result.protocol, 'value') else deploy_result.protocol
 
     if not deploy_result.success:
         deployment.status = DeploymentStatus.FAILED
         deployment.error_message = deploy_result.error
         db.commit()
-        audit_service.record_event(
-            db, actor="system", action="Deployment", result="Failed",
-            device_hostname=device.hostname, change_request_id=cr.id,
-            detail=f"{deploy_result.error} (after {deploy_result.attempts} attempt(s))",
-        )
+        msg = f"Deployment failed over {deploy_result.protocol}: {deploy_result.error}"
+        _log_deployment(db, deployment.id, "DEPLOY", msg, "ERROR")
         notification_service.notify(
             "Deployment Failed", f"{device.hostname}: {deploy_result.error}", severity="critical",
         )
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
-    audit_service.record_event(
-        db, actor="system", action="Deployment", result="Success",
-        device_hostname=device.hostname, change_request_id=cr.id,
-        detail=f"succeeded on attempt {deploy_result.attempts}" if deploy_result.attempts > 1 else None,
-    )
+    _log_deployment(db, deployment.id, "DEPLOY", f"Deployment succeeded swiftly over {deploy_result.protocol} ({deploy_result.execution_time_ms:.0f}ms).")
 
     # --- 3. Real-Time Health Monitoring (FR-9) ---
     # Actually polls the full suite (BGP/OSPF adjacency, DNS/DHCP/HTTP/VPN,
@@ -166,6 +187,8 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     # configurable monitoring window (SRS 6.7) rather than checking once --
     # see health_monitor.run_monitoring_window for why a single check right
     # after deploy isn't enough. Stops early on the first failing round.
+    _log_deployment(db, deployment.id, "VERIFY", "Initiating health monitoring sweeps across all vectors...")
+    
     monitoring = health_monitor.run_monitoring_window(
         device.ip_address,
         netmiko_type=netmiko_type,
@@ -174,6 +197,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         hostname=device.hostname,
     )
     for round_ in monitoring.rounds:
+        _log_deployment(db, deployment.id, "VERIFY", f"Completed verification round {round_.round_number} (t+{round_.elapsed_seconds}s). Passed: {len([o for o in round_.outcomes if o.passed])}/{len(round_.outcomes)}")
         for outcome in round_.outcomes:
             db.add(HealthCheckResult(
                 deployment_id=deployment.id,
@@ -192,6 +216,11 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     if healthy:
         deployment.status = DeploymentStatus.SUCCEEDED
         db.commit()
+        
+        detail_msg = f"All {len(monitoring.rounds)} health sweep(s) completed cleanly."
+        _log_deployment(db, deployment.id, "VERIFY", detail_msg)
+        _log_deployment(db, deployment.id, "COMPLETE", "Deployment successfully finalized.")
+        
         audit_service.record_event(
             db, actor="system", action="Health Check", result="Passed",
             device_hostname=device.hostname, change_request_id=cr.id,
@@ -206,45 +235,43 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
-    # --- 4. Self-Healing Rollback Engine (FR-10), with retry ---
+    # --- 4. Self-Healing Rollback Engine (FR-10) ---
+    fail_reasons = "; ".join(o.detail for o in outcomes if not o.passed)
+    _log_deployment(db, deployment.id, "VERIFY", f"Verification failed: {fail_reasons}", "ERROR")
+    _log_deployment(db, deployment.id, "ROLLBACK", "Health checks failed. Self-healing rollback triggered.", "WARN")
+
     audit_service.record_event(
         db, actor="system", action="Health Check", result="Failed",
         device_hostname=device.hostname, change_request_id=cr.id,
         detail=(
             f"failed on poll round {len(monitoring.rounds)} "
-            f"(t+{monitoring.rounds[-1].elapsed_seconds}s): "
-            + "; ".join(o.detail for o in outcomes if not o.passed)
+            f"(t+{monitoring.rounds[-1].elapsed_seconds}s): {fail_reasons}"
         ),
     )
 
+    _log_deployment(db, deployment.id, "ROLLBACK", "Restoring configuration from pre-flight snapshot...")
     restore_commands = (snapshot_service.decrypt_config(snapshot.running_config_encrypted)).splitlines()
-    rollback_result = deployment_engine.rollback_config(
-        hostname=device.hostname,
-        ip_address=device.ip_address,
-        device_type=netmiko_type,
-        username=device.ssh_username or "admin",
-        password=ssh_password,
-        restore_commands=[line for line in restore_commands if line.strip()],
-    )
+    restore_text = "\n".join([line for line in restore_commands if line.strip()])
+    
+    rollback_result = pm.restore_config(restore_text)
 
     deployment.status = DeploymentStatus.ROLLED_BACK if rollback_result.success else DeploymentStatus.FAILED
     deployment.error_message = rollback_result.error
     db.commit()
+    
+    if rollback_result.success:
+        _log_deployment(db, deployment.id, "ROLLBACK", f"Rollback succeeded via {rollback_result.protocol}. Device returned to known-good state.", "WARN")
+    else:
+        _log_deployment(db, deployment.id, "ROLLBACK", f"CRITICAL: Rollback failed! {rollback_result.error}", "ERROR")
 
-    audit_service.record_event(
-        db, actor="system", action="Rollback",
-        result="Completed" if rollback_result.success else "Failed",
-        device_hostname=device.hostname, change_request_id=cr.id, detail=rollback_result.error,
-    )
     notification_service.notify(
         "Automatic Rollback Triggered",
         f"{device.hostname}: health checks failed after deployment. Rollback "
-        f"{'succeeded' if rollback_result.success else 'FAILED — manual intervention required'} "
-        f"(after {rollback_result.attempts} attempt(s)).",
+        f"{'succeeded' if rollback_result.success else 'FAILED — manual intervention required'}.",
         severity="critical",
     )
     event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
-    return deployment
+    return deploymentnt
 
 
 def aggregate_change_request_status(db: Session, cr: ChangeRequest) -> ChangeRequest:

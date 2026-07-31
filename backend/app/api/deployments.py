@@ -58,3 +58,56 @@ def get_snapshot_checksum(snapshot_id: uuid.UUID, db: Session = Depends(get_db),
     if not snap:
         raise HTTPException(status_code=404, detail="Snapshot not found")
     return {"id": str(snap.id), "checksum": snap.checksum, "version": snap.version, "created_at": snap.created_at}
+
+
+@router.get("/{deployment_id}/logs")
+def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Returns the ordered timeline/logs of a deployment for real-time and historical views."""
+    from app.models.deployment import DeploymentLog
+    logs = db.query(DeploymentLog).filter(DeploymentLog.deployment_id == deployment_id).order_by(DeploymentLog.timestamp.asc()).all()
+    return [
+        {
+            "id": str(lg.id),
+            "step": lg.step,
+            "level": lg.level,
+            "message": lg.message,
+            "timestamp": lg.timestamp
+        }
+        for lg in logs
+    ]
+
+
+from fastapi import WebSocket, WebSocketDisconnect
+import json
+import asyncio
+from app.services.event_bus import redis_client, pubsub
+
+@router.websocket("/ws")
+async def deployments_ws(websocket: WebSocket):
+    """
+    Dedicated websocket for real-time deployment logs and status updates.
+    Yields events published to the 'netguard:deployments:events' channel.
+    Wait... actually we publish via event_bus to 'netguard:events' using `event_bus.publish_event`,
+    so we listen to the standard channel and filter for deployment events.
+    """
+    await websocket.accept()
+    ps = pubsub()
+    ps.subscribe("netguard:events")
+    try:
+        while True:
+            # Poll Redis for unread events
+            message = ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message:
+                data = json.loads(message["data"])
+                # Only stream deployment related events (status changed or logs)
+                if data.get("event") in ("deployment_status_changed", "deployment_log"):
+                    await websocket.send_json(data)
+            else:
+                # If no message, yield to the event loop
+                await asyncio.sleep(0.1)
+                
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ps.unsubscribe()
+        ps.close()

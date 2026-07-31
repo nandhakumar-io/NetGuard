@@ -199,3 +199,31 @@ export interface AlertSummary {
   active_total: number;
   resolved: number;
 }
+
+export interface HealthCheck {
+  category: string;
+  check_name: string;
+  passed: boolean;
+  detail: string | null;
+  checked_at: string;
+}
+
+export interface DeploymentLog {
+  id: string;
+  step: string;
+  level: "INFO" | "WARN" | "ERROR";
+  message: string;
+  timestamp: string;
+}
+
+export interface DeploymentRecord {
+  id: string;
+  change_request_id: string;
+  device_id: string;
+  snapshot_id: string | null;
+  protocol: string;
+  status: "queued" | "in_progress" | "succeeded" | "failed" | "rolled_back";
+  error_message: string | null;
+  created_at: string;
+  health_checks: HealthCheck[];
+}

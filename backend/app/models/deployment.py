@@ -52,3 +52,16 @@ class HealthCheckResult(Base):
     elapsed_seconds = Column(Integer, nullable=False, default=0, server_default="0")
 
     checked_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class DeploymentLog(Base):
+    __tablename__ = "deployment_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    deployment_id = Column(UUID(as_uuid=True), ForeignKey("deployments.id"), index=True, nullable=False)
+    
+    step = Column(String, nullable=False)  # e.g., 'PRE-FLIGHT', 'SNAPSHOT', 'DEPLOY', 'VERIFY', 'ROLLBACK', 'COMPLETE'
+    level = Column(String, nullable=False, default="INFO")  # 'INFO', 'ERROR', 'WARN'
+    message = Column(Text, nullable=False)
+    
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
