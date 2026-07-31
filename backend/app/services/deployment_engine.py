@@ -124,6 +124,50 @@ def deploy_config(
     return _deploy_with_retry(hostname, ip_address, device_type, username, password, config_commands, max_attempts)
 
 
+NAPALM_DRIVER_MAP = {
+    "cisco_ios": "ios",
+    "juniper_junos": "junos",
+    "arista_eos": "eos",
+}
+
+
+def read_running_config(
+    device_type: str,
+    ip_address: str,
+    username: str,
+    password: str,
+) -> str | None:
+    """Best-effort live read of a device's current running-config via
+    NAPALM, used to take a genuine "state right now" snapshot immediately
+    before a rollback is applied (as opposed to reusing whatever config
+    happened to be recorded in the DB from the last deployment, which may
+    be stale if the device was touched out-of-band).
+
+    Returns None -- not an exception -- when the platform has no NAPALM
+    driver (e.g. plain linux hosts) or the read otherwise fails; callers
+    should treat that as "couldn't confirm live state" and fall back to
+    their best available prior snapshot rather than blocking the rollback
+    on it. A failed pre-rollback snapshot is not a reason to refuse an
+    emergency rollback.
+    """
+    driver_name = NAPALM_DRIVER_MAP.get(device_type)
+    if driver_name is None:
+        return None
+    try:
+        import napalm
+
+        driver = napalm.get_network_driver(driver_name)
+        device = driver(hostname=ip_address, username=username, password=password, timeout=10)
+        device.open()
+        try:
+            config = device.get_config()
+            return config.get("running") or None
+        finally:
+            device.close()
+    except Exception:  # noqa: BLE001 - best-effort; caller falls back
+        return None
+
+
 def rollback_config(
     hostname: str,
     ip_address: str,

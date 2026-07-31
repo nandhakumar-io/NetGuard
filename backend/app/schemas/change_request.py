@@ -34,6 +34,8 @@ class ChangeRequestRead(ChangeRequestBase):
     risk_score: int | None = None
     risk_findings: str | None = None
     status: ChangeStatus
+    is_rollback: str = "false"
+    rollback_snapshot_id: uuid.UUID | None = None
     created_at: datetime.datetime
 
 

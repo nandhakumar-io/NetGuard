@@ -352,6 +352,83 @@ def test_suite_passed_false_when_any_check_fails():
     assert hm.suite_passed(results) is False
 
 
+# ---------------------------------------------------------------------
+# monitoring window: does it actually poll?
+# ---------------------------------------------------------------------
+def test_monitoring_window_polls_multiple_times_when_healthy():
+    """A device that stays healthy for the whole window should be checked
+    more than once -- this is the core "does it actually poll" behavior.
+    window=45s / interval=15s -> rounds at t=0, t=15, t=30 (3 rounds).
+    """
+    healthy_outcomes = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
+    sleeps = []
+    with patch.object(hm, "run_health_suite", return_value=healthy_outcomes):
+        result = hm.run_monitoring_window(
+            "10.0.0.1", window_seconds=45, poll_interval_seconds=15, sleep_fn=sleeps.append
+        )
+
+    assert result.healthy is True
+    assert len(result.rounds) == 3
+    assert [r.elapsed_seconds for r in result.rounds] == [0, 15, 30]
+    assert [r.round_number for r in result.rounds] == [1, 2, 3]
+    # slept between rounds (2 sleeps for 3 rounds), never after the last one
+    assert sleeps == [15, 15]
+
+
+def test_monitoring_window_stops_early_on_first_failure():
+    """A failure should stop polling immediately (fail-fast for fast
+    rollback), not run out the rest of the window first.
+    """
+    call_count = {"n": 0}
+
+    def fake_suite(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
+        return [hm.CheckOutcome("infrastructure", "ping", False, "timeout")]
+
+    sleeps = []
+    with patch.object(hm, "run_health_suite", side_effect=fake_suite):
+        result = hm.run_monitoring_window(
+            "10.0.0.1", window_seconds=120, poll_interval_seconds=15, sleep_fn=sleeps.append
+        )
+
+    assert result.healthy is False
+    assert len(result.rounds) == 2  # stopped right after the failing round, not all 8 possible rounds
+    assert result.rounds[-1].passed is False
+    assert result.failed_round.round_number == 2
+
+
+def test_monitoring_window_single_round_when_window_smaller_than_interval():
+    healthy_outcomes = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
+    with patch.object(hm, "run_health_suite", return_value=healthy_outcomes):
+        result = hm.run_monitoring_window(
+            "10.0.0.1", window_seconds=5, poll_interval_seconds=15, sleep_fn=lambda s: None
+        )
+    assert len(result.rounds) == 1
+    assert result.healthy is True
+
+
+def test_monitoring_result_outcomes_flattens_all_rounds():
+    round1 = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
+    round2 = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
+    with patch.object(hm, "run_health_suite", side_effect=[round1, round2]):
+        result = hm.run_monitoring_window(
+            "10.0.0.1", window_seconds=15, poll_interval_seconds=15, sleep_fn=lambda s: None
+        )
+    assert len(result.outcomes) == 2
+
+
+def test_monitoring_window_uses_settings_defaults_when_not_overridden():
+    healthy_outcomes = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
+    with patch.object(hm, "run_health_suite", return_value=healthy_outcomes):
+        result = hm.run_monitoring_window("10.0.0.1", sleep_fn=lambda s: None)
+    from app.core.config import settings
+
+    assert result.window_seconds == settings.HEALTH_MONITOR_WINDOW_SECONDS
+    assert result.poll_interval_seconds == settings.HEALTH_MONITOR_POLL_INTERVAL_SECONDS
+
+
 def test_run_health_suite_isolates_check_failures():
     """One check raising shouldn't be possible to reach run_health_suite
     unhandled -- every check function catches its own exceptions -- but

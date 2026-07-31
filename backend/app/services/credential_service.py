@@ -58,3 +58,20 @@ def get_ssh_password(device: Device) -> str:
             f"'{device.ssh_credential_ref}' (device '{device.hostname}')."
         )
     return password
+
+
+def get_secret(credential_ref: str | None, *, device: Device, label: str) -> str:
+    """Generic secret-store lookup for the non-SSH credential refs added
+    for NETCONF/SNMP (SNMP community string, SNMP v3 auth/privacy
+    passphrases). Same env-var-backed store as get_ssh_password, just not
+    hardcoded to the ssh_credential_ref field so it can resolve any of the
+    protocol-specific *_ref columns on Device.
+    """
+    if not credential_ref:
+        raise CredentialNotFoundError(f"Device '{device.hostname}' has no {label} credential configured.")
+    secret = _fetch_from_env(credential_ref)
+    if not secret:
+        raise CredentialNotFoundError(
+            f"No {label} credential found in the secret store for ref '{credential_ref}' (device '{device.hostname}')."
+        )
+    return secret

@@ -54,5 +54,15 @@ class ChangeRequest(Base):
 
     status = Column(Enum(ChangeStatus), nullable=False, default=ChangeStatus.DRAFT)
 
+    # Change Management & Rollback: a manual rollback is modeled as a
+    # regular change request whose proposed_config is a prior snapshot's
+    # config, so it runs through the exact same Snapshot -> Deploy ->
+    # Health Monitor pipeline as any other change (see
+    # app.services.rollback_service). These two columns are what
+    # distinguish it from an engineer-authored change and record which
+    # snapshot it's restoring, for the audit trail / UI.
+    is_rollback = Column(String, nullable=False, default="false", server_default="false")
+    rollback_snapshot_id = Column(UUID(as_uuid=True), ForeignKey("config_snapshots.id"), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

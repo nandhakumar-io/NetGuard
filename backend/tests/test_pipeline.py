@@ -11,7 +11,16 @@ from app.models.device import Device, DeviceVendor
 from app.models.change_request import ChangeRequest, ChangeStatus, ChangePriority
 from app.services import pipeline_service
 from app.services.deployment_engine import DeployResult
-from app.services.health_monitor import CheckOutcome
+from app.services.health_monitor import CheckOutcome, MonitoringResult, PollRound
+
+
+def _monitoring_result(outcomes: list[CheckOutcome], healthy: bool, rounds: int = 1) -> MonitoringResult:
+    """Builds a MonitoringResult with `rounds` identical poll rounds, for
+    tests that don't care about multi-round polling specifically -- see
+    test_health_monitor.py for tests that do.
+    """
+    poll_rounds = [PollRound(i + 1, i * 15, outcomes, healthy) for i in range(rounds)]
+    return MonitoringResult(healthy=healthy, rounds=poll_rounds, window_seconds=rounds * 15, poll_interval_seconds=15)
 
 
 @pytest.fixture()
@@ -53,11 +62,12 @@ def _make_cr(db):
 
 
 @patch("app.services.pipeline_service.notification_service.notify")
-@patch("app.services.pipeline_service.health_monitor.run_health_suite")
+@patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
 @patch("app.services.pipeline_service.deployment_engine.deploy_config")
 def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session):
     mock_deploy.return_value = DeployResult(success=True, output="ok")
-    mock_health.return_value = [CheckOutcome("infrastructure", "ping", True, "2 packets received")]
+    outcomes = [CheckOutcome("infrastructure", "ping", True, "2 packets received")]
+    mock_health.return_value = _monitoring_result(outcomes, healthy=True, rounds=3)
 
     cr = _make_cr(db_session)
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")
@@ -66,17 +76,27 @@ def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session
     mock_notify.assert_called_with(
         "Deployment Succeeded", "rtr-01: change deployed and healthy.", severity="info"
     )
+    # All 3 poll rounds' checks should have been persisted, not just one.
+    deployment = db_session.query(pipeline_service.Deployment).filter(
+        pipeline_service.Deployment.change_request_id == cr.id
+    ).first()
+    checks = db_session.query(pipeline_service.HealthCheckResult).filter(
+        pipeline_service.HealthCheckResult.deployment_id == deployment.id
+    ).all()
+    assert len(checks) == 3
+    assert {c.poll_round for c in checks} == {1, 2, 3}
 
 
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.deployment_engine.rollback_config")
-@patch("app.services.pipeline_service.health_monitor.run_health_suite")
+@patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
 @patch("app.services.pipeline_service.deployment_engine.deploy_config")
 def test_pipeline_rolls_back_on_failed_health_check(
     mock_deploy, mock_health, mock_rollback, mock_notify, db_session
 ):
     mock_deploy.return_value = DeployResult(success=True, output="ok")
-    mock_health.return_value = [CheckOutcome("infrastructure", "ping", False, "timeout")]
+    outcomes = [CheckOutcome("infrastructure", "ping", False, "timeout")]
+    mock_health.return_value = _monitoring_result(outcomes, healthy=False, rounds=1)
     mock_rollback.return_value = DeployResult(success=True, output="restored")
 
     cr = _make_cr(db_session)

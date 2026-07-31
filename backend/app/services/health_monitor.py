@@ -18,7 +18,8 @@ suite on something that was never expected to run BGP/OSPF.
 import re
 import socket
 import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -327,3 +328,108 @@ def run_health_suite(
 
 def suite_passed(results: list[CheckOutcome]) -> bool:
     return all(r.passed for r in results)
+
+
+# ---------------------------------------------------------------------
+# monitoring window: actually poll the suite repeatedly, not once
+# ---------------------------------------------------------------------
+@dataclass
+class PollRound:
+    """One pass of the health suite taken at a point in the monitoring
+    window. `elapsed_seconds` is time-since-deploy this round started at,
+    not wall-clock -- makes rounds easy to plot/relate regardless of when
+    the deployment itself happened.
+    """
+    round_number: int
+    elapsed_seconds: int
+    outcomes: list[CheckOutcome] = field(default_factory=list)
+    passed: bool = True
+
+
+@dataclass
+class MonitoringResult:
+    healthy: bool
+    rounds: list[PollRound]
+    window_seconds: int
+    poll_interval_seconds: int
+
+    @property
+    def outcomes(self) -> list[CheckOutcome]:
+        """Every CheckOutcome across every round, in order -- what callers
+        that just need a flat list to persist (e.g. one HealthCheckResult
+        row per outcome) want, without caring about round structure."""
+        return [o for r in self.rounds for o in r.outcomes]
+
+    @property
+    def failed_round(self) -> PollRound | None:
+        return next((r for r in self.rounds if not r.passed), None)
+
+
+def run_monitoring_window(
+    ip_address: str,
+    netmiko_type: str = "cisco_ios",
+    username: str = "admin",
+    password: str = "",
+    hostname: str | None = None,
+    window_seconds: int | None = None,
+    poll_interval_seconds: int | None = None,
+    sleep_fn=time.sleep,
+) -> MonitoringResult:
+    """Real-Time Health Monitoring (FR-9 / SRS 6.7).
+
+    Previously the pipeline called `run_health_suite` exactly once,
+    immediately after the config push returned, and treated that single
+    snapshot as "monitored". That isn't real monitoring -- it's a single
+    post-deploy check -- and it misses the failure modes SRS 6.7 actually
+    cares about: BGP/OSPF adjacencies that take tens of seconds to
+    reconverge, an interface that flaps up then back down, or a
+    routing-dependent service (DNS/HTTP) that only times out once the
+    initial ARP/neighbor cache entries expire. A one-shot check taken
+    milliseconds after `send_config_set` returns can look perfectly
+    healthy and still miss all of that.
+
+    This instead actually polls: it re-runs the full suite every
+    `poll_interval_seconds` for up to `window_seconds` ("Monitoring window
+    is configurable" -- SRS 6.7; defaults come from
+    settings.HEALTH_MONITOR_WINDOW_SECONDS / ..._POLL_INTERVAL_SECONDS).
+    The moment any round fails, polling stops immediately (fail-fast) and
+    rollback can be triggered right away rather than waiting out the rest
+    of the window -- consistent with the SRS NFR target of rollback
+    initiation in under 30 seconds. Only if every round in the window
+    passes is the deployment considered healthy.
+
+    `sleep_fn` is injectable so tests can run a multi-round window without
+    actually waiting (pass `lambda s: None`).
+    """
+    from app.core.config import settings
+
+    window = settings.HEALTH_MONITOR_WINDOW_SECONDS if window_seconds is None else window_seconds
+    interval = (
+        settings.HEALTH_MONITOR_POLL_INTERVAL_SECONDS if poll_interval_seconds is None else poll_interval_seconds
+    )
+    interval = max(interval, 1)  # guard against a zero/negative interval spinning forever
+    window = max(window, 0)
+
+    rounds: list[PollRound] = []
+    elapsed = 0
+    round_number = 0
+
+    while True:
+        round_number += 1
+        outcomes = run_health_suite(
+            ip_address, netmiko_type=netmiko_type, username=username, password=password, hostname=hostname
+        )
+        passed = suite_passed(outcomes)
+        rounds.append(PollRound(round_number, elapsed, outcomes, passed))
+
+        if not passed:
+            return MonitoringResult(
+                healthy=False, rounds=rounds, window_seconds=window, poll_interval_seconds=interval
+            )
+
+        elapsed += interval
+        if elapsed >= window:
+            break
+        sleep_fn(interval)
+
+    return MonitoringResult(healthy=True, rounds=rounds, window_seconds=window, poll_interval_seconds=interval)

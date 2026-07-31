@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     RISK_LOW_MAX: int = 30
     RISK_MEDIUM_MAX: int = 70
 
+    # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
+    # configurable" -- these two knobs are that configuration. After a
+    # deploy, the health suite is polled every POLL_INTERVAL_SECONDS for up
+    # to WINDOW_SECONDS (or until a poll fails, which fails fast and
+    # triggers rollback immediately rather than waiting out the window).
+    HEALTH_MONITOR_WINDOW_SECONDS: int = 60
+    HEALTH_MONITOR_POLL_INTERVAL_SECONDS: int = 15
+
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

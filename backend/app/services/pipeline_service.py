@@ -161,28 +161,33 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     )
 
     # --- 3. Real-Time Health Monitoring (FR-9) ---
-    # Now runs the full suite (BGP/OSPF adjacency, DNS/DHCP/HTTP/VPN,
-    # packet loss & latency) in addition to ping -- passes the resolved
-    # device type + credentials through so routing/service checks can use
-    # the same NAPALM-capable connection details as the deployment step.
-    outcomes = health_monitor.run_health_suite(
+    # Actually polls the full suite (BGP/OSPF adjacency, DNS/DHCP/HTTP/VPN,
+    # packet loss & latency, in addition to ping) repeatedly across a
+    # configurable monitoring window (SRS 6.7) rather than checking once --
+    # see health_monitor.run_monitoring_window for why a single check right
+    # after deploy isn't enough. Stops early on the first failing round.
+    monitoring = health_monitor.run_monitoring_window(
         device.ip_address,
         netmiko_type=netmiko_type,
         username=device.ssh_username or "admin",
         password=ssh_password,
         hostname=device.hostname,
     )
-    for outcome in outcomes:
-        db.add(HealthCheckResult(
-            deployment_id=deployment.id,
-            category=outcome.category,
-            check_name=outcome.check_name,
-            passed="true" if outcome.passed else "false",
-            detail=outcome.detail,
-        ))
+    for round_ in monitoring.rounds:
+        for outcome in round_.outcomes:
+            db.add(HealthCheckResult(
+                deployment_id=deployment.id,
+                category=outcome.category,
+                check_name=outcome.check_name,
+                passed="true" if outcome.passed else "false",
+                detail=outcome.detail,
+                poll_round=round_.round_number,
+                elapsed_seconds=round_.elapsed_seconds,
+            ))
     db.commit()
 
-    healthy = health_monitor.suite_passed(outcomes)
+    healthy = monitoring.healthy
+    outcomes = monitoring.rounds[-1].outcomes  # most recent round, for failure detail below
 
     if healthy:
         deployment.status = DeploymentStatus.SUCCEEDED
@@ -190,6 +195,10 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         audit_service.record_event(
             db, actor="system", action="Health Check", result="Passed",
             device_hostname=device.hostname, change_request_id=cr.id,
+            detail=(
+                f"{len(monitoring.rounds)} poll round(s) over "
+                f"{monitoring.window_seconds}s (every {monitoring.poll_interval_seconds}s), all passed"
+            ),
         )
         notification_service.notify(
             "Deployment Succeeded", f"{device.hostname}: change deployed and healthy.", severity="info",
@@ -201,7 +210,11 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     audit_service.record_event(
         db, actor="system", action="Health Check", result="Failed",
         device_hostname=device.hostname, change_request_id=cr.id,
-        detail="; ".join(o.detail for o in outcomes if not o.passed),
+        detail=(
+            f"failed on poll round {len(monitoring.rounds)} "
+            f"(t+{monitoring.rounds[-1].elapsed_seconds}s): "
+            + "; ".join(o.detail for o in outcomes if not o.passed)
+        ),
     )
 
     restore_commands = (snapshot_service.decrypt_config(snapshot.running_config_encrypted)).splitlines()

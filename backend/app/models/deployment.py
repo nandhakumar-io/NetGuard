@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, String, Enum, DateTime, Text, ForeignKey, func
+from sqlalchemy import Column, String, Enum, DateTime, Text, Integer, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -42,5 +42,13 @@ class HealthCheckResult(Base):
     check_name = Column(String, nullable=False)  # e.g. "ping", "bgp_neighbor", "dns"
     passed = Column(String, nullable=False)  # "true" / "false" (kept simple for SQLite/Postgres portability)
     detail = Column(Text, nullable=True)
+
+    # Real-Time Health Monitoring (FR-9) actually polls the suite multiple
+    # times over a configurable window (see app.services.health_monitor.
+    # run_monitoring_window) rather than checking once -- these identify
+    # which poll round a given result came from, so the monitoring history
+    # for a deployment is reconstructable (round 1 at 0s, round 2 at 15s, ...).
+    poll_round = Column(Integer, nullable=False, default=1, server_default="1")
+    elapsed_seconds = Column(Integer, nullable=False, default=0, server_default="0")
 
     checked_at = Column(DateTime(timezone=True), server_default=func.now())
