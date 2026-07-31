@@ -19,6 +19,7 @@ import redis.asyncio as aredis
 from app.core.config import settings
 
 DASHBOARD_CHANNEL = "netguard:dashboard:events"
+ALERTS_CHANNEL = "netguard:alerts:events"
 
 # Separate sync client for publishers running inside Celery workers
 # (regular, non-async code), and an async client for the FastAPI side
@@ -33,7 +34,7 @@ def _get_sync_client() -> redis.Redis:
     return _sync_client
 
 
-def publish_event(event_type: str, **payload) -> None:
+def publish_event(event_type: str, *, channel: str = DASHBOARD_CHANNEL, **payload) -> None:
     """Publish a "something changed" event. Best-effort: a Redis hiccup
     here should never take down a deployment pipeline, so failures are
     logged and swallowed, same policy as notification_service.
@@ -41,7 +42,7 @@ def publish_event(event_type: str, **payload) -> None:
     try:
         client = _get_sync_client()
         message = json.dumps({"type": event_type, **payload})
-        client.publish(DASHBOARD_CHANNEL, message)
+        client.publish(channel, message)
     except Exception:  # noqa: BLE001 - publishing must never break the pipeline
         pass
 

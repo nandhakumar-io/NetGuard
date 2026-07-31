@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     # automated drift sweep runs at via Celery beat (see app.celery_app).
     DRIFT_SWEEP_HOUR_UTC: int = 2
 
+    # SNMP Monitoring (Health Dashboard): how often app.tasks.run_snmp_poll_sweep_task
+    # fans out one snmp_poll_task per SNMP-enabled device, and how long
+    # DeviceMetric history is retained for the historical charts.
+    SNMP_POLL_INTERVAL_SECONDS: int = 60
+    SNMP_TIMEOUT_SECONDS: float = 3.0
+    SNMP_METRIC_RETENTION_DAYS: int = 30
+
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

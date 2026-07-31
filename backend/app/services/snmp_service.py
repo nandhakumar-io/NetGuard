@@ -24,6 +24,20 @@ OIDS = {
     "temperature": "1.3.6.1.4.1.9.9.13.1.3.1.3",  # ciscoEnvMonTemperatureValue
 }
 
+# Standard MIB-II ifTable columns (RFC 1213 / RFC 2863), walked across every
+# interface index rather than GET'd on a single OID -- this is what powers
+# the Interface Statistics / Errors panel on the Health Dashboard.
+IFTABLE_OIDS = {
+    "ifDescr": "1.3.6.1.2.1.2.2.1.2",
+    "ifOperStatus": "1.3.6.1.2.1.2.2.1.8",  # 1 = up
+    "ifInErrors": "1.3.6.1.2.1.2.2.1.14",
+    "ifOutErrors": "1.3.6.1.2.1.2.2.1.20",
+    "ifHCInOctets": "1.3.6.1.2.1.31.1.1.1.6",  # 64-bit counters (ifXTable)
+    "ifHCOutOctets": "1.3.6.1.2.1.31.1.1.1.10",
+    "ifHighSpeed": "1.3.6.1.2.1.31.1.1.1.15",  # Mbps
+}
+MAX_INTERFACES_WALKED = 64  # guard against a runaway walk on a chassis with hundreds of interfaces
+
 # Threshold defaults for turning raw readings into alerts (SNMP Health
 # Dashboard traffic-light + Alert Engine "High CPU" / "Temperature
 # Critical" style events).
@@ -33,6 +47,9 @@ MEM_WARN_PCT = 80
 MEM_CRIT_PCT = 92
 TEMP_WARN_C = 60
 TEMP_CRIT_C = 75
+IFACE_UTIL_WARN_PCT = 80
+IFACE_UTIL_CRIT_PCT = 95
+IFACE_ERRORS_WARN = 100  # cumulative errors seen growing since last poll
 
 
 @dataclass
@@ -47,6 +64,13 @@ class SnmpMetrics:
     uptime_seconds: int | None = None
     reachable: bool = False
     error: str | None = None
+    # Raw cumulative counters (SNMP counters are cumulative-since-boot, not
+    # instantaneous) -- utilization is derived from the *delta* between two
+    # polls, so these are carried alongside interface_utilization_pct and
+    # persisted on DeviceMetric for the next poll to diff against.
+    interface_octets_total: int | None = None
+    interface_speed_bps: int | None = None
+    interface_count: int | None = None
 
 
 def _get_via_pysnmp(ip_address: str, community: str, oid: str, version: str, timeout: float) -> str | None:
@@ -82,6 +106,90 @@ def _get_via_pysnmp(ip_address: str, community: str, oid: str, version: str, tim
         return None
 
 
+def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: str, timeout: float) -> dict[str, str]:
+    """Walks a single ifTable column across all interface indexes. Returns
+    {index: value}. Same tolerant pattern as _get_via_pysnmp -- any failure
+    (unsupported OID, timeout, device with no interfaces) returns an empty
+    dict rather than raising, so a missing column doesn't fail the poll.
+    """
+    results: dict[str, str] = {}
+    try:
+        from pysnmp.hlapi import (
+            CommunityData,
+            ContextData,
+            ObjectIdentity,
+            ObjectType,
+            SnmpEngine,
+            UdpTransportTarget,
+            nextCmd,
+        )
+
+        mp_model = 0 if version == "v1" else 1
+        iterator = nextCmd(
+            SnmpEngine(),
+            CommunityData(community, mpModel=mp_model),
+            UdpTransportTarget((ip_address, 161), timeout=timeout, retries=1),
+            ContextData(),
+            ObjectType(ObjectIdentity(base_oid)),
+            lexicographicMode=False,  # stop once we leave this OID subtree
+        )
+        for row in iterator:
+            error_indication, error_status, _, var_binds = row
+            if error_indication or error_status or not var_binds:
+                break
+            for oid, value in var_binds:
+                oid_str = str(oid)
+                if not oid_str.startswith(base_oid + "."):
+                    return results  # walked past the end of this column
+                index = oid_str.rsplit(".", 1)[-1]
+                results[index] = str(value)
+            if len(results) >= MAX_INTERFACES_WALKED:
+                break
+    except Exception:  # noqa: BLE001
+        return results
+    return results
+
+
+def walk_interface_stats(
+    ip_address: str, community: str, version: str = "v2c", timeout: float = 3.0
+) -> dict:
+    """Walks ifTable/ifXTable and rolls every operationally-up interface
+    into fleet-level totals: summed error counters (for the Errors panel)
+    and summed HC octets + max link speed (for utilization, computed later
+    as a delta against the previous poll -- see metrics_service.compute_interface_utilization).
+    """
+    oper_status = _walk_via_pysnmp(ip_address, community, IFTABLE_OIDS["ifOperStatus"], version, timeout)
+    if not oper_status:
+        return {"errors": None, "octets_total": None, "speed_bps": None, "interface_count": None}
+
+    in_errors = _walk_via_pysnmp(ip_address, community, IFTABLE_OIDS["ifInErrors"], version, timeout)
+    out_errors = _walk_via_pysnmp(ip_address, community, IFTABLE_OIDS["ifOutErrors"], version, timeout)
+    in_octets = _walk_via_pysnmp(ip_address, community, IFTABLE_OIDS["ifHCInOctets"], version, timeout)
+    out_octets = _walk_via_pysnmp(ip_address, community, IFTABLE_OIDS["ifHCOutOctets"], version, timeout)
+    speed = _walk_via_pysnmp(ip_address, community, IFTABLE_OIDS["ifHighSpeed"], version, timeout)
+
+    total_errors = 0
+    total_octets = 0
+    total_speed_bps = 0
+    up_count = 0
+
+    for index, status in oper_status.items():
+        if status != "1":  # not operationally up -- exclude from utilization/error rollup
+            continue
+        up_count += 1
+        total_errors += int(in_errors.get(index, 0) or 0) + int(out_errors.get(index, 0) or 0)
+        total_octets += int(in_octets.get(index, 0) or 0) + int(out_octets.get(index, 0) or 0)
+        # ifHighSpeed is in Mbps per RFC 2863
+        total_speed_bps += int(float(speed.get(index, 0) or 0) * 1_000_000)
+
+    return {
+        "errors": total_errors,
+        "octets_total": total_octets,
+        "speed_bps": total_speed_bps or None,
+        "interface_count": up_count,
+    }
+
+
 def poll_health(
     ip_address: str,
     community: str,
@@ -102,6 +210,7 @@ def poll_health(
     mem_used_raw = _get_via_pysnmp(ip_address, community, OIDS["mem_used"], version, timeout)
     mem_free_raw = _get_via_pysnmp(ip_address, community, OIDS["mem_free"], version, timeout)
     temp_raw = _get_via_pysnmp(ip_address, community, OIDS["temperature"], version, timeout)
+    interface_stats = walk_interface_stats(ip_address, community, version, timeout)
 
     mem_pct = None
     if mem_used_raw is not None and mem_free_raw is not None:
@@ -124,6 +233,10 @@ def poll_health(
         fan_status="ok",  # placeholder pending per-vendor fan OID mapping
         power_supply_status="ok",  # placeholder pending per-vendor PSU OID mapping
         reachable=True,
+        interface_errors=interface_stats["errors"],
+        interface_octets_total=interface_stats["octets_total"],
+        interface_speed_bps=interface_stats["speed_bps"],
+        interface_count=interface_stats["interface_count"],
     )
 
 
@@ -156,6 +269,8 @@ def compute_health_score(metrics: SnmpMetrics) -> tuple[int, str]:
         # 0-40C -> full marks, scales down to 0 by 90C
         temp_score = max(0.0, 100 - max(0.0, metrics.temperature_celsius - 40) * 2)
         component_scores.append(temp_score)
+    if metrics.interface_utilization_pct is not None:
+        component_scores.append(max(0.0, 100 - metrics.interface_utilization_pct))
     if metrics.fan_status == "failed":
         component_scores.append(0.0)
     if metrics.power_supply_status == "failed":
@@ -199,6 +314,15 @@ def evaluate_thresholds(metrics: SnmpMetrics) -> list[tuple[str, str, str]]:
             findings.append(("critical", "Temperature Critical", f"Chassis temperature at {metrics.temperature_celsius}C"))
         elif metrics.temperature_celsius >= TEMP_WARN_C:
             findings.append(("warning", "Temperature Critical", f"Chassis temperature at {metrics.temperature_celsius}C"))
+
+    if metrics.interface_utilization_pct is not None:
+        if metrics.interface_utilization_pct >= IFACE_UTIL_CRIT_PCT:
+            findings.append(("critical", "Interface Congestion", f"Interface utilization at {metrics.interface_utilization_pct}%"))
+        elif metrics.interface_utilization_pct >= IFACE_UTIL_WARN_PCT:
+            findings.append(("warning", "Interface Congestion", f"Interface utilization at {metrics.interface_utilization_pct}%"))
+
+    if metrics.interface_errors is not None and metrics.interface_errors >= IFACE_ERRORS_WARN:
+        findings.append(("warning", "Interface Errors", f"{metrics.interface_errors} interface error(s) since last poll"))
 
     if metrics.fan_status == "failed":
         findings.append(("critical", "Fan Failure", "Fan status reported failed"))

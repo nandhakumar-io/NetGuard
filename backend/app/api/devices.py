@@ -8,7 +8,7 @@ from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
-from app.schemas.device import DeviceCreate, DeviceRead
+from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
 from app.services import rollback_service
 from app.tasks import run_deployment_pipeline_task
@@ -44,6 +44,31 @@ def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(ge
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+    return device
+
+
+@router.patch("/{device_id}", response_model=DeviceRead)
+def update_device(
+    device_id: uuid.UUID, payload: DeviceUpdate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)
+):
+    """Partial update -- e.g. enabling SNMP monitoring on a device that was
+    added before its community string / SNMPv3 credentials were set up.
+    Only fields present in the request body are changed.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+    if "hostname" in updates and updates["hostname"] != device.hostname:
+        if db.query(Device).filter(Device.hostname == updates["hostname"]).first():
+            raise HTTPException(status_code=400, detail="Device with this hostname already exists")
+
+    for field, value in updates.items():
+        setattr(device, field, value)
+
+    db.commit()
+    db.refresh(device)
     return device
 
 

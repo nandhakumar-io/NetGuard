@@ -41,6 +41,13 @@ celery_app.conf.update(
             "task": "app.tasks.run_nightly_drift_sweep_task",
             "schedule": crontab(hour=settings.DRIFT_SWEEP_HOUR_UTC, minute=0),
         },
+        # SNMP Monitoring / Health Dashboard: fans out one snmp_poll_task
+        # per SNMP-enabled device every SNMP_POLL_INTERVAL_SECONDS so the
+        # dashboard, health scores, and historical charts stay current.
+        "snmp-poll-sweep": {
+            "task": "app.tasks.run_snmp_poll_sweep_task",
+            "schedule": float(settings.SNMP_POLL_INTERVAL_SECONDS),
+        },
     },
 )
 

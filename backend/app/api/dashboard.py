@@ -8,6 +8,7 @@ from app.core.database import SessionLocal, get_db
 from app.models.device import Device, DeviceStatus
 from app.models.deployment import Deployment, DeploymentStatus
 from app.models.change_request import ChangeRequest
+from app.models.alert import Alert, AlertSeverity
 from app.services import event_bus
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -30,6 +31,11 @@ def _compute_summary(db: Session) -> dict:
         ChangeRequest.status.in_(["pending_approval"])
     ).count()
 
+    # Alert counts for dashboard stat cards
+    active_alerts = db.query(Alert).filter(Alert.resolved == False)  # noqa: E712
+    critical_alerts = active_alerts.filter(Alert.severity == AlertSeverity.CRITICAL).count()
+    warning_alerts = active_alerts.filter(Alert.severity == AlertSeverity.WARNING).count()
+
     return {
         "devices_online": devices_online,
         "devices_total": devices_total,
@@ -37,6 +43,8 @@ def _compute_summary(db: Session) -> dict:
         "failed_deployments": failed_deployments,
         "rollbacks": rollbacks,
         "pending_change_requests": pending_change_requests,
+        "critical_alerts": critical_alerts,
+        "warning_alerts": warning_alerts,
     }
 
 

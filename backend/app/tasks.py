@@ -167,3 +167,61 @@ def run_nightly_drift_sweep_task() -> int:
     for device_id in device_ids:
         drift_detection_task.delay(device_id)
     return len(device_ids)
+
+
+# --- SNMP Monitoring / Health Dashboard (FR: SNMP polling) ---
+#
+# Same fan-out shape as the drift sweep above: one Celery task per device
+# so an unreachable/slow device can't delay the rest of the fleet's poll,
+# scheduled every settings.SNMP_POLL_INTERVAL_SECONDS via Celery beat.
+
+
+@celery_app.task(
+    name="app.tasks.snmp_poll_task",
+    bind=True,
+    # Infra retries only. snmp_service.poll_health already treats an
+    # unreachable device as a normal (reachable=False) result rather than
+    # raising, so a retry here only covers things like a DB hiccup --
+    # not "the device didn't answer", which is expected fleet noise.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def snmp_poll_task(self, device_id: str) -> str:
+    from app.services import metrics_service
+
+    db = SessionLocal()
+    try:
+        device = db.get(Device, uuid.UUID(device_id))
+        if device is None:
+            return "device_missing"
+        try:
+            metric = metrics_service.poll_device(db, device)
+            return metric.health_color.value if metric.health_color else "unknown"
+        except metrics_service.SnmpNotConfiguredError:
+            return "snmp_not_configured"
+        except metrics_service.credential_service.CredentialNotFoundError as exc:
+            audit_service.record_event(
+                db, actor="system:snmp-poll", action="SNMP Poll Failed", result="error",
+                device_hostname=device.hostname, detail=str(exc),
+            )
+            db.commit()
+            return "credential_missing"
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_snmp_poll_sweep_task")
+def run_snmp_poll_sweep_task() -> int:
+    """Celery beat entry point: fans out one snmp_poll_task per
+    SNMP-enabled device. Returns the number of devices polled.
+    """
+    db = SessionLocal()
+    try:
+        device_ids = [str(d.id) for d in db.query(Device.id).filter(Device.supports_snmp.is_(True)).all()]
+    finally:
+        db.close()
+
+    for device_id in device_ids:
+        snmp_poll_task.delay(device_id)
+    return len(device_ids)

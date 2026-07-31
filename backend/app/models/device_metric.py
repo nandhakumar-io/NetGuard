@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum, Float, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, Column, DateTime, Enum, Float, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -34,6 +34,16 @@ class DeviceMetric(Base):
     fan_status = Column(String, nullable=True)  # ok | failed | unknown
     power_supply_status = Column(String, nullable=True)  # ok | failed | unknown
     uptime_seconds = Column(Integer, nullable=True)
+
+    # Raw cumulative SNMP counters from this poll (ifHCInOctets +
+    # ifHCOutOctets summed across up interfaces, and the max link speed
+    # seen). SNMP counters are cumulative-since-boot, not instantaneous, so
+    # interface_utilization_pct above has to be computed as a *delta*
+    # against the previous poll's totals (see
+    # app.services.metrics_service._compute_interface_utilization) -- these
+    # two columns are what the *next* poll diffs against.
+    interface_octets_total = Column(BigInteger, nullable=True)
+    interface_speed_bps = Column(BigInteger, nullable=True)
 
     # 0-100 composite score derived from the readings above (see
     # app.services.snmp_service.compute_health_score) plus the traffic-light

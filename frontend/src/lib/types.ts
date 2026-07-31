@@ -168,4 +168,34 @@ export interface DashboardSummary {
   failed_deployments: number;
   rollbacks: number;
   pending_change_requests: number;
+  critical_alerts: number;
+  warning_alerts: number;
+}
+
+// --- Alert System ---
+
+export type AlertSeverity = "critical" | "warning" | "info";
+export type AlertSourceType = "snmp_trap" | "health_poll" | "drift" | "protocol_failure";
+
+export interface Alert {
+  id: string;
+  device_id: string | null;
+  severity: AlertSeverity;
+  source: AlertSourceType;
+  category: string;
+  message: string;
+  acknowledged: boolean;
+  acknowledged_by: string | null;
+  resolved: boolean;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  created_at: string;
+}
+
+export interface AlertSummary {
+  critical: number;
+  warning: number;
+  info: number;
+  active_total: number;
+  resolved: number;
 }

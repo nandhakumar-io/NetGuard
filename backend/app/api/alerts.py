@@ -1,0 +1,164 @@
+"""Alert API endpoints + realtime WebSocket.
+
+REST:
+  GET    /alerts           — filtered list (severity, source, status, device_id)
+  GET    /alerts/summary   — counts by severity for dashboard stat cards
+  GET    /alerts/{id}      — single alert
+  PATCH  /alerts/{id}/acknowledge
+  PATCH  /alerts/{id}/resolve
+
+WebSocket:
+  WS     /alerts/ws        — pushes every alert event in realtime
+"""
+import asyncio
+import contextlib
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
+from app.core.database import SessionLocal, get_db
+from app.core.deps import get_current_user
+from app.models.alert import Alert, AlertSeverity, AlertSource
+from app.models.user import User
+from app.schemas.alert import AlertRead, AlertSummary
+from app.services import alert_service, event_bus
+
+router = APIRouter(prefix="/alerts", tags=["alerts"])
+
+HEARTBEAT_INTERVAL_SECONDS = 30
+
+
+# ------------------------------------------------------------------
+# REST
+# ------------------------------------------------------------------
+@router.get("", response_model=list[AlertRead])
+def list_alerts(
+    severity: str | None = None,
+    source: str | None = None,
+    status: str | None = Query(None, description="active | acknowledged | resolved"),
+    device_id: uuid.UUID | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    q = db.query(Alert)
+    if severity:
+        q = q.filter(Alert.severity == AlertSeverity(severity))
+    if source:
+        q = q.filter(Alert.source == AlertSource(source))
+    if status == "active":
+        q = q.filter(Alert.resolved == False)  # noqa: E712
+    elif status == "acknowledged":
+        q = q.filter(Alert.acknowledged == True, Alert.resolved == False)  # noqa: E712
+    elif status == "resolved":
+        q = q.filter(Alert.resolved == True)  # noqa: E712
+    if device_id:
+        q = q.filter(Alert.device_id == device_id)
+    return q.order_by(desc(Alert.created_at)).offset(offset).limit(limit).all()
+
+
+@router.get("/summary", response_model=AlertSummary)
+def get_summary(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    return alert_service.get_alert_summary(db)
+
+
+@router.get("/{alert_id}", response_model=AlertRead)
+def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    alert = db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return alert
+
+
+@router.patch("/{alert_id}/acknowledge", response_model=AlertRead)
+def acknowledge(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    try:
+        return alert_service.acknowledge_alert(db, alert_id, user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.patch("/{alert_id}/resolve", response_model=AlertRead)
+def resolve(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    try:
+        return alert_service.resolve_alert(db, alert_id, user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+# ------------------------------------------------------------------
+# WebSocket — realtime alert event stream
+# ------------------------------------------------------------------
+def _serialize_recent(db: Session, n: int = 10) -> list[dict]:
+    """Return the N most recent alerts as dicts for the initial WS push."""
+    rows = db.query(Alert).order_by(desc(Alert.created_at)).limit(n).all()
+    result = []
+    for a in rows:
+        result.append({
+            "id": str(a.id),
+            "device_id": str(a.device_id) if a.device_id else None,
+            "severity": a.severity.value if a.severity else "info",
+            "source": a.source.value if a.source else "health_poll",
+            "category": a.category,
+            "message": a.message,
+            "acknowledged": a.acknowledged,
+            "acknowledged_by": a.acknowledged_by,
+            "resolved": a.resolved,
+            "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+            "resolved_by": a.resolved_by,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        })
+    return result
+
+
+async def _heartbeat_loop(websocket: WebSocket):
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            await websocket.send_json({"type": "heartbeat"})
+        except Exception:
+            break
+
+
+@router.websocket("/ws")
+async def alerts_ws(websocket: WebSocket):
+    await websocket.accept()
+
+    # Initial snapshot of recent alerts
+    db = SessionLocal()
+    try:
+        recent = _serialize_recent(db)
+        await websocket.send_json({"type": "initial", "alerts": recent})
+    finally:
+        db.close()
+
+    redis_client = event_bus.get_async_client()
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(event_bus.ALERTS_CHANNEL)
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(websocket))
+
+    try:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=None)
+            if message is None:
+                continue
+            # On any alert event, push refreshed recent alerts
+            db = SessionLocal()
+            try:
+                recent = _serialize_recent(db)
+                await websocket.send_json({"type": "update", "alerts": recent})
+            finally:
+                db.close()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
+        await pubsub.unsubscribe(event_bus.ALERTS_CHANNEL)
+        await pubsub.close()
+        await redis_client.close()
