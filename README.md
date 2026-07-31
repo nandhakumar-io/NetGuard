@@ -100,3 +100,11 @@ Backend: FastAPI, Python, Celery, Redis, SQLAlchemy
 Network Automation: Netmiko, NAPALM, Paramiko
 Database: PostgreSQL
 Monitoring: Prometheus, Grafana
+
+## System Requirements
+
+- Python 3.11+
+- Node.js 20+
+- Docker & Docker Compose
+- PostgreSQL
+- Redis
