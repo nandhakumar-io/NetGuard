@@ -52,6 +52,15 @@ class ChangeRequest(Base):
     risk_score = Column(Integer, nullable=True)  # 0-100, set by AI Configuration Analyzer
     risk_findings = Column(Text, nullable=True)  # JSON-encoded list of detected risks
 
+    # Automated Validation Engine (SRS 6.4 / FR-5): result of the last
+    # validation_engine.validate_syntax() run against this CR's
+    # proposed_config. Re-checked (and refreshed) at both submission and
+    # approval time -- see app.api.change_requests -- so this always
+    # reflects the most recent validation, not just the one at creation.
+    validation_passed = Column(String, nullable=True)  # "true" | "false"
+    validation_errors = Column(Text, nullable=True)  # JSON-encoded list[str]
+    validation_warnings = Column(Text, nullable=True)  # JSON-encoded list[str]
+
     status = Column(Enum(ChangeStatus), nullable=False, default=ChangeStatus.DRAFT)
 
     # Change Management & Rollback: a manual rollback is modeled as a

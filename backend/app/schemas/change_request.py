@@ -33,6 +33,9 @@ class ChangeRequestRead(ChangeRequestBase):
     config_diff: str | None = None
     risk_score: int | None = None
     risk_findings: str | None = None
+    validation_passed: str | None = None
+    validation_errors: str | None = None
+    validation_warnings: str | None = None
     status: ChangeStatus
     is_rollback: str = "false"
     rollback_snapshot_id: uuid.UUID | None = None
@@ -44,3 +47,9 @@ class RiskAnalysisResult(BaseModel):
     classification: str  # Low Risk | Medium Risk | Critical Risk
     recommendation: str
     findings: list[str]
+
+
+class ValidationReport(BaseModel):
+    passed: bool
+    errors: list[str]
+    warnings: list[str]

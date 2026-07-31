@@ -39,6 +39,7 @@ from app.services import (
     notification_service,
     protocol_manager,
     snapshot_service,
+    validation_engine,
 )
 from app.models.deployment import DeploymentLog
 
@@ -162,10 +163,48 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         detail=f"version={snapshot.version} checksum={snapshot.checksum[:12]}...",
     )
 
-    # --- 2. Configuration Deployment (FR-8) via ProtocolManager ---
-    _log_deployment(db, deployment.id, "DEPLOY", "Deploying requested configuration lines...")
+    # --- 2. Automated Validation Engine gate (SRS 6.4 / FR-5) ---
+    # Final hard check immediately before the config actually touches the
+    # device. The change request already passed validation at submission
+    # and again at approval (see app.api.change_requests), but real time
+    # passes between "approved" and this Celery task actually running --
+    # someone else's change may have landed on the device in the
+    # meantime -- so validation is re-run here against a fresh live read
+    # rather than trusted from earlier in the workflow. Any failure fails
+    # the deployment outright; it never degrades to a warning that lets a
+    # bad config reach the device.
     pm = protocol_manager.ProtocolManager(db, device, operator=actor_email)
-    
+    _log_deployment(db, deployment.id, "VALIDATE", "Re-running automated validation before deploy...")
+    live_running = pm.get_running_config()
+    inventory_config = live_running.output if live_running.success else cr.current_config
+    validation = validation_engine.validate_syntax(
+        cr.proposed_config,
+        vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
+        current_config=inventory_config,
+    )
+    if not validation.passed:
+        deployment.status = DeploymentStatus.FAILED
+        deployment.error_message = "Validation failed: " + "; ".join(validation.errors)
+        db.commit()
+        _log_deployment(db, deployment.id, "VALIDATE", deployment.error_message, "ERROR")
+        audit_service.record_event(
+            db, actor="system", action="Pre-Deploy Validation", result="Failed",
+            device_hostname=device.hostname, change_request_id=cr.id,
+            detail="; ".join(validation.errors),
+        )
+        notification_service.notify(
+            "Deployment Failed",
+            f"{device.hostname}: failed automated validation before deploy — {'; '.join(validation.errors)}",
+            severity="critical",
+            device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
+        )
+        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        return deployment
+    _log_deployment(db, deployment.id, "VALIDATE", "Validation passed.")
+
+    # --- 3. Configuration Deployment (FR-8) via ProtocolManager ---
+    _log_deployment(db, deployment.id, "DEPLOY", "Deploying requested configuration lines...")
+
     # We pass the proposed_config to deploy_config
     deploy_result = pm.deploy_config(cr.proposed_config)
     deployment.protocol = deploy_result.protocol.value if hasattr(deploy_result.protocol, 'value') else deploy_result.protocol
@@ -185,7 +224,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
 
     _log_deployment(db, deployment.id, "DEPLOY", f"Deployment succeeded swiftly over {deploy_result.protocol} ({deploy_result.execution_time_ms:.0f}ms).")
 
-    # --- 3. Real-Time Health Monitoring (FR-9) ---
+    # --- 4. Real-Time Health Monitoring (FR-9) ---
     # Actually polls the full suite (BGP/OSPF adjacency, DNS/DHCP/HTTP/VPN,
     # packet loss & latency, in addition to ping) repeatedly across a
     # configurable monitoring window (SRS 6.7) rather than checking once --
@@ -240,7 +279,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
-    # --- 4. Self-Healing Rollback Engine (FR-10) ---
+    # --- 5. Self-Healing Rollback Engine (FR-10) ---
     fail_reasons = "; ".join(o.detail for o in outcomes if not o.passed)
     _log_deployment(db, deployment.id, "VERIFY", f"Verification failed: {fail_reasons}", "ERROR")
     _log_deployment(db, deployment.id, "ROLLBACK", "Health checks failed. Self-healing rollback triggered.", "WARN")
