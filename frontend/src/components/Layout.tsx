@@ -18,7 +18,7 @@ export default function Layout() {
     <div className="min-h-screen flex bg-slate-50">
       <aside className="w-60 bg-navy text-white flex-shrink-0 flex flex-col">
         <div className="px-5 py-6 border-b border-white/10">
-          <p className="text-lg font-bold tracking-tight">NetGuard AI</p>
+          <p className="text-lg font-bold tracking-tight">NetGuard</p>
           <p className="text-[11px] text-accent mt-0.5">Network Change Management</p>
         </div>
         <nav className="flex-1 px-3 py-4 space-y-1">

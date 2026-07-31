@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "NetGuard AI"
+    APP_NAME: str = "NetGuard"
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change-me-to-a-long-random-string"
@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     MFA_CHALLENGE_EXPIRE_MINUTES: int = 5
-    MFA_ISSUER_NAME: str = "NetGuard AI"
+    MFA_ISSUER_NAME: str = "NetGuard"
 
     # Login lockout (FR-1 / NFR Security): brute-force protection
     LOGIN_MAX_ATTEMPTS: int = 5

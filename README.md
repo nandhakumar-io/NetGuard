@@ -1,10 +1,10 @@
-# NetGuard AI
+# NetGuard
 
 Intelligent Automated Network Change Management & Self-Healing Platform
 
 ## Overview
 
-NetGuard AI is an automated network change management platform designed to reduce configuration errors, improve deployment reliability, and provide automatic rollback in case of failures.
+NetGuard is an automated network change management platform designed to reduce configuration errors, improve deployment reliability, and provide automatic rollback in case of failures.
 
 The platform manages the complete lifecycle of a network configuration change:
 
@@ -29,7 +29,7 @@ See `docs/SRS.pdf` for the full Software Requirements Specification.
 ## Project Structure
 
 ```
-netguard-ai/
+netguard/
 ├── backend/              FastAPI backend (API, business logic, network automation)
 │   ├── app/
 │   │   ├── api/          Route handlers (change requests, devices, deployments, auth)

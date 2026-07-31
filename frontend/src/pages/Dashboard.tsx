@@ -23,7 +23,7 @@ export default function Dashboard() {
           setError(null);
           setLastUpdated(new Date());
         })
-        .catch(() => mounted && setError("Could not reach the NetGuard AI API."));
+        .catch(() => mounted && setError("Could not reach the NetGuard API."));
     };
     fetchSummary();
 

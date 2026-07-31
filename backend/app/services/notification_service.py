@@ -26,7 +26,7 @@ def notify(event: str, message: str, severity: str = "info") -> None:
     severity: "info" | "warning" | "critical"
     """
     emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
-    text = f"{emoji} *NetGuard AI — {event}*\n{message}"
+    text = f"{emoji} *NetGuard — {event}*\n{message}"
 
     _post_webhook(settings.SLACK_WEBHOOK_URL, {"text": text})
     _post_webhook(settings.TEAMS_WEBHOOK_URL, {"text": text})

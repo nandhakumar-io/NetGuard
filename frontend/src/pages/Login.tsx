@@ -113,7 +113,7 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
       <div className="w-full max-w-sm bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
         <div className="text-center mb-6">
-          <p className="text-xl font-bold text-navy">NetGuard AI</p>
+          <p className="text-xl font-bold text-navy">NetGuard</p>
           <p className="text-xs text-accent mt-1">Intelligent Network Change Management</p>
         </div>
 
