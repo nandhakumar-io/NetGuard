@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     GNS3_REQUEST_TIMEOUT_SECONDS: float = 10.0
     GNS3_CONSOLE_READY_TIMEOUT_SECONDS: float = 45.0
 
+    LOCAL_LLM_BASE_URL: str = "http://localhost:11434/v1"   
+    LOCAL_LLM_MODEL: str = "llama3.1:8b"
+
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

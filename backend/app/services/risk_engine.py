@@ -369,27 +369,29 @@ class LLMScorer(RiskScorer):
 
     def _call_llm(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
         import json
+        import requests
 
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         prompt = (
             "You are a network change-risk reviewer. Given the proposed device "
             "config (and current config, if provided), identify additional risks "
-            "not already obvious from simple keyword matching -- e.g. subtle "
-            "routing/security implications. Respond ONLY with JSON: "
-            '{"findings": ["..."], "additional_risk_points": <0-30 int>}.\n\n'
+            "not already obvious from simple keyword matching. Respond ONLY with "
+            'JSON: {"findings": ["..."], "additional_risk_points": <0-30 int>}.\n\n'
             f"CURRENT CONFIG:\n{current_config or '(none provided)'}\n\n"
             f"PROPOSED CONFIG:\n{proposed_config}"
         )
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
+        resp = requests.post(
+         f"{settings.LOCAL_LLM_BASE_URL}/chat/completions",
+         json={
+                "model": settings.LOCAL_LLM_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            },
+            timeout=30,
         )
-        raw = "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
-        data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
-        return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
+    resp.raise_for_status()
+    raw = resp.json()["choices"][0]["message"]["content"]
+    data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
+    return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
 
 
 def _classify(score: int) -> tuple[str, str]:
