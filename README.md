@@ -16,6 +16,16 @@ Change Request → AI Risk Analysis → Syntax Validation → Network Sanity Che
 
 See `docs/SRS.pdf` for the full Software Requirements Specification.
 
+## Key Features
+
+- Automated network configuration deployment
+- AI-based risk analysis
+- Configuration syntax validation
+- Automatic backup and rollback
+- Real-time health monitoring
+- Secure approval workflow
+- Complete audit logging
+
 ## Project Structure
 
 ```
