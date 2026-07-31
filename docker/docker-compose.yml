@@ -27,6 +27,31 @@ services:
       timeout: 5s
       retries: 10
 
+  # Runs `alembic upgrade head` exactly once, then exits. Every other
+  # backend-image service (backend, worker, beat) waits on this one
+  # finishing successfully before it starts, instead of each running
+  # migrations itself. That's the fix for the `type "driftseverity"
+  # already exists` crash: backend and worker used to both run
+  # `alembic upgrade head` in their own entrypoints at container start,
+  # racing to CREATE TYPE/CREATE TABLE for the same not-yet-existing
+  # objects at the same instant. With migrations centralized here, there's
+  # only ever one process applying schema changes.
+  migrate:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: "no"
+    entrypoint: ["./entrypoint-migrate.sh"]
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ../backend:/app
+
   backend:
     build:
       context: ../backend
@@ -42,6 +67,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
     volumes:
@@ -69,6 +96,36 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ../backend:/app
+
+  beat:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Fires the periodic Config Drift Detection sweep (see
+    # app.celery_app's beat_schedule / app.tasks.sweep_all_devices_for_drift_task)
+    # on its own schedule, independent of deployments. A separate service
+    # (rather than folding into `worker`) so there's exactly one beat
+    # scheduler regardless of how many worker replicas run.
+    command: celery -A app.celery_app.celery_app beat --loglevel=info
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ../backend:/app
 
