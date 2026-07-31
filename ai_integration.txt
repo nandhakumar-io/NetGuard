@@ -1,0 +1,21 @@
+Which model
+
+Use claude-sonnet-4-6 — already wired up in the code I gave you (see _call_llm). It's a good fit for structured technical reasoning tasks like this, doesn't need Opus-level cost for a narrow single-turn JSON classification.
+
+Setup steps
+Add the dependency:
+bash
+pip install anthropic --break-system-packages
+
+Add anthropic to backend/requirements.txt.
+
+Set env vars (in your .env / docker-compose environment):
+ANTHROPIC_API_KEY=sk-ant-...
+RISK_ENGINE_BACKEND=llm
+
+Leave RISK_ENGINE_BACKEND unset (defaults to "rules") if you don't want the LLM layer yet — it's fully optional and additive.
+
+Restart the backend. That's it — no other code changes needed; _get_scorer() picks the backend based on that setting, and if the key is missing or the API call fails for any reason, it silently falls back to the deterministic rule-based score so analysis never breaks.
+Sanity check: submit a change request with RISK_ENGINE_BACKEND=llm set and check risk_findings on the created CR — you should see rule-based findings plus any additional ones the model surfaced.
+
+One cost/latency note: this adds a network call to every change-request submission. If your team submits changes in bulk or CI-driven bursts, keep an eye on latency — you may want to consider caching or making it async later, but that's an optimization, not something you need on day one.

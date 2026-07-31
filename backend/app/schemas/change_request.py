@@ -39,6 +39,11 @@ class ChangeRequestRead(ChangeRequestBase):
     status: ChangeStatus
     is_rollback: str = "false"
     rollback_snapshot_id: uuid.UUID | None = None
+    risk_classification: str | None = None
+    # Critical Risk changes require two distinct Network Administrator
+    # approvals before deployment is enqueued (SRS 6.2 / FR-6).
+    requires_dual_approval: bool = False
+    first_approved_by: uuid.UUID | None = None
     created_at: datetime.datetime
 
 

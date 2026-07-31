@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, String, Enum, DateTime, Text, Integer, ForeignKey, func
+from sqlalchemy import Column, String, Enum, DateTime, Text, Integer, Boolean, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -51,6 +51,15 @@ class ChangeRequest(Base):
 
     risk_score = Column(Integer, nullable=True)  # 0-100, set by AI Configuration Analyzer
     risk_findings = Column(Text, nullable=True)  # JSON-encoded list of detected risks
+    risk_classification = Column(String, nullable=True)  # Low Risk | Medium Risk | Critical Risk
+
+    # Critical Risk dual approval (SRS 6.2 / FR-6): when true, a single
+    # approve() call is not enough -- the first call records
+    # first_approved_by/first_approved_at and leaves status unchanged; a
+    # *different* Network Administrator must approve again to finalize.
+    requires_dual_approval = Column(Boolean, nullable=False, default=False, server_default="false")
+    first_approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    first_approved_at = Column(DateTime(timezone=True), nullable=True)
 
     # Automated Validation Engine (SRS 6.4 / FR-5): result of the last
     # validation_engine.validate_syntax() run against this CR's

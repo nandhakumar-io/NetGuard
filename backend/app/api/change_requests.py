@@ -1,21 +1,56 @@
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
+from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
-from app.services import diff_engine, event_bus, risk_engine, validation_engine, audit_service
+from app.services import diff_engine, event_bus, risk_engine, snapshot_service, validation_engine, audit_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
 
 # Roles permitted to approve/reject change requests (FR-1 RBAC)
 APPROVER_ROLES = (UserRole.NETWORK_ADMIN,)
+
+
+def _latest_config(db: Session, device_id) -> str | None:
+    """Best-effort decrypted running-config from the most recent snapshot
+    for a device, used as the "current" side of risk analysis. Returns
+    None (not an error) if no snapshot exists yet -- analysis still runs,
+    just without before/after-aware checks for that device."""
+    snap = (
+        db.query(ConfigSnapshot)
+        .filter(ConfigSnapshot.device_id == device_id)
+        .order_by(ConfigSnapshot.seq.desc())
+        .first()
+    )
+    if not snap:
+        return None
+    try:
+        return snapshot_service.decrypt_config(snap.running_config_encrypted)
+    except Exception:
+        return None
+
+
+def _fleet_configs(db: Session, exclude_device_id) -> dict[str, str]:
+    """{hostname: latest decrypted config} for every other device, used for
+    cross-device duplicate-IP / VLAN-conflict checks (SRS 6.2 / FR-6). Kept
+    to one query + one snapshot lookup per device rather than N+1 per call
+    site; fine at prototype fleet sizes, revisit if this becomes hot."""
+    configs: dict[str, str] = {}
+    for device in db.query(Device).filter(Device.id != exclude_device_id).all():
+        cfg = _latest_config(db, device.id)
+        if cfg:
+            configs[device.hostname] = cfg
+    return configs
 
 
 @router.get("", response_model=list[ChangeRequestRead])
@@ -41,13 +76,18 @@ def create_change_request(
         import json
         additional_device_ids_json = json.dumps([str(i) for i in payload.additional_device_ids])
 
-    # NOTE: current_config would normally be fetched live from the device.
-    # For the prototype we leave it empty unless supplied by the caller later.
-    current_config = None
+    # Current config comes from the device's most recent snapshot (best
+    # effort -- analysis still runs without it, just skipping the
+    # before/after-aware checks). Every *other* device's latest config is
+    # also pulled so the analyzer can catch fleet-wide conflicts (duplicate
+    # IPs, VLAN naming conflicts) rather than only within this one device.
+    current_config = _latest_config(db, payload.device_id)
+    fleet_configs = _fleet_configs(db, payload.device_id)
 
     diff_text = diff_engine.generate_diff(current_config, payload.proposed_config)
     validation = validation_engine.validate_syntax(payload.proposed_config)
-    risk: RiskAnalysisResult = risk_engine.analyze(payload.proposed_config, current_config)
+    risk: RiskAnalysisResult = risk_engine.analyze(payload.proposed_config, current_config, fleet_configs)
+    critical = risk_engine.is_critical(risk)
 
     cr = ChangeRequest(
         device_id=payload.device_id,
@@ -63,6 +103,8 @@ def create_change_request(
         config_diff=diff_text,
         risk_score=risk.risk_score,
         risk_findings="; ".join(risk.findings),
+        risk_classification=risk.classification,
+        requires_dual_approval=critical and settings.RISK_CRITICAL_DUAL_APPROVAL_ENABLED,
         status=ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT,
     )
     db.add(cr)
@@ -115,14 +157,45 @@ def approve_change_request(
     if cr.status != ChangeStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail=f"Cannot approve a request in status '{cr.status.value}'")
 
+    device = db.get(Device, cr.device_id)
+
+    # Critical Risk (AI Configuration Analyzer, SRS 6.2 / FR-6): a single
+    # approval is not enough. The first Network Administrator's approval is
+    # recorded but does NOT move the request out of PENDING_APPROVAL or
+    # enqueue deployment; a *different* Network Administrator must approve
+    # again to finalize it. This blocks deployment on Critical Risk changes
+    # until two distinct admins have signed off.
+    if cr.requires_dual_approval and cr.first_approved_by is None:
+        cr.first_approved_by = current_user.id
+        cr.first_approved_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(cr)
+
+        audit_service.record_event(
+            db, actor=current_user.email, action="First Approval (Critical Risk)",
+            result="Awaiting Second Approval",
+            device_hostname=device.hostname if device else None, change_request_id=cr.id,
+            detail="Critical Risk change: a second, different Network Administrator must approve before deployment.",
+        )
+        event_bus.publish_event(
+            "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
+        )
+        return cr
+
+    if cr.requires_dual_approval and cr.first_approved_by == current_user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Critical Risk change: the second approval must come from a different Network Administrator.",
+        )
+
     cr.status = ChangeStatus.APPROVED
     cr.approved_by = current_user.id
     db.commit()
     db.refresh(cr)
 
-    device = db.get(Device, cr.device_id)
+    action = "Approved (2nd of 2, Critical Risk)" if cr.requires_dual_approval else "Approved"
     audit_service.record_event(
-        db, actor=current_user.email, action="Approved", result="Approved",
+        db, actor=current_user.email, action=action, result="Approved",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))

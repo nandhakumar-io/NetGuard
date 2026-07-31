@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     RISK_LOW_MAX: int = 30
     RISK_MEDIUM_MAX: int = 70
 
+    # AI Configuration Analyzer backend (SRS 6.2 / FR-6): "rules" is the
+    # deterministic v1 scorer (regex + network-aware checks). "llm" layers
+    # an optional model-backed review on top of the same deterministic
+    # checks -- see app.services.risk_engine.LLMScorer -- and silently
+    # degrades to "rules" behavior if ANTHROPIC_API_KEY is unset or the
+    # call fails, so switching this never makes analysis unavailable.
+    RISK_ENGINE_BACKEND: str = "rules"
+    ANTHROPIC_API_KEY: str | None = None
+
+    # Critical Risk changes (score > RISK_MEDIUM_MAX) require a second,
+    # distinct Network Administrator approval before deployment is
+    # enqueued (SRS 6.2 / FR-6). See app.api.change_requests.approve_change_request.
+    RISK_CRITICAL_DUAL_APPROVAL_ENABLED: bool = True
+
     # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
     # configurable" -- these two knobs are that configuration. After a
     # deploy, the health suite is polled every POLL_INTERVAL_SECONDS for up

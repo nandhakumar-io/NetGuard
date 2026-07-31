@@ -39,6 +39,9 @@ export interface ChangeRequest {
   config_diff?: string | null;
   risk_score?: number | null;
   risk_findings?: string | null;
+  risk_classification?: string | null;
+  requires_dual_approval?: boolean;
+  first_approved_by?: string | null;
   status: ChangeStatus;
   is_rollback: "true" | "false";
   rollback_snapshot_id?: string | null;
