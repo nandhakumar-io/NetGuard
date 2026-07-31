@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/ConfigDiff.tsx","./src/components/Layout.tsx","./src/components/RiskBadge.tsx","./src/components/StatCard.tsx","./src/lib/api.ts","./src/lib/types.ts","./src/pages/AuditLog.tsx","./src/pages/ChangeRequests.tsx","./src/pages/Dashboard.tsx","./src/pages/Devices.tsx"],"version":"5.9.3"}

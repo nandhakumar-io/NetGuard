@@ -1,0 +1,41 @@
+import uuid
+import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+from app.models.change_request import ChangeStatus, ChangePriority
+
+
+class ChangeRequestBase(BaseModel):
+    device_id: uuid.UUID
+    priority: ChangePriority = ChangePriority.MEDIUM
+    description: str
+    business_justification: str | None = None
+    maintenance_window_start: datetime.datetime | None = None
+    maintenance_window_end: datetime.datetime | None = None
+    proposed_config: str
+
+
+class ChangeRequestCreate(ChangeRequestBase):
+    pass
+
+
+class ChangeRequestRead(ChangeRequestBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    submitted_by: uuid.UUID
+    approved_by: uuid.UUID | None = None
+    current_config: str | None = None
+    config_diff: str | None = None
+    risk_score: int | None = None
+    risk_findings: str | None = None
+    status: ChangeStatus
+    created_at: datetime.datetime
+
+
+class RiskAnalysisResult(BaseModel):
+    risk_score: int
+    classification: str  # Low Risk | Medium Risk | Critical Risk
+    recommendation: str
+    findings: list[str]
