@@ -249,7 +249,14 @@ export default function ChangeRequests() {
                     selected?.id === r.id ? "ring-2 ring-inset ring-brandblue" : ""
                   }`}
                 >
-                  <td className="px-4 py-3 font-medium text-navy">{hostnameFor(r.device_id)}</td>
+                  <td className="px-4 py-3 font-medium text-navy">
+                    {hostnameFor(r.device_id)}
+                    {r.is_rollback === "true" && (
+                      <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700 align-middle">
+                        ↺ rollback
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${priorityStyle[r.priority]}`}>
                       {r.priority}
@@ -274,7 +281,14 @@ export default function ChangeRequests() {
             <div className="space-y-4">
               <div className="flex items-start justify-between gap-2">
                 <div>
-                  <h3 className="font-semibold text-navy">{selected.description}</h3>
+                  <h3 className="font-semibold text-navy flex items-center gap-2">
+                    {selected.description}
+                    {selected.is_rollback === "true" && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700">
+                        ↺ rollback
+                      </span>
+                    )}
+                  </h3>
                   <p className="text-xs text-slate-500 mt-1">
                     Device: {hostnameFor(selected.device_id)} · Submitted{" "}
                     {new Date(selected.created_at).toLocaleString()}

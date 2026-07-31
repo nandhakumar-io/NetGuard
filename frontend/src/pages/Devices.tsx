@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { Device } from "../lib/types";
+import { Device, Snapshot } from "../lib/types";
 import { useAuth } from "../lib/auth";
 
 const statusColor: Record<string, string> = {
@@ -31,6 +31,55 @@ export default function Devices() {
   const [vendorFilter, setVendorFilter] = useState<string>("all");
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+
+  // --- Change management: snapshot history + manual rollback ---
+  const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
+  const [snapshotsByDevice, setSnapshotsByDevice] = useState<Record<string, Snapshot[]>>({});
+  const [snapshotsLoading, setSnapshotsLoading] = useState<string | null>(null);
+  const [snapshotsError, setSnapshotsError] = useState<string | null>(null);
+  const [rollbackTarget, setRollbackTarget] = useState<{ device: Device; snapshot: Snapshot } | null>(null);
+  const [rollbackReason, setRollbackReason] = useState("");
+  const [rollbackSubmitting, setRollbackSubmitting] = useState(false);
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const [rollbackNotice, setRollbackNotice] = useState<string | null>(null);
+
+  const toggleHistory = (device: Device) => {
+    if (expandedDeviceId === device.id) {
+      setExpandedDeviceId(null);
+      return;
+    }
+    setExpandedDeviceId(device.id);
+    if (!snapshotsByDevice[device.id]) {
+      setSnapshotsLoading(device.id);
+      setSnapshotsError(null);
+      api
+        .get<Snapshot[]>(`/devices/${device.id}/snapshots`)
+        .then((res) => setSnapshotsByDevice((prev) => ({ ...prev, [device.id]: res.data })))
+        .catch(() => setSnapshotsError("Failed to load snapshot history."))
+        .finally(() => setSnapshotsLoading(null));
+    }
+  };
+
+  const confirmRollback = async () => {
+    if (!rollbackTarget) return;
+    setRollbackSubmitting(true);
+    setRollbackError(null);
+    try {
+      const res = await api.post(`/devices/${rollbackTarget.device.id}/rollback`, {
+        snapshot_id: rollbackTarget.snapshot.id,
+        reason: rollbackReason || undefined,
+      });
+      setRollbackNotice(
+        `${res.data.message} (change request ${String(res.data.change_request_id).slice(0, 8)})`
+      );
+      setRollbackTarget(null);
+      setRollbackReason("");
+    } catch (err: any) {
+      setRollbackError(err?.response?.data?.detail || "Failed to queue rollback.");
+    } finally {
+      setRollbackSubmitting(false);
+    }
+  };
 
   const load = () => {
     api
@@ -208,6 +257,14 @@ export default function Devices() {
       )}
 
       {error && <p className="text-riskcrit text-sm mt-3">{error}</p>}
+      {rollbackNotice && (
+        <p className="text-xs text-brandblue bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 mt-3">
+          {rollbackNotice}{" "}
+          <button onClick={() => setRollbackNotice(null)} className="ml-2 text-slate-400 hover:text-slate-600">
+            ✕
+          </button>
+        </p>
+      )}
 
       <div className="flex flex-wrap gap-2 items-center mt-5 mb-3">
         <input
@@ -247,26 +304,28 @@ export default function Devices() {
               <th className="text-left px-4 py-3 font-semibold">Site</th>
               <th className="text-left px-4 py-3 font-semibold">SSH Credential</th>
               <th className="text-left px-4 py-3 font-semibold">Status</th>
+              <th className="text-left px-4 py-3 font-semibold">History</th>
               {canManage && <th className="text-right px-4 py-3 font-semibold">Actions</th>}
             </tr>
           </thead>
           <tbody>
             {initialLoading && (
               <tr>
-                <td colSpan={canManage ? 7 : 6} className="text-center text-slate-400 py-8">
+                <td colSpan={canManage ? 8 : 7} className="text-center text-slate-400 py-8">
                   Loading devices…
                 </td>
               </tr>
             )}
             {!initialLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={canManage ? 7 : 6} className="text-center text-slate-400 py-8">
+                <td colSpan={canManage ? 8 : 7} className="text-center text-slate-400 py-8">
                   {devices.length === 0 ? "No devices yet. Add one above." : "No devices match your search."}
                 </td>
               </tr>
             )}
             {filtered.map((d, i) => (
-              <tr key={d.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
+              <>
+                <tr key={d.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                 <td className="px-4 py-3 font-medium text-navy">{d.hostname}</td>
                 <td className="px-4 py-3 text-slate-600 font-mono text-xs">{d.ip_address}</td>
                 <td className="px-4 py-3 text-slate-600 capitalize">{d.vendor}</td>
@@ -289,6 +348,15 @@ export default function Devices() {
                     <span className="capitalize text-slate-600">{d.status}</span>
                   </span>
                 </td>
+                <td className="px-4 py-3">
+                  <button
+                    onClick={() => toggleHistory(d)}
+                    className="text-xs text-brandblue font-medium hover:text-navy"
+                  >
+                    {expandedDeviceId === d.id ? "Hide" : "View"} snapshots
+                    <span className="text-slate-300 ml-1">{expandedDeviceId === d.id ? "▲" : "▼"}</span>
+                  </button>
+                </td>
                 {canManage && (
                   <td className="px-4 py-3 text-right">
                     <button
@@ -300,11 +368,106 @@ export default function Devices() {
                     </button>
                   </td>
                 )}
-              </tr>
+                </tr>
+                {expandedDeviceId === d.id && (
+                  <tr className="bg-slate-50">
+                    <td colSpan={canManage ? 8 : 7} className="px-4 py-3">
+                      <p className="text-xs font-semibold text-slate-500 uppercase mb-2">
+                        Configuration snapshot history — {d.hostname}
+                      </p>
+                      {snapshotsLoading === d.id && (
+                        <p className="text-xs text-slate-400">Loading snapshots…</p>
+                      )}
+                      {snapshotsError && <p className="text-xs text-riskcrit">{snapshotsError}</p>}
+                      {snapshotsLoading !== d.id &&
+                        !snapshotsError &&
+                        (snapshotsByDevice[d.id]?.length ?? 0) === 0 && (
+                          <p className="text-xs text-slate-400 italic">
+                            No snapshots yet — one is taken automatically before every deployment to this device.
+                          </p>
+                        )}
+                      {(snapshotsByDevice[d.id]?.length ?? 0) > 0 && (
+                        <ul className="space-y-1.5">
+                          {snapshotsByDevice[d.id].map((s, idx) => (
+                            <li
+                              key={s.id}
+                              className="flex items-center gap-3 text-xs bg-white border border-slate-200 rounded-lg px-3 py-2"
+                            >
+                              <span className="font-mono text-slate-500 shrink-0">v{s.version}</span>
+                              <span className="font-mono text-slate-400 shrink-0">{s.checksum.slice(0, 12)}…</span>
+                              <span className="text-slate-500">{new Date(s.created_at).toLocaleString()}</span>
+                              {idx === 0 && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-500">
+                                  latest
+                                </span>
+                              )}
+                              {canManage && (
+                                <button
+                                  onClick={() => {
+                                    setRollbackTarget({ device: d, snapshot: s });
+                                    setRollbackReason("");
+                                    setRollbackError(null);
+                                  }}
+                                  className="ml-auto text-riskcrit font-medium hover:text-red-800 shrink-0"
+                                >
+                                  ↺ Roll back to this
+                                </button>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {!canManage && (
+                        <p className="text-[11px] text-slate-400 italic mt-2">
+                          Only a Network Administrator can initiate a rollback.
+                        </p>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </>
             ))}
           </tbody>
         </table>
       </div>
+
+      {rollbackTarget && (
+        <div className="fixed inset-0 bg-navy/40 flex items-center justify-center z-50 px-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5">
+            <h3 className="font-semibold text-navy">Roll back {rollbackTarget.device.hostname}?</h3>
+            <p className="text-xs text-slate-500 mt-2">
+              This restores snapshot <span className="font-mono">v{rollbackTarget.snapshot.version}</span> (
+              {new Date(rollbackTarget.snapshot.created_at).toLocaleString()}). It runs through the same
+              snapshot → deploy → health-monitor pipeline as a normal change, including automatic rollback if
+              the restore itself fails its post-deploy health checks.
+            </p>
+            <label className="block text-xs font-medium text-slate-600 mt-4 mb-1">Reason (optional)</label>
+            <input
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              placeholder="e.g. interface flapping after last change"
+              value={rollbackReason}
+              onChange={(e) => setRollbackReason(e.target.value)}
+            />
+            {rollbackError && <p className="text-riskcrit text-xs mt-2">{rollbackError}</p>}
+            <div className="flex gap-2 justify-end mt-5">
+              <button
+                onClick={() => setRollbackTarget(null)}
+                disabled={rollbackSubmitting}
+                className="px-4 py-2 text-sm font-medium text-slate-500 hover:text-slate-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRollback}
+                disabled={rollbackSubmitting}
+                className="bg-riskcrit text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+              >
+                {rollbackSubmitting ? "Queuing…" : "Confirm rollback"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

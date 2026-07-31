@@ -82,16 +82,27 @@ npm run dev
 ## Roadmap (matches SRS functional requirements)
 
 - [x] Project scaffold, FR-1 (auth stub), core data models
-- [ ] FR-2 Device inventory CRUD
-- [ ] FR-3 Change request workflow + approvals
-- [ ] FR-4 Config diff engine
-- [ ] FR-5 / FR-6 Syntax validation + AI risk scoring
-- [ ] FR-7 Snapshot service (encrypted backups)
-- [ ] FR-8 Deployment engine (Netmiko / NAPALM)
-- [ ] FR-9 Health monitoring
-- [ ] FR-10 Self-healing rollback
-- [ ] FR-11 Notifications (email / Slack / Teams)
-- [ ] FR-12 Immutable audit log
+- [x] FR-2 Device inventory CRUD
+- [x] FR-3 Change request workflow + approvals
+- [x] FR-4 Config diff engine
+- [x] FR-5 / FR-6 Syntax validation + AI risk scoring
+- [x] FR-7 Snapshot service (encrypted backups) + git-style version history per device
+- [x] FR-8 Deployment engine (Netmiko / NAPALM)
+- [x] FR-9 Health monitoring (real polling over a configurable window, not a single check)
+- [x] FR-10 Self-healing rollback (automatic) + manual rollback to any prior snapshot
+- [x] FR-11 Notifications (email / Slack / Teams)
+- [x] FR-12 Immutable audit log
+
+## Change Management & Rollback
+
+- Every deployment automatically snapshots (and encrypts) the device's config immediately before applying a change.
+- After deploying, NetGuard actually polls the health suite -- infrastructure, routing, services -- every
+  `HEALTH_MONITOR_POLL_INTERVAL_SECONDS` for up to `HEALTH_MONITOR_WINDOW_SECONDS` (see `.env.example`), not a
+  single check right after the push. The first failing round triggers automatic rollback immediately.
+- `GET /devices/{id}/snapshots` lists a device's full config version history.
+- `POST /devices/{id}/rollback` (Network Administrators) restores any prior snapshot on demand. It runs through
+  the exact same Snapshot → Deploy → Health Monitor pipeline as a normal change, so a manual rollback gets the
+  same safety net -- including automatic rollback if the restore itself fails its health checks.
 
 ## Tech Stack
 

@@ -40,6 +40,17 @@ export interface ChangeRequest {
   risk_score?: number | null;
   risk_findings?: string | null;
   status: ChangeStatus;
+  is_rollback: "true" | "false";
+  rollback_snapshot_id?: string | null;
+  created_at: string;
+}
+
+export interface Snapshot {
+  id: string;
+  device_id: string;
+  change_request_id?: string | null;
+  version: string;
+  checksum: string;
   created_at: string;
 }
 
