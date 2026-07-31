@@ -57,4 +57,5 @@ export interface DashboardSummary {
   failed_deployments: number;
   rollbacks: number;
   pending_change_requests: number;
+  devices_with_unresolved_drift: number;
 }

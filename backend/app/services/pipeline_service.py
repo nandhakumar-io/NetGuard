@@ -34,6 +34,7 @@ from app.services import (
     audit_service,
     credential_service,
     deployment_engine,
+    drift_engine,
     event_bus,
     health_monitor,
     notification_service,
@@ -100,6 +101,28 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         notification_service.notify("Deployment Failed", f"{device.hostname}: {exc}", severity="critical")
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
+
+    # --- 0. Config Drift Check (pre-deployment) ---
+    # Catches out-of-band changes made outside NetGuard *before* we stack
+    # a new approved change on top of them. Non-blocking by design (a
+    # drifted device may be exactly what this change is meant to fix) --
+    # it's recorded and notified so an admin can see it happened, not used
+    # to auto-reject the deployment.
+    drift_result = drift_engine.check_device_drift(
+        db, device, username=device.ssh_username or "admin", password=ssh_password, triggered_by="pre_deployment",
+    )
+    if drift_result.drifted == "true":
+        audit_service.record_event(
+            db, actor="system", action="Config Drift Detected", result="Drifted",
+            device_hostname=device.hostname, change_request_id=cr.id, detail=drift_result.detail,
+        )
+        notification_service.notify(
+            "Config Drift Detected",
+            f"{device.hostname}: out-of-band config change found before this deployment "
+            f"({drift_result.lines_changed} line(s), severity={drift_result.severity.value}).",
+            severity="warning" if drift_result.severity.value in ("low", "medium") else "critical",
+        )
+        event_bus.publish_event("config_drift_detected", device=device.hostname, severity=drift_result.severity.value)
 
     # --- 1. Automatic Configuration Snapshot (FR-7) ---
     version = str(int(uuid.uuid4().int % 1_000_000))

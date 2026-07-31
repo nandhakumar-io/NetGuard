@@ -24,7 +24,8 @@ from celery import chord
 from app.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models.change_request import ChangeRequest, ChangeStatus
-from app.services import audit_service, event_bus, pipeline_service
+from app.models.device import Device
+from app.services import audit_service, credential_service, drift_engine, event_bus, notification_service, pipeline_service
 
 
 @celery_app.task(
@@ -100,3 +101,69 @@ def run_deployment_pipeline_task(cr_id: str, actor_email: str) -> None:
     header = [deploy_device_task.s(cr_id, device_id, actor_email) for device_id in device_ids]
     callback = finalize_change_request_task.s(cr_id, actor_email)
     chord(header)(callback)
+
+
+# ---------------------------------------------------------------------
+# Config Drift Detection (SRS: continuous monitoring, not just
+# post-deployment) -- runs independently of any change request, on a
+# schedule set in app.celery_app's beat_schedule.
+# ---------------------------------------------------------------------
+@celery_app.task(
+    name="app.tasks.check_device_drift_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def check_device_drift_task(self, device_id: str, triggered_by: str = "scheduled") -> str:
+    db = SessionLocal()
+    try:
+        device = db.get(Device, uuid.UUID(device_id))
+        if device is None:
+            return "device_missing"
+        if not device.ssh_credential_ref:
+            return "no_credential_configured"
+
+        try:
+            password = credential_service.get_ssh_password(device)
+        except credential_service.CredentialNotFoundError:
+            return "no_credential_configured"
+
+        record = drift_engine.check_device_drift(
+            db, device, username=device.ssh_username or "admin", password=password, triggered_by=triggered_by,
+        )
+
+        if record.drifted == "true":
+            audit_service.record_event(
+                db, actor="system", action="Config Drift Detected", result="Drifted",
+                device_hostname=device.hostname, detail=record.detail,
+            )
+            notification_service.notify(
+                "Config Drift Detected",
+                f"{device.hostname}: {record.detail} (severity={record.severity.value})",
+                severity="warning" if record.severity.value in ("low", "medium") else "critical",
+            )
+            event_bus.publish_event(
+                "config_drift_detected", device=device.hostname, severity=record.severity.value,
+            )
+
+        return record.drifted
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.sweep_all_devices_for_drift_task")
+def sweep_all_devices_for_drift_task() -> int:
+    """Celery beat entry point (see celery_app.conf.beat_schedule): fans out
+    one check_device_drift_task per device with credentials configured, so
+    drift is caught on a schedule instead of only around deployments.
+    """
+    db = SessionLocal()
+    try:
+        device_ids = [str(d.id) for d in db.query(Device).filter(Device.ssh_credential_ref.isnot(None)).all()]
+    finally:
+        db.close()
+
+    for device_id in device_ids:
+        check_device_drift_task.delay(device_id, triggered_by="scheduled")
+    return len(device_ids)
