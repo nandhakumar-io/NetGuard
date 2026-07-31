@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import os
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -14,16 +16,24 @@ from app.services.health_monitor import CheckOutcome
 
 @pytest.fixture()
 def db_session():
+    os.environ["NETGUARD_CRED_TEST_PIPELINE_DEVICE"] = "test-password"
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     session = Session()
     yield session
     session.close()
+    os.environ.pop("NETGUARD_CRED_TEST_PIPELINE_DEVICE", None)
 
 
 def _make_cr(db):
-    device = Device(hostname="rtr-01", ip_address="10.0.0.1", vendor=DeviceVendor.CISCO)
+    device = Device(
+        hostname="rtr-01",
+        ip_address="10.0.0.1",
+        vendor=DeviceVendor.CISCO,
+        ssh_username="admin",
+        ssh_credential_ref="test-pipeline-device",
+    )
     db.add(device)
     db.commit()
     db.refresh(device)

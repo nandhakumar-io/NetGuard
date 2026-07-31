@@ -17,7 +17,10 @@ class ChangeRequestBase(BaseModel):
 
 
 class ChangeRequestCreate(ChangeRequestBase):
-    pass
+    # Extra devices to deploy the same proposed_config to alongside device_id
+    # (SRS 6.6 multi-device / parallel deployment). Stored JSON-encoded on
+    # the model; see app.services.pipeline_service.target_device_ids.
+    additional_device_ids: list[uuid.UUID] | None = None
 
 
 class ChangeRequestRead(ChangeRequestBase):

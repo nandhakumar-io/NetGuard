@@ -32,6 +32,10 @@ class ChangeRequest(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=False)
+    # JSON-encoded list of extra device UUIDs (SRS 6.6 multi-device deployment).
+    # Stored as text rather than a join table to keep the prototype schema
+    # simple; see pipeline_service.target_device_ids() for the reader side.
+    additional_device_ids = Column(Text, nullable=True)
     submitted_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
