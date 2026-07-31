@@ -58,6 +58,12 @@ class ChangeRequest(Base):
     # first_approved_by/first_approved_at and leaves status unchanged; a
     # *different* Network Administrator must approve again to finalize.
     requires_dual_approval = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Why requires_dual_approval is set: "Critical Risk", "Blast Radius", or
+    # "Critical Risk + Blast Radius" when both independently trigger it (see
+    # app.api.change_requests.create_change_request). Purely informational
+    # for the audit trail / UI -- the approve() gate itself only checks
+    # requires_dual_approval.
+    dual_approval_reason = Column(String, nullable=True)
     first_approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     first_approved_at = Column(DateTime(timezone=True), nullable=True)
 

@@ -41,6 +41,7 @@ export interface ChangeRequest {
   risk_findings?: string | null;
   risk_classification?: string | null;
   requires_dual_approval?: boolean;
+  dual_approval_reason?: string | null;
   first_approved_by?: string | null;
   status: ChangeStatus;
   is_rollback: "true" | "false";

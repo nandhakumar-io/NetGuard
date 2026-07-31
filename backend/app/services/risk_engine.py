@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from app.core.config import settings
 from app.schemas.change_request import RiskAnalysisResult
+from app.services import diff_engine
 
 # (regex pattern, weight, human-readable finding)
 RISK_RULES: list[tuple[str, int, str]] = [
@@ -100,6 +101,24 @@ def parse_config(text: str) -> ParsedConfig:
         parsed.ospf_passive_interfaces.add(m.group(1).lower())
     parsed.has_ospf_process = bool(_OSPF_PROCESS_RE.search(text))
     return parsed
+
+
+def _added_lines_from_diff(diff_text: str) -> str:
+    """Pull just the newly-introduced lines out of a unified diff (as
+    produced by `diff_engine.generate_diff`), stripping the leading '+' and
+    the '+++ proposed_configuration' file-header line. Used so the keyword
+    RISK_RULES only ever see what's actually changing, not the whole
+    proposed config -- a `no router bgp` that already existed before this
+    change (and shows up as unchanged context, not a `+` line) shouldn't be
+    re-flagged as a newly proposed risk.
+    """
+    added = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++"):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+    return "\n".join(added)
 
 
 def _wildcard_to_prefixlen(mask: str) -> int | None:
@@ -293,7 +312,14 @@ class RiskScorer(ABC):
 
 class RuleBasedScorer(RiskScorer):
     """v1 scorer: weighted regex rules + the network-aware checks above.
-    Deterministic and dependency-free -- the default backend."""
+    Deterministic and dependency-free -- the default backend.
+
+    The regex rules are diff-aware: when a current_config is available they
+    run only against the lines diff_engine.generate_diff marks as added,
+    not the whole proposed config (see `_added_lines_from_diff`). The
+    NetworkAwareChecks below are already before/after-aware at the
+    structured level (stranded VLANs, OSPF adjacency impact, etc. all
+    compare `self.current` vs `self.proposed`), so they're unaffected."""
 
     def score(
         self,
@@ -303,10 +329,22 @@ class RuleBasedScorer(RiskScorer):
     ) -> RiskAnalysisResult:
         findings: list[str] = []
         score = 0
-        text = proposed_config.lower()
+
+        # Keyword rules run against only the *changed* lines when we have a
+        # current_config to diff against -- scanning the full proposed text
+        # would re-flag risky-looking lines that were already present and
+        # untouched (e.g. an existing `shutdown` on an unrelated interface),
+        # producing findings that don't map to what this change actually
+        # does. Falls back to the full text when there's no current_config
+        # to diff against (e.g. first-ever config for a device).
+        if current_config is not None:
+            scan_text = _added_lines_from_diff(diff_engine.generate_diff(current_config, proposed_config))
+        else:
+            scan_text = proposed_config
+        scan_text = scan_text.lower()
 
         for pattern, weight, message in RISK_RULES:
-            if re.search(pattern, text):
+            if re.search(pattern, scan_text):
                 findings.append(message)
                 score += weight
 

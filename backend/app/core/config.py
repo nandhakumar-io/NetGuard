@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # enqueued (SRS 6.2 / FR-6). See app.api.change_requests.approve_change_request.
     RISK_CRITICAL_DUAL_APPROVAL_ENABLED: bool = True
 
+    # Blast-radius dual approval (SRS 6.2 / FR-6 extension): independent of
+    # risk score, a change fanned out to more than this many devices
+    # (device_id + additional_device_ids) also requires two distinct
+    # Network Administrator approvals -- a Low/Medium Risk change pushed to
+    # 50 devices is still high blast-radius even if no single device's diff
+    # looks scary. See app.api.change_requests.create_change_request.
+    RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD: int = 5
+
     # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
     # configurable" -- these two knobs are that configuration. After a
     # deploy, the health suite is polled every POLL_INTERVAL_SECONDS for up

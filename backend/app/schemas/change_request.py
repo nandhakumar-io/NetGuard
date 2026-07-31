@@ -47,6 +47,7 @@ class ChangeRequestRead(ChangeRequestBase):
     # Critical Risk changes require two distinct Network Administrator
     # approvals before deployment is enqueued (SRS 6.2 / FR-6).
     requires_dual_approval: bool = False
+    dual_approval_reason: str | None = None
     first_approved_by: uuid.UUID | None = None
     canary_enabled: bool = False
     created_at: datetime.datetime

@@ -89,6 +89,26 @@ def create_change_request(
     risk: RiskAnalysisResult = risk_engine.analyze(payload.proposed_config, current_config, fleet_configs)
     critical = risk_engine.is_critical(risk)
 
+    # Blast-radius dual approval (SRS 6.2 / FR-6 extension): a change fanned
+    # out to enough devices requires two distinct Network Administrator
+    # approvals regardless of its individual risk score -- a low-risk
+    # change pushed to 50 devices is still high blast-radius.
+    device_count = 1 + len(payload.additional_device_ids or [])
+    blast_radius_triggered = device_count > settings.RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD
+
+    critical_triggered = critical and settings.RISK_CRITICAL_DUAL_APPROVAL_ENABLED
+    requires_dual_approval = critical_triggered or blast_radius_triggered
+    dual_approval_reason = None
+    if critical_triggered and blast_radius_triggered:
+        dual_approval_reason = "Critical Risk + Blast Radius"
+    elif critical_triggered:
+        dual_approval_reason = "Critical Risk"
+    elif blast_radius_triggered:
+        dual_approval_reason = (
+            f"Blast Radius ({device_count} devices, threshold "
+            f"{settings.RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD})"
+        )
+
     cr = ChangeRequest(
         device_id=payload.device_id,
         additional_device_ids=additional_device_ids_json,
@@ -104,7 +124,8 @@ def create_change_request(
         risk_score=risk.risk_score,
         risk_findings="; ".join(risk.findings),
         risk_classification=risk.classification,
-        requires_dual_approval=critical and settings.RISK_CRITICAL_DUAL_APPROVAL_ENABLED,
+        requires_dual_approval=requires_dual_approval,
+        dual_approval_reason=dual_approval_reason,
         canary_enabled=payload.canary_enabled,
         status=ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT,
     )
@@ -159,13 +180,16 @@ def approve_change_request(
         raise HTTPException(status_code=400, detail=f"Cannot approve a request in status '{cr.status.value}'")
 
     device = db.get(Device, cr.device_id)
+    reason = cr.dual_approval_reason or "Critical Risk"
 
-    # Critical Risk (AI Configuration Analyzer, SRS 6.2 / FR-6): a single
-    # approval is not enough. The first Network Administrator's approval is
-    # recorded but does NOT move the request out of PENDING_APPROVAL or
-    # enqueue deployment; a *different* Network Administrator must approve
-    # again to finalize it. This blocks deployment on Critical Risk changes
-    # until two distinct admins have signed off.
+    # Dual approval (AI Configuration Analyzer, SRS 6.2 / FR-6, extended to
+    # blast radius): a single approval is not enough. The first Network
+    # Administrator's approval is recorded but does NOT move the request
+    # out of PENDING_APPROVAL or enqueue deployment; a *different* Network
+    # Administrator must approve again to finalize it. Triggered either by
+    # Critical Risk classification or by additional_device_ids fanning the
+    # change out past RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD devices --
+    # see cr.dual_approval_reason / app.api.change_requests.create_change_request.
     if cr.requires_dual_approval and cr.first_approved_by is None:
         cr.first_approved_by = current_user.id
         cr.first_approved_at = datetime.now(timezone.utc)
@@ -173,10 +197,10 @@ def approve_change_request(
         db.refresh(cr)
 
         audit_service.record_event(
-            db, actor=current_user.email, action="First Approval (Critical Risk)",
+            db, actor=current_user.email, action=f"First Approval ({reason})",
             result="Awaiting Second Approval",
             device_hostname=device.hostname if device else None, change_request_id=cr.id,
-            detail="Critical Risk change: a second, different Network Administrator must approve before deployment.",
+            detail=f"{reason}: a second, different Network Administrator must approve before deployment.",
         )
         event_bus.publish_event(
             "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
@@ -186,7 +210,7 @@ def approve_change_request(
     if cr.requires_dual_approval and cr.first_approved_by == current_user.id:
         raise HTTPException(
             status_code=400,
-            detail="Critical Risk change: the second approval must come from a different Network Administrator.",
+            detail=f"{reason}: the second approval must come from a different Network Administrator.",
         )
 
     cr.status = ChangeStatus.APPROVED
@@ -194,7 +218,7 @@ def approve_change_request(
     db.commit()
     db.refresh(cr)
 
-    action = "Approved (2nd of 2, Critical Risk)" if cr.requires_dual_approval else "Approved"
+    action = f"Approved (2nd of 2, {reason})" if cr.requires_dual_approval else "Approved"
     audit_service.record_event(
         db, actor=current_user.email, action=action, result="Approved",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,

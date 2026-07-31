@@ -321,8 +321,8 @@ export default function ChangeRequests() {
               {selected.requires_dual_approval && selected.status === "pending_approval" && (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2">
                   {selected.first_approved_by
-                    ? "Critical Risk: first approval recorded. A second, different Network Administrator must approve to deploy."
-                    : "Critical Risk: this change requires approval from two different Network Administrators before deployment."}
+                    ? `${selected.dual_approval_reason ?? "Critical Risk"}: first approval recorded. A second, different Network Administrator must approve to deploy.`
+                    : `${selected.dual_approval_reason ?? "Critical Risk"}: this change requires approval from two different Network Administrators before deployment.`}
                 </div>
               )}
               {actionError && <p className="text-riskcrit text-xs">{actionError}</p>}
