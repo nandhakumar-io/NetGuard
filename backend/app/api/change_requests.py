@@ -105,6 +105,7 @@ def create_change_request(
         risk_findings="; ".join(risk.findings),
         risk_classification=risk.classification,
         requires_dual_approval=critical and settings.RISK_CRITICAL_DUAL_APPROVAL_ENABLED,
+        canary_enabled=payload.canary_enabled,
         status=ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT,
     )
     db.add(cr)

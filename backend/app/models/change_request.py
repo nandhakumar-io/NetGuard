@@ -61,6 +61,12 @@ class ChangeRequest(Base):
     first_approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     first_approved_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Canary multi-device deploy (SRS 6.6): when true and this CR targets
+    # more than one device, the first target device deploys and clears its
+    # health-monitoring window before the rest of the fleet is touched at
+    # all. See app.tasks.run_deployment_pipeline_task / canary_gate_task.
+    canary_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+
     # Automated Validation Engine (SRS 6.4 / FR-5): result of the last
     # validation_engine.validate_syntax() run against this CR's
     # proposed_config. Re-checked (and refreshed) at both submission and

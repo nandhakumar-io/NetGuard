@@ -21,6 +21,10 @@ class ChangeRequestCreate(ChangeRequestBase):
     # (SRS 6.6 multi-device / parallel deployment). Stored JSON-encoded on
     # the model; see app.services.pipeline_service.target_device_ids.
     additional_device_ids: list[uuid.UUID] | None = None
+    # Canary rollout (SRS 6.6): deploy to the first target device only,
+    # wait out its health-monitoring window, and only then fan the rest of
+    # the devices out. No-op when the CR targets a single device.
+    canary_enabled: bool = False
 
 
 class ChangeRequestRead(ChangeRequestBase):
@@ -44,6 +48,7 @@ class ChangeRequestRead(ChangeRequestBase):
     # approvals before deployment is enqueued (SRS 6.2 / FR-6).
     requires_dual_approval: bool = False
     first_approved_by: uuid.UUID | None = None
+    canary_enabled: bool = False
     created_at: datetime.datetime
 
 

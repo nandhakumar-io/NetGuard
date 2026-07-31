@@ -13,6 +13,7 @@ from app.api import (
     alerts,
     gns3,
     notifications,
+    reports,
 )
 
 api_router = APIRouter()
@@ -28,3 +29,4 @@ api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
 api_router.include_router(gns3.router)
 api_router.include_router(notifications.router)
+api_router.include_router(reports.router)

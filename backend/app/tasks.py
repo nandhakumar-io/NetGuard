@@ -19,14 +19,15 @@ ChangeRequest.status.
 """
 import uuid
 
-from celery import chord
+from celery import chain, chord
 
 from app.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.config_drift import DriftBaseline
+from app.models.deployment import Deployment, DeploymentStatus
 from app.models.device import Device
-from app.services import audit_service, event_bus, pipeline_service
+from app.services import audit_service, event_bus, notification_service, pipeline_service
 
 
 @celery_app.task(
@@ -78,12 +79,79 @@ def finalize_change_request_task(_deployment_ids: list[str], cr_id: str, actor_e
         db.close()
 
 
+@celery_app.task(name="app.tasks.canary_gate_task")
+def canary_gate_task(canary_deployment_id: str, cr_id: str, remaining_device_ids: list[str], actor_email: str) -> str:
+    """Chain callback that runs once the canary device's deploy_device_task
+    has finished (SRS 6.6 canary multi-device deploy: 1 device -> health
+    window -> rest of CR).
+
+    - Canary SUCCEEDED: fan the remaining devices out as a normal chord
+      (parallel, same as the non-canary path), so the bulk of the fleet
+      still deploys concurrently -- only the canary is sequential.
+    - Canary FAILED or ROLLED_BACK: the remaining devices are never
+      touched. The change request is finalized off just the canary's
+      result so the failure is visible immediately instead of waiting on
+      devices that were intentionally never dispatched.
+    """
+    db = SessionLocal()
+    try:
+        canary_deployment = db.get(Deployment, uuid.UUID(canary_deployment_id))
+        cr = db.get(ChangeRequest, uuid.UUID(cr_id))
+        if cr is None or canary_deployment is None:
+            return "change_request_or_canary_missing"
+
+        if canary_deployment.status == DeploymentStatus.SUCCEEDED:
+            audit_service.record_event(
+                db, actor=actor_email, action="Canary Deploy Succeeded", result="Proceeding",
+                change_request_id=cr.id,
+                detail=f"Canary healthy -- deploying remaining {len(remaining_device_ids)} device(s) in parallel.",
+            )
+            if remaining_device_ids:
+                header = [
+                    deploy_device_task.s(cr_id, device_id, actor_email) for device_id in remaining_device_ids
+                ]
+                callback = finalize_change_request_task.s(cr_id, actor_email)
+                chord(header)(callback)
+                return "canary_passed_remaining_dispatched"
+            # No other devices targeted -- canary was the whole rollout.
+            pipeline_service.aggregate_change_request_status(db, cr)
+            return "canary_passed_no_remaining"
+
+        # Canary failed or was rolled back: abort the rest of the rollout.
+        cr = pipeline_service.aggregate_change_request_status(db, cr)
+        audit_service.record_event(
+            db, actor=actor_email, action="Canary Deploy Failed", result=cr.status.value,
+            change_request_id=cr.id,
+            detail=(
+                f"Canary device failed health checks ({canary_deployment.status.value}). "
+                f"Remaining {len(remaining_device_ids)} device(s) were NOT deployed."
+            ),
+        )
+        notification_service.notify(
+            "Canary Deployment Aborted Rollout",
+            f"Change request {str(cr.id)[:8]}: canary device failed "
+            f"({canary_deployment.status.value}). Remaining {len(remaining_device_ids)} device(s) skipped.",
+            severity="critical",
+            change_request_id=cr.id, deployment_id=canary_deployment.id,
+        )
+        return "canary_failed_remaining_skipped"
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.run_deployment_pipeline_task")
 def run_deployment_pipeline_task(cr_id: str, actor_email: str) -> None:
     """Entry point dispatched by POST /change-requests/{id}/approve. Fans
     out one deploy_device_task per target device (multi-device / parallel
     deployment, SRS 6.6) and schedules finalize_change_request_task to run
     once they've all finished, whatever the outcome of each.
+
+    When `cr.canary_enabled` is set and the change request targets more
+    than one device, the FIRST target device deploys alone; only once its
+    health-monitoring window passes does the rest of the fleet fan out in
+    parallel via canary_gate_task above. A failing canary skips the
+    remaining devices entirely rather than deploying a config the canary
+    just proved unsafe.
     """
     db = SessionLocal()
     try:
@@ -96,8 +164,17 @@ def run_deployment_pipeline_task(cr_id: str, actor_email: str) -> None:
             "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
         )
         device_ids = [str(d) for d in pipeline_service.target_device_ids(cr)]
+        canary_enabled = bool(cr.canary_enabled)
     finally:
         db.close()
+
+    if canary_enabled and len(device_ids) > 1:
+        canary_id, remaining_ids = device_ids[0], device_ids[1:]
+        chain(
+            deploy_device_task.s(cr_id, canary_id, actor_email),
+            canary_gate_task.s(cr_id, remaining_ids, actor_email),
+        ).apply_async()
+        return
 
     header = [deploy_device_task.s(cr_id, device_id, actor_email) for device_id in device_ids]
     callback = finalize_change_request_task.s(cr_id, actor_email)
