@@ -67,3 +67,25 @@ class Device(Base):
 
     # --- Discovered capabilities, e.g. NETCONF <hello> capability list, stored as JSON text ---
     capabilities = Column(Text, nullable=True)
+
+    # --- Lab / simulation backing (GNS3 integration) ---
+    # A device backed by a GNS3 node is a real virtual router/switch instance
+    # (IOSv, vIOS-L2, Arista vEOS, Juniper vMX, ...) running inside GNS3, not a
+    # mock. Once `bootstrapped` is true it has a real management IP + SSH
+    # reachable from this app, so every other service (deployment_engine,
+    # protocol_manager, health_monitor, rollback_service) treats it exactly
+    # like a physical device via the normal ip_address/ssh_username columns
+    # above -- no separate code path needed for day-to-day deploy/validate/
+    # rollback. These columns exist only for: (a) telling lab devices apart
+    # in inventory/UI, (b) remembering which GNS3 project/node backs a
+    # device so it can be started/stopped/torn down, and (c) reaching the
+    # node's console over telnet for the one-time bootstrap before it has an
+    # SSH-reachable management IP of its own.
+    is_simulated = Column(Boolean, nullable=False, default=False, server_default="false")
+    lab_provider = Column(String, nullable=True)  # e.g. "gns3"
+    gns3_project_id = Column(String, nullable=True)
+    gns3_node_id = Column(String, nullable=True)
+    console_host = Column(String, nullable=True)  # GNS3 server address for console access
+    console_port = Column(Integer, nullable=True)  # per-node telnet console port assigned by GNS3
+    console_type = Column(String, nullable=True, default="telnet")  # telnet | vnc | none
+    bootstrapped = Column(Boolean, nullable=False, default=False, server_default="false")

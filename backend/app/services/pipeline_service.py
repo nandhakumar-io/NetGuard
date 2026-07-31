@@ -271,7 +271,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         severity="critical",
     )
     event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
-    return deploymentnt
+    return deployment
 
 
 def aggregate_change_request_status(db: Session, cr: ChangeRequest) -> ChangeRequest:

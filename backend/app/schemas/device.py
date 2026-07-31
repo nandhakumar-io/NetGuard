@@ -22,6 +22,16 @@ class DeviceBase(BaseModel):
     snmp_auth_credential_ref: str | None = None  # v3 auth passphrase
     snmp_privacy_credential_ref: str | None = None  # v3 priv passphrase
 
+    # --- Lab / simulation backing (GNS3) ---
+    is_simulated: bool = False
+    lab_provider: str | None = None
+    gns3_project_id: str | None = None
+    gns3_node_id: str | None = None
+    console_host: str | None = None
+    console_port: int | None = None
+    console_type: str | None = None
+    bootstrapped: bool = False
+
 
 class DeviceCreate(DeviceBase):
     pass
@@ -41,6 +51,14 @@ class DeviceUpdate(BaseModel):
     snmp_username: str | None = None
     snmp_auth_credential_ref: str | None = None
     snmp_privacy_credential_ref: str | None = None
+    is_simulated: bool | None = None
+    lab_provider: str | None = None
+    gns3_project_id: str | None = None
+    gns3_node_id: str | None = None
+    console_host: str | None = None
+    console_port: int | None = None
+    console_type: str | None = None
+    bootstrapped: bool | None = None
 
 
 class DeviceRead(DeviceBase):

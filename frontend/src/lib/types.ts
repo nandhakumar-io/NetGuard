@@ -233,3 +233,71 @@ export interface DeploymentRecord {
   created_at: string;
   health_checks: HealthCheck[];
 }
+
+// --- GNS3 Lab Integration ---
+export interface GNS3Status {
+  enabled: boolean;
+  reachable: boolean;
+  version?: string | null;
+  controller_url?: string | null;
+  detail?: string | null;
+}
+
+export interface GNS3Project {
+  project_id: string;
+  name: string;
+  status?: string | null;
+  filename?: string | null;
+}
+
+export interface GNS3Node {
+  node_id: string;
+  name: string;
+  node_type?: string | null;
+  status?: string | null;
+  console_host?: string | null;
+  console_port?: number | null;
+  console_type?: string | null;
+  vendor_guess: string;
+  synced: boolean;
+  device_id?: string | null;
+  bootstrapped: boolean;
+  management_ip?: string | null;
+}
+
+export interface GNS3BootstrapRequest {
+  mgmt_interface?: string;
+  mgmt_ip: string;
+  mgmt_subnet_mask?: string;
+  ssh_username?: string;
+  ssh_password: string;
+  enable_password?: string | null;
+  hostname?: string | null;
+  ssh_credential_ref?: string | null;
+  create_device?: boolean;
+  site?: string | null;
+}
+
+export interface GNS3BootstrapResponse {
+  success: boolean;
+  output: string;
+  error?: string | null;
+  device_id?: string | null;
+  hostname?: string | null;
+  management_ip?: string | null;
+  message: string;
+}
+
+export interface GNS3SyncResponse {
+  project_id: string;
+  created: number;
+  updated: number;
+  skipped: number;
+  results: Array<{
+    node_id: string;
+    name: string;
+    action: string;
+    device_id?: string | null;
+    detail?: string | null;
+  }>;
+}

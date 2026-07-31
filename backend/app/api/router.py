@@ -1,6 +1,18 @@
 from fastapi import APIRouter
 
-from app.api import auth, devices, change_requests, audit, dashboard, deployments, config_management, drift, metrics, alerts
+from app.api import (
+    auth,
+    devices,
+    change_requests,
+    audit,
+    dashboard,
+    deployments,
+    config_management,
+    drift,
+    metrics,
+    alerts,
+    gns3,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -13,3 +25,4 @@ api_router.include_router(deployments.router)
 api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
+api_router.include_router(gns3.router)

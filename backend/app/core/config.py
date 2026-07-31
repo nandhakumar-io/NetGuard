@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     SNMP_TIMEOUT_SECONDS: float = 3.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
 
+    # GNS3 Lab Integration: lets change requests be validated end-to-end
+    # (deploy -> health monitor -> rollback) against real virtual routers
+    # running in a GNS3 topology instead of production hardware. GNS3_ENABLED
+    # just toggles whether the /gns3 API surfaces itself as available; the
+    # controller URL/credentials point at an already-running GNS3 server
+    # (local gns3server process or a GNS3 VM), which this app never starts
+    # or manages itself.
+    GNS3_ENABLED: bool = False
+    GNS3_BASE_URL: str = "http://localhost:3080"
+    GNS3_USERNAME: str | None = None
+    GNS3_PASSWORD: str | None = None
+    GNS3_REQUEST_TIMEOUT_SECONDS: float = 10.0
+    GNS3_CONSOLE_READY_TIMEOUT_SECONDS: float = 45.0
+
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
