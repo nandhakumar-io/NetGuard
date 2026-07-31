@@ -14,6 +14,7 @@ from app.models.device_metric import DeviceMetric
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.services import event_bus
+from app.models.change_request import ChangeRequest, ChangeStatus
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -30,6 +31,9 @@ def _compute_summary(db: Session) -> dict:
     rollbacks = db.query(Deployment).filter(Deployment.status == DeploymentStatus.ROLLED_BACK).count()
     pending_change_requests = db.query(ChangeRequest).filter(
         ChangeRequest.status.in_(["pending_approval"])
+    ).count()
+    pending_change_requests = db.query(ChangeRequest).filter(
+    ChangeRequest.status.in_([ChangeStatus.PENDING_APPROVAL])
     ).count()
 
     # Alert counts for dashboard stat cards

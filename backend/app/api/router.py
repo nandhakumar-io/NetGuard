@@ -1,5 +1,3 @@
-from fastapi import APIRouter
-
 from app.api import (
     auth,
     devices,
