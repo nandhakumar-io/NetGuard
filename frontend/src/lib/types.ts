@@ -170,6 +170,12 @@ export interface DashboardSummary {
   pending_change_requests: number;
   critical_alerts: number;
   warning_alerts: number;
+  global_health_score: number;
+  deployment_success_rate: number;
+  top_cpu_devices: { hostname: string; ip_address: string; cpu: number }[];
+  top_memory_devices: { hostname: string; ip_address: string; memory: number }[];
+  recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
+  recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
 }
 
 // --- Alert System ---
