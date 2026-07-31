@@ -81,7 +81,7 @@ def _compute_summary(db: Session) -> dict:
     recent_backups = [{
         "id": str(r[0].id), 
         "version": r[0].version, 
-        "created_at": r[0].created_at.isoformat(), 
+        "created_at": r[0].created_at.isoformat() if r[0].created_at else "", 
         "hostname": r[1]
     } for r in recent_backups_query]
 
@@ -96,7 +96,7 @@ def _compute_summary(db: Session) -> dict:
         "protocol": r[0].protocol.value if hasattr(r[0].protocol, "value") else r[0].protocol,
         "operation": r[0].operation,
         "success": r[0].success,
-        "created_at": r[0].created_at.isoformat(),
+        "created_at": r[0].created_at.isoformat() if r[0].created_at else "",
         "operator": r[0].operator,
         "device_hostname": r[1] or "Unknown"
     } for r in recent_ops_query]
