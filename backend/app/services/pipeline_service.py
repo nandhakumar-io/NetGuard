@@ -120,7 +120,10 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             db, actor="system", action="Credential Retrieval", result="Failed",
             device_hostname=device.hostname, change_request_id=cr.id, detail=str(exc),
         )
-        notification_service.notify("Deployment Failed", f"{device.hostname}: {exc}", severity="critical")
+        notification_service.notify(
+            "Deployment Failed", f"{device.hostname}: {exc}", severity="critical",
+            device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
+        )
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
@@ -175,6 +178,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         _log_deployment(db, deployment.id, "DEPLOY", msg, "ERROR")
         notification_service.notify(
             "Deployment Failed", f"{device.hostname}: {deploy_result.error}", severity="critical",
+            device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
@@ -231,6 +235,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         )
         notification_service.notify(
             "Deployment Succeeded", f"{device.hostname}: change deployed and healthy.", severity="info",
+            device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
@@ -269,6 +274,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         f"{device.hostname}: health checks failed after deployment. Rollback "
         f"{'succeeded' if rollback_result.success else 'FAILED — manual intervention required'}.",
         severity="critical",
+        device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
     )
     event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
     return deployment

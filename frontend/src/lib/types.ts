@@ -161,6 +161,34 @@ export interface DriftFleetSummary {
   rollback_recommended_count: number;
 }
 
+// --- Notification Center ---
+
+export type NotificationEventType =
+  | "deployment_succeeded"
+  | "deployment_failed"
+  | "rollback_triggered"
+  | "drift_high"
+  | "drift_critical"
+  | "generic";
+
+export interface AppNotification {
+  id: string;
+  event_type: NotificationEventType;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  message: string;
+  device_hostname?: string | null;
+  change_request_id?: string | null;
+  deployment_id?: string | null;
+  read: boolean;
+  created_at: string;
+}
+
+export interface NotificationSummary {
+  unread_count: number;
+  total: number;
+}
+
 export interface DashboardSummary {
   devices_online: number;
   devices_total: number;

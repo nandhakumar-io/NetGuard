@@ -221,6 +221,7 @@ def detect_drift(
             event="Configuration Drift Detected",
             message=alert.message,
             severity="critical" if severity == DriftSeverity.CRITICAL else "warning",
+            device_hostname=device.hostname,
         )
 
     event_bus.publish_event(

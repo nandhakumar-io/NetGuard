@@ -10,3 +10,4 @@ from app.models.device_metric import DeviceMetric, HealthColor  # noqa: F401
 from app.models.alert import Alert, AlertSeverity, AlertSource  # noqa: F401
 from app.models.config_drift import ConfigDrift, DriftBaseline, DriftSeverity, DriftStatus  # noqa: F401
 from app.models.protocol_operation import ProtocolOperation, ProtocolName  # noqa: F401
+from app.models.notification import Notification, NotificationSeverity, NotificationEventType  # noqa: F401

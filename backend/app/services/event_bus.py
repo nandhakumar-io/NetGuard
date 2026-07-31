@@ -20,6 +20,7 @@ from app.core.config import settings
 
 DASHBOARD_CHANNEL = "netguard:dashboard:events"
 ALERTS_CHANNEL = "netguard:alerts:events"
+NOTIFICATIONS_CHANNEL = "netguard:notifications:events"
 
 # Separate sync client for publishers running inside Celery workers
 # (regular, non-async code), and an async client for the FastAPI side

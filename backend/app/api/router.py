@@ -1,3 +1,5 @@
+from fastapi import APIRouter
+
 from app.api import (
     auth,
     devices,
@@ -10,6 +12,7 @@ from app.api import (
     metrics,
     alerts,
     gns3,
+    notifications,
 )
 
 api_router = APIRouter()
@@ -24,3 +27,4 @@ api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
 api_router.include_router(gns3.router)
+api_router.include_router(notifications.router)

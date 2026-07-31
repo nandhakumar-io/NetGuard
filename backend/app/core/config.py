@@ -25,6 +25,25 @@ class Settings(BaseSettings):
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None
 
+    # Email notifications (FR-11): sent via SMTP using these settings. Email
+    # sending is skipped (not an error) whenever SMTP_HOST or
+    # NOTIFY_EMAIL_RECIPIENTS is unset, same "optional channel" behavior as
+    # the Slack/Teams webhooks above.
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM_EMAIL: str = "netguard@localhost"
+    SMTP_USE_TLS: bool = True
+    SMTP_TIMEOUT_SECONDS: float = 5.0
+    # Comma-separated list of recipient addresses, e.g. "noc@corp.com,oncall@corp.com"
+    NOTIFY_EMAIL_RECIPIENTS: str | None = None
+
+    # In-app Notification Center (FR-11): persists every notification event
+    # and pushes it over WebSocket (see app.api.notifications). Purely
+    # additive/optional -- disabling it does not affect Slack/Teams/Email.
+    NOTIFICATIONS_INAPP_ENABLED: bool = True
+
     # Risk score thresholds (0-100)
     RISK_LOW_MAX: int = 30
     RISK_MEDIUM_MAX: int = 70
