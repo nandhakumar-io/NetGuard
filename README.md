@@ -4,7 +4,9 @@ Intelligent Automated Network Change Management & Self-Healing Platform
 
 ## Overview
 
-NetGuard AI automates the full lifecycle of a network configuration change:
+NetGuard AI is an automated network change management platform designed to reduce configuration errors, improve deployment reliability, and provide automatic rollback in case of failures.
+
+The platform manages the complete lifecycle of a network configuration change:
 
 ```
 Change Request → AI Risk Analysis → Syntax Validation → Network Sanity Checks
