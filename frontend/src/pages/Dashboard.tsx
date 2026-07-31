@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../lib/api";
-import { DashboardSummary } from "../lib/types";
+import { DashboardSummary, DriftFleetSummary } from "../lib/types";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
 
 export default function Dashboard() {
   const { user } = useAuth();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [driftSummary, setDriftSummary] = useState<DriftFleetSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"live" | "polling" | "connecting">("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -26,6 +28,12 @@ export default function Dashboard() {
         .catch(() => mounted && setError("Could not reach the NetGuard API."));
     };
     fetchSummary();
+    api
+      .get<DriftFleetSummary>("/drift/summary")
+      .then((res) => mounted && setDriftSummary(res.data))
+      .catch(() => {
+        /* drift widget is supplementary -- fail quietly */
+      });
 
     // Live Deployment Dashboard (SRS 6.9): prefer WebSocket push, fall back to polling.
     const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
@@ -132,6 +140,28 @@ export default function Dashboard() {
           <p className="text-xs text-slate-500 mt-2">
             {summary.devices_online} of {summary.devices_total} managed devices reporting online.
           </p>
+        </div>
+      )}
+
+      {driftSummary && driftSummary.total_open_drifts > 0 && (
+        <div className="mt-6 bg-white border border-slate-200 rounded-xl p-6">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <h2 className="font-semibold text-navy mb-1">Configuration Drift Posture</h2>
+              <p className="text-sm text-slate-500">
+                {driftSummary.total_open_drifts} open drift record(s) across {driftSummary.devices_drifted} device(s)
+                · average compliance {driftSummary.average_compliance_score}/100.
+                {driftSummary.rollback_recommended_count > 0 &&
+                  ` ${driftSummary.rollback_recommended_count} recommend rollback.`}
+              </p>
+            </div>
+            <Link
+              to="/drift"
+              className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors shrink-0"
+            >
+              Review Drift
+            </Link>
+          </div>
         </div>
       )}
 

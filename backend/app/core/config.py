@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     HEALTH_MONITOR_WINDOW_SECONDS: int = 60
     HEALTH_MONITOR_POLL_INTERVAL_SECONDS: int = 15
 
+    # Configuration Drift Detection: hour (UTC, 0-23) the nightly
+    # automated drift sweep runs at via Celery beat (see app.celery_app).
+    DRIFT_SWEEP_HOUR_UTC: int = 2
+
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

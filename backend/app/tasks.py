@@ -24,6 +24,8 @@ from celery import chord
 from app.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models.change_request import ChangeRequest, ChangeStatus
+from app.models.config_drift import DriftBaseline
+from app.models.device import Device
 from app.services import audit_service, event_bus, pipeline_service
 
 
@@ -100,3 +102,68 @@ def run_deployment_pipeline_task(cr_id: str, actor_email: str) -> None:
     header = [deploy_device_task.s(cr_id, device_id, actor_email) for device_id in device_ids]
     callback = finalize_change_request_task.s(cr_id, actor_email)
     chord(header)(callback)
+
+
+# --- Nightly drift detection (SRS: automated + on-demand drift scans) ---
+#
+# Same fan-out shape as the deployment pipeline above: one Celery task per
+# device so a fleet of N devices scans in parallel across the worker pool
+# instead of one long-blocking loop, and one device's protocol timeout
+# can't delay every other device's scan. Scheduled nightly via Celery beat
+# (see app.celery_app.conf.beat_schedule); also invokable directly for
+# testing/backfills.
+
+
+@celery_app.task(
+    name="app.tasks.drift_detection_task",
+    bind=True,
+    # Infra retries only (DB hiccup, worker restart) -- protocol_manager
+    # already retries the underlying SSH/NETCONF/RESTCONF read itself, and
+    # a device that's simply unreachable shouldn't hold up the nightly
+    # sweep for every other device.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def drift_detection_task(self, device_id: str, baseline: str = DriftBaseline.PREVIOUS_BACKUP.value) -> str:
+    from app.services import drift_service
+
+    db = SessionLocal()
+    try:
+        device = db.get(Device, uuid.UUID(device_id))
+        if device is None:
+            return "device_missing"
+        try:
+            result = drift_service.detect_drift(
+                db, device, baseline=DriftBaseline(baseline), triggered_by="system:nightly-drift-scan"
+            )
+            return result.drift.severity.value
+        except drift_service.NoBaselineError:
+            # Nothing to compare against yet (no backup/golden config) --
+            # not a failure, just nothing to do for this device tonight.
+            return "no_baseline"
+        except RuntimeError as exc:
+            audit_service.record_event(
+                db, actor="system:nightly-drift-scan", action="Drift Scan Failed", result="error",
+                device_hostname=device.hostname, detail=str(exc),
+            )
+            db.commit()
+            return "scan_failed"
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_nightly_drift_sweep_task")
+def run_nightly_drift_sweep_task() -> int:
+    """Celery beat entry point: fans out one drift_detection_task per
+    device in inventory. Returns the number of devices scanned.
+    """
+    db = SessionLocal()
+    try:
+        device_ids = [str(d.id) for d in db.query(Device.id).all()]
+    finally:
+        db.close()
+
+    for device_id in device_ids:
+        drift_detection_task.delay(device_id)
+    return len(device_ids)

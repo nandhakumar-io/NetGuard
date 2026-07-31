@@ -17,6 +17,10 @@ class AlertSource(str, enum.Enum):
     SNMP_TRAP = "snmp_trap"
     HEALTH_POLL = "health_poll"
     DRIFT = "drift"
+    # Added for ProtocolManager integration (app.services.protocol_manager):
+    # any failed NETCONF/RESTCONF/SSH operation raises one of these instead
+    # of silently only recording a ProtocolOperation row.
+    PROTOCOL_FAILURE = "protocol_failure"
 
 
 class Alert(Base):

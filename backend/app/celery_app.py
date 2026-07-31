@@ -9,6 +9,7 @@ just enqueues one task per target device and returns immediately; the
 frontend polls GET /deployments / GET /change-requests/{id} for progress.
 """
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -31,6 +32,16 @@ celery_app.conf.update(
     task_time_limit=360,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Nightly configuration drift sweep (SRS: automated drift detection).
+    # Runs off business hours, fanning out one drift_detection_task per
+    # device (see app.tasks). On-demand scans via
+    # POST /devices/{id}/drift/scan are unaffected by this schedule.
+    beat_schedule={
+        "nightly-drift-sweep": {
+            "task": "app.tasks.run_nightly_drift_sweep_task",
+            "schedule": crontab(hour=settings.DRIFT_SWEEP_HOUR_UTC, minute=0),
+        },
+    },
 )
 
 celery_app.autodiscover_tasks(["app"])

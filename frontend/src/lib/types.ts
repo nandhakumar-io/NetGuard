@@ -63,6 +63,104 @@ export interface AuditLogEntry {
   result: string;
 }
 
+// --- Configuration Management ---
+
+export interface RunningConfig {
+  device_id: string;
+  hostname: string;
+  protocol: string;
+  config: string;
+  retrieved_at: string;
+}
+
+export interface StartupConfig {
+  device_id: string;
+  hostname: string;
+  config: string | null;
+  source: "snapshot" | "unavailable";
+  snapshot_id?: string | null;
+  retrieved_at: string;
+}
+
+export interface BackupHistoryEntry {
+  id: string;
+  device_id: string;
+  change_request_id?: string | null;
+  version: string;
+  checksum: string;
+  has_startup_config: boolean;
+  created_at: string;
+}
+
+export interface BackupConfigResponse {
+  snapshot: BackupHistoryEntry;
+  protocol: string;
+  message: string;
+}
+
+export interface RestoreConfigResponse {
+  device_id: string;
+  hostname: string;
+  restored_from_snapshot_id: string;
+  post_restore_snapshot_id?: string | null;
+  protocol: string;
+  success: boolean;
+  message: string;
+}
+
+export interface CompareConfigResponse {
+  device_id: string;
+  base_label: string;
+  target_label: string;
+  identical: boolean;
+  diff: string;
+}
+
+// --- Configuration Drift Detection ---
+
+export type DriftBaseline = "golden_config" | "previous_backup";
+export type DriftSeverity = "low" | "medium" | "high" | "critical";
+export type DriftStatus = "open" | "approved" | "rolled_back" | "dismissed";
+
+export interface Drift {
+  id: string;
+  device_id: string;
+  baseline: DriftBaseline;
+  added_lines: number;
+  removed_lines: number;
+  modified_lines: number;
+  risk_score: number;
+  compliance_score: number;
+  severity: DriftSeverity;
+  ai_summary?: string | null;
+  status: DriftStatus;
+  detected_at: string;
+}
+
+export interface DriftDetail extends Drift {
+  diff_text: string;
+}
+
+export interface RollbackRecommendation {
+  recommended: boolean;
+  reason: string;
+}
+
+export interface DriftScanResponse {
+  drift: DriftDetail;
+  baseline_label: string;
+  findings: string[];
+  rollback_recommendation: RollbackRecommendation;
+}
+
+export interface DriftFleetSummary {
+  total_open_drifts: number;
+  devices_drifted: number;
+  average_compliance_score: number;
+  by_severity: Record<DriftSeverity, number>;
+  rollback_recommended_count: number;
+}
+
 export interface DashboardSummary {
   devices_online: number;
   devices_total: number;

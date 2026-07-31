@@ -6,6 +6,7 @@ const links = [
   { to: "/change-requests", label: "Change Requests" },
   { to: "/deployments", label: "Deployments" },
   { to: "/devices", label: "Devices" },
+  { to: "/drift", label: "Drift" },
   { to: "/audit-log", label: "Audit Log" },
   { to: "/security", label: "Security" },
 ];

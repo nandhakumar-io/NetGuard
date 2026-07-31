@@ -8,6 +8,7 @@ import Deployments from "./pages/Deployments";
 import Devices from "./pages/Devices";
 import AuditLog from "./pages/AuditLog";
 import Security from "./pages/Security";
+import DriftPage from "./pages/Drift";
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/change-requests" element={<ChangeRequests />} />
           <Route path="/deployments" element={<Deployments />} />
           <Route path="/devices" element={<Devices />} />
+          <Route path="/drift" element={<DriftPage />} />
           <Route path="/audit-log" element={<AuditLog />} />
           <Route path="/security" element={<Security />} />
         </Route>
