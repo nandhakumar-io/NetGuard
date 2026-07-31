@@ -6,4 +6,3 @@ from app.models.change_request import ChangeRequest, ChangeStatus, ChangePriorit
 from app.models.snapshot import ConfigSnapshot  # noqa: F401
 from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResult  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
-from app.models.config_drift import ConfigDrift, DriftSeverity  # noqa: F401

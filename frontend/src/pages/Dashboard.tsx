@@ -68,7 +68,6 @@ export default function Dashboard() {
         <StatCard label="Pending Approvals" value={summary?.pending_change_requests ?? "–"} accent="amber" />
         <StatCard label="Failed Deployments" value={summary?.failed_deployments ?? "–"} accent="red" />
         <StatCard label="Rollbacks" value={summary?.rollbacks ?? "–"} accent="red" />
-        <StatCard label="Config Drift" value={summary?.devices_with_unresolved_drift ?? "–"} accent="amber" />
         <StatCard label="Platform Status" value="Healthy" accent="green" />
       </div>
 
