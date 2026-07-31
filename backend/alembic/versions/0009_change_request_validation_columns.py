@@ -12,6 +12,8 @@ visible in the UI/API, instead of only affecting status transitions.
 import sqlalchemy as sa
 from alembic import op
 
+from migration_helpers import add_column_if_missing
+
 revision = "0009"
 down_revision = "0008"
 branch_labels = None
@@ -19,9 +21,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("change_requests", sa.Column("validation_passed", sa.String(), nullable=True))
-    op.add_column("change_requests", sa.Column("validation_errors", sa.Text(), nullable=True))
-    op.add_column("change_requests", sa.Column("validation_warnings", sa.Text(), nullable=True))
+    add_column_if_missing("change_requests", sa.Column("validation_passed", sa.String(), nullable=True))
+    add_column_if_missing("change_requests", sa.Column("validation_errors", sa.Text(), nullable=True))
+    add_column_if_missing("change_requests", sa.Column("validation_warnings", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:

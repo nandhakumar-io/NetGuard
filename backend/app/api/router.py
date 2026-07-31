@@ -12,7 +12,7 @@ from app.api import (
     metrics,
     alerts,
     gns3,
-    notifications,
+    notification,
     reports,
 )
 
@@ -28,5 +28,5 @@ api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
 api_router.include_router(gns3.router)
-api_router.include_router(notifications.router)
+api_router.include_router(notification.router)
 api_router.include_router(reports.router)

@@ -48,7 +48,7 @@ def list_snapshots(db: Session, device_id: uuid.UUID) -> list[ConfigSnapshot]:
     return (
         db.query(ConfigSnapshot)
         .filter(ConfigSnapshot.device_id == device_id)
-        .order_by(ConfigSnapshot.created_at.desc())
+        .order_by(ConfigSnapshot.seq.desc())
         .all()
     )
 

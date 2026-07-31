@@ -12,6 +12,8 @@ app.tasks.run_deployment_pipeline_task / canary_gate_task).
 import sqlalchemy as sa
 from alembic import op
 
+from migration_helpers import add_column_if_missing
+
 revision = "0011"
 down_revision = "0010"
 branch_labels = None
@@ -19,7 +21,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "change_requests",
         sa.Column("canary_enabled", sa.Boolean(), nullable=False, server_default="false"),
     )

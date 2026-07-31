@@ -13,6 +13,8 @@ don't fail on missing columns.
 import sqlalchemy as sa
 from alembic import op
 
+from migration_helpers import add_column_if_missing, create_index_if_missing
+
 revision = "0007"
 down_revision = "85cec3c5accf"
 branch_labels = None
@@ -20,24 +22,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    # Guarded: on a fresh install these columns already exist courtesy of
+    # 0001's create_all(checkfirst=True) against today's Device model.
+    add_column_if_missing(
         "devices",
         sa.Column("is_simulated", sa.Boolean(), server_default="false", nullable=False),
     )
-    op.add_column("devices", sa.Column("lab_provider", sa.String(), nullable=True))
-    op.add_column("devices", sa.Column("gns3_project_id", sa.String(), nullable=True))
-    op.add_column("devices", sa.Column("gns3_node_id", sa.String(), nullable=True))
-    op.add_column("devices", sa.Column("console_host", sa.String(), nullable=True))
-    op.add_column("devices", sa.Column("console_port", sa.Integer(), nullable=True))
-    op.add_column(
+    add_column_if_missing("devices", sa.Column("lab_provider", sa.String(), nullable=True))
+    add_column_if_missing("devices", sa.Column("gns3_project_id", sa.String(), nullable=True))
+    add_column_if_missing("devices", sa.Column("gns3_node_id", sa.String(), nullable=True))
+    add_column_if_missing("devices", sa.Column("console_host", sa.String(), nullable=True))
+    add_column_if_missing("devices", sa.Column("console_port", sa.Integer(), nullable=True))
+    add_column_if_missing(
         "devices",
         sa.Column("console_type", sa.String(), server_default="telnet", nullable=True),
     )
-    op.add_column(
+    add_column_if_missing(
         "devices",
         sa.Column("bootstrapped", sa.Boolean(), server_default="false", nullable=False),
     )
-    op.create_index(
+    create_index_if_missing(
         "ix_devices_gns3_project_node",
         "devices",
         ["gns3_project_id", "gns3_node_id"],

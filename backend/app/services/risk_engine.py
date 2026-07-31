@@ -380,18 +380,18 @@ class LLMScorer(RiskScorer):
             f"PROPOSED CONFIG:\n{proposed_config}"
         )
         resp = requests.post(
-         f"{settings.LOCAL_LLM_BASE_URL}/chat/completions",
-         json={
+            f"{settings.LOCAL_LLM_BASE_URL}/chat/completions",
+            json={
                 "model": settings.LOCAL_LLM_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
             },
             timeout=30,
         )
-    resp.raise_for_status()
-    raw = resp.json()["choices"][0]["message"]["content"]
-    data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
-    return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"]
+        data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
+        return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
 
 
 def _classify(score: int) -> tuple[str, str]:

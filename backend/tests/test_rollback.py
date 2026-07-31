@@ -41,7 +41,7 @@ def _make_device(db):
 
 def _make_snapshot(db, device, config="interface Gi0/1\n ip address 10.1.1.1 255.255.255.0\n", version="1"):
     payload = snapshot_service.build_snapshot_payload(running_config=config, startup_config=config, version=version)
-    snap = ConfigSnapshot(device_id=device.id, **payload)
+    snap = ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **payload)
     db.add(snap)
     db.commit()
     db.refresh(snap)

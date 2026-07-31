@@ -14,6 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from migration_helpers import add_column_if_missing, create_foreign_key_if_missing
+
 revision = "0010"
 down_revision = "0009"
 branch_labels = None
@@ -21,17 +23,17 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("change_requests", sa.Column("risk_classification", sa.String(), nullable=True))
-    op.add_column(
+    add_column_if_missing("change_requests", sa.Column("risk_classification", sa.String(), nullable=True))
+    add_column_if_missing(
         "change_requests",
         sa.Column("requires_dual_approval", sa.Boolean(), nullable=False, server_default="false"),
     )
-    op.add_column(
+    add_column_if_missing(
         "change_requests",
         sa.Column("first_approved_by", postgresql.UUID(as_uuid=True), nullable=True),
     )
-    op.add_column("change_requests", sa.Column("first_approved_at", sa.DateTime(timezone=True), nullable=True))
-    op.create_foreign_key(
+    add_column_if_missing("change_requests", sa.Column("first_approved_at", sa.DateTime(timezone=True), nullable=True))
+    create_foreign_key_if_missing(
         "fk_change_requests_first_approved_by_users",
         "change_requests",
         "users",

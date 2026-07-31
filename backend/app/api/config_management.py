@@ -139,7 +139,7 @@ def backup_config(
 
     version = str(int(datetime.datetime.utcnow().timestamp()))
     payload_dict = snapshot_service.build_snapshot_payload(result.output, None, version)
-    snapshot = ConfigSnapshot(device_id=device.id, **payload_dict)
+    snapshot = ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **payload_dict)
     db.add(snapshot)
     db.commit()
     db.refresh(snapshot)
@@ -221,7 +221,7 @@ def restore_config(
     if pre_restore.success:
         pre_version = str(int(datetime.datetime.utcnow().timestamp()))
         pre_payload = snapshot_service.build_snapshot_payload(pre_restore.output, None, pre_version)
-        db.add(ConfigSnapshot(device_id=device.id, **pre_payload))
+        db.add(ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **pre_payload))
         db.commit()
 
     result = pm.restore_config(restored_config)
@@ -232,7 +232,7 @@ def restore_config(
         if post.success:
             post_version = str(int(datetime.datetime.utcnow().timestamp()))
             post_payload = snapshot_service.build_snapshot_payload(post.output, None, post_version)
-            post_snapshot = ConfigSnapshot(device_id=device.id, **post_payload)
+            post_snapshot = ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **post_payload)
             db.add(post_snapshot)
             db.commit()
             db.refresh(post_snapshot)

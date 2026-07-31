@@ -11,8 +11,11 @@ import hashlib
 import base64
 
 from cryptography.fernet import Fernet
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.snapshot import ConfigSnapshot
 
 
 def _get_fernet() -> Fernet:
@@ -43,3 +46,15 @@ def build_snapshot_payload(running_config: str, startup_config: str | None, vers
         "checksum": compute_checksum(running_config),
         "version": version,
     }
+
+
+def next_seq(db: Session) -> int:
+    """Next value for ConfigSnapshot.seq, a monotonic tiebreaker used to
+    order snapshots newest-first even when two are written in the same
+    `created_at` tick (see the column docstring on the model). Not backed
+    by a DB-generated identity/sequence -- Postgres identity columns can't
+    be nullable, which breaks the SQLite engine the test suite uses -- so
+    every caller that creates a ConfigSnapshot must call this first.
+    """
+    current_max = db.query(func.max(ConfigSnapshot.seq)).scalar()
+    return (current_max or 0) + 1

@@ -148,7 +148,12 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         startup_config=cr.current_config,
         version=version,
     )
-    snapshot = ConfigSnapshot(device_id=device.id, change_request_id=cr.id, **snapshot_payload)
+    snapshot = ConfigSnapshot(
+        device_id=device.id,
+        change_request_id=cr.id,
+        seq=snapshot_service.next_seq(db),
+        **snapshot_payload,
+    )
     db.add(snapshot)
     db.commit()
     db.refresh(snapshot)

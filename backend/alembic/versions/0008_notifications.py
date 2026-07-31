@@ -12,6 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from migration_helpers import create_index_if_missing, create_table_if_missing
+
 revision = "0008"
 down_revision = "0007"
 branch_labels = None
@@ -40,7 +42,7 @@ def upgrade() -> None:
     notification_event_type.create(bind, checkfirst=True)
     notification_severity.create(bind, checkfirst=True)
 
-    op.create_table(
+    create_table_if_missing(
         "notifications",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("event_type", notification_event_type, nullable=False, server_default="generic"),
@@ -53,7 +55,7 @@ def upgrade() -> None:
         sa.Column("read", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_notifications_created_at", "notifications", ["created_at"])
+    create_index_if_missing("ix_notifications_created_at", "notifications", ["created_at"])
 
 
 def downgrade() -> None:

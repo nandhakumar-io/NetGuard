@@ -27,6 +27,25 @@ class ConfigSnapshot(Base):
     # rapid succession -- e.g. deployment_engine snapshotting immediately
     # before and after a rollback -- which made list_snapshots'
     # `order_by(created_at.desc())` return an arbitrary (and sometimes
-    # wrong) order for same-tick rows. seq is autoincrement, so ordering
-    # by it is always correct regardless of timestamp resolution.
-    seq = Column(BigInteger, autoincrement=True, nullable=False)
+    # wrong) order for same-tick rows. seq is a DB-generated identity value
+    # (not just autoincrement=True, which SQLAlchemy only honors for a
+    # single-column integer primary key -- on any other column, including
+    # this one, it silently does nothing and leaves seq as a bare NOT NULL
+    # column with no default), so ordering by it is always correct
+    # regardless of timestamp resolution, and callers never need to set it.
+    # Monotonic tiebreaker for "newest first" ordering. created_at
+    # (func.now()) can tie when two snapshots are written in rapid
+    # succession -- e.g. deployment_engine snapshotting immediately before
+    # and after a rollback -- which made list_snapshots'
+    # `order_by(created_at.desc())` return an arbitrary (and sometimes
+    # wrong) order for same-tick rows.
+    #
+    # NOTE: this is deliberately *not* relying on `autoincrement=True` --
+    # SQLAlchemy only honors that for a single-column integer primary key
+    # (the PK here is the UUID `id` column), so on this column it's a
+    # silent no-op that leaves seq as a bare NOT NULL column with no way to
+    # get a value. It's also deliberately not a Postgres IDENTITY column:
+    # those can't be declared nullable, which breaks portability to the
+    # SQLite engine the test suite uses. Instead callers must set it
+    # explicitly -- see snapshot_service.next_seq().
+    seq = Column(BigInteger, nullable=False)
