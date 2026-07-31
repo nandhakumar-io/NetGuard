@@ -11,6 +11,8 @@ export interface Device {
   status: DeviceStatus;
   ssh_username?: string | null;
   ssh_credential_ref?: string | null;
+  flagged_unstable?: boolean;
+  unstable_since?: string | null;
 }
 
 export type ChangePriority = "low" | "medium" | "high" | "emergency";

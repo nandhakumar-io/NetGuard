@@ -1,3 +1,4 @@
+import datetime
 import uuid
 
 from pydantic import BaseModel, ConfigDict
@@ -66,3 +67,5 @@ class DeviceRead(DeviceBase):
 
     id: uuid.UUID
     status: DeviceStatus
+    flagged_unstable: bool = False
+    unstable_since: datetime.datetime | None = None

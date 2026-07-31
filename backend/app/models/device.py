@@ -89,3 +89,16 @@ class Device(Base):
     console_port = Column(Integer, nullable=True)  # per-node telnet console port assigned by GNS3
     console_type = Column(String, nullable=True, default="telnet")  # telnet | vnc | none
     bootstrapped = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    # --- Deployment pipeline circuit breaker ---
+    # Set by app.services.pipeline_service._check_circuit_breaker when this
+    # device fails deployment (FAILED or ROLLED_BACK) settings.
+    # DEPLOYMENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD times in a row across
+    # distinct ChangeRequests. While true, run_deployment_for_device
+    # refuses to attempt further automated deploys against this device --
+    # protects against a flapping device silently eating retries/rollbacks
+    # forever. Cleared only by a Network Administrator via POST
+    # /devices/{id}/clear-unstable-flag (manual review), never
+    # automatically by a later success.
+    flagged_unstable = Column(Boolean, nullable=False, default=False, server_default="false")
+    unstable_since = Column(DateTime(timezone=True), nullable=True)

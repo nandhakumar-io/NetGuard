@@ -302,3 +302,61 @@ def run_snmp_poll_sweep_task() -> int:
     for device_id in device_ids:
         snmp_poll_task.delay(device_id)
     return len(device_ids)
+
+
+# --- Compliance report scheduling (weekly / monthly email delivery) ---
+#
+# Same shape as every other scheduled task here: a thin Celery entry point
+# that opens its own DB session and delegates the actual work to the
+# service layer (app.services.compliance_report.deliver_scheduled_report),
+# scheduled via Celery beat (see app.celery_app.conf.beat_schedule). The
+# on-demand GET /reports/compliance endpoint is unaffected by this schedule.
+
+
+@celery_app.task(
+    name="app.tasks.run_weekly_compliance_report_task",
+    bind=True,
+    # Infra retries only (DB hiccup, worker restart) -- an SMTP failure is
+    # already handled (logged + swallowed) inside notification_service, not
+    # something retrying this task would fix.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_weekly_compliance_report_task(self) -> bool:
+    from app.core.config import settings
+    from app.services import compliance_report
+
+    if not settings.COMPLIANCE_REPORT_WEEKLY_ENABLED:
+        return False
+
+    db = SessionLocal()
+    try:
+        return compliance_report.deliver_scheduled_report(
+            db, window_days=settings.COMPLIANCE_REPORT_WEEKLY_WINDOW_DAYS, period_label="Weekly"
+        )
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.run_monthly_compliance_report_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_monthly_compliance_report_task(self) -> bool:
+    from app.core.config import settings
+    from app.services import compliance_report
+
+    if not settings.COMPLIANCE_REPORT_MONTHLY_ENABLED:
+        return False
+
+    db = SessionLocal()
+    try:
+        return compliance_report.deliver_scheduled_report(
+            db, window_days=settings.COMPLIANCE_REPORT_MONTHLY_WINDOW_DAYS, period_label="Monthly"
+        )
+    finally:
+        db.close()

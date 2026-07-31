@@ -22,10 +22,12 @@ call and handled exactly one device (`cr.device_id`). It's now designed to
 be dispatched as Celery tasks (see app.tasks) -- see `run_deployment_pipeline`
 at the bottom, kept as a thin synchronous entry point for tests/CLI use.
 """
+import datetime
 import uuid
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResult
@@ -67,6 +69,75 @@ def target_device_ids(cr: ChangeRequest) -> list[uuid.UUID]:
     return ids
 
 
+# --- Deployment pipeline circuit breaker -----------------------------------
+#
+# A device that fails deployment N times in a row (see
+# settings.DEPLOYMENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD) across distinct
+# change requests is auto-flagged unstable and blocked from further
+# automated deploys until a Network Administrator reviews it. "In a row" is
+# evaluated per distinct ChangeRequest (not per Deployment row), so a
+# Celery infra retry that creates a second Deployment attempt within the
+# *same* CR doesn't count as two separate failures.
+
+_CIRCUIT_BREAKER_FAILURE_STATUSES = (DeploymentStatus.FAILED, DeploymentStatus.ROLLED_BACK)
+
+
+def _recent_distinct_cr_outcomes(db: Session, device_id: uuid.UUID, limit: int) -> list[DeploymentStatus]:
+    """Most recent Deployment.status for this device, newest change request
+    first, keeping only the latest attempt within each distinct
+    change_request_id. Stops once `limit` distinct CRs have been seen (or
+    the device's deployment history runs out, whichever comes first).
+    """
+    deployments = (
+        db.query(Deployment)
+        .filter(Deployment.device_id == device_id)
+        .order_by(Deployment.created_at.desc())
+        .all()
+    )
+    outcomes: list[DeploymentStatus] = []
+    seen_crs: set[uuid.UUID] = set()
+    for d in deployments:
+        if d.change_request_id in seen_crs:
+            continue
+        seen_crs.add(d.change_request_id)
+        outcomes.append(d.status)
+        if len(outcomes) >= limit:
+            break
+    return outcomes
+
+
+def _check_circuit_breaker(db: Session, device: Device) -> None:
+    """Call after a Deployment reaches a terminal status. Flags the device
+    unstable (and notifies) the first time its last N distinct-CR outcomes
+    are all failures; a no-op once already flagged, and a no-op if the
+    device hasn't accumulated N distinct-CR attempts yet.
+    """
+    if device.flagged_unstable:
+        return
+
+    threshold = settings.DEPLOYMENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD
+    outcomes = _recent_distinct_cr_outcomes(db, device.id, limit=threshold)
+    if len(outcomes) < threshold or not all(s in _CIRCUIT_BREAKER_FAILURE_STATUSES for s in outcomes):
+        return
+
+    device.flagged_unstable = True
+    device.unstable_since = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+
+    detail = f"{threshold} consecutive deployment failures across distinct change requests -- automated deploys blocked pending manual review."
+    audit_service.record_event(
+        db, actor="system", action="Device Flagged Unstable", result="Manual Review Required",
+        device_hostname=device.hostname, detail=detail,
+    )
+    notification_service.notify(
+        "Device Flagged Unstable",
+        f"{device.hostname}: {detail}",
+        severity="critical",
+        device_hostname=device.hostname,
+    )
+    event_bus.publish_event("device_status_changed", device_id=str(device.id), flagged_unstable=True)
+
+
 def _log_deployment(db: Session, deployment_id: uuid.UUID, step: str, message: str, level: str = "INFO"):
     log = DeploymentLog(deployment_id=deployment_id, step=step, level=level, message=message)
     db.add(log)
@@ -97,6 +168,31 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     device: Device | None = db.get(Device, device_id)
     if device is None:
         raise ValueError(f"Device {device_id} not found for change request {cr.id}")
+
+    if device.flagged_unstable:
+        deployment = Deployment(
+            change_request_id=cr.id, device_id=device.id,
+            status=DeploymentStatus.FAILED, protocol="ssh",
+            error_message=(
+                "Deployment blocked: device is flagged unstable after repeated deployment "
+                "failures and requires manual review (POST /devices/{id}/clear-unstable-flag) "
+                "before further automated deploys."
+            ),
+        )
+        db.add(deployment)
+        db.commit()
+        db.refresh(deployment)
+        _log_deployment(
+            db, deployment.id, "PRE-FLIGHT",
+            "Device is flagged unstable (deployment circuit breaker) -- automated deploy skipped.", "ERROR",
+        )
+        audit_service.record_event(
+            db, actor="system", action="Deployment Blocked", result="Circuit Breaker",
+            device_hostname=device.hostname, change_request_id=cr.id,
+            detail="Device flagged unstable; manual review required before further automated deploys.",
+        )
+        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        return deployment
 
     netmiko_type = DEVICE_TYPE_MAP.get(
         device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
@@ -204,6 +300,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        _check_circuit_breaker(db, device)
         return deployment
     _log_deployment(db, deployment.id, "VALIDATE", "Validation passed.")
 
@@ -225,6 +322,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
         event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        _check_circuit_breaker(db, device)
         return deployment
 
     _log_deployment(db, deployment.id, "DEPLOY", f"Deployment succeeded swiftly over {deploy_result.protocol} ({deploy_result.execution_time_ms:.0f}ms).")
@@ -321,6 +419,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
     )
     event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+    _check_circuit_breaker(db, device)
     return deployment
 
 

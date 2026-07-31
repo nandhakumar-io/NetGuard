@@ -299,6 +299,7 @@ export default function Devices() {
   const [query, setQuery] = useState("");
   const [vendorFilter, setVendorFilter] = useState<string>("all");
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [clearingUnstableId, setClearingUnstableId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
 
@@ -370,6 +371,25 @@ export default function Devices() {
       setError(err?.response?.data?.detail || `Failed to remove ${hostname}.`);
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const clearUnstableFlag = async (id: string, hostname: string) => {
+    if (
+      !window.confirm(
+        `Clear the unstable flag for ${hostname}? This re-enables automated deploys — only do this after reviewing why it kept failing.`
+      )
+    )
+      return;
+    setClearingUnstableId(id);
+    setError(null);
+    try {
+      const res = await api.post<Device>(`/devices/${id}/clear-unstable-flag`, {});
+      setDevices((prev) => prev.map((d) => (d.id === id ? res.data : d)));
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || `Failed to clear unstable flag for ${hostname}.`);
+    } finally {
+      setClearingUnstableId(null);
     }
   };
 
@@ -576,6 +596,14 @@ export default function Devices() {
                     <span className={`w-2 h-2 rounded-full ${statusColor[d.status]} animate-pulse`} />
                     <span className="capitalize text-[11px] font-bold text-slate-600 tracking-wide">{d.status}</span>
                   </span>
+                  {d.flagged_unstable && (
+                    <span
+                      className="ml-2 inline-flex items-center gap-1.5 bg-red-50 border border-red-200 text-riskcrit px-2.5 py-1 rounded-full shadow-sm text-[11px] font-bold uppercase tracking-wide"
+                      title="Failed deployment repeatedly; automated deploys blocked until a Network Administrator reviews it."
+                    >
+                      Unstable — Review Required
+                    </span>
+                  )}
                 </td>
                 <td className="px-5 py-4">
                   <span className="text-xs text-brandblue font-bold uppercase tracking-wider select-none">
@@ -585,16 +613,30 @@ export default function Devices() {
                 </td>
                 {canManage && (
                   <td className="px-5 py-4 text-right">
-                    <button
-                      onClick={(e) => {
-                          e.stopPropagation();
-                          removeDevice(d.id, d.hostname);
-                      }}
-                      disabled={deletingId === d.id}
-                      className="text-[11px] uppercase tracking-wider text-riskcrit border border-red-200 bg-red-50 px-2 py-1 rounded shadow-sm hover:bg-red-100 font-bold disabled:opacity-50"
-                    >
-                      {deletingId === d.id ? "Wait…" : "Remove"}
-                    </button>
+                    <div className="flex justify-end gap-2">
+                      {d.flagged_unstable && (
+                        <button
+                          onClick={(e) => {
+                              e.stopPropagation();
+                              clearUnstableFlag(d.id, d.hostname);
+                          }}
+                          disabled={clearingUnstableId === d.id}
+                          className="text-[11px] uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-2 py-1 rounded shadow-sm hover:bg-blue-100 font-bold disabled:opacity-50"
+                        >
+                          {clearingUnstableId === d.id ? "Wait…" : "Clear Flag"}
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            removeDevice(d.id, d.hostname);
+                        }}
+                        disabled={deletingId === d.id}
+                        className="text-[11px] uppercase tracking-wider text-riskcrit border border-red-200 bg-red-50 px-2 py-1 rounded shadow-sm hover:bg-red-100 font-bold disabled:opacity-50"
+                      >
+                        {deletingId === d.id ? "Wait…" : "Remove"}
+                      </button>
+                    </div>
                   </td>
                 )}
                 </tr>

@@ -10,7 +10,7 @@ from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
-from app.services import rollback_service
+from app.services import rollback_service, audit_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -132,3 +132,34 @@ def rollback_device(
         status=cr.status.value,
         message=f"Rollback queued for {device.hostname}. Track progress via the change request or deployments feed.",
     )
+
+
+@router.post("/{device_id}/clear-unstable-flag", response_model=DeviceRead)
+def clear_unstable_flag(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Manual review sign-off for the deployment pipeline circuit breaker:
+    clears `flagged_unstable` so automated deploys against this device are
+    allowed again. Only Network Administrators may clear it (same RBAC as
+    inventory management / rollback) -- this is a deliberate "I've looked
+    at what's wrong with this device" action, never automatic.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not device.flagged_unstable:
+        raise HTTPException(status_code=400, detail="Device is not currently flagged unstable")
+
+    device.flagged_unstable = False
+    device.unstable_since = None
+    db.commit()
+    db.refresh(device)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="Unstable Flag Cleared", result="Success",
+        device_hostname=device.hostname,
+        detail="Manual review completed; automated deploys re-enabled.",
+    )
+    return device

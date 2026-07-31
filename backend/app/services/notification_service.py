@@ -75,11 +75,65 @@ def _resolve_event_type(event: str, severity: str) -> str:
     return event_type
 
 
+def _recipients() -> list[str]:
+    if not settings.NOTIFY_EMAIL_RECIPIENTS:
+        return []
+    return [r.strip() for r in settings.NOTIFY_EMAIL_RECIPIENTS.split(",") if r.strip()]
+
+
+def send_email_attachment(
+    subject: str,
+    body: str,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> bool:
+    """Send a standalone SMTP email with optional file attachments to
+    NOTIFY_EMAIL_RECIPIENTS, using the same SMTP_* settings as `notify()`'s
+    email channel. Unlike `notify()`, this does NOT also fan out to
+    Slack/Teams/the in-app Notification Center -- it's for document
+    deliverables (e.g. the scheduled compliance report PDF/CSV) rather than
+    short event messages, and those channels aren't attachment-capable.
+
+    attachments: list of (filename, raw_bytes, subtype) tuples, e.g.
+    ("report.pdf", pdf_bytes, "pdf"). MIME maintype is always
+    "application" (application/pdf, application/csv, etc.) -- fine for the
+    document types this is used for.
+
+    Returns True if the email was sent, False if it was skipped because
+    SMTP_HOST or NOTIFY_EMAIL_RECIPIENTS isn't configured. Never raises for
+    a send failure -- logs and swallows it, same "notifications must never
+    break the caller" policy as notify().
+    """
+    recipients = _recipients()
+    if not settings.SMTP_HOST or not recipients:
+        return False
+
+    email_msg = EmailMessage()
+    email_msg["Subject"] = subject
+    email_msg["From"] = settings.SMTP_FROM_EMAIL
+    email_msg["To"] = ", ".join(recipients)
+    email_msg.set_content(body)
+
+    for filename, data, subtype in attachments or []:
+        email_msg.add_attachment(data, maintype="application", subtype=subtype, filename=filename)
+
+    try:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=settings.SMTP_TIMEOUT_SECONDS) as smtp:
+            if settings.SMTP_USE_TLS:
+                smtp.starttls()
+            if settings.SMTP_USER and settings.SMTP_PASSWORD:
+                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            smtp.send_message(email_msg)
+        return True
+    except Exception:  # noqa: BLE001 - email must never break the caller
+        logger.warning("Compliance report email send failed", exc_info=True)
+        return False
+
+
 def _send_email(event_type: str, event: str, message: str) -> None:
     if not settings.SMTP_HOST or not settings.NOTIFY_EMAIL_RECIPIENTS:
         return
 
-    recipients = [r.strip() for r in settings.NOTIFY_EMAIL_RECIPIENTS.split(",") if r.strip()]
+    recipients = _recipients()
     if not recipients:
         return
 

@@ -82,6 +82,32 @@ class Settings(BaseSettings):
     # automated drift sweep runs at via Celery beat (see app.celery_app).
     DRIFT_SWEEP_HOUR_UTC: int = 2
 
+    # Compliance report scheduling (SRS: compliance reporting -- turns the
+    # on-demand GET /reports/compliance endpoint into a recurring artifact
+    # instead of something someone has to remember to pull). Both run via
+    # Celery beat -- see app.celery_app -- and email the rendered report
+    # through app.services.notification_service's existing SMTP config to
+    # NOTIFY_EMAIL_RECIPIENTS (skipped, not an error, if SMTP isn't
+    # configured -- same "optional channel" policy as every other
+    # notification). Independently toggleable since some deployments may
+    # only want one cadence.
+    COMPLIANCE_REPORT_WEEKLY_ENABLED: bool = True
+    COMPLIANCE_REPORT_MONTHLY_ENABLED: bool = True
+    COMPLIANCE_REPORT_HOUR_UTC: int = 6
+    COMPLIANCE_REPORT_WEEKLY_WINDOW_DAYS: int = 7
+    COMPLIANCE_REPORT_MONTHLY_WINDOW_DAYS: int = 30
+
+    # Deployment pipeline circuit breaker: a device that fails deployment
+    # (FAILED or ROLLED_BACK outcome) this many times in a row -- counting
+    # only the latest attempt per distinct ChangeRequest, so Celery infra
+    # retries within one CR don't inflate the count -- is auto-flagged
+    # unstable and blocked from further automated deploys until a Network
+    # Administrator reviews it and clears the flag (POST
+    # /devices/{id}/clear-unstable-flag). Protects against a flapping
+    # device silently eating retries/rollbacks forever. See
+    # app.services.pipeline_service._check_circuit_breaker.
+    DEPLOYMENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 3
+
     # SNMP Monitoring (Health Dashboard): how often app.tasks.run_snmp_poll_sweep_task
     # fans out one snmp_poll_task per SNMP-enabled device, and how long
     # DeviceMetric history is retained for the historical charts.

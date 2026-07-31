@@ -48,6 +48,21 @@ celery_app.conf.update(
             "task": "app.tasks.run_snmp_poll_sweep_task",
             "schedule": float(settings.SNMP_POLL_INTERVAL_SECONDS),
         },
+        # Compliance report scheduling: turns GET /reports/compliance from
+        # something someone has to remember to pull into a recurring
+        # artifact emailed to NOTIFY_EMAIL_RECIPIENTS (see
+        # app.services.compliance_report.deliver_scheduled_report). Each
+        # task no-ops (returns False without building/sending anything) if
+        # its COMPLIANCE_REPORT_*_ENABLED flag is off, so both stay
+        # registered here and the toggle lives entirely in settings.
+        "weekly-compliance-report": {
+            "task": "app.tasks.run_weekly_compliance_report_task",
+            "schedule": crontab(day_of_week="mon", hour=settings.COMPLIANCE_REPORT_HOUR_UTC, minute=0),
+        },
+        "monthly-compliance-report": {
+            "task": "app.tasks.run_monthly_compliance_report_task",
+            "schedule": crontab(day_of_month=1, hour=settings.COMPLIANCE_REPORT_HOUR_UTC, minute=0),
+        },
     },
 )
 
