@@ -7,6 +7,7 @@ const links = [
   { to: "/deployments", label: "Deployments" },
   { to: "/devices", label: "Devices" },
   { to: "/audit-log", label: "Audit Log" },
+  { to: "/security", label: "Security" },
 ];
 
 export default function Layout() {
@@ -44,8 +45,8 @@ export default function Layout() {
             </div>
           )}
           <button
-            onClick={() => {
-              logout();
+            onClick={async () => {
+              await logout();
               navigate("/login");
             }}
             className="text-[11px] text-slate-400 hover:text-white transition-colors"

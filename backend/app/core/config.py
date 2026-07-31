@@ -8,6 +8,13 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-to-a-long-random-string"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    MFA_CHALLENGE_EXPIRE_MINUTES: int = 5
+    MFA_ISSUER_NAME: str = "NetGuard AI"
+
+    # Login lockout (FR-1 / NFR Security): brute-force protection
+    LOGIN_MAX_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_MINUTES: int = 15
 
     DATABASE_URL: str = "postgresql+psycopg2://netguard:netguard@localhost:5432/netguard"
 

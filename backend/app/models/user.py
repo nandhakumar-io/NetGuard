@@ -24,4 +24,9 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.NETWORK_ENGINEER)
     is_active = Column(String, default=True)
+
+    # Multi-Factor Authentication (NFR Security / FR-1)
+    mfa_secret = Column(String, nullable=True)  # TOTP secret; set on /mfa/setup, unused until enabled
+    mfa_enabled = Column(String, default="false")  # "true" / "false" -- string for SQLite/Postgres portability
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())

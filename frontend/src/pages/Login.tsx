@@ -11,7 +11,7 @@ const ROLES: { value: UserRole; label: string }[] = [
 ];
 
 export default function Login() {
-  const { login, register } = useAuth();
+  const { login, verifyMfa, register } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
@@ -21,13 +21,22 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // MFA challenge step: set once /auth/login responds with mfa_required.
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
       if (mode === "login") {
-        await login(email, password);
+        const outcome = await login(email, password);
+        if (outcome.mfaRequired) {
+          setMfaToken(outcome.mfaToken);
+          setLoading(false);
+          return;
+        }
       } else {
         await register(email, fullName, password, role);
       }
@@ -38,6 +47,66 @@ export default function Login() {
       setLoading(false);
     }
   };
+
+  const submitMfa = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaToken) return;
+    setError(null);
+    setLoading(true);
+    try {
+      await verifyMfa(mfaToken, mfaCode);
+      navigate("/");
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Invalid code. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (mfaToken) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="w-full max-w-sm bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
+          <div className="text-center mb-6">
+            <p className="text-xl font-bold text-navy">Two-Factor Verification</p>
+            <p className="text-xs text-accent mt-1">Enter the 6-digit code from your authenticator app</p>
+          </div>
+          <form onSubmit={submitMfa} className="space-y-3">
+            <input
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm tracking-widest text-center text-lg"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={6}
+              placeholder="000000"
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+              autoFocus
+              required
+            />
+            {error && <p className="text-riskcrit text-sm">{error}</p>}
+            <button
+              type="submit"
+              disabled={loading || mfaCode.length < 6}
+              className="w-full bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
+            >
+              {loading ? "Verifying…" : "Verify"}
+            </button>
+            <button
+              type="button"
+              className="w-full text-xs text-slate-400 hover:text-slate-600"
+              onClick={() => {
+                setMfaToken(null);
+                setMfaCode("");
+                setError(null);
+              }}
+            >
+              Back to sign in
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">

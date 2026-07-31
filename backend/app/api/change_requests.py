@@ -9,7 +9,8 @@ from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.user import User, UserRole
 from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
-from app.services import diff_engine, risk_engine, validation_engine, audit_service, pipeline_service
+from app.services import diff_engine, risk_engine, validation_engine, audit_service
+from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
 
@@ -32,6 +33,14 @@ def create_change_request(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
+    additional_device_ids_json = None
+    if payload.additional_device_ids:
+        for extra_id in payload.additional_device_ids:
+            if not db.get(Device, extra_id):
+                raise HTTPException(status_code=404, detail=f"Device {extra_id} not found")
+        import json
+        additional_device_ids_json = json.dumps([str(i) for i in payload.additional_device_ids])
+
     # NOTE: current_config would normally be fetched live from the device.
     # For the prototype we leave it empty unless supplied by the caller later.
     current_config = None
@@ -42,6 +51,7 @@ def create_change_request(
 
     cr = ChangeRequest(
         device_id=payload.device_id,
+        additional_device_ids=additional_device_ids_json,
         submitted_by=current_user.id,
         priority=payload.priority,
         description=payload.description,
@@ -86,9 +96,14 @@ def approve_change_request(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Approves a pending change request and immediately runs the deployment
-    pipeline (Snapshot -> Deploy -> Health Monitor -> Success/Rollback), per
-    SRS section 3. Only Network Administrators may approve (RBAC, FR-1/FR-3).
+    """Approves a pending change request and enqueues the deployment
+    pipeline (Snapshot -> Deploy -> Health Monitor -> Success/Rollback) as
+    background Celery task(s) -- one per target device, run concurrently
+    (SRS 6.6) -- rather than blocking this request until deployment
+    finishes. Only Network Administrators may approve (RBAC, FR-1/FR-3).
+
+    Returns immediately with status "approved"; poll GET /change-requests/{id}
+    or GET /deployments?change_request_id={id} for progress.
     """
     if current_user.role not in APPROVER_ROLES:
         raise HTTPException(status_code=403, detail="Only Network Administrators may approve change requests")
@@ -110,7 +125,7 @@ def approve_change_request(
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
 
-    cr = pipeline_service.run_deployment_pipeline(db, cr, actor_email=current_user.email)
+    run_deployment_pipeline_task.delay(str(cr.id), current_user.email)
     return cr
 
 

@@ -7,8 +7,20 @@ Rollback Engine):
 
     Approved -> Snapshot -> Deploy -> Health Monitor -> Success | Rollback -> Notify
 
-Kept synchronous for the prototype so it can run inline behind an API call;
-in production this would be dispatched as a Celery task.
+Two entry points:
+
+  - `run_deployment_for_device`: the unit of work for ONE device. This is
+    what gets wrapped in a Celery task so multiple devices on the same
+    change request can run concurrently (SRS 6.6 multi-device / parallel
+    deployment) instead of one-at-a-time.
+  - `aggregate_change_request_status`: rolls the per-device Deployment
+    outcomes back up into a single ChangeStatus on the ChangeRequest once
+    every device has finished.
+
+Previously this module ran synchronously inline behind the approve API
+call and handled exactly one device (`cr.device_id`). It's now designed to
+be dispatched as Celery tasks (see app.tasks) -- see `run_deployment_pipeline`
+at the bottom, kept as a thin synchronous entry point for tests/CLI use.
 """
 import uuid
 
@@ -20,6 +32,7 @@ from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResul
 from app.models.snapshot import ConfigSnapshot
 from app.services import (
     audit_service,
+    credential_service,
     deployment_engine,
     health_monitor,
     notification_service,
@@ -34,17 +47,57 @@ DEVICE_TYPE_MAP = {
 }
 
 
-def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) -> ChangeRequest:
-    """Executes the full deploy -> monitor -> (rollback) pipeline for an
-    already-approved change request, persisting a Deployment record, a
-    ConfigSnapshot, HealthCheckResult rows, audit log entries, and
-    notifications along the way.
+def target_device_ids(cr: ChangeRequest) -> list[uuid.UUID]:
+    """The full set of devices a change request targets: the primary
+    `device_id` plus any `additional_device_ids` (SRS 6.6 multi-device
+    deployment), de-duplicated, primary first.
     """
-    device: Device | None = db.get(Device, cr.device_id)
-    if device is None:
-        raise ValueError("Device not found for change request")
+    import json
 
-    netmiko_type = DEVICE_TYPE_MAP.get(device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios")
+    ids = [cr.device_id]
+    if cr.additional_device_ids:
+        for raw in json.loads(cr.additional_device_ids):
+            extra_id = uuid.UUID(raw) if isinstance(raw, str) else raw
+            if extra_id not in ids:
+                ids.append(extra_id)
+    return ids
+
+
+def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UUID, actor_email: str) -> Deployment:
+    """Executes the full deploy -> monitor -> (rollback) pipeline for ONE
+    device on an already-approved change request. Persists a Deployment
+    record, a ConfigSnapshot, HealthCheckResult rows, audit log entries,
+    and notifications along the way. Safe to run concurrently (in separate
+    Celery tasks/DB sessions) alongside other devices on the same CR.
+    """
+    device: Device | None = db.get(Device, device_id)
+    if device is None:
+        raise ValueError(f"Device {device_id} not found for change request {cr.id}")
+
+    netmiko_type = DEVICE_TYPE_MAP.get(
+        device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
+    )
+
+    # --- Real credential retrieval (was: hardcoded empty password) ---
+    # Resolved up front so a missing/misconfigured credential fails loudly
+    # before we ever touch the snapshot or attempt a connection, and is
+    # recorded in the audit trail like any other pre-flight failure.
+    try:
+        ssh_password = credential_service.get_ssh_password(device)
+    except credential_service.CredentialNotFoundError as exc:
+        deployment = Deployment(
+            change_request_id=cr.id, device_id=device.id,
+            status=DeploymentStatus.FAILED, protocol="ssh", error_message=str(exc),
+        )
+        db.add(deployment)
+        db.commit()
+        db.refresh(deployment)
+        audit_service.record_event(
+            db, actor="system", action="Credential Retrieval", result="Failed",
+            device_hostname=device.hostname, change_request_id=cr.id, detail=str(exc),
+        )
+        notification_service.notify("Deployment Failed", f"{device.hostname}: {exc}", severity="critical")
+        return deployment
 
     # --- 1. Automatic Configuration Snapshot (FR-7) ---
     version = str(int(uuid.uuid4().int % 1_000_000))
@@ -72,43 +125,38 @@ def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) ->
     db.commit()
     db.refresh(deployment)
 
-    cr.status = ChangeStatus.DEPLOYING
-    db.commit()
-
-    # --- 2. Configuration Deployment (FR-8) ---
+    # --- 2. Configuration Deployment (FR-8), with retry (deployment_engine) ---
     config_commands = [line for line in cr.proposed_config.splitlines() if line.strip()]
     deploy_result = deployment_engine.deploy_config(
         hostname=device.hostname,
         ip_address=device.ip_address,
         device_type=netmiko_type,
         username=device.ssh_username or "admin",
-        password="",  # prototype: real credentials come from a secret store, not stored in DB
+        password=ssh_password,
         config_commands=config_commands,
     )
 
     if not deploy_result.success:
         deployment.status = DeploymentStatus.FAILED
         deployment.error_message = deploy_result.error
-        cr.status = ChangeStatus.FAILED
         db.commit()
         audit_service.record_event(
             db, actor="system", action="Deployment", result="Failed",
-            device_hostname=device.hostname, change_request_id=cr.id, detail=deploy_result.error,
+            device_hostname=device.hostname, change_request_id=cr.id,
+            detail=f"{deploy_result.error} (after {deploy_result.attempts} attempt(s))",
         )
         notification_service.notify(
             "Deployment Failed", f"{device.hostname}: {deploy_result.error}", severity="critical",
         )
-        return cr
+        return deployment
 
     audit_service.record_event(
         db, actor="system", action="Deployment", result="Success",
         device_hostname=device.hostname, change_request_id=cr.id,
+        detail=f"succeeded on attempt {deploy_result.attempts}" if deploy_result.attempts > 1 else None,
     )
 
     # --- 3. Real-Time Health Monitoring (FR-9) ---
-    cr.status = ChangeStatus.MONITORING
-    db.commit()
-
     outcomes = health_monitor.run_health_suite(device.ip_address)
     for outcome in outcomes:
         db.add(HealthCheckResult(
@@ -124,7 +172,6 @@ def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) ->
 
     if healthy:
         deployment.status = DeploymentStatus.SUCCEEDED
-        cr.status = ChangeStatus.SUCCESS
         db.commit()
         audit_service.record_event(
             db, actor="system", action="Health Check", result="Passed",
@@ -133,9 +180,9 @@ def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) ->
         notification_service.notify(
             "Deployment Succeeded", f"{device.hostname}: change deployed and healthy.", severity="info",
         )
-        return cr
+        return deployment
 
-    # --- 4. Self-Healing Rollback Engine (FR-10) ---
+    # --- 4. Self-Healing Rollback Engine (FR-10), with retry ---
     audit_service.record_event(
         db, actor="system", action="Health Check", result="Failed",
         device_hostname=device.hostname, change_request_id=cr.id,
@@ -148,13 +195,12 @@ def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) ->
         ip_address=device.ip_address,
         device_type=netmiko_type,
         username=device.ssh_username or "admin",
-        password="",
+        password=ssh_password,
         restore_commands=[line for line in restore_commands if line.strip()],
     )
 
     deployment.status = DeploymentStatus.ROLLED_BACK if rollback_result.success else DeploymentStatus.FAILED
     deployment.error_message = rollback_result.error
-    cr.status = ChangeStatus.ROLLED_BACK if rollback_result.success else ChangeStatus.FAILED
     db.commit()
 
     audit_service.record_event(
@@ -165,7 +211,47 @@ def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) ->
     notification_service.notify(
         "Automatic Rollback Triggered",
         f"{device.hostname}: health checks failed after deployment. Rollback "
-        f"{'succeeded' if rollback_result.success else 'FAILED — manual intervention required'}.",
+        f"{'succeeded' if rollback_result.success else 'FAILED — manual intervention required'} "
+        f"(after {rollback_result.attempts} attempt(s)).",
         severity="critical",
     )
+    return deployment
+
+
+def aggregate_change_request_status(db: Session, cr: ChangeRequest) -> ChangeRequest:
+    """Rolls up all Deployment rows for this change request (one per target
+    device) into a single overall ChangeStatus, worst-case first: any
+    outright FAILED deployment wins, then any ROLLED_BACK, else SUCCESS.
+    Called once every per-device task has finished.
+    """
+    deployments = db.query(Deployment).filter(Deployment.change_request_id == cr.id).all()
+    statuses = {d.status for d in deployments}
+
+    if DeploymentStatus.FAILED in statuses:
+        cr.status = ChangeStatus.FAILED
+    elif DeploymentStatus.ROLLED_BACK in statuses:
+        cr.status = ChangeStatus.ROLLED_BACK
+    elif statuses and statuses == {DeploymentStatus.SUCCEEDED}:
+        cr.status = ChangeStatus.SUCCESS
+    else:
+        cr.status = ChangeStatus.MONITORING  # still in flight / unexpected mix
+
+    db.commit()
+    db.refresh(cr)
     return cr
+
+
+def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) -> ChangeRequest:
+    """Synchronous convenience wrapper that runs every target device for a
+    change request one after another in-process (used by tests/CLI, and as
+    the reference implementation the Celery task in app.tasks fans out).
+    For production traffic, prefer dispatching app.tasks.run_deployment_pipeline_task
+    instead, which runs devices concurrently and doesn't block the request thread.
+    """
+    cr.status = ChangeStatus.DEPLOYING
+    db.commit()
+
+    for device_id in target_device_ids(cr):
+        run_deployment_for_device(db, cr, device_id, actor_email)
+
+    return aggregate_change_request_status(db, cr)
