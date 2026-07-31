@@ -9,7 +9,7 @@ from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.user import User, UserRole
 from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
-from app.services import diff_engine, risk_engine, validation_engine, audit_service
+from app.services import diff_engine, event_bus, risk_engine, validation_engine, audit_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
@@ -78,6 +78,7 @@ def create_change_request(
         change_request_id=cr.id,
         detail="; ".join(validation.errors) if validation.errors else None,
     )
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
 
     return cr
 
@@ -124,6 +125,7 @@ def approve_change_request(
         db, actor=current_user.email, action="Approved", result="Approved",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
 
     run_deployment_pipeline_task.delay(str(cr.id), current_user.email)
     return cr
@@ -151,4 +153,5 @@ def reject_change_request(
         db, actor=current_user.email, action="Rejected", result="Rejected",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
     return cr

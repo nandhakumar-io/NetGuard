@@ -24,7 +24,7 @@ from celery import chord
 from app.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models.change_request import ChangeRequest, ChangeStatus
-from app.services import audit_service, pipeline_service
+from app.services import audit_service, event_bus, pipeline_service
 
 
 @celery_app.task(
@@ -90,6 +90,9 @@ def run_deployment_pipeline_task(cr_id: str, actor_email: str) -> None:
             return
         cr.status = ChangeStatus.DEPLOYING
         db.commit()
+        event_bus.publish_event(
+            "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
+        )
         device_ids = [str(d) for d in pipeline_service.target_device_ids(cr)]
     finally:
         db.close()

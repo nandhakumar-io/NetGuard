@@ -34,6 +34,7 @@ from app.services import (
     audit_service,
     credential_service,
     deployment_engine,
+    event_bus,
     health_monitor,
     notification_service,
     snapshot_service,
@@ -97,6 +98,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             device_hostname=device.hostname, change_request_id=cr.id, detail=str(exc),
         )
         notification_service.notify("Deployment Failed", f"{device.hostname}: {exc}", severity="critical")
+        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
     # --- 1. Automatic Configuration Snapshot (FR-7) ---
@@ -124,6 +126,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     db.add(deployment)
     db.commit()
     db.refresh(deployment)
+    event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
 
     # --- 2. Configuration Deployment (FR-8), with retry (deployment_engine) ---
     config_commands = [line for line in cr.proposed_config.splitlines() if line.strip()]
@@ -148,6 +151,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         notification_service.notify(
             "Deployment Failed", f"{device.hostname}: {deploy_result.error}", severity="critical",
         )
+        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
     audit_service.record_event(
@@ -157,7 +161,17 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     )
 
     # --- 3. Real-Time Health Monitoring (FR-9) ---
-    outcomes = health_monitor.run_health_suite(device.ip_address)
+    # Now runs the full suite (BGP/OSPF adjacency, DNS/DHCP/HTTP/VPN,
+    # packet loss & latency) in addition to ping -- passes the resolved
+    # device type + credentials through so routing/service checks can use
+    # the same NAPALM-capable connection details as the deployment step.
+    outcomes = health_monitor.run_health_suite(
+        device.ip_address,
+        netmiko_type=netmiko_type,
+        username=device.ssh_username or "admin",
+        password=ssh_password,
+        hostname=device.hostname,
+    )
     for outcome in outcomes:
         db.add(HealthCheckResult(
             deployment_id=deployment.id,
@@ -180,6 +194,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         notification_service.notify(
             "Deployment Succeeded", f"{device.hostname}: change deployed and healthy.", severity="info",
         )
+        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
         return deployment
 
     # --- 4. Self-Healing Rollback Engine (FR-10), with retry ---
@@ -215,6 +230,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         f"(after {rollback_result.attempts} attempt(s)).",
         severity="critical",
     )
+    event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
     return deployment
 
 
@@ -238,6 +254,7 @@ def aggregate_change_request_status(db: Session, cr: ChangeRequest) -> ChangeReq
 
     db.commit()
     db.refresh(cr)
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
     return cr
 
 
@@ -250,6 +267,7 @@ def run_deployment_pipeline(db: Session, cr: ChangeRequest, actor_email: str) ->
     """
     cr.status = ChangeStatus.DEPLOYING
     db.commit()
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
 
     for device_id in target_device_ids(cr):
         run_deployment_for_device(db, cr, device_id, actor_email)
