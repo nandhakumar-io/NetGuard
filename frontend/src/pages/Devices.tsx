@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Device } from "../lib/types";
+import { useAuth } from "../lib/auth";
 
 const statusColor: Record<string, string> = {
   online: "bg-risklow",
@@ -10,6 +11,8 @@ const statusColor: Record<string, string> = {
 };
 
 export default function Devices() {
+  const { user } = useAuth();
+  const canManage = user?.role === "network_admin";
   const [devices, setDevices] = useState<Device[]>([]);
   const [form, setForm] = useState({ hostname: "", ip_address: "", vendor: "cisco", site: "" });
   const [loading, setLoading] = useState(false);
@@ -41,45 +44,51 @@ export default function Devices() {
       <h1 className="text-2xl font-bold text-navy">Device Inventory</h1>
       <p className="text-sm text-slate-500 mt-1">Centralized inventory of managed network devices.</p>
 
-      <form onSubmit={submit} className="mt-6 bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 md:grid-cols-5 gap-3">
-        <input
-          className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
-          placeholder="Hostname (e.g. RTR-01)"
-          value={form.hostname}
-          onChange={(e) => setForm({ ...form, hostname: e.target.value })}
-          required
-        />
-        <input
-          className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
-          placeholder="IP Address"
-          value={form.ip_address}
-          onChange={(e) => setForm({ ...form, ip_address: e.target.value })}
-          required
-        />
-        <select
-          className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
-          value={form.vendor}
-          onChange={(e) => setForm({ ...form, vendor: e.target.value })}
-        >
-          <option value="cisco">Cisco</option>
-          <option value="juniper">Juniper</option>
-          <option value="arista">Arista</option>
-          <option value="linux">Linux</option>
-        </select>
-        <input
-          className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
-          placeholder="Site (optional)"
-          value={form.site}
-          onChange={(e) => setForm({ ...form, site: e.target.value })}
-        />
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
-        >
-          {loading ? "Adding…" : "Add Device"}
-        </button>
-      </form>
+      {canManage ? (
+        <form onSubmit={submit} className="mt-6 bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 md:grid-cols-5 gap-3">
+          <input
+            className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            placeholder="Hostname (e.g. RTR-01)"
+            value={form.hostname}
+            onChange={(e) => setForm({ ...form, hostname: e.target.value })}
+            required
+          />
+          <input
+            className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            placeholder="IP Address"
+            value={form.ip_address}
+            onChange={(e) => setForm({ ...form, ip_address: e.target.value })}
+            required
+          />
+          <select
+            className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            value={form.vendor}
+            onChange={(e) => setForm({ ...form, vendor: e.target.value })}
+          >
+            <option value="cisco">Cisco</option>
+            <option value="juniper">Juniper</option>
+            <option value="arista">Arista</option>
+            <option value="linux">Linux</option>
+          </select>
+          <input
+            className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            placeholder="Site (optional)"
+            value={form.site}
+            onChange={(e) => setForm({ ...form, site: e.target.value })}
+          />
+          <button
+            type="submit"
+            disabled={loading}
+            className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
+          >
+            {loading ? "Adding…" : "Add Device"}
+          </button>
+        </form>
+      ) : (
+        <p className="mt-6 text-xs text-slate-400 italic bg-white border border-slate-200 rounded-xl p-4">
+          Only a Network Administrator can add devices to the inventory. You have read-only access.
+        </p>
+      )}
 
       {error && <p className="text-riskcrit text-sm mt-2">{error}</p>}
 

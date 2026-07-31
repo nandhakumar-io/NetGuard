@@ -16,10 +16,35 @@ export default function Dashboard() {
         .catch(() => mounted && setError("Could not reach the NetGuard AI API."));
     };
     fetchSummary();
-    const interval = setInterval(fetchSummary, 5000); // live-ish polling
+
+    // Live Deployment Dashboard (SRS 6.9): prefer WebSocket push, fall back to polling.
+    const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+    const wsUrl = base.replace(/^http/, "ws") + "/dashboard/ws";
+    let ws: WebSocket | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (evt) => {
+        if (!mounted) return;
+        try {
+          setSummary(JSON.parse(evt.data));
+          setError(null);
+        } catch {
+          /* ignore malformed frame */
+        }
+      };
+      ws.onerror = () => {
+        if (!pollInterval) pollInterval = setInterval(fetchSummary, 5000);
+      };
+    } catch {
+      pollInterval = setInterval(fetchSummary, 5000);
+    }
+
     return () => {
       mounted = false;
-      clearInterval(interval);
+      ws?.close();
+      if (pollInterval) clearInterval(pollInterval);
     };
   }, []);
 

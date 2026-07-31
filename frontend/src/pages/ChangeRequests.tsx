@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { ChangeRequest, Device } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
+import { useAuth } from "../lib/auth";
 
 const statusStyle: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600",
@@ -15,6 +16,8 @@ const statusStyle: Record<string, string> = {
 };
 
 export default function ChangeRequests() {
+  const { user } = useAuth();
+  const canApprove = user?.role === "network_admin";
   const [requests, setRequests] = useState<ChangeRequest[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selected, setSelected] = useState<ChangeRequest | null>(null);
@@ -166,21 +169,32 @@ export default function ChangeRequests() {
                 <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Configuration Diff</p>
                 <ConfigDiff diffText={selected.config_diff} />
               </div>
-              {selected.status === "pending_approval" && (
-                <div className="flex gap-2 pt-2">
-                  <button
-                    onClick={() => act(selected.id, "approve")}
-                    className="bg-risklow text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    onClick={() => act(selected.id, "reject")}
-                    className="bg-riskcrit text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90"
-                  >
-                    Reject
-                  </button>
-                </div>
+              {selected.status === "pending_approval" &&
+                (canApprove ? (
+                  <div className="flex gap-2 pt-2">
+                    <button
+                      onClick={() => act(selected.id, "approve")}
+                      className="bg-risklow text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90"
+                    >
+                      Approve &amp; Deploy
+                    </button>
+                    <button
+                      onClick={() => act(selected.id, "reject")}
+                      className="bg-riskcrit text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400 italic pt-2">
+                    Only a Network Administrator can approve or reject this request.
+                  </p>
+                ))}
+              {["deploying", "monitoring", "success", "failed", "rolled_back"].includes(selected.status) && (
+                <p className="text-xs text-slate-500 pt-1">
+                  See the <span className="font-medium text-navy">Deployments</span> page for pipeline details
+                  (snapshot, health checks, rollback status).
+                </p>
               )}
             </div>
           )}
