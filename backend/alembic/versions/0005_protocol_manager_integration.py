@@ -33,7 +33,10 @@ def upgrade() -> None:
         return
 
     with op.get_context().autocommit_block():
-        op.execute("ALTER TYPE alertsource ADD VALUE IF NOT EXISTS 'protocol_failure'")
+        conn = op.get_bind()
+        res = conn.execute(sa.text("SELECT 1 FROM pg_type WHERE typname = 'alertsource'")).scalar()
+        if res:
+            op.execute("ALTER TYPE alertsource ADD VALUE IF NOT EXISTS 'protocol_failure'")
 
 
 def downgrade() -> None:

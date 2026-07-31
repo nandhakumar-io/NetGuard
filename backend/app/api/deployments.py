@@ -80,34 +80,29 @@ def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db),
 from fastapi import WebSocket, WebSocketDisconnect
 import json
 import asyncio
-from app.services.event_bus import redis_client, pubsub
+from app.services import event_bus
 
 @router.websocket("/ws")
 async def deployments_ws(websocket: WebSocket):
     """
     Dedicated websocket for real-time deployment logs and status updates.
-    Yields events published to the 'netguard:deployments:events' channel.
-    Wait... actually we publish via event_bus to 'netguard:events' using `event_bus.publish_event`,
-    so we listen to the standard channel and filter for deployment events.
     """
     await websocket.accept()
-    ps = pubsub()
-    ps.subscribe("netguard:events")
+    client = event_bus.get_async_client()
+    ps = client.pubsub()
+    await ps.subscribe("netguard:events")
     try:
         while True:
-            # Poll Redis for unread events
-            message = ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            message = await ps.get_message(ignore_subscribe_messages=True, timeout=None)
             if message:
                 data = json.loads(message["data"])
-                # Only stream deployment related events (status changed or logs)
                 if data.get("event") in ("deployment_status_changed", "deployment_log"):
                     await websocket.send_json(data)
-            else:
-                # If no message, yield to the event loop
-                await asyncio.sleep(0.1)
-                
     except WebSocketDisconnect:
         pass
+    except Exception:
+        pass
     finally:
-        ps.unsubscribe()
-        ps.close()
+        await ps.unsubscribe()
+        await ps.close()
+        await client.close()

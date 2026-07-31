@@ -8,3 +8,5 @@ backend/.env
 frontend/.env
 node_modules/
 backend/logs/
+*/__pycache__/*
+.env.example
