@@ -9,6 +9,8 @@ export interface Device {
   site?: string | null;
   device_type?: string | null;
   status: DeviceStatus;
+  ssh_username?: string | null;
+  ssh_credential_ref?: string | null;
 }
 
 export type ChangePriority = "low" | "medium" | "high" | "emergency";

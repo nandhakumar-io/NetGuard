@@ -12,6 +12,7 @@ class DeviceBase(BaseModel):
     site: str | None = None
     device_type: str | None = None
     ssh_username: str | None = None
+    ssh_credential_ref: str | None = None
 
 
 class DeviceCreate(DeviceBase):

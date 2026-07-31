@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 
 interface HealthCheck {
@@ -29,15 +29,27 @@ const STATUS_STYLES: Record<DeploymentRecord["status"], string> = {
   rolled_back: "bg-amber-100 text-amber-700",
 };
 
+const STATUS_FILTERS: { value: DeploymentRecord["status"] | "all"; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "queued", label: "Queued" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "succeeded", label: "Succeeded" },
+  { value: "failed", label: "Failed" },
+  { value: "rolled_back", label: "Rolled Back" },
+];
+
 export default function Deployments() {
   const [deployments, setDeployments] = useState<DeploymentRecord[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<DeploymentRecord["status"] | "all">("all");
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const load = () => {
     api.get<DeploymentRecord[]>("/deployments").then((res) => {
       setDeployments(res.data);
       setLoading(false);
+      setLastUpdated(new Date());
     });
   };
 
@@ -50,14 +62,52 @@ export default function Deployments() {
     return () => clearInterval(interval);
   }, []);
 
+  const filtered = useMemo(
+    () => (statusFilter === "all" ? deployments : deployments.filter((d) => d.status === statusFilter)),
+    [deployments, statusFilter]
+  );
+
+  const hasActive = deployments.some((d) => d.status === "queued" || d.status === "in_progress");
+
   return (
     <div>
-      <h1 className="text-2xl font-bold text-navy">Deployments</h1>
-      <p className="text-sm text-slate-500 mt-1">
-        Snapshot → Deploy → Health Monitor → Success / Rollback, per target device. Refreshes automatically.
-      </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-navy">Deployments</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Snapshot → Deploy → Health Monitor → Success / Rollback, per target device.
+          </p>
+        </div>
+        <div className="text-right text-xs text-slate-400">
+          {hasActive && (
+            <span className="inline-flex items-center gap-1.5 text-brandblue font-medium mr-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-brandblue animate-pulse" /> live
+            </span>
+          )}
+          {lastUpdated && <span>Updated {lastUpdated.toLocaleTimeString()}</span>}
+          <button onClick={load} className="block ml-auto text-brandblue font-medium hover:text-navy mt-1">
+            ↻ Refresh now
+          </button>
+        </div>
+      </div>
 
-      <div className="mt-6 bg-white border border-slate-200 rounded-xl overflow-hidden">
+      <div className="flex flex-wrap gap-2 mt-5 mb-3">
+        {STATUS_FILTERS.map((f) => (
+          <button
+            key={f.value}
+            onClick={() => setStatusFilter(f.value)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+              statusFilter === f.value
+                ? "bg-navy text-white border-navy"
+                : "bg-white text-slate-500 border-slate-200 hover:border-slate-300"
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-navy text-white">
             <tr>
@@ -70,14 +120,23 @@ export default function Deployments() {
             </tr>
           </thead>
           <tbody>
-            {!loading && deployments.length === 0 && (
+            {loading && (
               <tr>
                 <td colSpan={6} className="text-center text-slate-400 py-8">
-                  No deployments yet. Approve a change request to kick one off.
+                  Loading deployments…
                 </td>
               </tr>
             )}
-            {deployments.map((d, i) => (
+            {!loading && filtered.length === 0 && (
+              <tr>
+                <td colSpan={6} className="text-center text-slate-400 py-8">
+                  {deployments.length === 0
+                    ? "No deployments yet. Approve a change request to kick one off."
+                    : "No deployments match this filter."}
+                </td>
+              </tr>
+            )}
+            {filtered.map((d, i) => (
               <>
                 <tr
                   key={d.id}
@@ -97,6 +156,7 @@ export default function Deployments() {
                     {d.health_checks.length > 0
                       ? `${d.health_checks.filter((c) => c.passed).length}/${d.health_checks.length} passed`
                       : "—"}
+                    <span className="text-slate-300 ml-1">{expanded === d.id ? "▲" : "▼"}</span>
                   </td>
                 </tr>
                 {expanded === d.id && (
@@ -112,8 +172,13 @@ export default function Deployments() {
                               <span className={c.passed ? "text-green-700" : "text-riskcrit"}>
                                 {c.passed ? "✓" : "✗"}
                               </span>
-                              <span className="font-medium">{c.category}/{c.check_name}</span>
+                              <span className="font-medium">
+                                {c.category}/{c.check_name}
+                              </span>
                               {c.detail && <span className="text-slate-400">— {c.detail}</span>}
+                              <span className="text-slate-300 ml-auto">
+                                {new Date(c.checked_at).toLocaleTimeString()}
+                              </span>
                             </li>
                           ))}
                         </ul>

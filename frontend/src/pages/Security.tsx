@@ -12,6 +12,18 @@ export default function Security() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const copySecret = async () => {
+    if (!secret) return;
+    try {
+      await navigator.clipboard.writeText(secret);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable — the visible text is still selectable */
+    }
+  };
 
   const qrSrc = otpauthUri
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpauthUri)}`
@@ -107,6 +119,13 @@ export default function Security() {
             {secret && (
               <p className="text-[11px] text-slate-400 text-center break-all">
                 Can't scan? Enter this key manually: <span className="font-mono">{secret}</span>
+                <button
+                  type="button"
+                  onClick={copySecret}
+                  className="ml-2 text-brandblue font-medium hover:text-navy"
+                >
+                  {copied ? "Copied!" : "Copy"}
+                </button>
               </p>
             )}
             <input

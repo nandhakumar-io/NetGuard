@@ -17,6 +17,7 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState<UserRole>("network_engineer");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -151,15 +152,25 @@ export default function Login() {
             onChange={(e) => setEmail(e.target.value)}
             required
           />
-          <input
-            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            minLength={8}
-          />
+          <div className="relative">
+            <input
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 pr-16 text-sm"
+              type={showPassword ? "text" : "password"}
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={8}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((s) => !s)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-medium text-slate-400 hover:text-slate-600"
+              tabIndex={-1}
+            >
+              {showPassword ? "Hide" : "Show"}
+            </button>
+          </div>
           {mode === "register" && (
             <select
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
