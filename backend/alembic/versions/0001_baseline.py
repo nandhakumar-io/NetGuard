@@ -37,9 +37,33 @@ def upgrade() -> None:
     # Fresh-install path: create any table that doesn't exist yet, exactly
     # as the app's models define it today (this is what create_all() did,
     # just made idempotent and repeatable instead of implicit/on every boot).
+    #
+    # IMPORTANT: `Base.metadata` reflects the CURRENT codebase, not the
+    # schema as it stood when this migration was written -- so create_all()
+    # here would also create every table added by migrations *after* this
+    # one, before they get a chance to run. On a genuinely fresh database
+    # that means this step and (e.g.) 85cec3c5accf both try to create
+    # `alerts`, and the second one fails with "type already exists".
+    #
+    # Tables below are excluded because a later migration in this chain
+    # already owns creating them via its own op.create_table(...). Any
+    # future migration that adds `op.create_table("some_new_table", ...)`
+    # must add "some_new_table" to this set too, or it will collide with
+    # this baseline on fresh installs the same way.
+    OWNED_BY_LATER_MIGRATIONS = {
+        "config_drifts",         # 0002_config_drift.py
+        "alerts",                # 85cec3c5accf_add_telemetry_tables.py
+        "device_metrics",        # 85cec3c5accf_add_telemetry_tables.py
+        "protocol_operations",   # 85cec3c5accf_add_telemetry_tables.py
+        "deployment_logs",       # 85cec3c5accf_add_telemetry_tables.py
+    }
+
     from app.core.database import Base
 
-    Base.metadata.create_all(bind=bind, checkfirst=True)
+    baseline_tables = [
+        table for name, table in Base.metadata.tables.items() if name not in OWNED_BY_LATER_MIGRATIONS
+    ]
+    Base.metadata.create_all(bind=bind, checkfirst=True, tables=baseline_tables)
 
     # Existing-install path: patch known schema drift on tables that
     # already existed before this migration was introduced.
