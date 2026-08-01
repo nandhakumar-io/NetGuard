@@ -15,6 +15,8 @@ management IP (see `lab_bootstrap_service`). That split is what lets every
 other service in this app stay completely unaware that a device is
 simulated.
 """
+import time
+
 import httpx
 
 from app.core.config import settings
@@ -24,15 +26,83 @@ class GNS3Error(Exception):
     """Raised when the GNS3 controller can't be reached or returns an error."""
 
 
-def _client() -> httpx.Client:
-    auth = None
-    if settings.GNS3_USERNAME and settings.GNS3_PASSWORD:
-        auth = (settings.GNS3_USERNAME, settings.GNS3_PASSWORD)
-    return httpx.Client(
+_cached_token: str | None = None
+
+
+def _fetch_token() -> str:
+    """Always makes a fresh login request -- callers should go through
+    `_get_token()`, which caches the result. Kept separate so a forced
+    refresh doesn't duplicate the request/validation logic below.
+    """
+    if not settings.GNS3_USERNAME or not settings.GNS3_PASSWORD:
+        raise GNS3Error("GNS3 credentials not set in environment.")
+
+    with httpx.Client(base_url=settings.GNS3_BASE_URL, timeout=settings.GNS3_REQUEST_TIMEOUT_SECONDS) as client:
+        resp = client.post(
+            "/v3/access/users/login",
+            data={"username": settings.GNS3_USERNAME, "password": settings.GNS3_PASSWORD},
+        )
+        if resp.status_code >= 400:
+            raise GNS3Error(f"Failed to authenticate with GNS3 controller: {resp.text}")
+        token = resp.json().get("access_token")
+        if not token:
+            raise GNS3Error(
+                "GNS3 controller login succeeded but the response had no access_token "
+                "-- check GNS3_USERNAME/GNS3_PASSWORD and that user management is "
+                "enabled on the controller."
+            )
+        return token
+
+
+def _get_token(force_refresh: bool = False) -> str:
+    """Cached token lookup. A permanent, never-invalidated cache used to
+    live here -- once a bad or expired token was cached, every call for
+    the rest of the process's life reused it and every locked endpoint
+    failed forever. `force_refresh` (used by `_request`'s retry-on-401/403
+    below) is what actually recovers from that instead of just masking it
+    for one lucky request.
+    """
+    global _cached_token
+    if force_refresh:
+        _cached_token = None
+    if _cached_token:
+        return _cached_token
+    _cached_token = _fetch_token()
+    return _cached_token
+
+
+def _headers(force_refresh: bool = False) -> dict:
+    if not settings.GNS3_USERNAME or not settings.GNS3_PASSWORD:
+        return {}
+    return {"Authorization": f"Bearer {_get_token(force_refresh=force_refresh)}"}
+
+
+def _request(method: str, path: str, **kwargs) -> httpx.Response:
+    """Single entry point every controller call below goes through.
+
+    Retries exactly once, with a freshly-fetched token, if the first
+    attempt comes back 401/403. This covers both a genuinely expired
+    token (GNS3's JWTs are short-lived) and a controller restart that
+    invalidated every previously-issued token -- neither of which the old
+    cache-forever `_client()` helper ever recovered from without a full
+    backend process restart.
+    """
+    with httpx.Client(
         base_url=settings.GNS3_BASE_URL,
         timeout=settings.GNS3_REQUEST_TIMEOUT_SECONDS,
-        auth=auth,
-    )
+        headers=_headers(),
+    ) as client:
+        resp = client.request(method, path, **kwargs)
+
+    if resp.status_code in (401, 403) and settings.GNS3_USERNAME and settings.GNS3_PASSWORD:
+        with httpx.Client(
+            base_url=settings.GNS3_BASE_URL,
+            timeout=settings.GNS3_REQUEST_TIMEOUT_SECONDS,
+            headers=_headers(force_refresh=True),
+        ) as client:
+            resp = client.request(method, path, **kwargs)
+
+    return resp
 
 
 def _host() -> str:
@@ -42,80 +112,106 @@ def _host() -> str:
 
 
 def check_status() -> dict:
-    """Ping the controller (GET /v2/version). Raises GNS3Error if the
+    """Ping the controller (GET /v3/version). Raises GNS3Error if the
     server is unreachable or GNS3 integration is disabled.
     """
     if not settings.GNS3_ENABLED:
         raise GNS3Error("GNS3 integration is disabled (set GNS3_ENABLED=true in .env).")
     try:
-        with _client() as client:
-            resp = client.get("/v2/version")
-            resp.raise_for_status()
-            return resp.json()
+        resp = _request("GET", "/v3/version")
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Could not reach GNS3 controller at {settings.GNS3_BASE_URL}: {exc}") from exc
 
 
 def list_projects() -> list[dict]:
     try:
-        with _client() as client:
-            resp = client.get("/v2/projects")
-            resp.raise_for_status()
-            return resp.json()
+        resp = _request("GET", "/v3/projects")
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Failed to list GNS3 projects: {exc}") from exc
 
 
-def open_project(project_id: str) -> dict:
-    """Opens (loads) a project so its nodes can be started."""
+def open_project(project_id: str, wait_seconds: float = 8.0) -> dict:
+    """Opens (loads) a project so its nodes can be started.
+
+    Opening is asynchronous on GNS3's side (computes/VMs have to spin up),
+    so the POST returning success doesn't mean the project has actually
+    flipped to "opened" yet -- a project with more nodes takes longer.
+    This polls the project's status for up to `wait_seconds` instead of
+    checking once immediately after the POST, which was racing (and
+    losing) against larger projects.
+    """
     try:
-        with _client() as client:
-            resp = client.post(f"/v2/projects/{project_id}/open")
-            if resp.status_code not in (200, 201, 409):
-                resp.raise_for_status()
-            get_resp = client.get(f"/v2/projects/{project_id}")
+        resp = _request("POST", f"/v3/projects/{project_id}/open", json={})
+        if resp.status_code not in (200, 201, 409):
+            resp.raise_for_status()
+
+        deadline = time.monotonic() + wait_seconds
+        project: dict = {}
+        while True:
+            get_resp = _request("GET", f"/v3/projects/{project_id}")
             get_resp.raise_for_status()
-            return get_resp.json()
+            project = get_resp.json()
+            if (project.get("status") or "").lower() in ("opened", "open"):
+                return project
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Failed to open GNS3 project {project_id}: {exc}") from exc
+
+    raise GNS3Error(
+        f"GNS3 project {project_id} did not report as opened within {wait_seconds:.0f}s "
+        f"(status='{project.get('status')}'). Node actions require an opened project."
+    )
 
 
 def list_nodes(project_id: str) -> list[dict]:
     try:
-        with _client() as client:
-            resp = client.get(f"/v2/projects/{project_id}/nodes")
-            resp.raise_for_status()
-            return resp.json()
+        resp = _request("GET", f"/v3/projects/{project_id}/nodes")
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Failed to list nodes for GNS3 project {project_id}: {exc}") from exc
 
 
 def get_node(project_id: str, node_id: str) -> dict:
     try:
-        with _client() as client:
-            resp = client.get(f"/v2/projects/{project_id}/nodes/{node_id}")
-            resp.raise_for_status()
-            return resp.json()
+        resp = _request("GET", f"/v3/projects/{project_id}/nodes/{node_id}")
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Failed to fetch GNS3 node {node_id}: {exc}") from exc
 
 
 def start_node(project_id: str, node_id: str) -> dict:
+    """Starts a node, first making sure its project is actually open --
+    GNS3 returns 403 for node actions in a closed project, regardless of
+    whether the frontend happened to open it earlier in the session (e.g.
+    after a page reload, or if a different project was opened since).
+    """
     try:
-        with _client() as client:
-            resp = client.post(f"/v2/projects/{project_id}/nodes/{node_id}/start")
-            resp.raise_for_status()
-            return resp.json()
+        open_project(project_id)
+        resp = _request("POST", f"/v3/projects/{project_id}/nodes/{node_id}/start", json={})
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Failed to start GNS3 node {node_id}: {exc}") from exc
 
 
 def stop_node(project_id: str, node_id: str) -> dict:
+    """Same "make sure the project is open first" guard as start_node --
+    a node can only be running (and therefore stoppable) if its project is
+    open, but this stays cheap and defensive rather than assuming that.
+    """
     try:
-        with _client() as client:
-            resp = client.post(f"/v2/projects/{project_id}/nodes/{node_id}/stop")
-            resp.raise_for_status()
-            return resp.json()
+        open_project(project_id)
+        resp = _request("POST", f"/v3/projects/{project_id}/nodes/{node_id}/stop", json={})
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
     except httpx.HTTPError as exc:
         raise GNS3Error(f"Failed to stop GNS3 node {node_id}: {exc}") from exc
 

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import React, { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import {
   Device,
@@ -10,9 +10,12 @@ import {
   DeviceHealthSummary,
   DeviceMetric,
   Alert as AlertRow,
+  ProtocolOperationRecord,
+  DeploymentRecord,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
+import { WebTerminal } from "../components/WebTerminal";
 
 const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
   green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 border-green-200" },
@@ -62,6 +65,11 @@ const emptyForm = {
   site: "",
   ssh_username: "",
   ssh_credential_ref: "",
+  supports_snmp: false,
+  snmp_version: "v2c",
+  snmp_community_ref: "",
+  supports_restconf: false,
+  restconf_url: "",
 };
 
 const TAB_NAMES = [
@@ -123,6 +131,16 @@ function DeviceInlineDetails({
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [ackingId, setAckingId] = useState<string | null>(null);
 
+  // Protocol Operations tab state
+  const [protocolOps, setProtocolOps] = useState<ProtocolOperationRecord[]>([]);
+  const [protocolOpsLoading, setProtocolOpsLoading] = useState(false);
+  const [protocolOpsError, setProtocolOpsError] = useState<string | null>(null);
+
+  // Deployment History tab state
+  const [deployments, setDeployments] = useState<DeploymentRecord[]>([]);
+  const [deploymentsLoading, setDeploymentsLoading] = useState(false);
+  const [deploymentsError, setDeploymentsError] = useState<string | null>(null);
+
   const loadHealth = () => {
     setHealthLoading(true);
     setHealthError(null);
@@ -172,12 +190,38 @@ function DeviceInlineDetails({
     }
   };
 
+  const loadProtocolOps = () => {
+    setProtocolOpsLoading(true);
+    setProtocolOpsError(null);
+    api
+      .get<ProtocolOperationRecord[]>(`/devices/${device.id}/protocol-operations?limit=50`)
+      .then((res) => setProtocolOps(res.data))
+      .catch(() => setProtocolOpsError("Failed to load protocol operations for this device."))
+      .finally(() => setProtocolOpsLoading(false));
+  };
+
+  const loadDeployments = () => {
+    setDeploymentsLoading(true);
+    setDeploymentsError(null);
+    api
+      .get<DeploymentRecord[]>(`/deployments?device_id=${device.id}`)
+      .then((res) => setDeployments(res.data))
+      .catch(() => setDeploymentsError("Failed to load deployment history for this device."))
+      .finally(() => setDeploymentsLoading(false));
+  };
+
   useEffect(() => {
     if ((activeTab === "Health" || activeTab === "Interfaces") && !health && !healthLoading) {
       loadHealth();
     }
     if (activeTab === "Alerts" && deviceAlerts.length === 0 && !alertsLoading) {
       loadAlerts();
+    }
+    if (activeTab === "Protocol Operations" && protocolOps.length === 0 && !protocolOpsLoading) {
+      loadProtocolOps();
+    }
+    if (activeTab === "Deployment History" && deployments.length === 0 && !deploymentsLoading) {
+      loadDeployments();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, device.id]);
@@ -268,6 +312,30 @@ function DeviceInlineDetails({
             <div>
               <p className="text-xs text-slate-500">System Uptime</p>
               <p className="text-slate-400 italic text-sm">Waiting for telemetry...</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Platform</p>
+              <p className="font-medium text-navy">{device.platform || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Model</p>
+              <p className="font-medium text-navy">{device.model || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Serial Number</p>
+              <p className="font-mono text-xs text-navy">{device.serial_number || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">OS Version</p>
+              <p className="font-medium text-navy">{device.os_version || "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Connectivity</p>
+              <div className="flex flex-wrap gap-1 mt-1">
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_snmp ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-400"}`}>SNMP</span>
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_netconf ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-400"}`}>NETCONF</span>
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_restconf ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-400"}`}>RESTCONF</span>
+              </div>
             </div>
           </div>
         )}
@@ -601,8 +669,108 @@ function DeviceInlineDetails({
           </div>
         )}
 
-        {/* Placeholders for remaining tabs */}
-        {["Drift", "Protocol Operations", "Deployment History"].includes(activeTab) && (
+        {activeTab === "Protocol Operations" && (
+          <div>
+            {protocolOpsLoading ? (
+              <p className="text-xs text-slate-400">Loading protocol operations…</p>
+            ) : protocolOpsError ? (
+              <p className="text-xs text-riskcrit">{protocolOpsError}</p>
+            ) : protocolOps.length === 0 ? (
+              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+                <div className="text-3xl mb-2">🔗</div>
+                <p className="text-sm font-medium">No NETCONF/RESTCONF/SNMP operations recorded yet.</p>
+              </div>
+            ) : (
+              <div className="max-h-96 overflow-y-auto border border-slate-200 rounded-lg">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-100 sticky top-0">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">When</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Protocol</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Operation</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Operator</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Result</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {protocolOps.map((op) => (
+                      <tr key={op.id} className="bg-white">
+                        <td className="px-3 py-1.5 text-slate-500">{timeAgo(op.created_at)}</td>
+                        <td className="px-3 py-1.5 uppercase font-bold text-slate-600">{op.protocol}</td>
+                        <td className="px-3 py-1.5 text-slate-700">{op.operation}</td>
+                        <td className="px-3 py-1.5 text-slate-500">{op.operator}</td>
+                        <td className="px-3 py-1.5">
+                          <span className={`font-bold ${op.success ? "text-risklow" : "text-riskcrit"}`}>
+                            {op.success ? "Success" : "Failed"}
+                          </span>
+                          {op.http_status != null && <span className="text-slate-400 ml-1">({op.http_status})</span>}
+                          {!op.success && op.error_message && (
+                            <p className="text-slate-400 mt-0.5 max-w-xs truncate" title={op.error_message}>
+                              {op.error_message}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-3 py-1.5 text-slate-500">
+                          {op.execution_time_ms != null ? `${Math.round(op.execution_time_ms)}ms` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "Deployment History" && (
+          <div>
+            {deploymentsLoading ? (
+              <p className="text-xs text-slate-400">Loading deployment history…</p>
+            ) : deploymentsError ? (
+              <p className="text-xs text-riskcrit">{deploymentsError}</p>
+            ) : deployments.length === 0 ? (
+              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+                <div className="text-3xl mb-2">🚀</div>
+                <p className="text-sm font-medium">No deployments recorded yet for this device.</p>
+              </div>
+            ) : (
+              <ul className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                {deployments.map((d) => {
+                  const statusStyle: Record<string, string> = {
+                    succeeded: "text-risklow bg-green-50 border-green-200",
+                    failed: "text-riskcrit bg-red-50 border-red-200",
+                    rolled_back: "text-riskmed bg-amber-50 border-amber-200",
+                    in_progress: "text-brandblue bg-blue-50 border-blue-200",
+                    queued: "text-slate-500 bg-slate-50 border-slate-200",
+                  };
+                  const style = statusStyle[d.status] || statusStyle.queued;
+                  return (
+                    <li key={d.id} className={`border rounded-lg px-3 py-2.5 shadow-sm ${style}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-wide">{d.status.replace("_", " ")}</p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {d.protocol.toUpperCase()} · {new Date(d.created_at).toLocaleString()}
+                          </p>
+                          {d.error_message && <p className="text-[11px] text-riskcrit mt-1">{d.error_message}</p>}
+                        </div>
+                        {d.health_checks.length > 0 && (
+                          <span className="text-[10px] font-bold uppercase text-slate-400 shrink-0">
+                            {d.health_checks.filter((h) => h.passed).length}/{d.health_checks.length} checks passed
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* Placeholder for remaining tabs not yet wired to a dedicated data source */}
+        {["Drift"].includes(activeTab) && (
           <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
             <div className="text-3xl mb-2">🚧</div>
             <p className="text-sm font-medium">{activeTab} data integration coming in next phase.</p>
@@ -629,6 +797,7 @@ export default function Devices() {
   const [clearingUnstableId, setClearingUnstableId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
+  const [activeTerminalDevice, setActiveTerminalDevice] = useState<string | null>(null);
 
   const [rollbackTarget, setRollbackTarget] = useState<{ device: Device; snapshot: Snapshot } | null>(null);
   const [rollbackReason, setRollbackReason] = useState("");
@@ -836,10 +1005,63 @@ export default function Devices() {
                 required
               />
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3 pt-3 border-t border-slate-100">
+            <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+              <input
+                type="checkbox"
+                checked={form.supports_snmp}
+                onChange={(e) => setForm({ ...form, supports_snmp: e.target.checked })}
+              />
+              Enable SNMP monitoring
+            </label>
+            {form.supports_snmp && (
+              <>
+                <select
+                  className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                  value={form.snmp_version}
+                  onChange={(e) => setForm({ ...form, snmp_version: e.target.value })}
+                >
+                  <option value="v1">SNMP v1</option>
+                  <option value="v2c">SNMP v2c</option>
+                  <option value="v3">SNMP v3</option>
+                </select>
+                <div className="md:col-span-2">
+                  <input
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                    placeholder="SNMP Community Credential Ref"
+                    value={form.snmp_community_ref}
+                    onChange={(e) => setForm({ ...form, snmp_community_ref: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
+            <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+              <input
+                type="checkbox"
+                checked={form.supports_restconf}
+                onChange={(e) => setForm({ ...form, supports_restconf: e.target.checked })}
+              />
+              Enable RESTCONF
+            </label>
+            {form.supports_restconf && (
+              <div className="md:col-span-2">
+                <input
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                  placeholder="RESTCONF URL (e.g. https://10.0.0.1/restconf)"
+                  value={form.restconf_url}
+                  onChange={(e) => setForm({ ...form, restconf_url: e.target.value })}
+                />
+              </div>
+            )}
             <button
               type="submit"
               disabled={loading}
-              className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold shadow hover:bg-navy transition-colors disabled:opacity-50 h-fit self-start"
+              className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold shadow hover:bg-navy transition-colors disabled:opacity-50 h-fit self-start md:col-start-4"
             >
               {loading ? "Adding…" : "Add Device"}
             </button>
@@ -908,7 +1130,7 @@ export default function Devices() {
               </tr>
             )}
             {filtered.map((d) => (
-              <React.Fragment key={d.id}>
+              <Fragment key={d.id}>
                 <tr className={`cursor-pointer transition-colors hover:bg-slate-50/70 border-l-4 ${
                     expandedDeviceId === d.id ? "bg-slate-50 border-l-navy" : "border-l-transparent bg-white"
                   }`} 
@@ -956,6 +1178,15 @@ export default function Devices() {
                       <button
                         onClick={(e) => {
                             e.stopPropagation();
+                            setActiveTerminalDevice(d.id);
+                        }}
+                        className="text-[11px] uppercase tracking-wider text-slate-100 border border-slate-700 bg-slate-800 px-2 py-1 rounded shadow-sm hover:bg-slate-700 font-bold"
+                      >
+                        Terminal
+                      </button>
+                      <button
+                        onClick={(e) => {
+                            e.stopPropagation();
                             removeDevice(d.id, d.hostname);
                         }}
                         disabled={deletingId === d.id}
@@ -981,7 +1212,7 @@ export default function Devices() {
                     </td>
                   </tr>
                 )}
-              </React.Fragment>
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -1022,6 +1253,30 @@ export default function Devices() {
           </div>
         </div>
       )}
+
+        {/* Web Terminal Modal Overlay */}
+        {activeTerminalDevice && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-sm">
+            <div className="bg-slate-900 w-full max-w-6xl h-[80vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-slate-700">
+              <div className="flex items-center justify-between px-4 py-3 bg-slate-800 border-b border-slate-700">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-slate-200 font-bold tracking-wide text-sm font-mono uppercase">
+                    Terminal Session: {devices.find(d => d.id === activeTerminalDevice)?.hostname}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setActiveTerminalDevice(null)}
+                  className="text-slate-400 hover:text-white font-bold text-sm bg-transparent border-0"
+                >
+                  Close [ X ]
+                </button>
+              </div>
+              <div className="flex-grow p-1 overflow-hidden">
+                <WebTerminal deviceId={activeTerminalDevice} />
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   );
 }

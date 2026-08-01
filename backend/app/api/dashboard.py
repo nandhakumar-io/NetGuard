@@ -30,10 +30,7 @@ def _compute_summary(db: Session) -> dict:
     failed_deployments = db.query(Deployment).filter(Deployment.status == DeploymentStatus.FAILED).count()
     rollbacks = db.query(Deployment).filter(Deployment.status == DeploymentStatus.ROLLED_BACK).count()
     pending_change_requests = db.query(ChangeRequest).filter(
-        ChangeRequest.status.in_(["pending_approval"])
-    ).count()
-    pending_change_requests = db.query(ChangeRequest).filter(
-    ChangeRequest.status.in_([ChangeStatus.PENDING_APPROVAL])
+        ChangeRequest.status.in_([ChangeStatus.PENDING_APPROVAL])
     ).count()
 
     # Alert counts for dashboard stat cards
@@ -67,9 +64,9 @@ def _compute_summary(db: Session) -> dict:
     top_memory_devices = [{"hostname": r[1], "ip_address": r[2], "memory": r[0].memory_utilization_pct or 0} for r in top_memory]
 
     # 2. Deployment Success Rate
-    deployments_successful = db.query(Deployment).filter(Deployment.status == DeploymentStatus.COMPLETED).count()
+    deployments_successful = db.query(Deployment).filter(Deployment.status == DeploymentStatus.SUCCEEDED).count()
     deployments_total_finished = db.query(Deployment).filter(Deployment.status.in_([
-        DeploymentStatus.COMPLETED, 
+        DeploymentStatus.SUCCEEDED, 
         DeploymentStatus.FAILED, 
         DeploymentStatus.ROLLED_BACK
     ])).count()

@@ -1,4 +1,16 @@
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# pydantic-settings' env_file="./.env" below only populates the declared
+# fields on the Settings class -- it's a self-contained mechanism and does
+# NOT set anything into os.environ. Several places in the codebase (notably
+# app.services.credential_service, which resolves NETGUARD_CRED_* secret-store
+# refs) read os.environ directly, bypassing Settings entirely, so without
+# this call those lookups silently miss anything that only lives in .env.
+# This module is imported first by both the FastAPI process (app.main) and
+# the Celery worker/beat process (app.celery_app), so loading it here covers
+# both rather than just the API process.
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -114,6 +126,15 @@ class Settings(BaseSettings):
     SNMP_POLL_INTERVAL_SECONDS: int = 60
     SNMP_TIMEOUT_SECONDS: float = 3.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
+
+    # When true, the FastAPI process itself runs a lightweight asyncio loop
+    # that polls every SNMP-enabled device every SNMP_POLL_INTERVAL_SECONDS
+    # -- functionally the same as app.tasks.run_snmp_poll_sweep_task, but
+    # without needing Redis/a Celery worker/beat running. This is what
+    # makes SNMP monitoring work out of the box for local dev / demos.
+    # Set to False once Celery worker + beat are actually running (e.g. in
+    # production) so devices aren't polled twice on the same interval.
+    SNMP_INPROCESS_POLLING_ENABLED: bool = True
 
     # GNS3 Lab Integration: lets change requests be validated end-to-end
     # (deploy -> health monitor -> rollback) against real virtual routers

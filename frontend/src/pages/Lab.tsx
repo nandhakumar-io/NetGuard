@@ -87,6 +87,10 @@ export default function Lab() {
     try {
       const res = await api.post<GNS3Project>(`/gns3/projects/${project.project_id}/open`);
       setSelectedProject(res.data);
+      // Keep the left-hand project list in sync too -- it previously kept
+      // showing whatever status was fetched on page load (usually
+      // "Closed") even after a project had actually been opened.
+      setProjects((prev) => prev.map((p) => (p.project_id === res.data.project_id ? res.data : p)));
       loadNodes(project.project_id);
     } catch (err: any) {
       setActionError(err?.response?.data?.detail || "Failed to open project.");

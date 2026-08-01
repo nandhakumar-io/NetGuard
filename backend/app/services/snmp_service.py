@@ -8,6 +8,7 @@ the same category vocabulary the Alert Engine uses for polled breaches, so
 "Interface Down" looks the same in the UI whether it came from a trap or
 from a poll that noticed the interface was down.
 """
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -78,30 +79,40 @@ def _get_via_pysnmp(ip_address: str, community: str, oid: str, version: str, tim
     an unreadable OID is "not applicable"/"unsupported", the same
     tolerant pattern health_monitor.py uses for NAPALM getters, so one
     missing OID doesn't fail the whole poll.
+
+    NOTE: pysnmp>=6.2 removed the old synchronous `pysnmp.hlapi`
+    generator API (SnmpEngine()/getCmd()/next(iterator)) entirely -- it's
+    asyncio-only now (pysnmp.hlapi.v1arch.asyncio for v1/v2c). We use
+    asyncio.run() per call since this is invoked from synchronous Celery
+    task context, not from inside an already-running event loop.
     """
     try:
-        from pysnmp.hlapi import (
+        from pysnmp.hlapi.v1arch.asyncio import (
             CommunityData,
-            ContextData,
             ObjectIdentity,
             ObjectType,
-            SnmpEngine,
+            SnmpDispatcher,
             UdpTransportTarget,
-            getCmd,
+            get_cmd,
         )
 
-        mp_model = 0 if version == "v1" else 1  # v1 -> 0, v2c -> 1
-        iterator = getCmd(
-            SnmpEngine(),
-            CommunityData(community, mpModel=mp_model),
-            UdpTransportTarget((ip_address, 161), timeout=timeout, retries=1),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-        )
-        error_indication, error_status, _, var_binds = next(iterator)
-        if error_indication or error_status or not var_binds:
-            return None
-        return str(var_binds[0][1])
+        async def _run() -> str | None:
+            mp_model = 0 if version == "v1" else 1  # v1 -> 0, v2c -> 1
+            with SnmpDispatcher() as dispatcher:
+                transport = await UdpTransportTarget.create(
+                    (ip_address, 161), timeout=timeout, retries=1
+                )
+                error_indication, error_status, _, var_binds = await get_cmd(
+                    dispatcher,
+                    CommunityData(community, mpModel=mp_model),
+                    transport,
+                    ObjectType(ObjectIdentity(oid)),
+                )
+                if error_indication or error_status or not var_binds:
+                    return None
+                return str(var_binds[0][1])
+
+        return asyncio.run(_run())
     except Exception:  # noqa: BLE001
         return None
 
@@ -114,37 +125,40 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
     """
     results: dict[str, str] = {}
     try:
-        from pysnmp.hlapi import (
+        from pysnmp.hlapi.v1arch.asyncio import (
             CommunityData,
-            ContextData,
             ObjectIdentity,
             ObjectType,
-            SnmpEngine,
+            SnmpDispatcher,
             UdpTransportTarget,
-            nextCmd,
+            next_cmd,
         )
 
-        mp_model = 0 if version == "v1" else 1
-        iterator = nextCmd(
-            SnmpEngine(),
-            CommunityData(community, mpModel=mp_model),
-            UdpTransportTarget((ip_address, 161), timeout=timeout, retries=1),
-            ContextData(),
-            ObjectType(ObjectIdentity(base_oid)),
-            lexicographicMode=False,  # stop once we leave this OID subtree
-        )
-        for row in iterator:
-            error_indication, error_status, _, var_binds = row
-            if error_indication or error_status or not var_binds:
-                break
-            for oid, value in var_binds:
-                oid_str = str(oid)
-                if not oid_str.startswith(base_oid + "."):
-                    return results  # walked past the end of this column
-                index = oid_str.rsplit(".", 1)[-1]
-                results[index] = str(value)
-            if len(results) >= MAX_INTERFACES_WALKED:
-                break
+        async def _run() -> None:
+            mp_model = 0 if version == "v1" else 1
+            with SnmpDispatcher() as dispatcher:
+                transport = await UdpTransportTarget.create(
+                    (ip_address, 161), timeout=timeout, retries=1
+                )
+                auth = CommunityData(community, mpModel=mp_model)
+                var_bind = ObjectType(ObjectIdentity(base_oid))
+                while True:
+                    error_indication, error_status, _, var_binds = await next_cmd(
+                        dispatcher, auth, transport, var_bind,
+                    )
+                    if error_indication or error_status or not var_binds:
+                        break
+                    oid, value = var_binds[0]
+                    oid_str = str(oid)
+                    if not oid_str.startswith(base_oid + "."):
+                        break  # walked past the end of this column
+                    index = oid_str.rsplit(".", 1)[-1]
+                    results[index] = str(value)
+                    if len(results) >= MAX_INTERFACES_WALKED:
+                        break
+                    var_bind = ObjectType(ObjectIdentity(oid))
+
+        asyncio.run(_run())
     except Exception:  # noqa: BLE001
         return results
     return results

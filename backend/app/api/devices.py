@@ -6,17 +6,36 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
+from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
-from app.services import rollback_service, audit_service
+from app.services import rollback_service, audit_service, metrics_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
 # Only Network Administrators manage inventory (FR-2 + RBAC); everyone authenticated can read it.
 INVENTORY_MANAGER_ROLES = require_roles(UserRole.NETWORK_ADMIN)
+
+
+def _poll_snmp_best_effort(db: Session, device: Device) -> None:
+    """Fire an immediate SNMP poll synchronously (instead of queuing a
+    Celery task) so the dashboard/health tab has telemetry right away even
+    when no Celery worker/Redis is running -- see also the in-process
+    polling loop in app.main for the recurring sweep. Best-effort: an
+    unreachable device or missing credential must not block the device
+    create/update response.
+    """
+    try:
+        metrics_service.poll_device(db, device)
+    except metrics_service.SnmpNotConfiguredError:
+        pass
+    except metrics_service.credential_service.CredentialNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 - best-effort only
+        pass
 
 # Rollback carries the same authority as approving a change (both bypass
 # the normal validation/approval queue), so it's gated the same way.
@@ -36,6 +55,14 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depend
     db.add(device)
     db.commit()
     db.refresh(device)
+
+    # Don't make the operator wait for the next SNMP_POLL_INTERVAL_SECONDS
+    # sweep -- if the device was added with SNMP already configured, poll
+    # it right away so the dashboard / device detail page has telemetry as
+    # soon as possible.
+    if device.supports_snmp:
+        _poll_snmp_best_effort(db, device)
+
     return device
 
 
@@ -64,11 +91,17 @@ def update_device(
         if db.query(Device).filter(Device.hostname == updates["hostname"]).first():
             raise HTTPException(status_code=400, detail="Device with this hostname already exists")
 
+    was_snmp_enabled = device.supports_snmp
+
     for field, value in updates.items():
         setattr(device, field, value)
 
     db.commit()
     db.refresh(device)
+
+    if device.supports_snmp and not was_snmp_enabled:
+        _poll_snmp_best_effort(db, device)
+
     return device
 
 
@@ -163,3 +196,43 @@ def clear_unstable_flag(
         detail="Manual review completed; automated deploys re-enabled.",
     )
     return device
+
+
+@router.get("/{device_id}/protocol-operations")
+def list_device_protocol_operations(
+    device_id: uuid.UUID,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Recent NETCONF/RESTCONF/SNMP operations recorded against this device
+    (config reads/pushes, health checks, SNMP polls) -- backs the Protocol
+    Operations tab on the device detail page. Complements the coarser
+    AuditLog with the raw request/response payloads captured by
+    ProtocolManager for every operation it performs.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    ops = (
+        db.query(ProtocolOperation)
+        .filter(ProtocolOperation.device_id == device_id)
+        .order_by(ProtocolOperation.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": str(op.id),
+            "protocol": op.protocol.value if hasattr(op.protocol, "value") else str(op.protocol),
+            "operation": op.operation,
+            "operator": op.operator,
+            "success": op.success,
+            "error_message": op.error_message,
+            "http_status": op.http_status,
+            "execution_time_ms": op.execution_time_ms,
+            "created_at": op.created_at,
+        }
+        for op in ops
+    ]
