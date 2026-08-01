@@ -111,6 +111,7 @@ Backend: FastAPI, Python, Celery, Redis, SQLAlchemy
 Network Automation: Netmiko, NAPALM, Paramiko
 Database: PostgreSQL
 Monitoring: Prometheus, Grafana
+AI Model: Llama LLM
 
 ## System Requirements
 
