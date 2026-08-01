@@ -36,10 +36,17 @@ def _serialize(d: Deployment, db: Session) -> dict:
 
 
 @router.get("")
-def list_deployments(change_request_id: uuid.UUID | None = None, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_deployments(
+    change_request_id: uuid.UUID | None = None,
+    device_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
     q = db.query(Deployment).order_by(Deployment.created_at.desc())
     if change_request_id:
         q = q.filter(Deployment.change_request_id == change_request_id)
+    if device_id:
+        q = q.filter(Deployment.device_id == device_id)
     return [_serialize(d, db) for d in q.all()]
 
 

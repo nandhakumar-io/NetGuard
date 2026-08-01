@@ -15,6 +15,7 @@ from app.api import (
     notification,
     reports,
     topology,
+    terminal,
 )
 
 api_router = APIRouter()
@@ -32,3 +33,4 @@ api_router.include_router(gns3.router)
 api_router.include_router(notification.router)
 api_router.include_router(reports.router)
 api_router.include_router(topology.router)
+api_router.include_router(terminal.router)

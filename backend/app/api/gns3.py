@@ -315,49 +315,50 @@ def bootstrap_node(
         )
 
     device_id: uuid.UUID | None = None
-    if payload.create_device:
-        cred_ref = payload.ssh_credential_ref or _slug_cred_ref(hostname)
-        device = _find_linked_device(db, project_id, node_id)
-        if device is None:
-            device = db.query(Device).filter(Device.hostname == hostname).first()
+    cred_ref = payload.ssh_credential_ref or _slug_cred_ref(hostname)
+    device = _find_linked_device(db, project_id, node_id)
+    
+    if payload.create_device and device is None:
+        device = db.query(Device).filter(Device.hostname == hostname).first()
 
-        vendor = _vendor_enum(gns3_service.guess_vendor(node))
-        if device is None:
-            device = Device(
-                hostname=hostname,
-                ip_address=payload.mgmt_ip,
-                vendor=vendor,
-                site=payload.site,
-                device_type=node.get("node_type") or "router",
-                status=DeviceStatus.ONLINE,
-                ssh_username=payload.ssh_username,
-                ssh_credential_ref=cred_ref,
-                is_simulated=True,
-                lab_provider="gns3",
-                gns3_project_id=project_id,
-                gns3_node_id=node_id,
-                console_host=console_host,
-                console_port=console_port,
-                console_type=console_type or "telnet",
-                bootstrapped=True,
-            )
-            db.add(device)
-        else:
-            device.ip_address = payload.mgmt_ip
-            device.ssh_username = payload.ssh_username
-            device.ssh_credential_ref = cred_ref
-            device.is_simulated = True
-            device.lab_provider = "gns3"
-            device.gns3_project_id = project_id
-            device.gns3_node_id = node_id
-            device.console_host = console_host
-            device.console_port = console_port
-            device.console_type = console_type or "telnet"
-            device.bootstrapped = True
-            device.status = DeviceStatus.ONLINE
-            if payload.site:
-                device.site = payload.site
+    vendor = _vendor_enum(gns3_service.guess_vendor(node))
+    if device is None and payload.create_device:
+        device = Device(
+            hostname=hostname,
+            ip_address=payload.mgmt_ip,
+            vendor=vendor,
+            site=payload.site,
+            device_type=node.get("node_type") or "router",
+            status=DeviceStatus.ONLINE,
+            ssh_username=payload.ssh_username,
+            ssh_credential_ref=cred_ref,
+            is_simulated=True,
+            lab_provider="gns3",
+            gns3_project_id=project_id,
+            gns3_node_id=node_id,
+            console_host=console_host,
+            console_port=console_port,
+            console_type=console_type or "telnet",
+            bootstrapped=True,
+        )
+        db.add(device)
+    elif device is not None:
+        device.ip_address = payload.mgmt_ip
+        device.ssh_username = payload.ssh_username
+        device.ssh_credential_ref = cred_ref
+        device.is_simulated = True
+        device.lab_provider = "gns3"
+        device.gns3_project_id = project_id
+        device.gns3_node_id = node_id
+        device.console_host = console_host
+        device.console_port = console_port
+        device.console_type = console_type or "telnet"
+        device.bootstrapped = True
+        device.status = DeviceStatus.ONLINE
+        if payload.site:
+            device.site = payload.site
 
+    if device is not None:
         db.commit()
         db.refresh(device)
         device_id = device.id

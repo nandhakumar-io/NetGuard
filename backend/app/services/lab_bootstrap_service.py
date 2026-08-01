@@ -51,7 +51,7 @@ def bootstrap_cisco_ios(
     """
     try:
         from netmiko import ConnectHandler
-        from netmiko.exceptions import NetmikoTimeoutError, NetmikoAuthenticationException
+        from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
     except ImportError as exc:  # pragma: no cover - dependency always present, defensive only
         return BootstrapResult(success=False, output="", error=f"netmiko not available: {exc}")
 
@@ -68,8 +68,8 @@ def bootstrap_cisco_ios(
     }
 
     commands = []
-    if hostname:
-        commands.append(f"hostname {hostname}")
+    if False:
+        pass
     commands += [
         "no ip domain-lookup",
         f"interface {mgmt_interface}",
@@ -93,10 +93,14 @@ def bootstrap_cisco_ios(
         try:
             with ConnectHandler(**device) as conn:
                 conn.enable()
-                output = conn.send_config_set(commands)
+                output = ""
+                if hostname:
+                    output += conn.send_config_set([f"hostname {hostname}"])
+                    conn.set_base_prompt()
+                output += conn.send_config_set(commands)
                 conn.save_config()
                 return BootstrapResult(success=True, output=output)
-        except (NetmikoTimeoutError, NetmikoAuthenticationException, OSError) as exc:
+        except (NetmikoTimeoutException, NetmikoAuthenticationException, OSError) as exc:
             # Node likely still booting / console not accepting connections
             # yet -- retry until ready_timeout_seconds elapses rather than
             # failing on the first attempt.

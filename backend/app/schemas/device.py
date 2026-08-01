@@ -23,6 +23,19 @@ class DeviceBase(BaseModel):
     snmp_auth_credential_ref: str | None = None  # v3 auth passphrase
     snmp_privacy_credential_ref: str | None = None  # v3 priv passphrase
 
+    # --- NETCONF / RESTCONF (Protocol Manager) ---
+    supports_netconf: bool = False
+    netconf_port: int | None = 830
+    supports_restconf: bool = False
+    restconf_url: str | None = None
+
+    # --- Discovered / manually-entered inventory detail ---
+    platform: str | None = None
+    model: str | None = None
+    serial_number: str | None = None
+    os_version: str | None = None
+    capabilities: str | None = None
+
     # --- Lab / simulation backing (GNS3) ---
     is_simulated: bool = False
     lab_provider: str | None = None
@@ -52,6 +65,15 @@ class DeviceUpdate(BaseModel):
     snmp_username: str | None = None
     snmp_auth_credential_ref: str | None = None
     snmp_privacy_credential_ref: str | None = None
+    supports_netconf: bool | None = None
+    netconf_port: int | None = None
+    supports_restconf: bool | None = None
+    restconf_url: str | None = None
+    platform: str | None = None
+    model: str | None = None
+    serial_number: str | None = None
+    os_version: str | None = None
+    capabilities: str | None = None
     is_simulated: bool | None = None
     lab_provider: str | None = None
     gns3_project_id: str | None = None

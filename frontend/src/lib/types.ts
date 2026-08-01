@@ -14,6 +14,20 @@ export interface Device {
   flagged_unstable?: boolean;
   unstable_since?: string | null;
   supports_snmp?: boolean;
+  snmp_version?: "v1" | "v2c" | "v3" | null;
+  snmp_community_ref?: string | null;
+  snmp_username?: string | null;
+  snmp_auth_credential_ref?: string | null;
+  snmp_privacy_credential_ref?: string | null;
+  supports_netconf?: boolean;
+  netconf_port?: number | null;
+  supports_restconf?: boolean;
+  restconf_url?: string | null;
+  platform?: string | null;
+  model?: string | null;
+  serial_number?: string | null;
+  os_version?: string | null;
+  capabilities?: string | null;
 }
 
 export type ChangePriority = "low" | "medium" | "high" | "emergency";
@@ -267,6 +281,18 @@ export interface DeploymentRecord {
   error_message: string | null;
   created_at: string;
   health_checks: HealthCheck[];
+}
+
+export interface ProtocolOperationRecord {
+  id: string;
+  protocol: "netconf" | "restconf" | "snmp";
+  operation: string;
+  operator: string;
+  success: boolean;
+  error_message: string | null;
+  http_status: number | null;
+  execution_time_ms: number | null;
+  created_at: string;
 }
 
 // --- GNS3 Lab Integration ---
