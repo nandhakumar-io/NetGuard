@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import { api } from "../lib/api";
 import { DeploymentRecord, DeploymentLog } from "../lib/types";
+import PipelineStages, { Stage, StageState, stagesFromStatus } from "../components/PipelineStages";
 
 const STATUS_STYLES: Record<DeploymentRecord["status"], string> = {
   queued: "bg-slate-100 text-slate-600",
@@ -82,43 +83,28 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
 
     if (hasLog && deployment.status === "failed") return "failed";
     if (hasLog) return "passed";
+    if (isCurrent && (deployment.status === "queued" || deployment.status === "in_progress")) return "running";
     return "pending";
   }
 
+  // Same four stages driven by real log data (not the coarse status-only
+  // heuristic PipelineStages falls back to elsewhere) -- this is the
+  // ground truth Jenkins-style strip for a single deployment run.
+  const pipelineStages: Stage[] = steps.map((st) => ({
+    key: st.key,
+    label: st.label,
+    state: (getStepStatus(st.key) === "rolled_back" ? "skipped" : getStepStatus(st.key)) as StageState,
+  }));
+
   return (
-    <div className="flex flex-col md:flex-row gap-6 p-4 bg-slate-50 border-t border-slate-200">
-      
+    <div className="flex flex-col gap-6 p-4 bg-slate-50 border-t border-slate-200">
+      <div className="overflow-x-auto pb-1">
+        <PipelineStages stages={pipelineStages} />
+      </div>
+      <div className="flex flex-col md:flex-row gap-6">
+
       {/* LEFT PANE: Progress & Health Checks */}
       <div className="w-full md:w-1/3 flex flex-col gap-6 p-2">
-        <div>
-          <h4 className="text-xs uppercase font-bold text-slate-500 mb-3 tracking-wider">Timeline</h4>
-          <div className="relative pl-5 border-l-2 border-slate-200/60 pb-2 space-y-5 ml-2">
-            {steps.map((st, idx) => {
-              const status = getStepStatus(st.key);
-              let icon = <div className="w-[11px] h-[11px] rounded-full bg-slate-300 absolute -left-[7px] top-1" />;
-              let textStyle = "text-slate-400";
-              
-              if (status === "passed") {
-                icon = <div className="w-[15px] h-[15px] rounded-full bg-green-500 absolute -left-[9px] top-[2px] ring-4 ring-slate-50 shadow-sm" />;
-                textStyle = "text-green-700 font-medium";
-              } else if (status === "failed") {
-                icon = <div className="w-[15px] h-[15px] rounded-full bg-red-500 absolute -left-[9px] top-[2px] ring-4 ring-slate-50 shadow-sm" />;
-                textStyle = "text-red-700 font-medium";
-              } else if (status === "rolled_back") {
-                icon = <div className="w-[15px] h-[15px] rounded-full bg-amber-500 absolute -left-[9px] top-[2px] ring-4 ring-slate-50 shadow-sm" />;
-                textStyle = "text-amber-700 font-medium";
-              }
-
-              return (
-                <div key={idx} className="relative">
-                  {icon}
-                  <span className={`text-[13px] ${textStyle} -mt-1 block`}>{st.label}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
         <div>
           <h4 className="text-xs uppercase font-bold text-slate-500 mb-2 tracking-wider">Health Sweeps</h4>
           {deployment.health_checks.length > 0 ? (
@@ -180,6 +166,7 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
           )}
         </div>
       </div>
+      </div>
     </div>
   );
 }
@@ -233,7 +220,7 @@ export default function Deployments() {
         <div>
           <h1 className="text-3xl font-bold text-navy">Deployments & Logs</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Real-time pipeline monitoring and historical live logs.
+            Jenkins-style pipeline view (Snapshot → Deploy → Verify → Complete) with real-time logs.
           </p>
         </div>
         <div className="text-right text-xs text-slate-400">
@@ -274,13 +261,14 @@ export default function Deployments() {
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Device</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Protocol</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Status</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Pipeline</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Health Checks</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading && (
               <tr>
-                <td colSpan={6} className="text-center text-slate-400 py-12">
+                <td colSpan={7} className="text-center text-slate-400 py-12">
                   <div className="inline-block w-5 h-5 border-2 border-slate-200 border-t-brandblue rounded-full animate-spin mb-2" />
                   <p>Loading deployments…</p>
                 </td>
@@ -288,7 +276,7 @@ export default function Deployments() {
             )}
             {!loading && filtered.length === 0 && (
               <tr>
-                <td colSpan={6} className="text-center text-slate-400 py-12">
+                <td colSpan={7} className="text-center text-slate-400 py-12">
                   {deployments.length === 0
                     ? "No deployments yet. Approve a change request to trigger the pipeline."
                     : "No deployments match the selected filter."}
@@ -312,6 +300,9 @@ export default function Deployments() {
                       {d.status.replace(/_/g, " ")}
                     </span>
                   </td>
+                  <td className="px-5 py-4">
+                    <PipelineStages stages={stagesFromStatus(d.status, d.health_checks.length > 0)} compact />
+                  </td>
                   <td className="px-5 py-4 text-slate-500 font-medium whitespace-nowrap">
                     {d.health_checks.length > 0
                       ? <span className="bg-slate-100 px-2 py-0.5 rounded-full text-slate-700 text-xs shadow-sm font-semibold border border-slate-200">{d.health_checks.filter((c) => c.passed).length}/{d.health_checks.length} passed</span>
@@ -321,7 +312,7 @@ export default function Deployments() {
                 </tr>
                 {expanded === d.id && (
                   <tr>
-                    <td colSpan={6} className="p-0 border-b-2 border-slate-200">
+                    <td colSpan={7} className="p-0 border-b-2 border-slate-200">
                       <DeploymentDetails deployment={d} />
                     </td>
                   </tr>
