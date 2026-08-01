@@ -1,8 +1,52 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { Device, Snapshot, RunningConfig, StartupConfig, BackupHistoryEntry, CompareConfigResponse } from "../lib/types";
+import {
+  Device,
+  Snapshot,
+  RunningConfig,
+  StartupConfig,
+  BackupHistoryEntry,
+  CompareConfigResponse,
+  DeviceHealthSummary,
+  DeviceMetric,
+  Alert as AlertRow,
+} from "../lib/types";
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
+
+const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
+  green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 border-green-200" },
+  yellow: { dot: "bg-riskmed", text: "text-riskmed", bg: "bg-amber-50 border-amber-200" },
+  red: { dot: "bg-riskcrit", text: "text-riskcrit", bg: "bg-red-50 border-red-200" },
+  unknown: { dot: "bg-slate-300", text: "text-slate-400", bg: "bg-slate-50 border-slate-200" },
+};
+
+const ALERT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: string }> = {
+  critical: { text: "text-riskcrit", bg: "bg-red-50 border-red-200", icon: "🚨" },
+  warning: { text: "text-riskmed", bg: "bg-amber-50 border-amber-200", icon: "⚠️" },
+  info: { text: "text-brandblue", bg: "bg-blue-50 border-blue-200", icon: "ℹ️" },
+};
+
+function formatUptime(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const days = Math.floor(seconds / 86400);
+  const hrs = Math.floor((seconds % 86400) / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hrs}h`;
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  return `${mins}m`;
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
 const statusColor: Record<string, string> = {
   online: "bg-risklow",
@@ -63,6 +107,81 @@ function DeviceInlineDetails({
   const [compareResult, setCompareResult] = useState<CompareConfigResponse | null>(null);
   const [comparing, setComparing] = useState(false);
 
+  // Health tab state (shared with Interfaces tab, which reads the same
+  // metric history -- interface_utilization_pct/interface_errors are
+  // columns on the same DeviceMetric row, there's no separate per-interface
+  // table in this schema).
+  const [health, setHealth] = useState<DeviceHealthSummary | null>(null);
+  const [metricHistory, setMetricHistory] = useState<DeviceMetric[]>([]);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
+
+  // Alerts tab state
+  const [deviceAlerts, setDeviceAlerts] = useState<AlertRow[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [ackingId, setAckingId] = useState<string | null>(null);
+
+  const loadHealth = () => {
+    setHealthLoading(true);
+    setHealthError(null);
+    Promise.all([
+      api.get<DeviceHealthSummary>(`/devices/${device.id}/health`),
+      api.get<DeviceMetric[]>(`/devices/${device.id}/metrics/history?hours=24`),
+    ])
+      .then(([healthRes, historyRes]) => {
+        setHealth(healthRes.data);
+        setMetricHistory(historyRes.data);
+      })
+      .catch(() => setHealthError("No SNMP telemetry available for this device yet."))
+      .finally(() => setHealthLoading(false));
+  };
+
+  const pollNow = async () => {
+    setPolling(true);
+    try {
+      await api.post(`/devices/${device.id}/metrics/poll`);
+      loadHealth();
+    } catch (err: any) {
+      setHealthError(err?.response?.data?.detail || "On-demand poll failed.");
+    } finally {
+      setPolling(false);
+    }
+  };
+
+  const loadAlerts = () => {
+    setAlertsLoading(true);
+    setAlertsError(null);
+    api
+      .get<AlertRow[]>(`/alerts?device_id=${device.id}&limit=25`)
+      .then((res) => setDeviceAlerts(res.data))
+      .catch(() => setAlertsError("Failed to load alerts for this device."))
+      .finally(() => setAlertsLoading(false));
+  };
+
+  const acknowledgeAlert = async (alertId: string) => {
+    setAckingId(alertId);
+    try {
+      const res = await api.patch<AlertRow>(`/alerts/${alertId}/acknowledge`);
+      setDeviceAlerts((prev) => prev.map((a) => (a.id === alertId ? res.data : a)));
+    } catch {
+      // leave the row as-is; the button re-enables so the user can retry
+    } finally {
+      setAckingId(null);
+    }
+  };
+
+  useEffect(() => {
+    if ((activeTab === "Health" || activeTab === "Interfaces") && !health && !healthLoading) {
+      loadHealth();
+    }
+    if (activeTab === "Alerts" && deviceAlerts.length === 0 && !alertsLoading) {
+      loadAlerts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, device.id]);
+
   useEffect(() => {
     if (activeTab === "Configuration" && !running) {
       setConfigLoading(true);
@@ -85,6 +204,7 @@ function DeviceInlineDetails({
         .finally(() => setHistoryLoading(false));
     }
   }, [activeTab, device.id, running, history.length]);
+
 
   const runCompare = async () => {
     setComparing(true);
@@ -153,9 +273,109 @@ function DeviceInlineDetails({
         )}
 
         {activeTab === "Health" && (
-          <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
-            <div className="text-3xl mb-2">🩺</div>
-            <p className="text-sm font-medium">Health checks and live telemetry coming in next phase.</p>
+          <div>
+            {healthLoading && !health ? (
+              <p className="text-xs text-slate-400">Loading telemetry…</p>
+            ) : healthError && !health ? (
+              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-70">
+                <div className="text-3xl mb-2">🩺</div>
+                <p className="text-sm font-medium">{healthError}</p>
+                {!device.supports_snmp && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    Enable SNMP monitoring for this device in Devices → Edit to start collecting health telemetry.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`w-3 h-3 rounded-full ${
+                        HEALTH_COLOR_STYLES[health?.health_color || "unknown"].dot
+                      }`}
+                    />
+                    <span className="text-2xl font-bold text-navy">
+                      {health?.health_score != null ? `${health.health_score}/100` : "No score yet"}
+                    </span>
+                    <span className={`text-xs font-bold uppercase tracking-wide ${health?.reachable ? "text-risklow" : "text-riskcrit"}`}>
+                      {health?.reachable ? "Reachable" : "Unreachable"}
+                    </span>
+                  </div>
+                  {canManage && (
+                    <button
+                      onClick={pollNow}
+                      disabled={polling}
+                      className="text-xs font-bold uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 disabled:opacity-50"
+                    >
+                      {polling ? "Polling…" : "↻ Poll Now"}
+                    </button>
+                  )}
+                </div>
+
+                {healthError && <p className="text-riskcrit text-xs">{healthError}</p>}
+
+                {health?.latest_metric ? (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {[
+                      { label: "CPU", value: health.latest_metric.cpu_utilization_pct, suffix: "%" },
+                      { label: "Memory", value: health.latest_metric.memory_utilization_pct, suffix: "%" },
+                      { label: "Temperature", value: health.latest_metric.temperature_celsius, suffix: "°C" },
+                      { label: "Uptime", value: formatUptime(health.latest_metric.uptime_seconds), suffix: "" },
+                      { label: "Fan Status", value: health.latest_metric.fan_status || "unknown", suffix: "" },
+                      { label: "Power Supply", value: health.latest_metric.power_supply_status || "unknown", suffix: "" },
+                      { label: "Interface Util.", value: health.latest_metric.interface_utilization_pct, suffix: "%" },
+                      { label: "Interface Errors", value: health.latest_metric.interface_errors, suffix: "" },
+                    ].map((m) => (
+                      <div key={m.label} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
+                        <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">{m.label}</p>
+                        <p className="text-lg font-bold text-navy capitalize">
+                          {m.value === null || m.value === undefined
+                            ? "—"
+                            : typeof m.value === "number"
+                            ? `${Math.round(m.value * 10) / 10}${m.suffix}`
+                            : m.value}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400 italic">No poll recorded yet.</p>
+                )}
+
+                {metricHistory.length > 0 && (
+                  <div>
+                    <h4 className="text-xs uppercase font-bold text-slate-500 mb-2 tracking-wider">
+                      Last 24h ({metricHistory.length} poll{metricHistory.length === 1 ? "" : "s"})
+                    </h4>
+                    <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-100 sticky top-0">
+                          <tr>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Polled</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">CPU</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Mem</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Temp</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Score</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {[...metricHistory].reverse().slice(0, 50).map((m) => (
+                            <tr key={m.id} className="bg-white">
+                              <td className="px-3 py-1.5 text-slate-500">{timeAgo(m.polled_at)}</td>
+                              <td className="px-3 py-1.5 text-slate-700">{m.cpu_utilization_pct ?? "—"}</td>
+                              <td className="px-3 py-1.5 text-slate-700">{m.memory_utilization_pct ?? "—"}</td>
+                              <td className="px-3 py-1.5 text-slate-700">{m.temperature_celsius ?? "—"}</td>
+                              <td className="px-3 py-1.5 font-bold text-slate-700">{m.health_score ?? "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -189,9 +409,66 @@ function DeviceInlineDetails({
         )}
 
         {activeTab === "Interfaces" && (
-          <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
-            <div className="text-3xl mb-2">🔌</div>
-            <p className="text-sm font-medium">Interface state tables and bandwidth utilization coming in next phase.</p>
+          <div>
+            {healthLoading && metricHistory.length === 0 ? (
+              <p className="text-xs text-slate-400">Loading interface telemetry…</p>
+            ) : metricHistory.length === 0 ? (
+              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+                <div className="text-3xl mb-2">🔌</div>
+                <p className="text-sm font-medium">No interface telemetry recorded yet for this device.</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  {device.supports_snmp
+                    ? "Waiting for the next SNMP poll (or use Poll Now on the Health tab)."
+                    : "Enable SNMP monitoring on this device to start collecting it."}
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                <p className="text-xs text-slate-400">
+                  NetGuard currently tracks fleet-aggregate interface throughput and error counts per SNMP poll
+                  (not yet broken out per physical interface). Shown below: total link utilization and cumulative
+                  error count over the last 24h.
+                </p>
+                <div className="grid grid-cols-2 gap-3 max-w-md">
+                  <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
+                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Current Utilization</p>
+                    <p className="text-lg font-bold text-navy">
+                      {metricHistory[metricHistory.length - 1]?.interface_utilization_pct ?? "—"}%
+                    </p>
+                  </div>
+                  <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
+                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Current Errors</p>
+                    <p className="text-lg font-bold text-navy">
+                      {metricHistory[metricHistory.length - 1]?.interface_errors ?? "—"}
+                    </p>
+                  </div>
+                </div>
+                <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-100 sticky top-0">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Polled</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Utilization</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Errors</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {[...metricHistory].reverse().slice(0, 50).map((m) => (
+                        <tr key={m.id} className="bg-white">
+                          <td className="px-3 py-1.5 text-slate-500">{timeAgo(m.polled_at)}</td>
+                          <td className="px-3 py-1.5 text-slate-700">
+                            {m.interface_utilization_pct != null ? `${m.interface_utilization_pct}%` : "—"}
+                          </td>
+                          <td className={`px-3 py-1.5 font-bold ${m.interface_errors ? "text-riskcrit" : "text-slate-700"}`}>
+                            {m.interface_errors ?? "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -274,8 +551,58 @@ function DeviceInlineDetails({
           </div>
         )}
 
+        {activeTab === "Alerts" && (
+          <div>
+            {alertsLoading ? (
+              <p className="text-xs text-slate-400">Loading alerts…</p>
+            ) : alertsError ? (
+              <p className="text-xs text-riskcrit">{alertsError}</p>
+            ) : deviceAlerts.length === 0 ? (
+              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+                <div className="text-3xl mb-2">✅</div>
+                <p className="text-sm font-medium">No alerts recorded for this device.</p>
+              </div>
+            ) : (
+              <ul className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                {deviceAlerts.map((a) => {
+                  const style = ALERT_SEVERITY_STYLES[a.severity] || ALERT_SEVERITY_STYLES.info;
+                  return (
+                    <li key={a.id} className={`border rounded-lg px-3 py-2.5 shadow-sm ${style.bg}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-2">
+                          <span className="text-base leading-none mt-0.5">{style.icon}</span>
+                          <div>
+                            <p className={`text-xs font-bold uppercase tracking-wide ${style.text}`}>
+                              {a.category}
+                            </p>
+                            <p className="text-sm text-navy mt-0.5">{a.message}</p>
+                            <p className="text-[11px] text-slate-400 mt-1">
+                              {timeAgo(a.created_at)} · {a.source.replace("_", " ")}
+                              {a.resolved && " · resolved"}
+                              {!a.resolved && a.acknowledged && " · acknowledged"}
+                            </p>
+                          </div>
+                        </div>
+                        {!a.acknowledged && !a.resolved && (
+                          <button
+                            onClick={() => acknowledgeAlert(a.id)}
+                            disabled={ackingId === a.id}
+                            className="shrink-0 text-[10px] uppercase tracking-wider font-bold text-slate-500 border border-slate-300 bg-white px-2 py-1 rounded hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            {ackingId === a.id ? "…" : "Acknowledge"}
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+
         {/* Placeholders for remaining tabs */}
-        {["Drift", "Alerts", "Protocol Operations", "Deployment History"].includes(activeTab) && (
+        {["Drift", "Protocol Operations", "Deployment History"].includes(activeTab) && (
           <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
             <div className="text-3xl mb-2">🚧</div>
             <p className="text-sm font-medium">{activeTab} data integration coming in next phase.</p>

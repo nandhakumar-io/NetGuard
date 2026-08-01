@@ -13,6 +13,7 @@ export interface Device {
   ssh_credential_ref?: string | null;
   flagged_unstable?: boolean;
   unstable_since?: string | null;
+  supports_snmp?: boolean;
 }
 
 export type ChangePriority = "low" | "medium" | "high" | "emergency";
@@ -359,4 +360,33 @@ export interface TopologyEdge {
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+}
+
+// --- SNMP Health / Metrics (per-device Health & Interfaces tabs) ---
+
+export type HealthColor = "green" | "yellow" | "red";
+
+export interface DeviceMetric {
+  id: string;
+  device_id: string;
+  cpu_utilization_pct: number | null;
+  memory_utilization_pct: number | null;
+  interface_utilization_pct: number | null;
+  interface_errors: number | null;
+  temperature_celsius: number | null;
+  fan_status: string | null;
+  power_supply_status: string | null;
+  uptime_seconds: number | null;
+  health_score: number | null;
+  health_color: HealthColor | null;
+  polled_at: string;
+}
+
+export interface DeviceHealthSummary {
+  device_id: string;
+  hostname: string;
+  health_score: number | null;
+  health_color: string;
+  reachable: boolean;
+  latest_metric: DeviceMetric | null;
 }
