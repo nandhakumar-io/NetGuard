@@ -335,3 +335,28 @@ export interface GNS3SyncResponse {
     detail?: string | null;
   }>;
 }
+
+export interface TopologyNode {
+  id: string;
+  hostname: string;
+  ip_address: string;
+  vendor: string;
+  site?: string | null;
+  device_type?: string | null;
+  status: DeviceStatus;
+  flagged_unstable: boolean;
+  has_config_on_file: boolean;
+}
+
+export interface TopologyEdge {
+  source: string;
+  target: string;
+  subnet: string;
+  source_ip: string;
+  target_ip: string;
+}
+
+export interface TopologyResponse {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+}

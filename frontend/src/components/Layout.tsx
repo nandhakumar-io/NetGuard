@@ -7,6 +7,7 @@ const links = [
   { to: "/change-requests", label: "Change Requests" },
   { to: "/deployments", label: "Deployments" },
   { to: "/devices", label: "Devices" },
+  { to: "/topology", label: "Topology" },
   { to: "/drift", label: "Drift" },
   { to: "/alerts", label: "Alerts" },
   { to: "/lab", label: "GNS3 Lab" },
