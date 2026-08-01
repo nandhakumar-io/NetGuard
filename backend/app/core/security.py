@@ -2,20 +2,39 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from jose import jwt
-from passlib.context import CryptContext
 
 from app.core.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# --- Password hashing ---
+#
+# Calls the `bcrypt` library directly rather than going through passlib's
+# CryptContext. passlib 1.7.x detects the installed bcrypt version by
+# reading `bcrypt.__about__.__version__`, which was removed in bcrypt
+# 4.1+ -- on any environment that resolves a newer bcrypt than the
+# repo's pin (a fresh `pip install` without exact version locking, a
+# rebuilt image, etc.) this makes passlib silently fail to detect a
+# backend and register/login start raising errors, surfaced to the user
+# as a generic "Authentication failed". Calling bcrypt directly has no
+# such version-sniffing step, so hashing/verifying works the same on
+# every bcrypt version.
+_BCRYPT_MAX_BYTES = 72  # bcrypt's own hard limit; longer inputs are truncated, matching passlib's prior default behavior
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    pw_bytes = password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    return bcrypt.hashpw(pw_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    pw_bytes = plain_password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    try:
+        return bcrypt.checkpw(pw_bytes, hashed_password.encode("utf-8"))
+    except ValueError:
+        # Malformed/foreign hash format (e.g. a stale non-bcrypt hash) --
+        # treat as "wrong password" rather than a 500.
+        return False
 
 
 # --- JWT access / MFA-challenge tokens ---
