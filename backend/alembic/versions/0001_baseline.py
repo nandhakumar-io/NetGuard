@@ -38,32 +38,37 @@ def upgrade() -> None:
     # as the app's models define it today (this is what create_all() did,
     # just made idempotent and repeatable instead of implicit/on every boot).
     #
-    # IMPORTANT: `Base.metadata` reflects the CURRENT codebase, not the
-    # schema as it stood when this migration was written -- so create_all()
-    # here would also create every table added by migrations *after* this
-    # one, before they get a chance to run. On a genuinely fresh database
-    # that means this step and (e.g.) 85cec3c5accf both try to create
-    # `alerts`, and the second one fails with "type already exists".
+    # This deliberately does NOT try to exclude tables that later
+    # migrations (0002_config_drift.py, 85cec3c5accf_add_telemetry_tables.py)
+    # also create -- an earlier version of this migration tried filtering
+    # `Base.metadata` down to a table subset, which turned out to be a
+    # dead end for two independent reasons, both confirmed against a real
+    # Postgres instance:
+    #   1. Passing a filtered `tables=` list to create_all() only skips
+    #      creating the *tables* you excluded, not standalone PostgreSQL
+    #      ENUM types used by those tables' columns -- SQLAlchemy treats
+    #      ENUM types as metadata-scoped, created regardless of which
+    #      tables you actually asked for. Even fully detaching the Table
+    #      object via `MetaData.remove()` didn't stop its column's Enum
+    #      type from still being created.
+    #   2. Creating tables one-by-one (to dodge #1) loses create_all()'s
+    #      automatic topological sort, which also breaks: this schema has
+    #      a genuine circular FK (change_requests.rollback_snapshot_id ->
+    #      config_snapshots.id and config_snapshots.change_request_id ->
+    #      change_requests.id) that only create_all()'s built-in
+    #      two-phase/ALTER-based handling resolves correctly.
     #
-    # Tables below are excluded because a later migration in this chain
-    # already owns creating them via its own op.create_table(...). Any
-    # future migration that adds `op.create_table("some_new_table", ...)`
-    # must add "some_new_table" to this set too, or it will collide with
-    # this baseline on fresh installs the same way.
-    OWNED_BY_LATER_MIGRATIONS = {
-        "config_drifts",         # 0002_config_drift.py
-        "alerts",                # 85cec3c5accf_add_telemetry_tables.py
-        "device_metrics",        # 85cec3c5accf_add_telemetry_tables.py
-        "protocol_operations",   # 85cec3c5accf_add_telemetry_tables.py
-        "deployment_logs",       # 85cec3c5accf_add_telemetry_tables.py
-    }
-
+    # Instead, the *later* migrations that also create these tables guard
+    # themselves with an inspector check (see 0002_config_drift.py's
+    # `if "config_drifts" in inspector.get_table_names(): return` and the
+    # equivalent `existing_tables` check in 85cec3c5accf) and skip their
+    # own op.create_table(...) when this step already created it. That
+    # puts the idempotency where it belongs -- on the migration that would
+    # otherwise collide -- without fighting SQLAlchemy's metadata/DDL
+    # internals here.
     from app.core.database import Base
 
-    baseline_tables = [
-        table for name, table in Base.metadata.tables.items() if name not in OWNED_BY_LATER_MIGRATIONS
-    ]
-    Base.metadata.create_all(bind=bind, checkfirst=True, tables=baseline_tables)
+    Base.metadata.create_all(bind=bind, checkfirst=True)
 
     # Existing-install path: patch known schema drift on tables that
     # already existed before this migration was introduced.

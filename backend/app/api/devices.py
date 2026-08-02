@@ -1,11 +1,19 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
+from app.models.alert import Alert
+from app.models.audit_log import AuditLog
+from app.models.change_request import ChangeRequest
+from app.models.config_drift import ConfigDrift
+from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
+from app.models.device_metric import DeviceMetric
+from app.models.golden_config import GoldenConfig
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
@@ -106,10 +114,84 @@ def update_device(
 
 
 @router.delete("/{device_id}", status_code=204)
-def delete_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+def delete_device(
+    device_id: uuid.UUID,
+    force: bool = Query(False, description="Also permanently delete this device's change/deployment/config history"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Delete a device. Fails with a clear 409 (rather than the raw FK
+    error Postgres would otherwise raise) if the device has compliance-
+    relevant history -- change requests, deployments, config snapshots, or
+    a defined golden config -- unless `force=true` is passed, since those
+    records are exactly what audit trails and compliance reports (see
+    app.services.compliance_report) are built from.
+
+    Pure telemetry (alerts, drift records, SNMP metrics, protocol op logs)
+    has no standalone value once the device is gone, so it's always purged
+    regardless of `force` -- that's what used to trigger the bare
+    `alerts_device_id_fkey` IntegrityError this replaces.
+    """
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+
+    blocking_counts = {
+        "change_requests": db.query(func.count(ChangeRequest.id)).filter(ChangeRequest.device_id == device_id).scalar(),
+        "deployments": db.query(func.count(Deployment.id)).filter(Deployment.device_id == device_id).scalar(),
+        "config_snapshots": db.query(func.count(ConfigSnapshot.id)).filter(ConfigSnapshot.device_id == device_id).scalar(),
+        "golden_config": db.query(func.count(GoldenConfig.id)).filter(GoldenConfig.device_id == device_id).scalar(),
+    }
+    blocking_counts = {k: v for k, v in blocking_counts.items() if v}
+
+    if blocking_counts and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"'{device.hostname}' has change/deployment history and cannot be deleted without confirmation. "
+                    "Retry with ?force=true to permanently delete the device along with this history."
+                ),
+                "counts": blocking_counts,
+            },
+        )
+
+    # Pure telemetry: no compliance value once the device is gone, always purged.
+    db.query(Alert).filter(Alert.device_id == device_id).delete(synchronize_session=False)
+    db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
+    db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
+    db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
+
+    if force and blocking_counts:
+        # Deletion order matters: children before parents.
+        # deployment_logs / health_check_results -> deployments -> change_requests
+        deployment_ids = [
+            d.id for d in db.query(Deployment.id).filter(Deployment.device_id == device_id).all()
+        ]
+        if deployment_ids:
+            db.query(DeploymentLog).filter(DeploymentLog.deployment_id.in_(deployment_ids)).delete(synchronize_session=False)
+            db.query(HealthCheckResult).filter(HealthCheckResult.deployment_id.in_(deployment_ids)).delete(synchronize_session=False)
+        db.query(Deployment).filter(Deployment.device_id == device_id).delete(synchronize_session=False)
+        db.query(ConfigSnapshot).filter(ConfigSnapshot.device_id == device_id).delete(synchronize_session=False)
+        db.query(GoldenConfig).filter(GoldenConfig.device_id == device_id).delete(synchronize_session=False)
+
+        change_request_ids = [
+            cr.id for cr in db.query(ChangeRequest.id).filter(ChangeRequest.device_id == device_id).all()
+        ]
+        if change_request_ids:
+            # Audit history is immutable/preserved for compliance -- detach
+            # the dangling reference rather than deleting the log rows.
+            db.query(AuditLog).filter(AuditLog.change_request_id.in_(change_request_ids)).update(
+                {"change_request_id": None}, synchronize_session=False
+            )
+        db.query(ChangeRequest).filter(ChangeRequest.device_id == device_id).delete(synchronize_session=False)
+
+        audit_service.record_event(
+            db, actor=current_user.email, action="Device Force-Deleted", result="Deleted",
+            device_hostname=device.hostname,
+            detail=f"Purged history: {blocking_counts}",
+        )
+
     db.delete(device)
     db.commit()
 
@@ -228,6 +310,14 @@ def set_snmp_credentials(
     )
     db.commit()
     db.refresh(device)
+
+    # Don't make the operator wait for the next scheduled sweep to see
+    # whether the credentials they just entered actually work -- poll
+    # immediately (best-effort; failures here don't block the response,
+    # same as the create/enable-SNMP paths above).
+    if device.supports_snmp:
+        _poll_snmp_best_effort(db, device)
+        db.refresh(device)
 
     audit_service.record_event(
         db, actor=current_user.email, action="SNMP Credentials Updated", result="Success",

@@ -131,41 +131,68 @@ NAPALM_DRIVER_MAP = {
 }
 
 
+_TELNET_DEVICE_TYPE_MAP = {
+    "cisco_ios": "cisco_ios_telnet",
+    "arista_eos": "arista_eos_telnet",
+    # juniper_junos / linux have no Netmiko telnet variant -- callers get
+    # None back for those exactly as if telnet weren't attempted at all.
+}
+
+
 def read_running_config(
     device_type: str,
     ip_address: str,
     username: str,
     password: str,
-) -> str | None:
-    """Best-effort live read of a device's current running-config via
-    NAPALM, used to take a genuine "state right now" snapshot immediately
-    before a rollback is applied (as opposed to reusing whatever config
-    happened to be recorded in the DB from the last deployment, which may
-    be stale if the device was touched out-of-band).
+) -> tuple[str | None, str]:
+    """Best-effort live read of a device's current running-config: SSH
+    (via NAPALM) first, then falling back to Netmiko-over-Telnet if SSH's
+    connection phase fails outright -- refused, timed out, no SSH server
+    running at all. This matters most for devices that were never
+    configured for SSH (GNS3 lab nodes before their one-time bootstrap,
+    older gear managed only over telnet historically).
 
-    Returns None -- not an exception -- when the platform has no NAPALM
-    driver (e.g. plain linux hosts) or the read otherwise fails; callers
-    should treat that as "couldn't confirm live state" and fall back to
-    their best available prior snapshot rather than blocking the rollback
-    on it. A failed pre-rollback snapshot is not a reason to refuse an
-    emergency rollback.
+    Returns (config_text_or_None, protocol_used) where protocol_used is
+    "ssh", "telnet", or "none" (nothing reachable) -- callers should
+    surface a warning to the user whenever it's "telnet", since that
+    session was unencrypted.
+
+    A failed read is not an exception in either branch; callers already
+    treat None as "couldn't confirm live state" (see the docstring below
+    for why that's safe for the rollback pre-snapshot use case).
     """
     driver_name = NAPALM_DRIVER_MAP.get(device_type)
-    if driver_name is None:
-        return None
-    try:
-        import napalm
-
-        driver = napalm.get_network_driver(driver_name)
-        device = driver(hostname=ip_address, username=username, password=password, timeout=10)
-        device.open()
+    if driver_name is not None:
         try:
-            config = device.get_config()
-            return config.get("running") or None
-        finally:
-            device.close()
-    except Exception:  # noqa: BLE001 - best-effort; caller falls back
-        return None
+            import napalm
+
+            driver = napalm.get_network_driver(driver_name)
+            device = driver(hostname=ip_address, username=username, password=password, timeout=10)
+            device.open()
+            try:
+                config = device.get_config()
+                running = config.get("running") or None
+                if running:
+                    return running, "ssh"
+            finally:
+                device.close()
+        except Exception:  # noqa: BLE001 - fall through to telnet below
+            pass
+
+    telnet_device_type = _TELNET_DEVICE_TYPE_MAP.get(device_type)
+    if telnet_device_type is None:
+        return None, "none"
+
+    try:
+        from netmiko import ConnectHandler
+
+        with ConnectHandler(
+            device_type=telnet_device_type, host=ip_address, username=username, password=password, timeout=10,
+        ) as conn:
+            output = conn.send_command("show running-config")
+        return (output or None), "telnet"
+    except Exception:  # noqa: BLE001 - best-effort; caller treats None as unreachable
+        return None, "none"
 
 
 def rollback_config(

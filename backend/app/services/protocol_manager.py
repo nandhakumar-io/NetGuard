@@ -202,16 +202,20 @@ class ProtocolManager:
                 error=result.error, execution_time_ms=result.execution_time_ms,
             )
 
-        # SSH fallback via NAPALM (deployment_engine.read_running_config)
+        # SSH first, Netmiko-over-Telnet fallback (deployment_engine.read_running_config)
         start = time.perf_counter()
         device_type = _netmiko_device_type(self.device)
-        config = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
+        config, used_protocol = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
         elapsed = (time.perf_counter() - start) * 1000
+        if used_protocol == "telnet":
+            error = None  # success, but flag it as an unencrypted-fallback read, not a failure
+        else:
+            error = None if config is not None else "SSH/NAPALM read failed or unsupported platform (Telnet fallback also unavailable)"
         return self._record(
-            protocol="ssh", operation="get_running_config", success=config is not None,
+            protocol=used_protocol if config is not None else "ssh",
+            operation="get_running_config", success=config is not None,
             request=None, response=config, http_status=None,
-            error=None if config is not None else "SSH/NAPALM read failed or unsupported platform",
-            execution_time_ms=elapsed,
+            error=error, execution_time_ms=elapsed,
         )
 
     def deploy_config(self, config_text: str) -> ProtocolResult:
@@ -361,12 +365,13 @@ class ProtocolManager:
 
         start = time.perf_counter()
         device_type = _netmiko_device_type(self.device)
-        config = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
+        config, used_protocol = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
         elapsed = (time.perf_counter() - start) * 1000
         return self._record(
-            protocol="ssh", operation="health_check", success=config is not None,
+            protocol=used_protocol if config is not None else "ssh",
+            operation="health_check", success=config is not None,
             request=None, response=None, http_status=None,
-            error=None if config is not None else "SSH unreachable", execution_time_ms=elapsed,
+            error=None if config is not None else "Unreachable via SSH or Telnet", execution_time_ms=elapsed,
         )
 
 

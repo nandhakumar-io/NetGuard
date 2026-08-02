@@ -12,7 +12,7 @@ from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
-from app.services import diff_engine, event_bus, risk_engine, snapshot_service, validation_engine, audit_service
+from app.services import diff_engine, event_bus, protocol_manager, risk_engine, snapshot_service, validation_engine, audit_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
@@ -81,11 +81,25 @@ def create_change_request(
     # before/after-aware checks). Every *other* device's latest config is
     # also pulled so the analyzer can catch fleet-wide conflicts (duplicate
     # IPs, VLAN naming conflicts) rather than only within this one device.
-    current_config = _latest_config(db, payload.device_id)
+    # Current config: prefer a fresh live read from the device itself (it's
+    # already been proven reachable -- see health_monitor/snmp -- so use
+    # that reachability instead of trusting a snapshot that may be stale or
+    # may not exist yet for a device that's never been deployed to). Falls
+    # back to the last snapshot on file if the live read fails for any
+    # reason (device briefly unreachable, no supported protocol configured,
+    # etc.) -- never blocks change-request submission on this being a
+    # best-effort improvement, not a hard requirement.
+    pm = protocol_manager.ProtocolManager(db, device, operator=current_user.email)
+    live_running = pm.get_running_config()
+    current_config = live_running.output if live_running.success else _latest_config(db, payload.device_id)
     fleet_configs = _fleet_configs(db, payload.device_id)
 
     diff_text = diff_engine.generate_diff(current_config, payload.proposed_config)
-    validation = validation_engine.validate_syntax(payload.proposed_config)
+    validation = validation_engine.validate_syntax(
+        payload.proposed_config,
+        vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
+        current_config=current_config,
+    )
     risk: RiskAnalysisResult = risk_engine.analyze(payload.proposed_config, current_config, fleet_configs)
     critical = risk_engine.is_critical(risk)
 

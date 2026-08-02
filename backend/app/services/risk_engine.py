@@ -368,13 +368,14 @@ class RuleBasedScorer(RiskScorer):
 
 
 class LLMScorer(RiskScorer):
-    """Optional ML/LLM-backed scorer, selected via
+    """Optional Claude-backed scorer, selected via
     `settings.RISK_ENGINE_BACKEND = "llm"`. Runs the same deterministic
     NetworkAwareChecks first (so hard conflicts are never missed even if the
-    model call fails or is unavailable), then asks the model to reason about
-    softer/contextual risk and merges its findings in. Falls back to the
-    rule-based score alone if no API key is configured or the call errors,
-    so enabling this backend can never make analysis unavailable.
+    model call fails or is unavailable), then asks Claude (model =
+    settings.ANTHROPIC_MODEL) to reason about softer/contextual risk and
+    merges its findings in. Falls back to the rule-based score alone if no
+    ANTHROPIC_API_KEY is configured or the call errors, so enabling this
+    backend can never make analysis unavailable.
     """
 
     def __init__(self) -> None:
@@ -407,7 +408,8 @@ class LLMScorer(RiskScorer):
 
     def _call_llm(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
         import json
-        import requests
+
+        import anthropic
 
         prompt = (
             "You are a network change-risk reviewer. Given the proposed device "
@@ -417,17 +419,14 @@ class LLMScorer(RiskScorer):
             f"CURRENT CONFIG:\n{current_config or '(none provided)'}\n\n"
             f"PROPOSED CONFIG:\n{proposed_config}"
         )
-        resp = requests.post(
-            f"{settings.LOCAL_LLM_BASE_URL}/chat/completions",
-            json={
-                "model": settings.LOCAL_LLM_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0,
-            },
-            timeout=30,
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=1024,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
         )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
+        raw = "".join(block.text for block in message.content if block.type == "text")
         data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
         return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
 

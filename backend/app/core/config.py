@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # call fails, so switching this never makes analysis unavailable.
     RISK_ENGINE_BACKEND: str = "rules"
     ANTHROPIC_API_KEY: str | None = None
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
 
     # Critical Risk changes (score > RISK_MEDIUM_MAX) require a second,
     # distinct Network Administrator approval before deployment is
@@ -153,10 +154,6 @@ class Settings(BaseSettings):
     GNS3_PASSWORD: str | None = None
     GNS3_REQUEST_TIMEOUT_SECONDS: float = 10.0
     GNS3_CONSOLE_READY_TIMEOUT_SECONDS: float = 45.0
-
-    LOCAL_LLM_BASE_URL: str = "http://localhost:11434/v1"   
-    LOCAL_LLM_MODEL: str = "llama3.1:8b"
-
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

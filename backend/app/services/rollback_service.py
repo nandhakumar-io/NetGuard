@@ -105,7 +105,7 @@ def initiate_rollback(
     current_config = None
     try:
         ssh_password = credential_service.get_ssh_password(device)
-        current_config = deployment_engine.read_running_config(
+        current_config, _used_protocol = deployment_engine.read_running_config(
             _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
         )
     except credential_service.CredentialNotFoundError:
