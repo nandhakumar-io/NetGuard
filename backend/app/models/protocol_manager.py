@@ -23,6 +23,7 @@ Extending Device with protocol-specific credential refs is a schema change
 outside this integration's scope (Device is one of the "already
 implemented, do not regenerate" models).
 """
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -76,6 +77,14 @@ class ProtocolManager:
         self.db = db
         self.device = device
         self.operator = operator
+
+    @property
+    def _vendor(self) -> str:
+        """Plain string vendor value (e.g. "cisco") for netconf_service's
+        ncclient device_params selection -- see
+        netconf_service._device_params_for_vendor.
+        """
+        return self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor)
 
     # -- internal helpers ---------------------------------------------
 
@@ -186,7 +195,8 @@ class ProtocolManager:
 
         if protocol == ProtocolName.NETCONF:
             result = netconf_service.get_config(
-                self.device.ip_address, self.device.netconf_port, username, password, source="running"
+                self.device.ip_address, self.device.netconf_port, username, password,
+                source="running", vendor=self._vendor,
             )
             return self._record(
                 protocol="netconf", operation="get_running_config", success=result.success,
@@ -222,7 +232,10 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == ProtocolName.NETCONF:
-            result = netconf_service.push_config(self.device.ip_address, self.device.netconf_port, username, password, config_text)
+            result = netconf_service.push_config(
+                self.device.ip_address, self.device.netconf_port, username, password, config_text,
+                vendor=self._vendor,
+            )
             return self._record(
                 protocol="netconf", operation="deploy_config", success=result.success,
                 request=result.request_xml, response=result.response_xml, http_status=None,
@@ -230,7 +243,40 @@ class ProtocolManager:
             )
 
         if protocol == ProtocolName.RESTCONF:
-            result = restconf_service.patch(self.device.restconf_url, "data", username, password, {"raw": config_text})
+            # RESTCONF's PATCH /data expects a JSON body whose keys are
+            # actual YANG module:container paths (e.g.
+            # {"ietf-interfaces:interfaces": {...}}) -- no real RESTCONF
+            # device accepts an arbitrary opaque wrapper like the old
+            # {"raw": config_text}, which just gets rejected (400/415) by
+            # the device's YANG datastore validation. config_text has to
+            # actually *be* that JSON body -- there's no generic way to
+            # turn IOS-CLI-style lines into a YANG-modeled document
+            # without a per-model translation layer, so a change request
+            # targeting a RESTCONF-only device is expected to carry JSON
+            # here (change_requests.proposed_config), not CLI text.
+            try:
+                yang_body = json.loads(config_text)
+            except (json.JSONDecodeError, TypeError) as exc:
+                return self._record(
+                    protocol="restconf", operation="deploy_config", success=False,
+                    request=config_text, response=None, http_status=None,
+                    error=(
+                        "RESTCONF deployment requires proposed_config to be a JSON body matching a YANG "
+                        f"data model at {self.device.restconf_url}/data (e.g. "
+                        '{"ietf-interfaces:interfaces": {...}}), not CLI-style text. '
+                        f"JSON parse failed: {exc}"
+                    ),
+                    execution_time_ms=0.0,
+                )
+            if not isinstance(yang_body, dict):
+                return self._record(
+                    protocol="restconf", operation="deploy_config", success=False,
+                    request=config_text, response=None, http_status=None,
+                    error="RESTCONF deployment requires a JSON object body (YANG container), got a JSON "
+                          f"{type(yang_body).__name__} instead.",
+                    execution_time_ms=0.0,
+                )
+            result = restconf_service.patch(self.device.restconf_url, "data", username, password, yang_body)
             return self._record(
                 protocol="restconf", operation="deploy_config", success=result.success,
                 request=result.request_body, response=result.response_body, http_status=result.http_status,
@@ -272,7 +318,10 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == ProtocolName.NETCONF:
-            result = netconf_service.get_config(self.device.ip_address, self.device.netconf_port, username, password, source="running")
+            result = netconf_service.get_config(
+                self.device.ip_address, self.device.netconf_port, username, password,
+                source="running", vendor=self._vendor,
+            )
             return self._record(
                 protocol="netconf", operation="get_interfaces", success=result.success,
                 request=result.request_xml, response=result.response_xml, http_status=None,
@@ -305,7 +354,9 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == ProtocolName.NETCONF:
-            caps = netconf_service.discover_capabilities(self.device.ip_address, self.device.netconf_port, username, password)
+            caps = netconf_service.discover_capabilities(
+                self.device.ip_address, self.device.netconf_port, username, password, vendor=self._vendor,
+            )
             return self._record(
                 protocol="netconf", operation="get_facts", success=caps is not None,
                 request="<hello/>", response=str(caps) if caps else None, http_status=None,
@@ -344,7 +395,9 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == ProtocolName.NETCONF:
-            caps = netconf_service.discover_capabilities(self.device.ip_address, self.device.netconf_port, username, password)
+            caps = netconf_service.discover_capabilities(
+                self.device.ip_address, self.device.netconf_port, username, password, vendor=self._vendor,
+            )
             return self._record(
                 protocol="netconf", operation="health_check", success=caps is not None,
                 request=None, response=None, http_status=None,

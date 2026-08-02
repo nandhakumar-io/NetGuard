@@ -1,9 +1,6 @@
 import asyncio
 import asyncssh
 import uuid
-import base64
-import os
-import re
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.orm import Session
 from jose import JWTError
@@ -11,8 +8,9 @@ from app.core.database import get_db
 from app.models.device import Device
 from app.models.user import User
 from app.core.security import decode_access_token
+from app.services import credential_service
 
-router = APIRouter()
+router = APIRouter(prefix="/devices", tags=["terminal"])
 
 async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket):
     try:
@@ -84,8 +82,12 @@ async def device_terminal(
         await websocket.close()
         return
 
-    cred_key = re.sub(r"[^A-Za-z0-9]", "_", device.ssh_credential_ref.upper())
-    env_password = os.getenv(f"NETGUARD_CRED_{cred_key}") or "cisco"
+    try:
+        env_password = credential_service.get_ssh_password(device)
+    except credential_service.CredentialNotFoundError as exc:
+        await websocket.send_text(f"\r\n\x1b[31mError: {exc}\x1b[0m\r\n")
+        await websocket.close()
+        return
 
     await websocket.send_text(f"\r\n\x1b[36mInitiating secure shell connection to {device.ip_address}...\x1b[0m\r\n")
 

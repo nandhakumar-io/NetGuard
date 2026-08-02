@@ -20,6 +20,8 @@ store is a one-file change:
 import os
 import re
 
+from app.core import crypto
+from app.core.config import settings
 from app.models.device import Device
 
 
@@ -36,6 +38,24 @@ def _fetch_from_env(credential_ref: str) -> str | None:
     return os.environ.get(_env_key(credential_ref))
 
 
+def _fetch_dev_default() -> str | None:
+    """Dev-only fallback used when a device's specific ref has no matching
+    NETGUARD_CRED_<REF> entry.
+
+    GNS3 lab bootstrap (app.api.gns3._slug_cred_ref) mints a fresh
+    ssh_credential_ref per node (e.g. "gns3-ciscoiosvl2-1"), so every newly
+    bootstrapped lab device needs its own env var or it 404s/500s on
+    config read until someone manually adds one. Lab images conventionally
+    all share one login, so in development we fall back to a single
+    NETGUARD_CRED_DEFAULT instead of forcing a per-node env entry.
+    Never applied outside ENVIRONMENT=development, so production behavior
+    (fail loudly on an unmapped credential) is unchanged.
+    """
+    if settings.ENVIRONMENT != "development":
+        return None
+    return os.environ.get("NETGUARD_CRED_DEFAULT")
+
+
 def get_ssh_password(device: Device) -> str:
     """Resolve the SSH password for a device from the secret store.
 
@@ -43,7 +63,8 @@ def get_ssh_password(device: Device) -> str:
     empty/wrong password) if the device has no `ssh_credential_ref` set, or
     if that reference doesn't resolve to anything in the store -- a missing
     credential should fail loudly before we ever open a connection to a
-    production network device.
+    production network device. In development, an unmapped ref falls back
+    to NETGUARD_CRED_DEFAULT (see _fetch_dev_default) before failing.
     """
     if not device.ssh_credential_ref:
         raise CredentialNotFoundError(
@@ -51,7 +72,7 @@ def get_ssh_password(device: Device) -> str:
             "cannot retrieve a credential to deploy with."
         )
 
-    password = _fetch_from_env(device.ssh_credential_ref)
+    password = _fetch_from_env(device.ssh_credential_ref) or _fetch_dev_default()
     if not password:
         raise CredentialNotFoundError(
             f"No credential found in the secret store for ref "
@@ -75,3 +96,82 @@ def get_secret(credential_ref: str | None, *, device: Device, label: str) -> str
             f"No {label} credential found in the secret store for ref '{credential_ref}' (device '{device.hostname}')."
         )
     return secret
+
+
+# ---------------------------------------------------------------------
+# SNMP credentials -- DB-encrypted storage (app.core.crypto), entered via
+# POST /devices/{id}/snmp-credentials rather than an env-var ref. This is
+# a deliberate departure from the SSH pattern above: the user explicitly
+# wants SNMP credentials configurable per-device and persisted for reuse,
+# not hand-added to .env one device at a time. The legacy snmp_*_ref /
+# env-var path is kept as a fallback for any device that still only has
+# that set (or for anyone who prefers the env-var workflow), but the
+# DB-encrypted columns take priority whenever present.
+# ---------------------------------------------------------------------
+
+def set_snmp_credentials(
+    device: Device,
+    *,
+    community: str | None = None,
+    v3_auth_key: str | None = None,
+    v3_priv_key: str | None = None,
+) -> None:
+    """Encrypts and stores SNMP secrets directly on the device row. Only
+    touches fields actually passed (None = leave untouched); pass "" to
+    explicitly clear a field. Caller is responsible for db.commit().
+    """
+    if community is not None:
+        device.snmp_community_encrypted = crypto.encrypt(community) if community else None
+    if v3_auth_key is not None:
+        device.snmp_auth_key_encrypted = crypto.encrypt(v3_auth_key) if v3_auth_key else None
+    if v3_priv_key is not None:
+        device.snmp_priv_key_encrypted = crypto.encrypt(v3_priv_key) if v3_priv_key else None
+
+
+def get_snmp_community(device: Device) -> str:
+    """v1/v2c community string. DB-encrypted value (set via
+    POST /devices/{id}/snmp-credentials) takes priority; falls back to
+    the legacy env-var ref (snmp_community_ref), then the dev-only
+    NETGUARD_CRED_DEFAULT, before failing loudly.
+    """
+    if device.snmp_community_encrypted:
+        secret = crypto.decrypt(device.snmp_community_encrypted)
+        if secret:
+            return secret
+    if device.snmp_community_ref:
+        secret = _fetch_from_env(device.snmp_community_ref)
+        if secret:
+            return secret
+    fallback = _fetch_dev_default()
+    if fallback:
+        return fallback
+    raise CredentialNotFoundError(
+        f"Device '{device.hostname}' has no SNMP community configured. "
+        "Set one via POST /devices/{id}/snmp-credentials."
+    )
+
+
+def get_snmp_v3_auth_key(device: Device) -> str | None:
+    """SNMPv3 auth passphrase, or None if not configured (valid for
+    noAuthNoPriv). DB-encrypted value takes priority over the legacy
+    env-var ref."""
+    if device.snmp_auth_key_encrypted:
+        secret = crypto.decrypt(device.snmp_auth_key_encrypted)
+        if secret:
+            return secret
+    if device.snmp_auth_credential_ref:
+        return _fetch_from_env(device.snmp_auth_credential_ref)
+    return None
+
+
+def get_snmp_v3_priv_key(device: Device) -> str | None:
+    """SNMPv3 privacy passphrase, or None if not configured (valid for
+    noAuthNoPriv/authNoPriv). DB-encrypted value takes priority over the
+    legacy env-var ref."""
+    if device.snmp_priv_key_encrypted:
+        secret = crypto.decrypt(device.snmp_priv_key_encrypted)
+        if secret:
+            return secret
+    if device.snmp_privacy_credential_ref:
+        return _fetch_from_env(device.snmp_privacy_credential_ref)
+    return None

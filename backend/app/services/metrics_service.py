@@ -26,12 +26,58 @@ class SnmpNotConfiguredError(Exception):
     """Raised when a device isn't set up for SNMP polling."""
 
 
-def _resolve_community(device: Device) -> str:
-    """SNMP v1/v2c community string, resolved the same way SSH/NETCONF
-    secrets are (credential_service, env-backed secret store).
+def build_snmp_auth(device: Device) -> "snmp_service.SnmpAuthConfig":
+    """Public entry point for _build_snmp_auth -- used by
+    app.api.devices' SNMP credentials test-connection endpoint, which
+    needs the same v1/v2c/v3 credential resolution as poll_device()
+    without actually running a full health poll.
     """
-    return credential_service.get_secret(
-        device.snmp_community_ref, device=device, label="SNMP community"
+    return _build_snmp_auth(device)
+
+
+def _build_snmp_auth(device: Device) -> "snmp_service.SnmpAuthConfig":
+    """Builds the SnmpAuthConfig poll_health needs from a device row +
+    the credential store -- v1/v2c resolves the community string, v3
+    resolves username/USM params and raises CredentialNotFoundError with
+    a specific, actionable message if a security-level-required secret
+    (auth key for authNoPriv/authPriv, priv key for authPriv) is missing.
+    """
+    version = device.snmp_version.value
+    port = device.snmp_port or 161
+
+    if version in ("v1", "v2c"):
+        community = credential_service.get_snmp_community(device)
+        return snmp_service.SnmpAuthConfig(version=version, community=community, port=port)
+
+    # v3
+    if not device.snmp_username:
+        raise credential_service.CredentialNotFoundError(
+            f"Device '{device.hostname}' is set to SNMPv3 but has no snmp_username configured."
+        )
+    security_level = device.snmp_security_level.value if device.snmp_security_level else "noAuthNoPriv"
+    auth_protocol = device.snmp_auth_protocol.value if device.snmp_auth_protocol else None
+    priv_protocol = device.snmp_priv_protocol.value if device.snmp_priv_protocol else None
+    auth_key = credential_service.get_snmp_v3_auth_key(device)
+    priv_key = credential_service.get_snmp_v3_priv_key(device)
+
+    if security_level in ("authNoPriv", "authPriv") and not auth_key:
+        raise credential_service.CredentialNotFoundError(
+            f"Device '{device.hostname}' security level is {security_level} but has no SNMPv3 auth key configured."
+        )
+    if security_level == "authPriv" and not priv_key:
+        raise credential_service.CredentialNotFoundError(
+            f"Device '{device.hostname}' security level is authPriv but has no SNMPv3 privacy key configured."
+        )
+
+    return snmp_service.SnmpAuthConfig(
+        version="v3",
+        port=port,
+        username=device.snmp_username,
+        security_level=security_level,
+        auth_protocol=auth_protocol,
+        auth_key=auth_key,
+        priv_protocol=priv_protocol,
+        priv_key=priv_key,
     )
 
 
@@ -99,7 +145,7 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     if not device.supports_snmp or not device.snmp_version:
         raise SnmpNotConfiguredError(f"Device '{device.hostname}' is not configured for SNMP polling")
 
-    community = _resolve_community(device)
+    auth = _build_snmp_auth(device)
 
     previous = (
         db.query(DeviceMetric)
@@ -117,8 +163,7 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
 
     metrics = snmp_service.poll_health(
         device.ip_address,
-        community,
-        version=device.snmp_version.value,
+        auth,
         timeout=settings.SNMP_TIMEOUT_SECONDS,
     )
     metrics.interface_utilization_pct = _compute_interface_utilization(metrics, previous, interval_seconds)

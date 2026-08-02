@@ -31,8 +31,8 @@ class DeviceMetric(Base):
     interface_utilization_pct = Column(Float, nullable=True)
     interface_errors = Column(Integer, nullable=True)
     temperature_celsius = Column(Float, nullable=True)
-    fan_status = Column(String, nullable=True)  # ok | failed | unknown
-    power_supply_status = Column(String, nullable=True)  # ok | failed | unknown
+    fan_status = Column(String, nullable=True)  # ok | warning | failed | unknown
+    power_supply_status = Column(String, nullable=True)  # ok | warning | failed | unknown
     uptime_seconds = Column(Integer, nullable=True)
 
     # Raw cumulative SNMP counters from this poll (ifHCInOctets +

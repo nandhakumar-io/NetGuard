@@ -27,6 +27,29 @@ class SnmpVersion(str, enum.Enum):
     V3 = "v3"
 
 
+class SnmpSecurityLevel(str, enum.Enum):
+    NO_AUTH_NO_PRIV = "noAuthNoPriv"
+    AUTH_NO_PRIV = "authNoPriv"
+    AUTH_PRIV = "authPriv"
+
+
+class SnmpAuthProtocol(str, enum.Enum):
+    MD5 = "MD5"
+    SHA = "SHA"
+    SHA224 = "SHA224"
+    SHA256 = "SHA256"
+    SHA384 = "SHA384"
+    SHA512 = "SHA512"
+
+
+class SnmpPrivProtocol(str, enum.Enum):
+    DES = "DES"
+    DES3 = "3DES"
+    AES128 = "AES128"
+    AES192 = "AES192"
+    AES256 = "AES256"
+
+
 class Device(Base):
     __tablename__ = "devices"
 
@@ -60,10 +83,31 @@ class Device(Base):
 
     # --- SNMP connection settings ---
     snmp_version = Column(Enum(SnmpVersion), nullable=True)
+    snmp_port = Column(Integer, nullable=True, default=161)
+    # Legacy env-var-ref pointers (see credential_service module docstring for
+    # the ref-> NETGUARD_CRED_<REF> env var pattern). Still supported as a
+    # fallback, but superseded by the *_encrypted columns below, which are
+    # populated by POST /devices/{id}/snmp-credentials and let an operator
+    # enter real SNMP secrets from the UI instead of hand-editing .env per
+    # device.
     snmp_community_ref = Column(String, nullable=True)  # pointer to secret store (v1/v2c)
-    snmp_username = Column(String, nullable=True)  # v3
+    snmp_username = Column(String, nullable=True)  # v3 (not secret, stored plain like ssh_username)
     snmp_auth_credential_ref = Column(String, nullable=True)  # v3 auth passphrase (secret store ref)
     snmp_privacy_credential_ref = Column(String, nullable=True)  # v3 priv passphrase (secret store ref)
+    # SNMPv3 USM parameters (not secret; auth/priv *keys* are the secrets,
+    # stored encrypted below -- protocol choice and security level are just
+    # configuration, same sensitivity as snmp_version itself).
+    snmp_security_level = Column(Enum(SnmpSecurityLevel), nullable=True)
+    snmp_auth_protocol = Column(Enum(SnmpAuthProtocol), nullable=True)
+    snmp_priv_protocol = Column(Enum(SnmpPrivProtocol), nullable=True)
+    # Fernet-encrypted (app.core.crypto) secrets stored directly on the
+    # device row -- set via credential_service.set_snmp_credentials, called
+    # from POST /devices/{id}/snmp-credentials. Never returned by any GET
+    # endpoint (excluded from DeviceRead). Takes priority over the
+    # snmp_*_ref env-var-based fallbacks above when present.
+    snmp_community_encrypted = Column(Text, nullable=True)  # v1/v2c community string
+    snmp_auth_key_encrypted = Column(Text, nullable=True)  # v3 auth passphrase
+    snmp_priv_key_encrypted = Column(Text, nullable=True)  # v3 priv passphrase
 
     # --- Discovered capabilities, e.g. NETCONF <hello> capability list, stored as JSON text ---
     capabilities = Column(Text, nullable=True)

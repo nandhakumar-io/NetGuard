@@ -16,6 +16,7 @@ import {
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
 import { WebTerminal } from "../components/WebTerminal";
+import SnmpCredentialsModal from "../components/SnmpCredentialsModal";
 
 const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
   green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 border-green-200" },
@@ -67,7 +68,12 @@ const emptyForm = {
   ssh_credential_ref: "",
   supports_snmp: false,
   snmp_version: "v2c",
+  snmp_port: "161",
   snmp_community_ref: "",
+  snmp_username: "",
+  snmp_security_level: "authPriv",
+  snmp_auth_protocol: "SHA",
+  snmp_priv_protocol: "AES128",
   supports_restconf: false,
   restconf_url: "",
 };
@@ -91,12 +97,15 @@ function DeviceInlineDetails({
   device,
   canManage,
   onQueueRollback,
+  onDeviceUpdated,
 }: {
   device: Device;
   canManage: boolean;
   onQueueRollback: (snapshot: Snapshot, reason: string) => void;
+  onDeviceUpdated: (updated: Device) => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabName>("Overview");
+  const [showSnmpCredsModal, setShowSnmpCredsModal] = useState(false);
 
   // Configuration tab state
   const [running, setRunning] = useState<RunningConfig | null>(null);
@@ -371,13 +380,28 @@ function DeviceInlineDetails({
                     </span>
                   </div>
                   {canManage && (
-                    <button
-                      onClick={pollNow}
-                      disabled={polling}
-                      className="text-xs font-bold uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 disabled:opacity-50"
-                    >
-                      {polling ? "Polling…" : "↻ Poll Now"}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {device.supports_snmp && (
+                        <button
+                          onClick={() => setShowSnmpCredsModal(true)}
+                          className="text-xs font-bold uppercase tracking-wider text-slate-600 border border-slate-200 bg-slate-50 px-3 py-1.5 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                        >
+                          🔑 Credentials
+                          {device.snmp_credentials_configured ? (
+                            <span className="w-1.5 h-1.5 rounded-full bg-risklow" />
+                          ) : (
+                            <span className="w-1.5 h-1.5 rounded-full bg-riskmed" />
+                          )}
+                        </button>
+                      )}
+                      <button
+                        onClick={pollNow}
+                        disabled={polling}
+                        className="text-xs font-bold uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 disabled:opacity-50"
+                      >
+                        {polling ? "Polling…" : "↻ Poll Now"}
+                      </button>
+                    </div>
                   )}
                 </div>
 
@@ -777,6 +801,17 @@ function DeviceInlineDetails({
           </div>
         )}
       </div>
+
+      {showSnmpCredsModal && (
+        <SnmpCredentialsModal
+          device={device}
+          onClose={() => setShowSnmpCredsModal(false)}
+          onSaved={(updated) => {
+            onDeviceUpdated(updated);
+            setShowSnmpCredsModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -844,7 +879,7 @@ export default function Devices() {
     setLoading(true);
     setError(null);
     try {
-      await api.post("/devices", form);
+      await api.post("/devices", { ...form, snmp_port: form.snmp_port ? Number(form.snmp_port) : null });
       setForm(emptyForm);
       setShowForm(false);
       load();
@@ -1027,14 +1062,71 @@ export default function Devices() {
                   <option value="v2c">SNMP v2c</option>
                   <option value="v3">SNMP v3</option>
                 </select>
-                <div className="md:col-span-2">
-                  <input
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
-                    placeholder="SNMP Community Credential Ref"
-                    value={form.snmp_community_ref}
-                    onChange={(e) => setForm({ ...form, snmp_community_ref: e.target.value })}
-                  />
-                </div>
+                <input
+                  className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                  placeholder="Port"
+                  type="number"
+                  value={form.snmp_port}
+                  onChange={(e) => setForm({ ...form, snmp_port: e.target.value })}
+                />
+                {form.snmp_version !== "v3" ? (
+                  <div className="md:col-span-2">
+                    <input
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                      placeholder="SNMP Community Credential Ref (legacy env-var fallback — or set the community itself after creating the device via 🔑 Credentials)"
+                      value={form.snmp_community_ref}
+                      onChange={(e) => setForm({ ...form, snmp_community_ref: e.target.value })}
+                    />
+                  </div>
+                ) : (
+                  <div className="md:col-span-2">
+                    <input
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                      placeholder="SNMPv3 Username"
+                      value={form.snmp_username}
+                      onChange={(e) => setForm({ ...form, snmp_username: e.target.value })}
+                    />
+                  </div>
+                )}
+                {form.snmp_version === "v3" && (
+                  <>
+                    <select
+                      className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                      value={form.snmp_security_level}
+                      onChange={(e) => setForm({ ...form, snmp_security_level: e.target.value })}
+                    >
+                      <option value="noAuthNoPriv">noAuthNoPriv</option>
+                      <option value="authNoPriv">authNoPriv</option>
+                      <option value="authPriv">authPriv</option>
+                    </select>
+                    {form.snmp_security_level !== "noAuthNoPriv" && (
+                      <select
+                        className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                        value={form.snmp_auth_protocol}
+                        onChange={(e) => setForm({ ...form, snmp_auth_protocol: e.target.value })}
+                      >
+                        {["MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"].map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    )}
+                    {form.snmp_security_level === "authPriv" && (
+                      <select
+                        className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                        value={form.snmp_priv_protocol}
+                        onChange={(e) => setForm({ ...form, snmp_priv_protocol: e.target.value })}
+                      >
+                        {["DES", "3DES", "AES128", "AES192", "AES256"].map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    )}
+                    <p className="md:col-span-4 text-[11px] text-slate-400 italic">
+                      Set the actual auth/privacy passphrases after creating the device, via the 🔑 Credentials
+                      button on its Health tab — they're stored encrypted, not as plain form fields.
+                    </p>
+                  </>
+                )}
               </>
             )}
           </div>
@@ -1208,6 +1300,9 @@ export default function Devices() {
                                 setRollbackTarget({ device: d, snapshot });
                                 setRollbackReason(reason);
                             }} 
+                            onDeviceUpdated={(updated) =>
+                                setDevices((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
+                            }
                         />
                     </td>
                   </tr>

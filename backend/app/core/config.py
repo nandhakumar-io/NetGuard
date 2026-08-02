@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change-me-to-a-long-random-string"
+    # Fernet key (see app.core.crypto) encrypting SNMP credentials stored
+    # in the database (Device.snmp_*_encrypted). Falls back to a fixed
+    # dev-only key if unset -- production deployments should set this.
+    SECRET_ENCRYPTION_KEY: str | None = None
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7

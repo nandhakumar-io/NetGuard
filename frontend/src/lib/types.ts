@@ -15,10 +15,15 @@ export interface Device {
   unstable_since?: string | null;
   supports_snmp?: boolean;
   snmp_version?: "v1" | "v2c" | "v3" | null;
+  snmp_port?: number | null;
   snmp_community_ref?: string | null;
   snmp_username?: string | null;
   snmp_auth_credential_ref?: string | null;
   snmp_privacy_credential_ref?: string | null;
+  snmp_security_level?: "noAuthNoPriv" | "authNoPriv" | "authPriv" | null;
+  snmp_auth_protocol?: "MD5" | "SHA" | "SHA224" | "SHA256" | "SHA384" | "SHA512" | null;
+  snmp_priv_protocol?: "DES" | "3DES" | "AES128" | "AES192" | "AES256" | null;
+  snmp_credentials_configured?: boolean;
   supports_netconf?: boolean;
   netconf_port?: number | null;
   supports_restconf?: boolean;

@@ -23,7 +23,36 @@ class NetconfResult:
     error: str | None = None
 
 
-def _connect(ip_address: str, port: int, username: str, password: str, device_params: dict | None = None):
+# Maps app.models.device.DeviceVendor values to the ncclient device_params
+# "name" that selects its vendor-specific NETCONF handler (XML quirks,
+# RPC dialect differences, etc. -- ncclient ships ~9 of these; "default"
+# is the plain-IETF handler that plenty of platforms don't actually need).
+# Cisco is IOS-XE by default here since that's the mainstream NETCONF-
+# capable Cisco platform (classic IOS/IOS-XR don't speak NETCONF the same
+# way); Arista EOS's NETCONF support is close enough to the plain IETF
+# model that ncclient has no dedicated handler for it, so it stays on
+# "default" -- same as Linux, which isn't a NETCONF target at all.
+_VENDOR_DEVICE_PARAMS = {
+    "cisco": "iosxe",
+    "juniper": "junos",
+    "arista": "default",
+    "linux": "default",
+}
+
+
+def _device_params_for_vendor(vendor: str | None) -> dict:
+    name = _VENDOR_DEVICE_PARAMS.get((vendor or "").lower(), "default")
+    return {"name": name}
+
+
+def _connect(
+    ip_address: str,
+    port: int,
+    username: str,
+    password: str,
+    device_params: dict | None = None,
+    vendor: str | None = None,
+):
     from ncclient import manager
 
     return manager.connect(
@@ -32,7 +61,7 @@ def _connect(ip_address: str, port: int, username: str, password: str, device_pa
         username=username,
         password=password,
         hostkey_verify=False,
-        device_params=device_params or {"name": "default"},
+        device_params=device_params or _device_params_for_vendor(vendor),
         timeout=30,
     )
 
@@ -43,6 +72,7 @@ def get_config(
     username: str,
     password: str,
     source: str = "running",
+    vendor: str | None = None,
 ) -> NetconfResult:
     """<get-config> for a datastore (running/candidate/startup). Used to
     pull the current config before a Digital Twin simulation or drift
@@ -51,7 +81,7 @@ def get_config(
     start = time.perf_counter()
     request_xml = f'<get-config><source><{source}/></source></get-config>'
     try:
-        with _connect(ip_address, port, username, password) as conn:
+        with _connect(ip_address, port, username, password, vendor=vendor) as conn:
             reply = conn.get_config(source=source)
             elapsed = (time.perf_counter() - start) * 1000
             return NetconfResult(True, request_xml, str(reply), elapsed)
@@ -67,6 +97,7 @@ def push_config(
     password: str,
     config_xml: str,
     target: str = "candidate",
+    vendor: str | None = None,
 ) -> NetconfResult:
     """Lock -> edit-config -> validate -> commit -> unlock, in order.
 
@@ -82,7 +113,7 @@ def push_config(
     )
     responses: list[str] = []
     try:
-        with _connect(ip_address, port, username, password) as conn:
+        with _connect(ip_address, port, username, password, vendor=vendor) as conn:
             conn.lock(target=target)
             try:
                 edit_reply = conn.edit_config(target=target, config=config_xml)
@@ -115,13 +146,15 @@ def push_config(
         return NetconfResult(False, request_xml, "\n".join(responses), elapsed, error=str(exc))
 
 
-def discover_capabilities(ip_address: str, port: int, username: str, password: str) -> list[str] | None:
+def discover_capabilities(
+    ip_address: str, port: int, username: str, password: str, vendor: str | None = None
+) -> list[str] | None:
     """Returns the server's advertised NETCONF <hello> capabilities, or
     None if the device couldn't be reached over NETCONF at all -- used to
     populate Device.capabilities and confirm supports_netconf.
     """
     try:
-        with _connect(ip_address, port, username, password) as conn:
+        with _connect(ip_address, port, username, password, vendor=vendor) as conn:
             return list(conn.server_capabilities)
     except Exception:  # noqa: BLE001
         return None

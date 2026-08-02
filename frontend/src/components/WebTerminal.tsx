@@ -33,12 +33,16 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
     // Small delay to ensure container is fully rendered before fitting
     setTimeout(() => fitAddon.fit(), 50);
 
-    const baseUrl = window.location.hostname;
-    // Attempt to parse out the host from the VITE_API_URL env var, or fallback gracefully
-    let wsHost = `${baseUrl}:8000`;
-    if (import.meta.env.VITE_API_URL) {
+    // Derive the WS host from the same VITE_API_BASE_URL the rest of the
+    // app's API client (lib/api.ts) uses -- this used to read a
+    // VITE_API_URL var that was never actually set anywhere (.env only
+    // defines VITE_API_BASE_URL), so it silently fell through to a
+    // hardcoded ":8000" guess on window.location.hostname every time,
+    // which only happened to work for the default local-dev setup.
+    let wsHost = `${window.location.hostname}:8000`;
+    if (import.meta.env.VITE_API_BASE_URL) {
        try {
-           wsHost = new URL(import.meta.env.VITE_API_URL).host;
+           wsHost = new URL(import.meta.env.VITE_API_BASE_URL).host;
        } catch (e) { }
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';

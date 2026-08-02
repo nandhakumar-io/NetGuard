@@ -9,9 +9,9 @@ from app.models.device import Device
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
-from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate
+from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate, SnmpCredentialsUpdate, SnmpTestResult
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
-from app.services import rollback_service, audit_service, metrics_service
+from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -44,7 +44,7 @@ ROLLBACK_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 
 @router.get("", response_model=list[DeviceRead])
 def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    return db.query(Device).all()
+    return [DeviceRead.from_device(d) for d in db.query(Device).all()]
 
 
 @router.post("", response_model=DeviceRead, status_code=201)
@@ -63,7 +63,7 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depend
     if device.supports_snmp:
         _poll_snmp_best_effort(db, device)
 
-    return device
+    return DeviceRead.from_device(device)
 
 
 @router.get("/{device_id}", response_model=DeviceRead)
@@ -71,7 +71,7 @@ def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(ge
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return device
+    return DeviceRead.from_device(device)
 
 
 @router.patch("/{device_id}", response_model=DeviceRead)
@@ -102,7 +102,7 @@ def update_device(
     if device.supports_snmp and not was_snmp_enabled:
         _poll_snmp_best_effort(db, device)
 
-    return device
+    return DeviceRead.from_device(device)
 
 
 @router.delete("/{device_id}", status_code=204)
@@ -195,7 +195,77 @@ def clear_unstable_flag(
         device_hostname=device.hostname,
         detail="Manual review completed; automated deploys re-enabled.",
     )
-    return device
+    return DeviceRead.from_device(device)
+
+
+@router.post("/{device_id}/snmp-credentials", response_model=DeviceRead)
+def set_snmp_credentials(
+    device_id: uuid.UUID,
+    payload: SnmpCredentialsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Sets/updates SNMP secrets for a device: the v1/v2c community string,
+    or the SNMPv3 auth/privacy passphrases. Encrypted at rest (Fernet, see
+    app.core.crypto) and never returned by any GET endpoint -- DeviceRead
+    only exposes a derived `snmp_credentials_configured` boolean. Only
+    fields present in the request are touched; omit a field to leave it
+    unchanged, or send "" to explicitly clear it.
+
+    This does not itself verify the credentials work -- use
+    POST /devices/{id}/snmp-credentials/test for that, either before or
+    after saving.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    credential_service.set_snmp_credentials(
+        device,
+        community=payload.community,
+        v3_auth_key=payload.v3_auth_key,
+        v3_priv_key=payload.v3_priv_key,
+    )
+    db.commit()
+    db.refresh(device)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="SNMP Credentials Updated", result="Success",
+        device_hostname=device.hostname,
+        detail="community" if payload.community is not None else "v3 auth/priv keys",
+    )
+
+    return DeviceRead.from_device(device)
+
+
+@router.post("/{device_id}/snmp-credentials/test", response_model=SnmpTestResult)
+def test_snmp_credentials(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Verifies SNMP connectivity using whatever credentials are currently
+    on file for this device (DB-encrypted first, legacy env-var ref as
+    fallback -- see credential_service), without doing a full health poll.
+    Lets an operator confirm a community string / SNMPv3 credential set
+    actually works right after saving it, instead of waiting for the next
+    scheduled poll to find out it doesn't.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not device.snmp_version:
+        raise HTTPException(status_code=400, detail="Device has no SNMP version configured (snmp_version is unset)")
+
+    try:
+        auth = metrics_service.build_snmp_auth(device)
+    except credential_service.CredentialNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    from app.core.config import settings
+
+    result = snmp_service.test_connection(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
+    return SnmpTestResult(**result)
 
 
 @router.get("/{device_id}/protocol-operations")

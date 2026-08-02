@@ -5,6 +5,7 @@ e.g. https://10.0.0.1/restconf). Every call returns a RestconfResult with
 enough detail (status code, request/response body, execution time) to be
 persisted as a ProtocolOperation audit record.
 """
+import json
 import time
 from dataclasses import dataclass
 
@@ -30,7 +31,12 @@ class RestconfResult:
 
 def _request(method: str, url: str, username: str, password: str, json_body: dict | None, timeout: float = 15.0):
     start = time.perf_counter()
-    body_str = None if json_body is None else str(json_body)
+    # json.dumps, not str(): str({...}) produces Python repr (single-quoted
+    # keys, None/True/False) which is *not* valid JSON and corrupts the
+    # audit trail (ProtocolOperation.request_payload) -- anyone replaying
+    # or diffing a logged RESTCONF request body needs it to actually be
+    # the JSON that was sent on the wire.
+    body_str = None if json_body is None else json.dumps(json_body)
     try:
         with httpx.Client(verify=False, timeout=timeout) as client:
             resp = client.request(
