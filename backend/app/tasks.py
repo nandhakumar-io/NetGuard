@@ -56,6 +56,34 @@ def deploy_device_task(self, cr_id: str, device_id: str, actor_email: str) -> st
         db.close()
 
 
+@celery_app.task(
+    name="app.tasks.retry_deployment_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 2},
+)
+def retry_deployment_task(self, cr_id: str, device_id: str, actor_email: str) -> str:
+    """Re-runs the full snapshot -> deploy -> verify -> (rollback) pipeline
+    for ONE device that previously failed/rolled back, without touching
+    the other devices on the same change request. Unlike
+    run_deployment_pipeline_task (which fans out every target device via
+    a chord), this drives a single device end-to-end and re-aggregates
+    the change request's overall status itself once done -- there's no
+    second device to wait on.
+    """
+    db = SessionLocal()
+    try:
+        cr = db.get(ChangeRequest, uuid.UUID(cr_id))
+        if cr is None:
+            raise ValueError(f"ChangeRequest {cr_id} no longer exists")
+        deployment = pipeline_service.run_deployment_for_device(db, cr, uuid.UUID(device_id), actor_email)
+        pipeline_service.aggregate_change_request_status(db, cr)
+        return str(deployment.id)
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.finalize_change_request_task")
 def finalize_change_request_task(_deployment_ids: list[str], cr_id: str, actor_email: str) -> str:
     """Chord callback: runs once every deploy_device_task for this change

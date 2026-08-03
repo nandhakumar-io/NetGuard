@@ -34,6 +34,15 @@ def looks_like_xml(raw: str | None) -> bool:
     return bool(raw and raw.strip().startswith("<"))
 
 
+def looks_like_json(raw: str | None) -> bool:
+    if not str(raw).strip().startswith(("{", "[")):
+        return False
+    try:
+        json.loads(raw)
+        return True
+    except (ValueError, TypeError):
+        return False
+
 def strip_rpc_envelope(raw: str | None) -> str | None:
     """Strips the outer <rpc-reply>/<data> NETCONF envelope from a
     <get-config> reply, returning just the actual config content (e.g.
@@ -136,25 +145,7 @@ def cli_to_netconf_config(cli_text: str) -> str:
         if line.strip() and not line.strip().startswith(("!", "#"))
     ]
     cmd_xml = "".join(f"<cmd>{_xml_escape(c)}</cmd>" for c in cmds)
-    # <config> needs an *explicit* NETCONF base namespace here, even
-    # though it's ultimately nested inside an <rpc> element that's
-    # already in that namespace. ncclient parses this string into its
-    # own standalone lxml Element (via to_ele()) before appending it as
-    # a child of the <edit-config> node; lxml elements built from a
-    # separate document don't inherit the parent tree's default
-    # namespace on append, so without this, the serialized RPC came out
-    # as <config xmlns="">...</config> -- a *different* (empty) namespace
-    # than the one edit-config's schema expects for its <config> child.
-    # IOS-XE devices enforce that strictly and rejected the whole push
-    # with an rpc-error: tag "unknown-element", bad-element "config",
-    # path "/rpc/edit-config" -- the device wasn't objecting to the
-    # cli-config-data content at all, it never recognized the wrapping
-    # <config> element itself as the one the schema requires.
-    return (
-        '<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">'
-        f'<cli-config-data xmlns="http://cisco.com/yang/cisco-ia">{cmd_xml}</cli-config-data>'
-        "</config>"
-    )
+    return f'<cli-config-data xmlns="http://cisco.com/yang/cisco-ia">{cmd_xml}</cli-config-data>'
 
 
 @dataclass

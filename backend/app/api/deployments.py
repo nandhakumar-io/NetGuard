@@ -5,10 +5,17 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.models.deployment import Deployment, HealthCheckResult
+from app.models.change_request import ChangeRequest
+from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResult
+from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
+from app.models.user import User
+from app.services import audit_service
+from app.tasks import retry_deployment_task
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
+
+RETRYABLE_STATUSES = (DeploymentStatus.FAILED, DeploymentStatus.ROLLED_BACK)
 
 
 def _serialize(d: Deployment, db: Session) -> dict:
@@ -56,6 +63,54 @@ def get_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), _=De
     if not d:
         raise HTTPException(status_code=404, detail="Deployment not found")
     return _serialize(d, db)
+
+
+@router.post("/{deployment_id}/retry")
+def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Re-runs the full snapshot -> deploy -> verify -> (rollback) pipeline
+    for the device behind a FAILED or ROLLED_BACK deployment, without
+    touching any other device on the same change request (see
+    app.tasks.retry_deployment_task, which this dispatches).
+
+    Only deployments in a terminal failure state are retryable -- a
+    SUCCEEDED deployment has nothing to retry, and one still IN_PROGRESS
+    would race the pipeline that's already running it.
+    """
+    deployment = db.get(Deployment, deployment_id)
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    if deployment.status not in RETRYABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Deployment is '{deployment.status.value}' and can't be retried -- only "
+                f"{', '.join(s.value for s in RETRYABLE_STATUSES)} deployments are retryable."
+            ),
+        )
+
+    cr = db.get(ChangeRequest, deployment.change_request_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request for this deployment no longer exists")
+
+    device = db.get(Device, deployment.device_id)
+    if device and device.flagged_unstable:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{device.hostname}' is flagged unstable after repeated deployment failures. "
+                "Clear the unstable flag (POST /devices/{id}/clear-unstable-flag) before retrying."
+            ),
+        )
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="Deployment Retry Queued", result="Queued",
+        device_hostname=device.hostname if device else None, change_request_id=cr.id,
+        detail=f"Retrying deployment {deployment_id} (was {deployment.status.value}).",
+    )
+
+    task = retry_deployment_task.delay(str(cr.id), str(deployment.device_id), current_user.email)
+    return {"message": "Retry queued.", "task_id": task.id, "change_request_id": str(cr.id), "device_id": str(deployment.device_id)}
 
 
 @router.get("/snapshots/{snapshot_id}/checksum")

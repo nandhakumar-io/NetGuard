@@ -1,4 +1,5 @@
 import datetime
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -71,7 +72,9 @@ def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
 def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
     if db.query(Device).filter(Device.hostname == payload.hostname).first():
         raise HTTPException(status_code=400, detail="Device with this hostname already exists")
-    device = Device(**payload.model_dump())
+    data = payload.model_dump()
+    checks = data.pop("enabled_health_checks", None)
+    device = Device(**data, enabled_health_checks=json.dumps(checks) if checks else None)
     db.add(device)
     db.commit()
     db.refresh(device)
@@ -84,6 +87,20 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depend
         _poll_snmp_best_effort(db, device)
 
     return DeviceRead.from_device(device)
+
+
+@router.get("/health-checks/catalog")
+def list_health_check_catalog(_=Depends(get_current_user)):
+    """The full set of post-deployment verification checks (health_monitor
+    .ALL_CHECKS) a device's `enabled_health_checks` can select from, so the
+    UI can render a picker instead of hardcoding check names.
+    """
+    from app.services import health_monitor
+
+    return [
+        {"name": name, "category": meta["category"], "label": meta["label"]}
+        for name, meta in health_monitor.ALL_CHECKS.items()
+    ]
 
 
 @router.get("/{device_id}", response_model=DeviceRead)
@@ -112,6 +129,10 @@ def update_device(
             raise HTTPException(status_code=400, detail="Device with this hostname already exists")
 
     was_snmp_enabled = device.supports_snmp
+
+    if "enabled_health_checks" in updates:
+        checks = updates.pop("enabled_health_checks")
+        device.enabled_health_checks = json.dumps(checks) if checks else None
 
     for field, value in updates.items():
         setattr(device, field, value)
@@ -148,13 +169,27 @@ def delete_device(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    blocking_counts = {
-        "change_requests": db.query(func.count(ChangeRequest.id)).filter(ChangeRequest.device_id == device_id).scalar(),
-        "deployments": db.query(func.count(Deployment.id)).filter(Deployment.device_id == device_id).scalar(),
-        "config_snapshots": db.query(func.count(ConfigSnapshot.id)).filter(ConfigSnapshot.device_id == device_id).scalar(),
-        "golden_config": db.query(func.count(GoldenConfig.id)).filter(GoldenConfig.device_id == device_id).scalar(),
-    }
-    blocking_counts = {k: v for k, v in blocking_counts.items() if v}
+    try:
+        blocking_counts = {
+            "change_requests": db.query(func.count(ChangeRequest.id)).filter(ChangeRequest.device_id == device_id).scalar(),
+            "deployments": db.query(func.count(Deployment.id)).filter(Deployment.device_id == device_id).scalar(),
+            "config_snapshots": db.query(func.count(ConfigSnapshot.id)).filter(ConfigSnapshot.device_id == device_id).scalar(),
+            "golden_config": db.query(func.count(GoldenConfig.id)).filter(GoldenConfig.device_id == device_id).scalar(),
+        }
+        blocking_counts = {k: v for k, v in blocking_counts.items() if v}
+    except SQLAlchemyError:
+        # Same "never let this fall through unhandled" reasoning as the
+        # purge below -- an error here used to propagate raw, skip
+        # CORSMiddleware, and show up in the browser as a bare "Network
+        # Error" with no status/body at all.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"Could not check '{device.hostname}' for related history due to a database error. Please try again.",
+                "counts": {},
+            },
+        )
 
     if blocking_counts and not force:
         raise HTTPException(
@@ -175,6 +210,15 @@ def delete_device(
         db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
         db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
         db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
+        # DiscoveredNeighbor has two FKs into devices (device_id, the
+        # discovering device, and neighbor_device_id, a resolved
+        # neighbor) -- both need clearing or this device can never be
+        # deleted even with force=true (every retry hits the same
+        # IntegrityError since nothing ever purges these rows).
+        db.query(DiscoveredNeighbor).filter(DiscoveredNeighbor.device_id == device_id).delete(synchronize_session=False)
+        db.query(DiscoveredNeighbor).filter(DiscoveredNeighbor.neighbor_device_id == device_id).update(
+            {"neighbor_device_id": None}, synchronize_session=False
+        )
 
         # Compliance-relevant records (only reached when force=true or counts are 0).
         # Deletion order: children before parents.

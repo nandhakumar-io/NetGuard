@@ -217,10 +217,11 @@ def push_config(
         if stripped is not None and stripped != config_xml:
             config_xml = stripped
             
-        # Ensure it has a <config> envelope because ncclient's edit_config expects the actual <config> node
-        # if you pass a string, or it passes it verbatim which fails if not wrapped.
-        if not config_xml.strip().startswith("<config"):
-            config_xml = f'<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">\n{config_xml}\n</config>'
+        # We do NOT add a <config> envelope here because ncclient's
+        # `conn.edit_config(..., config=config_xml)` method AUTOMATICALLY
+        # wraps XML element strings in a `<config>` top-level node. Passing
+        # an explicit `<config>` tag strings causes double `<config><config>`
+        # nesting which the server rejects with bad-element config.
 
     def _push_once(conn, push_target: str, caps) -> tuple[str, list[str]]:
         """One lock -> edit-config -> validate -> commit -> unlock

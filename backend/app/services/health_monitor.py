@@ -296,14 +296,32 @@ def check_vpn(netmiko_type: str, ip_address: str, username: str, password: str) 
 # ---------------------------------------------------------------------
 # suite orchestration
 # ---------------------------------------------------------------------
+# Registry of every check the suite can run, keyed by the same
+# `check_name` each CheckOutcome carries. Used both to build the full
+# suite and to let callers (API, UI) select a subset -- see
+# `enabled_checks` on run_health_suite / run_monitoring_window below and
+# devices.enabled_health_checks.
+ALL_CHECKS: dict[str, dict] = {
+    "ping": {"category": "infrastructure", "label": "Ping reachability"},
+    "packet_loss_latency": {"category": "infrastructure", "label": "Packet loss & latency"},
+    "bgp_neighbor": {"category": "routing", "label": "BGP neighbor adjacency"},
+    "ospf_neighbor": {"category": "routing", "label": "OSPF neighbor adjacency"},
+    "dns": {"category": "services", "label": "DNS resolution"},
+    "dhcp": {"category": "services", "label": "DHCP lease"},
+    "http": {"category": "services", "label": "HTTP(S) reachability"},
+    "vpn": {"category": "services", "label": "VPN tunnel status"},
+}
+
+
 def run_health_suite(
     ip_address: str,
     netmiko_type: str = "cisco_ios",
     username: str = "admin",
     password: str = "",
     hostname: str | None = None,
+    enabled_checks: set[str] | None = None,
 ) -> list[CheckOutcome]:
-    """Runs the full post-deployment health suite described in SRS 6.9:
+    """Runs the post-deployment health suite described in SRS 6.9:
 
       infrastructure - ping, packet loss %, latency
       routing        - BGP neighbor adjacency, OSPF neighbor adjacency
@@ -312,18 +330,27 @@ def run_health_suite(
     Each check is isolated (wrapped in try/except at the individual-check
     level) so one check erroring doesn't prevent the rest of the suite
     from running and being recorded.
+
+    `enabled_checks` restricts the suite to a subset of ALL_CHECKS'
+    keys (e.g. {"ping", "http"}) -- checks that don't apply to a given
+    device/lab (no BGP/OSPF configured, no telnetlib/NAPALM driver
+    installed, etc.) can be turned off instead of failing verification,
+    and triggering a rollback, over something that was never going to
+    pass. None/empty means "run everything", the historical behavior.
     """
-    results: list[CheckOutcome] = [
-        check_ping(ip_address),
-        check_packet_loss_and_latency(ip_address),
-        check_bgp_neighbors(netmiko_type, ip_address, username, password),
-        check_ospf_neighbors(netmiko_type, ip_address, username, password),
-        check_dns(hostname or ip_address),
-        check_dhcp(netmiko_type, ip_address, username, password),
-        check_http(ip_address),
-        check_vpn(netmiko_type, ip_address, username, password),
-    ]
-    return results
+    all_checks: dict[str, callable] = {
+        "ping": lambda: check_ping(ip_address),
+        "packet_loss_latency": lambda: check_packet_loss_and_latency(ip_address),
+        "bgp_neighbor": lambda: check_bgp_neighbors(netmiko_type, ip_address, username, password),
+        "ospf_neighbor": lambda: check_ospf_neighbors(netmiko_type, ip_address, username, password),
+        "dns": lambda: check_dns(hostname or ip_address),
+        "dhcp": lambda: check_dhcp(netmiko_type, ip_address, username, password),
+        "http": lambda: check_http(ip_address),
+        "vpn": lambda: check_vpn(netmiko_type, ip_address, username, password),
+    }
+
+    selection = set(enabled_checks) if enabled_checks else set(all_checks.keys())
+    return [fn() for name, fn in all_checks.items() if name in selection]
 
 
 def suite_passed(results: list[CheckOutcome]) -> bool:
@@ -374,6 +401,7 @@ def run_monitoring_window(
     window_seconds: int | None = None,
     poll_interval_seconds: int | None = None,
     sleep_fn=time.sleep,
+    enabled_checks: set[str] | None = None,
 ) -> MonitoringResult:
     """Real-Time Health Monitoring (FR-9 / SRS 6.7).
 
@@ -417,7 +445,8 @@ def run_monitoring_window(
     while True:
         round_number += 1
         outcomes = run_health_suite(
-            ip_address, netmiko_type=netmiko_type, username=username, password=password, hostname=hostname
+            ip_address, netmiko_type=netmiko_type, username=username, password=password, hostname=hostname,
+            enabled_checks=enabled_checks,
         )
         passed = suite_passed(outcomes)
         rounds.append(PollRound(round_number, elapsed, outcomes, passed))

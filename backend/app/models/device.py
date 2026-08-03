@@ -89,6 +89,16 @@ class Device(Base):
     last_snmp_poll_at = Column(DateTime(timezone=True), nullable=True)
     last_snmp_poll_error = Column(Text, nullable=True)
 
+    # JSON-encoded list of health_monitor check_name values (e.g.
+    # ["ping","packet_loss_latency","http"]) that the post-deployment
+    # verification suite (FR-9) should actually run against this device.
+    # NULL/empty means "run everything" (the historical, still-default
+    # behavior). Lets an operator turn off checks that don't apply to a
+    # given device (e.g. no BGP/OSPF configured, no NAPALM driver
+    # installed) instead of every deploy failing verification -- and
+    # triggering a rollback -- over a check that was never going to pass.
+    enabled_health_checks = Column(Text, nullable=True)
+
     # --- NETCONF connection settings (ncclient) ---
     netconf_port = Column(Integer, nullable=True, default=830)
     # Whether netconf_service.push_config should <lock>/<unlock> the target

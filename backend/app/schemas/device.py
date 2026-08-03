@@ -58,6 +58,10 @@ class DeviceBase(BaseModel):
     console_type: str | None = None
     bootstrapped: bool = False
 
+    # Which post-deployment health checks (health_monitor.ALL_CHECKS keys)
+    # to actually run for this device. None/omitted means "run everything".
+    enabled_health_checks: list[str] | None = None
+
 
 class DeviceCreate(DeviceBase):
     pass
@@ -99,6 +103,7 @@ class DeviceUpdate(BaseModel):
     console_port: int | None = None
     console_type: str | None = None
     bootstrapped: bool | None = None
+    enabled_health_checks: list[str] | None = None
 
 
 class DeviceRead(DeviceBase):
@@ -125,7 +130,26 @@ class DeviceRead(DeviceBase):
 
     @classmethod
     def from_device(cls, device) -> "DeviceRead":
-        obj = cls.model_validate(device)
+        import json as _json
+
+        # enabled_health_checks is stored as a JSON-encoded string
+        # (Device.enabled_health_checks : Text) but exposed as a list --
+        # model_validate would otherwise choke trying to coerce a raw
+        # string into list[str].
+        raw = getattr(device, "enabled_health_checks", None)
+        checks: list[str] | None = None
+        if raw:
+            try:
+                parsed = _json.loads(raw)
+                if isinstance(parsed, list):
+                    checks = parsed
+            except (ValueError, TypeError):
+                checks = None
+
+        obj = cls.model_construct(
+            **{k: getattr(device, k, None) for k in cls.model_fields if k != "enabled_health_checks"},
+            enabled_health_checks=checks,
+        )
         obj.snmp_credentials_configured = bool(
             device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted
         )

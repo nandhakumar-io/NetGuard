@@ -335,12 +335,31 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     # after deploy isn't enough. Stops early on the first failing round.
     _log_deployment(db, deployment.id, "VERIFY", "Initiating health monitoring sweeps across all vectors...")
     
+    enabled_checks = None
+    if device.enabled_health_checks:
+        try:
+            import json as _json
+            parsed = _json.loads(device.enabled_health_checks)
+            if isinstance(parsed, list) and parsed:
+                enabled_checks = set(parsed)
+        except (ValueError, TypeError):
+            enabled_checks = None
+
+    if enabled_checks:
+        skipped = sorted(set(health_monitor.ALL_CHECKS.keys()) - enabled_checks)
+        if skipped:
+            _log_deployment(
+                db, deployment.id, "VERIFY",
+                f"Running selected checks only ({', '.join(sorted(enabled_checks))}); skipped: {', '.join(skipped)}.",
+            )
+
     monitoring = health_monitor.run_monitoring_window(
         device.ip_address,
         netmiko_type=netmiko_type,
         username=device.ssh_username or "admin",
         password=ssh_password,
         hostname=device.hostname,
+        enabled_checks=enabled_checks,
     )
     for round_ in monitoring.rounds:
         _log_deployment(db, deployment.id, "VERIFY", f"Completed verification round {round_.round_number} (t+{round_.elapsed_seconds}s). Passed: {len([o for o in round_.outcomes if o.passed])}/{len(round_.outcomes)}")

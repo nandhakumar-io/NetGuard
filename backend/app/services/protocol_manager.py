@@ -34,6 +34,7 @@ from app.models.alert import AlertSeverity, AlertSource
 from app.models.device import Device
 from app.models.protocol_operation import ProtocolName, ProtocolOperation
 from app.services import alert_service, audit_service, credential_service, deployment_engine, netconf_service, restconf_service
+from app.services.config_format_service import looks_like_json, looks_like_xml
 from app.services.credential_service import CredentialNotFoundError
 
 logger = logging.getLogger("netguard.protocol_manager")
@@ -266,23 +267,29 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == "netconf":
-            result = netconf_service.push_config(
-                self.device.ip_address, self.device.netconf_port, username, password, config_text,
-                use_lock=getattr(self.device, "netconf_use_lock", True),
-            )
-            return self._record(
-                protocol="netconf", operation="deploy_config", success=result.success,
-                request=result.request_xml, response=result.response_xml, http_status=None,
-                error=result.error, execution_time_ms=result.execution_time_ms,
-            )
+            if looks_like_xml(config_text):
+                vendor = self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor)
+                result = netconf_service.push_config(
+                    self.device.ip_address, self.device.netconf_port, username, password, config_text, vendor=vendor,
+                )
+                return self._record(
+                    protocol="netconf", operation="deploy_config", success=result.success,
+                    request=result.request_xml, response=result.response_xml, http_status=None,
+                    error=result.error, execution_time_ms=result.execution_time_ms,
+                )
+            else:
+                logger.debug("Config specifies NETCONF, but the payload is raw CLI (not XML). Falling back to SSH.")
 
-        if protocol == "restconf":
-            result = restconf_service.patch(self.device.restconf_url, "data", username, password, {"raw": config_text})
-            return self._record(
-                protocol="restconf", operation="deploy_config", success=result.success,
-                request=result.request_body, response=result.response_body, http_status=result.http_status,
-                error=result.error, execution_time_ms=result.execution_time_ms,
-            )
+        elif protocol == "restconf":
+            if looks_like_json(config_text):
+                result = restconf_service.patch(self.device.restconf_url, "data", username, password, {"raw": config_text})
+                return self._record(
+                    protocol="restconf", operation="deploy_config", success=result.success,
+                    request=result.request_body, response=result.response_body, http_status=result.http_status,
+                    error=result.error, execution_time_ms=result.execution_time_ms,
+                )
+            else:
+                logger.debug("Config specifies RESTCONF, but the payload is raw CLI (not JSON). Falling back to SSH.")
 
         device_type = _netmiko_device_type(self.device)
         commands = [line for line in config_text.splitlines() if line.strip()]
