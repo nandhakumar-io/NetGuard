@@ -9,6 +9,7 @@ import {
   CompareConfigResponse,
 } from "../lib/types";
 import ConfigDiff from "../components/ConfigDiff";
+import ConfigViewer from "../components/ConfigViewer";
 
 /** Full-page device configuration browser: pick a device, view its
  * running/startup config side by side, and compare any two snapshots.
@@ -154,22 +155,24 @@ export default function DeviceConfiguration() {
               <p className="text-xs text-riskcrit">{configError}</p>
             ) : (
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                <div>
-                  <h4 className="text-xs font-bold uppercase text-slate-500 mb-2">Running Configuration</h4>
-                  <pre className="bg-slate-900 border border-slate-700 text-slate-300 text-[11px] rounded-lg p-3 overflow-x-auto max-h-[420px] whitespace-pre-wrap leading-relaxed shadow-inner">
-                    {running?.config || "(no configuration available)"}
-                  </pre>
-                </div>
-                <div>
-                  <h4 className="text-xs font-bold uppercase text-slate-500 mb-2">Startup Configuration</h4>
-                  {startup?.source === "unavailable" ? (
-                    <p className="text-xs text-slate-400 italic mt-4">No startup configuration on file yet.</p>
-                  ) : (
-                    <pre className="bg-slate-900 border border-slate-700 text-slate-300 text-[11px] rounded-lg p-3 overflow-x-auto max-h-[420px] whitespace-pre-wrap leading-relaxed shadow-inner">
-                      {startup?.config || "(no startup configuration available)"}
-                    </pre>
-                  )}
-                </div>
+                <ConfigViewer
+                  title="Running Configuration"
+                  config={running?.config}
+                  configPretty={running?.config_pretty}
+                  isXml={running?.is_xml}
+                  emptyText="(no configuration available)"
+                />
+                <ConfigViewer
+                  title="Startup Configuration"
+                  config={startup?.source === "unavailable" ? null : startup?.config}
+                  configPretty={startup?.config_pretty}
+                  isXml={startup?.is_xml}
+                  emptyText={
+                    startup?.source === "unavailable"
+                      ? "No startup configuration on file yet."
+                      : "(no startup configuration available)"
+                  }
+                />
               </div>
             )}
           </div>

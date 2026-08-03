@@ -215,7 +215,9 @@ class ProtocolManager:
         # SSH fallback via NAPALM (deployment_engine.read_running_config)
         start = time.perf_counter()
         device_type = _netmiko_device_type(self.device)
-        config = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
+        config, _used_protocol = deployment_engine.read_running_config(
+            device_type, self.device.ip_address, username, password
+        )
         elapsed = (time.perf_counter() - start) * 1000
         return self._record(
             protocol="ssh", operation="get_running_config", success=config is not None,
@@ -414,7 +416,9 @@ class ProtocolManager:
 
         start = time.perf_counter()
         device_type = _netmiko_device_type(self.device)
-        config = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
+        config, _used_protocol = deployment_engine.read_running_config(
+            device_type, self.device.ip_address, username, password
+        )
         elapsed = (time.perf_counter() - start) * 1000
         return self._record(
             protocol="ssh", operation="health_check", success=config is not None,

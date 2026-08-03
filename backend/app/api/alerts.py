@@ -89,6 +89,21 @@ def resolve(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = Dep
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/clear")
+def clear_alerts(
+    device_id: uuid.UUID | None = Query(None, description="Only clear alerts for this device; omit to clear everything"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Resolve every currently-active alert in one call (the 'Clear
+    Alerts' button on the Alert Center / device Alerts tab). Alerts are
+    resolved, not deleted, so they still show up under the 'resolved'
+    filter and in the audit trail.
+    """
+    cleared = alert_service.clear_alerts(db, user.email, device_id=device_id)
+    return {"cleared": cleared}
+
+
 # ------------------------------------------------------------------
 # WebSocket — realtime alert event stream
 # ------------------------------------------------------------------
@@ -109,6 +124,8 @@ def _serialize_recent(db: Session, n: int = 10) -> list[dict]:
             "resolved": a.resolved,
             "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
             "resolved_by": a.resolved_by,
+            "last_seen_at": a.last_seen_at.isoformat() if a.last_seen_at else None,
+            "occurrence_count": a.occurrence_count,
             "created_at": a.created_at.isoformat() if a.created_at else None,
         })
     return result

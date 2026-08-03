@@ -73,13 +73,14 @@ def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")
 
     assert result.status == ChangeStatus.SUCCESS
-    mock_notify.assert_called_with(
-        "Deployment Succeeded", "rtr-01: change deployed and healthy.", severity="info"
-    )
-    # All 3 poll rounds' checks should have been persisted, not just one.
     deployment = db_session.query(pipeline_service.Deployment).filter(
         pipeline_service.Deployment.change_request_id == cr.id
     ).first()
+    mock_notify.assert_called_with(
+        "Deployment Succeeded", "rtr-01: change deployed and healthy.", severity="info",
+        device_hostname="rtr-01", change_request_id=cr.id, deployment_id=deployment.id,
+    )
+    # All 3 poll rounds' checks should have been persisted, not just one.
     checks = db_session.query(pipeline_service.HealthCheckResult).filter(
         pipeline_service.HealthCheckResult.deployment_id == deployment.id
     ).all()
@@ -88,22 +89,27 @@ def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session
 
 
 @patch("app.services.pipeline_service.notification_service.notify")
-@patch("app.services.pipeline_service.deployment_engine.rollback_config")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
 @patch("app.services.pipeline_service.deployment_engine.deploy_config")
 def test_pipeline_rolls_back_on_failed_health_check(
-    mock_deploy, mock_health, mock_rollback, mock_notify, db_session
+    mock_deploy, mock_health, mock_notify, db_session
 ):
+    # Self-healing rollback re-pushes the pre-flight snapshot's config via
+    # the same deploy path used for the original change (ProtocolManager.
+    # restore_config() -> deploy_config()) -- there's no separate
+    # "rollback_config" call in this pipeline, so deploy_config is mocked
+    # to succeed for *both* the initial deploy and the restore push.
     mock_deploy.return_value = DeployResult(success=True, output="ok")
     outcomes = [CheckOutcome("infrastructure", "ping", False, "timeout")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=False, rounds=1)
-    mock_rollback.return_value = DeployResult(success=True, output="restored")
 
     cr = _make_cr(db_session)
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")
 
     assert result.status == ChangeStatus.ROLLED_BACK
-    mock_rollback.assert_called_once()
+    # Called once for the original deploy, once more to restore the
+    # pre-flight snapshot after the health check failed.
+    assert mock_deploy.call_count == 2
 
 
 @patch("app.services.pipeline_service.notification_service.notify")

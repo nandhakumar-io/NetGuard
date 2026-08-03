@@ -11,6 +11,14 @@ class RunningConfigResponse(BaseModel):
     hostname: str
     protocol: str
     config: str
+    # `config` is left byte-for-byte as returned by the device (needed for
+    # diffing/restore) -- these two are display-only additions so the UI
+    # can show something readable without touching the value used for
+    # comparisons. config_pretty is None when `config` isn't XML (already
+    # CLI text off an SSH/NAPALM read, or unparseable) -- fall back to
+    # `config` in that case.
+    config_pretty: str | None = None
+    is_xml: bool = False
     retrieved_at: datetime.datetime
 
 
@@ -26,9 +34,36 @@ class StartupConfigResponse(BaseModel):
     device_id: uuid.UUID
     hostname: str
     config: str | None
+    config_pretty: str | None = None
+    is_xml: bool = False
     source: str  # "snapshot" | "unavailable"
     snapshot_id: uuid.UUID | None = None
     retrieved_at: datetime.datetime
+
+
+class InterfaceStatusOut(BaseModel):
+    """One interface's operational status, normalized across NETCONF/
+    RESTCONF/SSH-NAPALM backends -- see app.services.config_format_service."""
+
+    name: str
+    description: str | None = None
+    admin_status: str | None = None
+    oper_status: str | None = None
+    ip_addresses: list[str] = Field(default_factory=list)
+    mtu: int | None = None
+    speed: str | None = None
+    mac_address: str | None = None
+
+
+class InterfacesResponse(BaseModel):
+    device_id: uuid.UUID
+    hostname: str
+    protocol: str
+    interfaces: list[InterfaceStatusOut]
+    retrieved_at: datetime.datetime
+    # Populated (interfaces == []) when the read itself failed, so the UI
+    # can tell "device has no interfaces" apart from "couldn't reach it".
+    error: str | None = None
 
 
 class BackupHistoryEntry(BaseModel):
@@ -94,5 +129,33 @@ class CompareConfigResponse(BaseModel):
     device_id: uuid.UUID
     base_label: str
     target_label: str
+    identical: bool
+    diff: str
+
+
+# --- Golden Config (approved baseline) -------------------------------
+class GoldenConfigRead(BaseModel):
+    device_id: uuid.UUID
+    config: str
+    config_pretty: str | None = None
+    is_xml: bool = False
+    checksum: str
+    set_by: str
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
+class GoldenConfigSet(BaseModel):
+    """Body for PUT /devices/{id}/golden-config. `config` is required --
+    there's no partial update, since a golden config is meant to be
+    reviewed and set as a whole (typically from a known-good backup),
+    not patched piecemeal.
+    """
+
+    config: str
+
+
+class GoldenConfigCompareResponse(BaseModel):
+    device_id: uuid.UUID
     identical: bool
     diff: str

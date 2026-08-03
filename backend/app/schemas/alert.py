@@ -17,6 +17,8 @@ class AlertRead(BaseModel):
     resolved: bool
     resolved_at: datetime | None = None
     resolved_by: str | None = None
+    last_seen_at: datetime | None = None
+    occurrence_count: int = 1
     created_at: datetime
 
     class Config:

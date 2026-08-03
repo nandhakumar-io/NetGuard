@@ -13,12 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
-from app.models.alert import Alert, AlertSeverity
 from app.models.device import Device
 from app.models.device_metric import DeviceMetric
 from app.models.user import User, UserRole
 from app.schemas.metrics import (
-    AlertRead,
     DeviceHealthSummary,
     DeviceMetricRead,
     FleetHealthSummary,
@@ -54,38 +52,17 @@ def list_all_device_health(db: Session = Depends(get_db), _=Depends(get_current_
     return [metrics_service.device_health(db, d) for d in devices]
 
 
-@router.get("/alerts", response_model=list[AlertRead])
-def list_alerts(
-    device_id: uuid.UUID | None = None,
-    severity: str | None = None,
-    acknowledged: bool | None = None,
-    limit: int = Query(100, le=500),
-    db: Session = Depends(get_db),
-    _=Depends(get_current_user),
-):
-    """Alert Engine feed powering the Health Dashboard's alert panel --
-    threshold breaches from SNMP polls plus any inbound SNMP traps,
-    newest first."""
-    query = db.query(Alert)
-    if device_id is not None:
-        query = query.filter(Alert.device_id == device_id)
-    if severity is not None:
-        query = query.filter(Alert.severity == AlertSeverity(severity))
-    if acknowledged is not None:
-        query = query.filter(Alert.acknowledged == acknowledged)
-    return query.order_by(Alert.created_at.desc()).limit(limit).all()
-
-
-@router.post("/alerts/{alert_id}/acknowledge", response_model=AlertRead)
-def acknowledge_alert(alert_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
-    alert = db.get(Alert, alert_id)
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    alert.acknowledged = True
-    db.commit()
-    db.refresh(alert)
-    return alert
-
+# NOTE: this router previously also defined `GET /alerts` and
+# `POST /alerts/{alert_id}/acknowledge` here. Because app.api.router
+# registers this router *before* app.api.alerts, FastAPI's order-of-
+# registration route matching meant every call to GET /alerts was being
+# silently intercepted by this router's stripped-down handler (missing
+# resolved/resolved_at/resolved_by/occurrence_count on its response
+# model, and no support for the status/source filters the Alert Center UI
+# sends) instead of the full-featured, actually-current implementation in
+# app.api.alerts. That's why Alert Center filtering and resolve/clear
+# state looked broken. Removed here -- app.api.alerts is the canonical
+# alerts surface; this module stays focused on health/metrics.
 
 # --- Per-device ---
 

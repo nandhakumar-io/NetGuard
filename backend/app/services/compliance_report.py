@@ -234,3 +234,65 @@ def render_pdf(report: ComplianceReport) -> bytes:
     story.append(table)
     doc.build(story)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Scheduled delivery
+# ---------------------------------------------------------------------------
+
+
+def deliver_scheduled_report(db: Session, window_days: int, period_label: str) -> bool:
+    """Builds the compliance report and emails it to NOTIFY_EMAIL_RECIPIENTS
+    via app.services.notification_service.send_email_attachment, using the
+    same SMTP config as every other notification. Renders as PDF; falls
+    back to CSV if reportlab isn't installed on this server rather than
+    failing the scheduled run outright.
+
+    Called by the weekly/monthly Celery beat tasks (see
+    app.tasks.run_weekly_compliance_report_task /
+    run_monthly_compliance_report_task) so the report lands in inboxes on
+    its own schedule instead of only being available on-demand via
+    GET /reports/compliance.
+
+    Returns True if the email was actually sent, False if it was skipped
+    because SMTP isn't configured (recorded in the audit trail either way,
+    so a silently-unconfigured SMTP setup is still visible there).
+    """
+    from app.services import audit_service, notification_service
+
+    report = build_report(db, window_days=window_days)
+    timestamp = report.generated_at.strftime("%Y%m%d")
+    period_slug = period_label.lower()
+
+    try:
+        report_bytes = render_pdf(report)
+        filename = f"netguard-compliance-report-{period_slug}-{timestamp}.pdf"
+        subtype = "pdf"
+    except ImportError:
+        report_bytes = render_csv(report)
+        filename = f"netguard-compliance-report-{period_slug}-{timestamp}.csv"
+        subtype = "csv"
+
+    subject = f"[NetGuard] {period_label} Compliance Report -- {report.generated_at.strftime('%Y-%m-%d')}"
+    body = (
+        f"Attached is the {period_slug} NetGuard compliance report covering the "
+        f"last {window_days} day(s).\n\n"
+        f"Fleet average compliance: {report.fleet_average_compliance}/100\n"
+        f"Open drifts: {report.total_open_drifts}\n"
+        f"Critical Risk changes in window: {report.total_critical_risk_changes}\n\n"
+        "Full detail (per-device breakdown, audit trail) is in the attached report."
+    )
+
+    sent = notification_service.send_email_attachment(subject, body, attachments=[(filename, report_bytes, subtype)])
+
+    audit_service.record_event(
+        db,
+        actor=f"system:{period_slug}-compliance-report",
+        action="Compliance Report Delivery",
+        result="Sent" if sent else "Skipped (SMTP not configured)",
+        detail=(
+            f"window_days={window_days} fleet_avg_compliance={report.fleet_average_compliance} "
+            f"open_drifts={report.total_open_drifts}"
+        ),
+    )
+    return sent

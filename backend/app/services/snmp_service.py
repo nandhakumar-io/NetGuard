@@ -9,9 +9,12 @@ the same category vocabulary the Alert Engine uses for polled breaches, so
 from a poll that noticed the interface was down.
 """
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass
+
+logger = logging.getLogger("netguard.snmp")
 
 # Standard OIDs used for the health poll. Kept generic (MIB-II + the
 # widely-implemented CISCO-PROCESS-MIB/HOST-RESOURCES-MIB equivalents)
@@ -20,6 +23,7 @@ from dataclasses import dataclass
 # per-vendor without changing the calling code.
 OIDS = {
     "sysDescr": "1.3.6.1.2.1.1.1.0",  # scalar -- used only by test_connection() below
+    "sysName": "1.3.6.1.2.1.1.5.0",  # scalar -- device's configured hostname, used by discover_inventory()
     "sysUpTime": "1.3.6.1.2.1.1.3.0",  # scalar (.0 instance) -- GET works as-is
     # cpu_5min / mem_used / mem_free / temperature are all *table columns*
     # (indexed by CPU/pool/sensor number), not scalars. An SNMP GET needs a
@@ -30,16 +34,56 @@ OIDS = {
     # majority of single-CPU, single-processor-pool, single-sensor devices
     # (including the IOSv images used in the GNS3 lab); a fleet with
     # multi-instance chassis would need a per-device index lookup instead.
-    "cpu_5min": "1.3.6.1.4.1.9.9.109.1.1.1.1.8.1",  # cpmCPUTotal5minRev.1 (Cisco)
-    "mem_used": "1.3.6.1.4.1.9.9.48.1.1.1.5.1",  # ciscoMemoryPoolUsed.1 (pool 1 = Processor)
-    "mem_free": "1.3.6.1.4.1.9.9.48.1.1.1.6.1",  # ciscoMemoryPoolFree.1
-    "temperature": "1.3.6.1.4.1.9.9.13.1.3.1.3.1",  # ciscoEnvMonTemperatureValue.1
-    # CISCO-ENVMON-MIB state tables (also row-indexed, ".1" = first fan
-    # tray / first PSU). Replaces the old hardcoded fan_status="ok" /
-    # power_supply_status="ok" placeholders with real device telemetry.
-    "fan_state": "1.3.6.1.4.1.9.9.13.1.4.1.3.1",  # ciscoEnvMonFanState.1
-    "power_supply_state": "1.3.6.1.4.1.9.9.13.1.5.1.3.1",  # ciscoEnvMonSupplyState.1
+    # CISCO-PROCESS-MIB cpmCPUTotalTable (1.3.6.1.4.1.9.9.109.1.1.1.1),
+    # "Rev" variants -- .6/.7/.8 respectively. These were previously
+    # mislabeled: "cpu_5min" pointed at .6.1 (actually the 5-SECOND
+    # reading, cpmCPUTotal5secRev), with the real 5-minute OID (.8.1)
+    # only ever tried as a last-resort *fallback* -- so every CPU
+    # health-score/threshold-alert calculation was silently working off a
+    # noisy instantaneous spot value instead of the smoothed 5-min
+    # average, risking spiky false-positive "High CPU" alerts. Now all
+    # three are correctly separated; poll_health uses cpu_5min (the
+    # smoothed value) as the canonical health/alerting figure, same as
+    # before the fix was needed -- cpu_5sec/cpu_1min are captured too for
+    # future finer-grained display but aren't part of alerting yet.
+    # NOTE: these four used to be hardcoded to row instance ".1"
+    # (cpmCPUTotal5minRev.1, ciscoMemoryPoolUsed.1, ...) on the assumption
+    # that a single-CPU/single-pool/single-sensor device always lives at
+    # row index 1. That assumption is false in practice -- a real device
+    # tested with `snmpwalk -v2c -c public <ip>
+    # 1.3.6.1.4.1.9.9.109.1.1.1.1.6` returned
+    # ...109.1.1.1.1.6.7 = Gauge32: 20, i.e. row index *7*, not 1.
+    # GETting the ".1" instance on that device returns "No Such Instance",
+    # which _get_via_pysnmp treats as a normal (silent) failure -- so CPU/
+    # mem/temp/fan/power all quietly came back empty. These are now stored
+    # as *base* column OIDs (no trailing instance) and resolved via
+    # _get_first_table_value(), which walks the column and uses whichever
+    # row index the agent actually returns first -- 1, 7, or anything else.
+    "cpu_5sec": "1.3.6.1.4.1.9.9.109.1.1.1.1.6",   # cpmCPUTotal5secRev
+    "cpu_1min": "1.3.6.1.4.1.9.9.109.1.1.1.1.7",   # cpmCPUTotal1minRev
+    "cpu_5min": "1.3.6.1.4.1.9.9.109.1.1.1.1.8",   # cpmCPUTotal5minRev (the correct, smoothed value)
+    "mem_used": "1.3.6.1.4.1.9.9.48.1.1.1.5",  # ciscoMemoryPoolUsed (first pool row returned)
+    "mem_free": "1.3.6.1.4.1.9.9.48.1.1.1.6",  # ciscoMemoryPoolFree (same row index as mem_used)
+    "temperature": "1.3.6.1.4.1.9.9.13.1.3.1.3",  # ciscoEnvMonTemperatureValue
+    # CISCO-ENVMON-MIB state tables (also row-indexed -- first fan tray /
+    # first PSU, whatever index that turns out to be). Replaces the old
+    # hardcoded fan_status="ok" / power_supply_status="ok" placeholders
+    # with real device telemetry.
+    "fan_state": "1.3.6.1.4.1.9.9.13.1.4.1.3",  # ciscoEnvMonFanState
+    "power_supply_state": "1.3.6.1.4.1.9.9.13.1.5.1.3",  # ciscoEnvMonSupplyState
 }
+
+# Fallback CPU OIDs for devices where cpmCPUTotal5minRev (CISCO-PROCESS-MIB,
+# the primary "cpu_5min" OID above) isn't implemented -- older Cisco images
+# and non-Cisco gear. Each of these is also a 5-minute-equivalent (or, for
+# avgBusy5, effectively the closest legacy analog), not a 5-second spot
+# reading, so falling back to one of these preserves the same "smoothed,
+# not spiky" semantics cpu_5min is meant to have.
+CPU_FALLBACK_OIDS = [
+    "1.3.6.1.4.1.9.9.109.1.1.1.1.5.1",  # cpmCPUTotal5min.1 (older CISCO-PROCESS-MIB, pre-"Rev" table)
+    "1.3.6.1.4.1.9.2.1.58.0",            # OLD-CISCO-CPU-MIB avgBusy5 (scalar, very widely supported)
+    "1.3.6.1.2.1.25.3.3.1.2.1",          # HOST-RESOURCES-MIB hrProcessorLoad.1 (vendor-neutral)
+]
 
 # ciscoEnvMonState values shared by fan/PSU/temperature status tables:
 # 1=normal 2=warning 3=critical 4=shutdown 5=notPresent 6=notFunctioning
@@ -61,6 +105,63 @@ IFTABLE_OIDS = {
     "ifHighSpeed": "1.3.6.1.2.1.31.1.1.1.15",  # Mbps
 }
 MAX_INTERFACES_WALKED = 64  # guard against a runaway walk on a chassis with hundreds of interfaces
+
+# --- Discovery OIDs (Cisco devices) ---------------------------------------
+# Powers discover_inventory() below: ARP table, routing table, LLDP/CDP
+# neighbors, and chassis/module inventory. These are walked on demand (the
+# "Discovery" action), not on every routine health poll -- they're much
+# heavier tables than ifTable and change far less often.
+ARP_OIDS = {
+    "ipNetToMediaPhysAddress": "1.3.6.1.2.1.4.22.1.2",  # index: ifIndex.a.b.c.d (IP embedded in suffix) -> MAC
+}
+# RFC 4293 IP-MIB ipNetToPhysicalTable -- the replacement for the older
+# ipNetToMediaTable above. Several real devices (IOS-XE routers in
+# particular) simply don't populate ipNetToMediaTable at all any more --
+# it walks successfully (no error) but returns zero rows -- while this
+# table has the live ARP entries. Used as a fallback when the primary
+# walk comes back empty, not tried first, since ipNetToMediaTable is
+# still the more universally-implemented table on older/non-Cisco gear.
+# Index: ifIndex.ipNetToPhysicalNetAddressType.ipNetToPhysicalNetAddress
+# (address itself is length-prefixed InetAddress: addrLen.b1.b2.b3.b4 for
+# IPv4) -- i.e. ifIndex.addrType.addrLen.b1.b2.b3.b4, 7 components for a
+# v4 entry (addrType=1).
+ARP_OIDS_FALLBACK = {
+    "ipNetToPhysicalPhysAddress": "1.3.6.1.2.1.4.35.1.4",
+}
+ROUTE_OIDS = {
+    "ipRouteNextHop": "1.3.6.1.2.1.4.21.1.7",   # index: destination IP -> next-hop IP
+    "ipRouteMask": "1.3.6.1.2.1.4.21.1.11",     # index: destination IP -> subnet mask
+    "ipRouteIfIndex": "1.3.6.1.2.1.4.21.1.2",   # index: destination IP -> outgoing ifIndex
+}
+# IP-FORWARD-MIB ipCidrRouteTable -- the replacement for the deprecated
+# ipRouteTable above; same story as the ARP fallback, ipRouteTable often
+# walks clean but empty on modern IOS-XE. Index is the composite
+# dest(4).mask(4).tos(1).nexthop(4) -- 13 components -- so destination,
+# mask, and next-hop are all recoverable straight from the index itself;
+# only ifIndex needs a separate column walk.
+ROUTE_OIDS_FALLBACK = {
+    "ipCidrRouteIfIndex": "1.3.6.1.2.1.4.24.4.1.5",
+}
+LLDP_OIDS = {
+    # Index: lldpRemTimeMark.lldpRemLocalPortNum.lldpRemIndex
+    "lldpRemSysName": "1.0.8802.1.1.2.1.4.1.1.9",
+    "lldpRemPortId": "1.0.8802.1.1.2.1.4.1.1.7",
+    "lldpRemSysDesc": "1.0.8802.1.1.2.1.4.1.1.10",
+}
+CDP_OIDS = {
+    # Index: ifIndex.cdpCacheDeviceIndex
+    "cdpCacheDeviceId": "1.3.6.1.4.1.9.9.23.1.2.1.1.6",
+    "cdpCacheDevicePort": "1.3.6.1.4.1.9.9.23.1.2.1.1.7",
+    "cdpCachePlatform": "1.3.6.1.4.1.9.9.23.1.2.1.1.8",
+}
+INVENTORY_OIDS = {
+    # ENTITY-MIB entPhysicalTable, index: entPhysicalIndex
+    "entPhysicalDescr": "1.3.6.1.2.1.47.1.1.1.1.2",
+    "entPhysicalName": "1.3.6.1.2.1.47.1.1.1.1.7",
+    "entPhysicalSerialNum": "1.3.6.1.2.1.47.1.1.1.1.11",
+    "entPhysicalModelName": "1.3.6.1.2.1.47.1.1.1.1.13",
+}
+MAX_DISCOVERY_ROWS = 128  # guard against runaway walks on tables that can legitimately be huge (ARP, routes)
 
 # Threshold defaults for turning raw readings into alerts (SNMP Health
 # Dashboard traffic-light + Alert Engine "High CPU" / "Temperature
@@ -248,7 +349,40 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                     var_bind = ObjectType(ObjectIdentity(oid))
 
         asyncio.run(_run())
+    except ImportError:
+        # pysnmp.hlapi.v1arch.asyncio may not exist in all pysnmp builds;
+        # fall back to the v3arch nextCmd path (same as _walk_via_pysnmp_v3
+        # but with CommunityData instead of UsmUserData).
+        logger.debug("v1arch walk module not available, falling back to v3arch for walk")
+        try:
+            import pysnmp.hlapi.asyncio as m
+
+            async def _run_v3arch() -> None:
+                mp_model = 0 if version == "v1" else 1
+                engine = m.SnmpEngine()
+                auth_data = m.CommunityData(community, mpModel=mp_model)
+                transport = m.UdpTransportTarget((ip_address, port), timeout=timeout, retries=1)
+                var_bind = m.ObjectType(m.ObjectIdentity(base_oid))
+                async for error_indication, error_status, _, var_binds in m.nextCmd(
+                    engine, auth_data, transport, m.ContextData(), var_bind, lexicographicMode=False,
+                ):
+                    if error_indication or error_status or not var_binds:
+                        break
+                    oid, value = var_binds[0]
+                    oid_str = str(oid)
+                    if not oid_str.startswith(base_oid + "."):
+                        break
+                    index = oid_str.rsplit(".", 1)[-1]
+                    results[index] = str(value)
+                    if len(results) >= MAX_INTERFACES_WALKED:
+                        break
+
+            asyncio.run(_run_v3arch())
+        except Exception:  # noqa: BLE001
+            logger.debug("v3arch walk also failed for %s OID %s", ip_address, base_oid, exc_info=True)
+            return results
     except Exception:  # noqa: BLE001
+        logger.debug("walk failed for %s OID %s", ip_address, base_oid, exc_info=True)
         return results
     return results
 
@@ -307,6 +441,34 @@ def _walk(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, timeout: float
     return _walk_via_pysnmp(ip_address, auth.community, base_oid, auth.version, timeout, port=auth.port or 161)
 
 
+def _get_first_table_value(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, timeout: float) -> str | None:
+    """Resolves a single-row-per-device table column (CPU/mem/temp/fan/
+    power) without assuming the row lives at instance ".1". Walks the
+    column and returns the value of whichever row index the agent
+    actually returns first.
+
+    This replaces the old `base_oid + ".1"` GET, which silently returned
+    nothing on any device whose row index isn't 1 -- confirmed against a
+    real device where cpmCPUTotalTable's only row is index 7, not 1
+    (`snmpwalk ... 1.3.6.1.4.1.9.9.109.1.1.1.1.6` -> `...6.7 = Gauge32:
+    20`). A GET-based device with a genuinely single-row table only ever
+    has one row to walk into anyway, so this is a strict improvement with
+    no behavior change for the common case, and fixes the case that broke.
+    """
+    row = _walk(ip_address, auth, base_oid, timeout)
+    if not row:
+        return None
+    # Rows come back keyed by instance suffix as strings ("1", "7", ...);
+    # sort numerically so the lowest real index wins if a device somehow
+    # exposes more than one (e.g. multi-CPU chassis), rather than whatever
+    # order the dict happens to iterate in.
+    try:
+        first_index = min(row.keys(), key=lambda idx: int(idx))
+    except ValueError:
+        first_index = next(iter(row))
+    return row[first_index]
+
+
 def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
     """Walks ifTable/ifXTable and rolls every operationally-up interface
     into fleet-level totals: summed error counters (for the Errors panel)
@@ -345,6 +507,223 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
     }
 
 
+def _mac_from_snmp_value(raw: str) -> str:
+    """pysnmp returns OctetString MAC values either as a colon-hex string
+    already, or as a raw/escaped byte string depending on the agent --
+    normalize both into 'aa:bb:cc:dd:ee:ff'."""
+    cleaned = raw.strip()
+    if re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", cleaned):
+        return cleaned.lower()
+    # Fallback: pull out any hex-looking byte tokens (handles pysnmp's
+    # '0xaabbccddeeff' / escaped-octet renderings) and re-join as MAC.
+    hex_bytes = re.findall(r"[0-9A-Fa-f]{2}", cleaned.replace("0x", ""))
+    if len(hex_bytes) >= 6:
+        return ":".join(hex_bytes[-6:]).lower()
+    return cleaned
+
+
+def _discover_arp_table(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """Cisco ARP table (RFC 1213 ipNetToMediaTable). Index suffix is
+    'ifIndex.a.b.c.d' -- the destination IP is embedded in the index
+    itself, not the value, so it's parsed back out of the suffix."""
+    raw = _walk(ip_address, auth, ARP_OIDS["ipNetToMediaPhysAddress"], timeout)
+    if not raw:
+        # ipNetToMediaTable walks clean but empty on plenty of real
+        # devices (IOS-XE routers in particular no longer populate it) --
+        # fall back to its RFC 4293 replacement rather than reporting "no
+        # ARP entries" when there plainly are some.
+        return _discover_arp_table_fallback(ip_address, auth, timeout)
+    rows = []
+    for index, mac in list(raw.items())[:MAX_DISCOVERY_ROWS]:
+        parts = index.split(".")
+        if len(parts) < 5:
+            continue
+        if_index, ip_parts = parts[0], parts[1:5]
+        rows.append({
+            "if_index": if_index,
+            "ip_address": ".".join(ip_parts),
+            "mac_address": _mac_from_snmp_value(mac),
+        })
+    return rows
+
+
+def _discover_arp_table_fallback(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """RFC 4293 IP-MIB ipNetToPhysicalTable. Index is
+    'ifIndex.addrType.addrLen.b1.b2.b3.b4' for an IPv4 (addrType=1)
+    entry -- 7 components. IPv6 entries (addrType=2, 16 address bytes)
+    are skipped; the Discovery page's ARP tab is IPv4-focused, same as
+    the primary ipNetToMediaTable path above.
+    """
+    raw = _walk(ip_address, auth, ARP_OIDS_FALLBACK["ipNetToPhysicalPhysAddress"], timeout)
+    rows = []
+    for index, mac in list(raw.items())[:MAX_DISCOVERY_ROWS]:
+        parts = index.split(".")
+        if len(parts) < 7 or parts[1] != "1":  # not IPv4
+            continue
+        if_index, ip_parts = parts[0], parts[3:7]
+        rows.append({
+            "if_index": if_index,
+            "ip_address": ".".join(ip_parts),
+            "mac_address": _mac_from_snmp_value(mac),
+        })
+    return rows
+
+
+def _discover_routing_table(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """Cisco IPv4 routing table (RFC 1213 ipRouteTable). Index is the
+    destination network IP; next-hop/mask/ifIndex are separate walks
+    joined on that same index."""
+    next_hop = _walk(ip_address, auth, ROUTE_OIDS["ipRouteNextHop"], timeout)
+    if not next_hop:
+        # Same story as the ARP fallback: ipRouteTable is deprecated and
+        # plenty of real devices (IOS-XE in particular) walk it clean but
+        # empty. Fall back to IP-FORWARD-MIB's ipCidrRouteTable, which is
+        # what those devices actually populate.
+        return _discover_routing_table_fallback(ip_address, auth, timeout)
+    mask = _walk(ip_address, auth, ROUTE_OIDS["ipRouteMask"], timeout)
+    if_index = _walk(ip_address, auth, ROUTE_OIDS["ipRouteIfIndex"], timeout)
+
+    rows = []
+    for destination, hop in list(next_hop.items())[:MAX_DISCOVERY_ROWS]:
+        rows.append({
+            "destination": destination,
+            "mask": mask.get(destination),
+            "next_hop": hop,
+            "if_index": if_index.get(destination),
+        })
+    return rows
+
+
+def _discover_routing_table_fallback(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """IP-FORWARD-MIB ipCidrRouteTable. Index is the composite
+    dest(4).mask(4).tos(1).nexthop(4) -- 13 components -- so destination,
+    mask, and next-hop all come straight out of the index; only ifIndex
+    needs its own column walk, keyed on that same composite index.
+    """
+    if_index = _walk(ip_address, auth, ROUTE_OIDS_FALLBACK["ipCidrRouteIfIndex"], timeout)
+    rows = []
+    for index, ifidx in list(if_index.items())[:MAX_DISCOVERY_ROWS]:
+        parts = index.split(".")
+        if len(parts) < 13:
+            continue
+        destination = ".".join(parts[0:4])
+        mask = ".".join(parts[4:8])
+        next_hop = ".".join(parts[9:13])
+        rows.append({
+            "destination": destination,
+            "mask": mask,
+            "next_hop": next_hop,
+            "if_index": ifidx,
+        })
+    return rows
+
+
+def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """LLDP-MIB lldpRemTable. Index is 'timeMark.localPortNum.remIndex' --
+    the local port number (2nd component) is the useful, stable part; the
+    other two are bookkeeping values from the agent, not needed here."""
+    sys_names = _walk(ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
+    if not sys_names:
+        return []
+    port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
+
+    rows = []
+    for index, neighbor_name in list(sys_names.items())[:MAX_DISCOVERY_ROWS]:
+        parts = index.split(".")
+        local_port = parts[1] if len(parts) >= 2 else index
+        rows.append({
+            "local_port_index": local_port,
+            "neighbor_name": neighbor_name,
+            "neighbor_port": port_ids.get(index),
+        })
+    return rows
+
+
+def _discover_cdp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """CISCO-CDP-MIB cdpCacheTable. Index is 'ifIndex.deviceIndex' -- the
+    local ifIndex (1st component) identifies which local interface saw
+    the neighbor."""
+    device_ids = _walk(ip_address, auth, CDP_OIDS["cdpCacheDeviceId"], timeout)
+    if not device_ids:
+        return []
+    ports = _walk(ip_address, auth, CDP_OIDS["cdpCacheDevicePort"], timeout)
+    platforms = _walk(ip_address, auth, CDP_OIDS["cdpCachePlatform"], timeout)
+
+    rows = []
+    for index, neighbor_id in list(device_ids.items())[:MAX_DISCOVERY_ROWS]:
+        parts = index.split(".")
+        local_if_index = parts[0] if parts else index
+        rows.append({
+            "local_if_index": local_if_index,
+            "neighbor_id": neighbor_id,
+            "neighbor_port": ports.get(index),
+            "neighbor_platform": platforms.get(index),
+        })
+    return rows
+
+
+def _discover_physical_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
+    """ENTITY-MIB entPhysicalTable -- chassis, modules, power supplies,
+    fans, etc. Index is entPhysicalIndex.
+
+    Walks off entPhysicalDescr now (present on essentially every
+    ENTITY-MIB row, including containers) rather than starting from
+    entPhysicalSerialNum and requiring a non-empty serial to even be
+    considered -- plenty of real devices (virtual/lab platforms
+    especially) implement ENTITY-MIB without populating serial numbers
+    on most or all rows, which made this come back completely empty even
+    though the chassis/module inventory itself was readable. A row with
+    no name, no description, and no serial is genuinely empty bookkeeping
+    and still gets skipped; anything with at least one of those three is
+    now included.
+    """
+    descrs = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalDescr"], timeout)
+    names = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalName"], timeout)
+    serials = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalSerialNum"], timeout)
+    models = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalModelName"], timeout)
+
+    all_indexes = set(descrs) | set(names) | set(serials) | set(models)
+    rows = []
+    for index in list(all_indexes)[:MAX_DISCOVERY_ROWS]:
+        name = names.get(index)
+        descr = descrs.get(index)
+        serial = serials.get(index)
+        if not (name or descr) and not (serial and serial.strip()):
+            continue  # nothing usable to show -- purely internal bookkeeping row
+        rows.append({
+            "index": index,
+            "name": name,
+            "description": descr,
+            "model": models.get(index),
+            "serial_number": serial,
+        })
+    return rows
+
+
+def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 5.0) -> dict:
+    """Cisco device discovery: hostname, ARP table, routing table, LLDP/CDP
+    neighbors, and chassis/module inventory -- the OIDs from the
+    Cisco device polling table (Hostname, ARP Table, Routing Table, LLDP,
+    CDP, Inventory). Run on demand (the Discovery action), not on every
+    routine health poll, since these are much heavier walks than ifTable
+    and the data changes far less often than CPU/memory/interface counters.
+
+    Every sub-walk is independently best-effort: a table the device
+    doesn't support (e.g. LLDP disabled, or a non-Cisco device with no
+    CDP) just comes back as an empty list rather than failing the whole
+    discovery call.
+    """
+    hostname = _get_via_pysnmp(ip_address, auth, OIDS["sysName"], timeout)
+    return {
+        "hostname": hostname,
+        "arp_table": _discover_arp_table(ip_address, auth, timeout),
+        "routing_table": _discover_routing_table(ip_address, auth, timeout),
+        "lldp_neighbors": _discover_lldp_neighbors(ip_address, auth, timeout),
+        "cdp_neighbors": _discover_cdp_neighbors(ip_address, auth, timeout),
+        "inventory": _discover_physical_inventory(ip_address, auth, timeout),
+    }
+
+
 def poll_health(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> SnmpMetrics:
     """Polls the OIDs in OIDS and returns whatever resolved. Individual
     OID failures don't fail the whole poll (see _get_via_pysnmp); a
@@ -356,12 +735,33 @@ def poll_health(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -
     if uptime_raw is None:
         return SnmpMetrics(reachable=False, error="Device did not respond to SNMP GET (sysUpTime)")
 
-    cpu_raw = _get_via_pysnmp(ip_address, auth, OIDS["cpu_5min"], timeout)
-    mem_used_raw = _get_via_pysnmp(ip_address, auth, OIDS["mem_used"], timeout)
-    mem_free_raw = _get_via_pysnmp(ip_address, auth, OIDS["mem_free"], timeout)
-    temp_raw = _get_via_pysnmp(ip_address, auth, OIDS["temperature"], timeout)
-    fan_state_raw = _get_via_pysnmp(ip_address, auth, OIDS["fan_state"], timeout)
-    power_state_raw = _get_via_pysnmp(ip_address, auth, OIDS["power_supply_state"], timeout)
+    # cpu_5min/mem_used/mem_free/temperature/fan_state/power_supply_state
+    # are all table columns, not scalars -- resolved via
+    # _get_first_table_value (walk + take whichever row index the agent
+    # actually has), not a hardcoded ".1" GET. See OIDS dict comment.
+    cpu_raw = _get_first_table_value(ip_address, auth, OIDS["cpu_5min"], timeout)
+    # Fallback: try older/vendor-neutral CPU OIDs if the primary one
+    # (CISCO-PROCESS-MIB cpmCPUTotal5minRev) wasn't implemented. These
+    # fallbacks are true scalars (OLD-CISCO-CPU-MIB avgBusy5) or already
+    # walked with the same row-agnostic helper (legacy cpmCPUTotal5min /
+    # HOST-RESOURCES-MIB hrProcessorLoad), so a plain GET is only correct
+    # for the genuine scalar; use the table helper for the two row-indexed
+    # ones instead of re-adding a hardcoded ".1".
+    if cpu_raw is None:
+        for fallback_oid in CPU_FALLBACK_OIDS:
+            if fallback_oid.endswith(".0"):  # genuine scalar (OLD-CISCO-CPU-MIB avgBusy5)
+                cpu_raw = _get_via_pysnmp(ip_address, auth, fallback_oid, timeout)
+            else:  # row-indexed table column -- strip the ".1" and walk instead of assuming index 1
+                base = fallback_oid.rsplit(".", 1)[0] if fallback_oid.endswith(".1") else fallback_oid
+                cpu_raw = _get_first_table_value(ip_address, auth, base, timeout)
+            if cpu_raw is not None:
+                logger.debug("CPU fallback OID %s returned %s for %s", fallback_oid, cpu_raw, ip_address)
+                break
+    mem_used_raw = _get_first_table_value(ip_address, auth, OIDS["mem_used"], timeout)
+    mem_free_raw = _get_first_table_value(ip_address, auth, OIDS["mem_free"], timeout)
+    temp_raw = _get_first_table_value(ip_address, auth, OIDS["temperature"], timeout)
+    fan_state_raw = _get_first_table_value(ip_address, auth, OIDS["fan_state"], timeout)
+    power_state_raw = _get_first_table_value(ip_address, auth, OIDS["power_supply_state"], timeout)
     interface_stats = walk_interface_stats(ip_address, auth, timeout)
 
     mem_pct = None

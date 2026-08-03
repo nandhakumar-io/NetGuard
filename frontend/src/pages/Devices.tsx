@@ -5,6 +5,7 @@ import {
   Snapshot,
   RunningConfig,
   StartupConfig,
+  GoldenConfig,
   BackupHistoryEntry,
   CompareConfigResponse,
   DeviceHealthSummary,
@@ -12,23 +13,27 @@ import {
   Alert as AlertRow,
   ProtocolOperationRecord,
   DeploymentRecord,
+  InterfacesResponse,
+  DeviceDiscoveryResult,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
+import ConfigViewer from "../components/ConfigViewer";
 import { WebTerminal } from "../components/WebTerminal";
 import SnmpCredentialsModal from "../components/SnmpCredentialsModal";
+import SshCredentialsModal from "../components/SshCredentialsModal";
 
 const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
-  green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 border-green-200" },
-  yellow: { dot: "bg-riskmed", text: "text-riskmed", bg: "bg-amber-50 border-amber-200" },
-  red: { dot: "bg-riskcrit", text: "text-riskcrit", bg: "bg-red-50 border-red-200" },
-  unknown: { dot: "bg-slate-300", text: "text-slate-400", bg: "bg-slate-50 border-slate-200" },
+  green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800" },
+  yellow: { dot: "bg-riskmed", text: "text-riskmed", bg: "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800" },
+  red: { dot: "bg-riskcrit", text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800" },
+  unknown: { dot: "bg-slate-300 dark:bg-slate-600", text: "text-slate-400 dark:text-slate-500", bg: "bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700" },
 };
 
 const ALERT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: string }> = {
-  critical: { text: "text-riskcrit", bg: "bg-red-50 border-red-200", icon: "🚨" },
-  warning: { text: "text-riskmed", bg: "bg-amber-50 border-amber-200", icon: "⚠️" },
-  info: { text: "text-brandblue", bg: "bg-blue-50 border-blue-200", icon: "ℹ️" },
+  critical: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🚨" },
+  warning: { text: "text-riskmed", bg: "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800", icon: "⚠️" },
+  info: { text: "text-brandblue", bg: "bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800", icon: "ℹ️" },
 };
 
 function formatUptime(seconds: number | null): string {
@@ -56,7 +61,7 @@ const statusColor: Record<string, string> = {
   online: "bg-risklow",
   offline: "bg-slate-400",
   degraded: "bg-riskmed",
-  unknown: "bg-slate-300",
+  unknown: "bg-slate-300 dark:bg-slate-600",
 };
 
 const emptyForm = {
@@ -74,6 +79,9 @@ const emptyForm = {
   snmp_security_level: "authPriv",
   snmp_auth_protocol: "SHA",
   snmp_priv_protocol: "AES128",
+  supports_netconf: false,
+  netconf_port: "830",
+  netconf_use_lock: true,
   supports_restconf: false,
   restconf_url: "",
 };
@@ -83,6 +91,7 @@ const TAB_NAMES = [
   "Health",
   "Configuration",
   "Interfaces",
+  "Discovery",
   "Backups",
   "Drift",
   "Alerts",
@@ -92,6 +101,45 @@ const TAB_NAMES = [
 type TabName = typeof TAB_NAMES[number];
 
 // --- Subcomponents for Device Details Tabs ---
+
+function DiscoveryTable({ columns, rows, empty }: { columns: string[]; rows: string[][]; empty: string }) {
+  if (rows.length === 0) {
+    return <p className="text-xs text-slate-400 dark:text-slate-500 italic py-4">{empty}</p>;
+  }
+  return (
+    <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+      <table className="w-full text-xs">
+        <thead className="bg-slate-100 dark:bg-slate-700">
+          <tr>
+            {columns.map((c) => (
+              <th key={c} className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">
+                {c}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+          {rows.map((row, idx) => (
+            <tr key={idx} className="bg-white dark:bg-slate-800">
+              {row.map((cell, cidx) => (
+                <td
+                  key={cidx}
+                  className={`px-3 py-1.5 ${
+                    cidx === 0
+                      ? "font-mono font-semibold text-navy dark:text-white"
+                      : "text-slate-600 dark:text-slate-300 font-mono"
+                  }`}
+                >
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 function DeviceInlineDetails({
   device,
@@ -106,10 +154,15 @@ function DeviceInlineDetails({
 }) {
   const [activeTab, setActiveTab] = useState<TabName>("Overview");
   const [showSnmpCredsModal, setShowSnmpCredsModal] = useState(false);
+  const [showSshCredsModal, setShowSshCredsModal] = useState(false);
 
   // Configuration tab state
   const [running, setRunning] = useState<RunningConfig | null>(null);
   const [startup, setStartup] = useState<StartupConfig | null>(null);
+  const [golden, setGolden] = useState<GoldenConfig | null>(null);
+  const [goldenLoaded, setGoldenLoaded] = useState(false);
+  const [goldenBusy, setGoldenBusy] = useState(false);
+  const [goldenNotice, setGoldenNotice] = useState<string | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
 
@@ -117,6 +170,8 @@ function DeviceInlineDetails({
   const [history, setHistory] = useState<BackupHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
 
   // Compare sub-state inside backups (simplified for inline view)
   const [baseId, setBaseId] = useState<string>("");
@@ -124,15 +179,57 @@ function DeviceInlineDetails({
   const [compareResult, setCompareResult] = useState<CompareConfigResponse | null>(null);
   const [comparing, setComparing] = useState(false);
 
-  // Health tab state (shared with Interfaces tab, which reads the same
-  // metric history -- interface_utilization_pct/interface_errors are
-  // columns on the same DeviceMetric row, there's no separate per-interface
-  // table in this schema).
+  // Health tab state (shared with Interfaces tab for the fleet-aggregate
+  // utilization/error chart -- interface_utilization_pct/interface_errors
+  // are columns on the same DeviceMetric row, there's no separate
+  // per-interface table for that part of the schema).
   const [health, setHealth] = useState<DeviceHealthSummary | null>(null);
   const [metricHistory, setMetricHistory] = useState<DeviceMetric[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
+
+  // Interfaces tab: real per-interface admin/oper status + IPs, read live
+  // from the device via GET /devices/{id}/config/interfaces (NETCONF/
+  // RESTCONF/SSH-NAPALM, normalized server-side). Separate from the
+  // aggregate SNMP chart above -- this is live-fetched on demand, not
+  // polled/stored history.
+  const [interfaces, setInterfaces] = useState<InterfacesResponse | null>(null);
+  const [interfacesLoading, setInterfacesLoading] = useState(false);
+  const [interfacesError, setInterfacesError] = useState<string | null>(null);
+
+  const loadInterfaces = () => {
+    setInterfacesLoading(true);
+    setInterfacesError(null);
+    api
+      .get<InterfacesResponse>(`/devices/${device.id}/config/interfaces`)
+      .then((res) => setInterfaces(res.data))
+      .catch((err: any) => setInterfacesError(err?.response?.data?.detail || "Failed to read interface status."))
+      .finally(() => setInterfacesLoading(false));
+  };
+
+  // Discovery tab: on-demand SNMP discovery (hostname, ARP table, routing
+  // table, LLDP/CDP neighbors, chassis inventory) from GET
+  // /devices/{id}/discovery. Also persists LLDP/CDP results server-side
+  // as DiscoveredNeighbor rows, which the Topology page picks up as
+  // confirmed (non-inferred) links -- so running Discovery here is what
+  // makes real links show up on the Topology graph.
+  const [discovery, setDiscovery] = useState<DeviceDiscoveryResult | null>(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [discoverySubTab, setDiscoverySubTab] = useState<"lldp" | "cdp" | "arp" | "routes" | "inventory">("lldp");
+
+  const loadDiscovery = () => {
+    setDiscoveryLoading(true);
+    setDiscoveryError(null);
+    api
+      .get<DeviceDiscoveryResult>(`/devices/${device.id}/discovery`)
+      .then((res) => setDiscovery(res.data))
+      .catch((err: any) =>
+        setDiscoveryError(err?.response?.data?.detail || "SNMP discovery failed for this device.")
+      )
+      .finally(() => setDiscoveryLoading(false));
+  };
 
   // Alerts tab state
   const [deviceAlerts, setDeviceAlerts] = useState<AlertRow[]>([]);
@@ -199,6 +296,25 @@ function DeviceInlineDetails({
     }
   };
 
+  const [clearingAlerts, setClearingAlerts] = useState(false);
+  const activeDeviceAlertCount = deviceAlerts.filter((a) => !a.resolved).length;
+
+  const clearDeviceAlerts = async () => {
+    if (activeDeviceAlertCount === 0) return;
+    if (!window.confirm(`Clear ${activeDeviceAlertCount} active alert${activeDeviceAlertCount === 1 ? "" : "s"} for ${device.hostname}?`)) {
+      return;
+    }
+    setClearingAlerts(true);
+    try {
+      await api.post(`/alerts/clear?device_id=${device.id}`);
+      loadAlerts();
+    } catch {
+      // leave alerts as-is; button re-enables so the user can retry
+    } finally {
+      setClearingAlerts(false);
+    }
+  };
+
   const loadProtocolOps = () => {
     setProtocolOpsLoading(true);
     setProtocolOpsError(null);
@@ -220,8 +336,11 @@ function DeviceInlineDetails({
   };
 
   useEffect(() => {
-    if ((activeTab === "Health" || activeTab === "Interfaces") && !health && !healthLoading) {
+    if ((activeTab === "Overview" || activeTab === "Health" || activeTab === "Interfaces") && !health && !healthLoading) {
       loadHealth();
+    }
+    if (activeTab === "Interfaces" && !interfaces && !interfacesLoading) {
+      loadInterfaces();
     }
     if (activeTab === "Alerts" && deviceAlerts.length === 0 && !alertsLoading) {
       loadAlerts();
@@ -247,17 +366,44 @@ function DeviceInlineDetails({
         setConfigLoading(false);
       });
     }
+    if (activeTab === "Configuration" && !goldenLoaded) {
+      api
+        .get<GoldenConfig>(`/devices/${device.id}/config/golden-config`)
+        .then((res) => setGolden(res.data))
+        .catch(() => setGolden(null))
+        .finally(() => setGoldenLoaded(true));
+    }
 
     if (activeTab === "Backups" && history.length === 0) {
-      setHistoryLoading(true);
-      api
-        .get<BackupHistoryEntry[]>(`/devices/${device.id}/config/backups`)
-        .then((res) => setHistory(res.data))
-        .catch(() => setHistoryError("Failed to load backup history."))
-        .finally(() => setHistoryLoading(false));
+      loadBackupHistory();
     }
   }, [activeTab, device.id, running, history.length]);
 
+
+  const loadBackupHistory = () => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    api
+      .get<BackupHistoryEntry[]>(`/devices/${device.id}/config/backups`)
+      .then((res) => setHistory(res.data))
+      .catch(() => setHistoryError("Failed to load backup history."))
+      .finally(() => setHistoryLoading(false));
+  };
+
+  const runBackupNow = async () => {
+    setBackingUp(true);
+    setHistoryError(null);
+    setBackupNotice(null);
+    try {
+      const res = await api.post(`/devices/${device.id}/config/backup`, {});
+      setBackupNotice(res.data.message || "Backup completed.");
+      loadBackupHistory();
+    } catch (err: any) {
+      setHistoryError(err?.response?.data?.detail || "Failed to back up configuration.");
+    } finally {
+      setBackingUp(false);
+    }
+  };
 
   const runCompare = async () => {
     setComparing(true);
@@ -275,9 +421,41 @@ function DeviceInlineDetails({
     }
   };
 
+  const setRunningAsGolden = async () => {
+    if (!running?.config) return;
+    setGoldenBusy(true);
+    setGoldenNotice(null);
+    try {
+      const res = await api.put<GoldenConfig>(`/devices/${device.id}/config/golden-config`, {
+        config: running.config,
+      });
+      setGolden(res.data);
+      setGoldenNotice("Current running config approved as the golden baseline.");
+    } catch (err: any) {
+      setGoldenNotice(err?.response?.data?.detail || "Failed to set golden config.");
+    } finally {
+      setGoldenBusy(false);
+    }
+  };
+
+  const clearGolden = async () => {
+    if (!window.confirm("Clear the golden config baseline for this device?")) return;
+    setGoldenBusy(true);
+    setGoldenNotice(null);
+    try {
+      await api.delete(`/devices/${device.id}/config/golden-config`);
+      setGolden(null);
+      setGoldenNotice("Golden config cleared.");
+    } catch (err: any) {
+      setGoldenNotice(err?.response?.data?.detail || "Failed to clear golden config.");
+    } finally {
+      setGoldenBusy(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col bg-slate-50 min-h-[400px]">
-      <div className="flex border-b border-slate-200 overflow-x-auto hide-scrollbar bg-white">
+    <div className="flex flex-col bg-slate-50 dark:bg-slate-900 min-h-[400px]">
+      <div className="flex border-b border-slate-200 dark:border-slate-700 overflow-x-auto hide-scrollbar bg-white dark:bg-slate-800">
         {TAB_NAMES.map((tab) => (
           <button
             key={tab}
@@ -285,7 +463,7 @@ function DeviceInlineDetails({
             className={`whitespace-nowrap px-4 py-3 text-xs font-semibold uppercase tracking-wider transition-colors border-b-2 ${
               activeTab === tab
                 ? "border-brandblue text-brandblue"
-                : "border-transparent text-slate-500 hover:text-navy hover:bg-slate-50"
+                : "border-transparent text-slate-500 dark:text-slate-400 hover:text-navy dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-700"
             }`}
           >
             {tab}
@@ -297,53 +475,115 @@ function DeviceInlineDetails({
         {activeTab === "Overview" && (
           <div className="grid grid-cols-2 gap-4 max-w-lg">
             <div>
-              <p className="text-xs text-slate-500">Hostname</p>
-              <p className="font-medium text-navy">{device.hostname}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Hostname</p>
+              <p className="font-medium text-navy dark:text-white">{device.hostname}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">IP Address</p>
-              <p className="font-mono text-sm text-navy">{device.ip_address}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">IP Address</p>
+              <p className="font-mono text-sm text-navy dark:text-white">{device.ip_address}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Vendor</p>
-              <p className="font-medium capitalize text-navy">{device.vendor}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Vendor</p>
+              <p className="font-medium capitalize text-navy dark:text-white">{device.vendor}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Site / Location</p>
-              <p className="font-medium text-navy">{device.site || "Unknown"}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Site / Location</p>
+              <p className="font-medium text-navy dark:text-white">{device.site || "Unknown"}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Authentication</p>
-              <p className="font-mono text-xs text-slate-600 bg-slate-100 px-2 py-1 rounded w-fit mt-1">
-                {device.ssh_username || "none"} : *** ({device.ssh_credential_ref})
-              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Authentication</p>
+              <div className="flex items-center gap-2 mt-1">
+                <p className="font-mono text-xs text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 px-2 py-1 rounded w-fit">
+                  {device.ssh_username || "none"} : {device.ssh_credentials_configured ? "***" : "not set"}
+                </p>
+                {canManage && (
+                  <button
+                    onClick={() => setShowSshCredsModal(true)}
+                    className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-2 py-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1"
+                  >
+                    🔑 SSH Credentials
+                    {device.ssh_credentials_configured ? (
+                      <span className="w-1.5 h-1.5 rounded-full bg-risklow" />
+                    ) : (
+                      <span className="w-1.5 h-1.5 rounded-full bg-riskmed" />
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
             <div>
-              <p className="text-xs text-slate-500">System Uptime</p>
-              <p className="text-slate-400 italic text-sm">Waiting for telemetry...</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">System Uptime</p>
+              {healthLoading && !health ? (
+                <p className="text-slate-400 dark:text-slate-500 italic text-sm">Loading…</p>
+              ) : health?.latest_metric?.uptime_seconds != null ? (
+                <p className="font-medium text-navy dark:text-white">{formatUptime(health.latest_metric.uptime_seconds)}</p>
+              ) : (
+                <p className="text-slate-400 dark:text-slate-500 italic text-sm">
+                  {device.supports_snmp ? "Waiting for next SNMP poll..." : "SNMP not enabled for this device"}
+                </p>
+              )}
             </div>
             <div>
-              <p className="text-xs text-slate-500">Platform</p>
-              <p className="font-medium text-navy">{device.platform || "—"}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Platform</p>
+              <p className="font-medium text-navy dark:text-white">{device.platform || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Model</p>
-              <p className="font-medium text-navy">{device.model || "—"}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Model</p>
+              <p className="font-medium text-navy dark:text-white">{device.model || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Serial Number</p>
-              <p className="font-mono text-xs text-navy">{device.serial_number || "—"}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Serial Number</p>
+              <p className="font-mono text-xs text-navy dark:text-white">{device.serial_number || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">OS Version</p>
-              <p className="font-medium text-navy">{device.os_version || "—"}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">OS Version</p>
+              <p className="font-medium text-navy dark:text-white">{device.os_version || "—"}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Connectivity</p>
-              <div className="flex flex-wrap gap-1 mt-1">
-                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_snmp ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-400"}`}>SNMP</span>
-                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_netconf ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-400"}`}>NETCONF</span>
-                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_restconf ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-400"}`}>RESTCONF</span>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Connectivity</p>
+              <div className="flex flex-wrap items-center gap-1 mt-1">
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_snmp ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}>SNMP</span>
+                {canManage ? (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await api.patch<Device>(`/devices/${device.id}`, { supports_netconf: !device.supports_netconf, netconf_port: device.netconf_port || 830 });
+                        onDeviceUpdated(res.data);
+                      } catch {}
+                    }}
+                    title={device.supports_netconf ? "Click to disable NETCONF" : "Click to enable NETCONF"}
+                    className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full cursor-pointer transition-colors hover:ring-2 hover:ring-brandblue/40 ${device.supports_netconf ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}
+                  >NETCONF</button>
+                ) : (
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_netconf ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}>NETCONF</span>
+                )}
+                {canManage ? (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await api.patch<Device>(`/devices/${device.id}`, { supports_restconf: !device.supports_restconf });
+                        onDeviceUpdated(res.data);
+                      } catch {}
+                    }}
+                    title={device.supports_restconf ? "Click to disable RESTCONF" : "Click to enable RESTCONF"}
+                    className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full cursor-pointer transition-colors hover:ring-2 hover:ring-brandblue/40 ${device.supports_restconf ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}
+                  >RESTCONF</button>
+                ) : (
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${device.supports_restconf ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}>RESTCONF</span>
+                )}
+                {canManage && (
+                  <button
+                    onClick={() => setShowSnmpCredsModal(true)}
+                    className="ml-1 text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-2 py-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1"
+                  >
+                    📡 SNMP Credentials
+                    {device.supports_snmp && device.snmp_credentials_configured ? (
+                      <span className="w-1.5 h-1.5 rounded-full bg-risklow" />
+                    ) : (
+                      <span className="w-1.5 h-1.5 rounded-full bg-riskmed" />
+                    )}
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -352,13 +592,13 @@ function DeviceInlineDetails({
         {activeTab === "Health" && (
           <div>
             {healthLoading && !health ? (
-              <p className="text-xs text-slate-400">Loading telemetry…</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading telemetry…</p>
             ) : healthError && !health ? (
-              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-70">
+              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-70">
                 <div className="text-3xl mb-2">🩺</div>
                 <p className="text-sm font-medium">{healthError}</p>
                 {!device.supports_snmp && (
-                  <p className="text-xs text-slate-400 mt-1">
+                  <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
                     Enable SNMP monitoring for this device in Devices → Edit to start collecting health telemetry.
                   </p>
                 )}
@@ -372,7 +612,7 @@ function DeviceInlineDetails({
                         HEALTH_COLOR_STYLES[health?.health_color || "unknown"].dot
                       }`}
                     />
-                    <span className="text-2xl font-bold text-navy">
+                    <span className="text-2xl font-bold text-navy dark:text-white">
                       {health?.health_score != null ? `${health.health_score}/100` : "No score yet"}
                     </span>
                     <span className={`text-xs font-bold uppercase tracking-wide ${health?.reachable ? "text-risklow" : "text-riskcrit"}`}>
@@ -384,7 +624,7 @@ function DeviceInlineDetails({
                       {device.supports_snmp && (
                         <button
                           onClick={() => setShowSnmpCredsModal(true)}
-                          className="text-xs font-bold uppercase tracking-wider text-slate-600 border border-slate-200 bg-slate-50 px-3 py-1.5 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                          className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-3 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1"
                         >
                           🔑 Credentials
                           {device.snmp_credentials_configured ? (
@@ -397,7 +637,7 @@ function DeviceInlineDetails({
                       <button
                         onClick={pollNow}
                         disabled={polling}
-                        className="text-xs font-bold uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 disabled:opacity-50"
+                        className="text-xs font-bold uppercase tracking-wider text-brandblue border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-3 py-1.5 rounded-lg hover:bg-blue-100 disabled:opacity-50"
                       >
                         {polling ? "Polling…" : "↻ Poll Now"}
                       </button>
@@ -419,9 +659,9 @@ function DeviceInlineDetails({
                       { label: "Interface Util.", value: health.latest_metric.interface_utilization_pct, suffix: "%" },
                       { label: "Interface Errors", value: health.latest_metric.interface_errors, suffix: "" },
                     ].map((m) => (
-                      <div key={m.label} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
-                        <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">{m.label}</p>
-                        <p className="text-lg font-bold text-navy capitalize">
+                      <div key={m.label} className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-3 shadow-sm">
+                        <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider">{m.label}</p>
+                        <p className="text-lg font-bold text-navy dark:text-white capitalize">
                           {m.value === null || m.value === undefined
                             ? "—"
                             : typeof m.value === "number"
@@ -432,33 +672,33 @@ function DeviceInlineDetails({
                     ))}
                   </div>
                 ) : (
-                  <p className="text-xs text-slate-400 italic">No poll recorded yet.</p>
+                  <p className="text-xs text-slate-400 dark:text-slate-500 italic">No poll recorded yet.</p>
                 )}
 
                 {metricHistory.length > 0 && (
                   <div>
-                    <h4 className="text-xs uppercase font-bold text-slate-500 mb-2 tracking-wider">
+                    <h4 className="text-xs uppercase font-bold text-slate-500 dark:text-slate-400 mb-2 tracking-wider">
                       Last 24h ({metricHistory.length} poll{metricHistory.length === 1 ? "" : "s"})
                     </h4>
-                    <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
+                    <div className="max-h-48 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
                       <table className="w-full text-xs">
-                        <thead className="bg-slate-100 sticky top-0">
+                        <thead className="bg-slate-100 dark:bg-slate-700 sticky top-0">
                           <tr>
-                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Polled</th>
-                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">CPU</th>
-                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Mem</th>
-                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Temp</th>
-                            <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Score</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Polled</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">CPU</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Mem</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Temp</th>
+                            <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Score</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100">
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                           {[...metricHistory].reverse().slice(0, 50).map((m) => (
-                            <tr key={m.id} className="bg-white">
-                              <td className="px-3 py-1.5 text-slate-500">{timeAgo(m.polled_at)}</td>
-                              <td className="px-3 py-1.5 text-slate-700">{m.cpu_utilization_pct ?? "—"}</td>
-                              <td className="px-3 py-1.5 text-slate-700">{m.memory_utilization_pct ?? "—"}</td>
-                              <td className="px-3 py-1.5 text-slate-700">{m.temperature_celsius ?? "—"}</td>
-                              <td className="px-3 py-1.5 font-bold text-slate-700">{m.health_score ?? "—"}</td>
+                            <tr key={m.id} className="bg-white dark:bg-slate-800">
+                              <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{timeAgo(m.polled_at)}</td>
+                              <td className="px-3 py-1.5 text-slate-700 dark:text-slate-200">{m.cpu_utilization_pct ?? "—"}</td>
+                              <td className="px-3 py-1.5 text-slate-700 dark:text-slate-200">{m.memory_utilization_pct ?? "—"}</td>
+                              <td className="px-3 py-1.5 text-slate-700 dark:text-slate-200">{m.temperature_celsius ?? "—"}</td>
+                              <td className="px-3 py-1.5 font-bold text-slate-700 dark:text-slate-200">{m.health_score ?? "—"}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -473,27 +713,71 @@ function DeviceInlineDetails({
 
         {activeTab === "Configuration" && (
           <div>
+            {goldenNotice && (
+              <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/30 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2 mb-3">
+                {goldenNotice}
+              </p>
+            )}
             {configLoading ? (
-              <p className="text-xs text-slate-400">Loading configurations...</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading configurations...</p>
             ) : (
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                <div>
-                  <h4 className="text-xs font-bold uppercase text-slate-500 mb-2">Running Configuration</h4>
-                  <pre className="bg-slate-900 border border-slate-700 text-slate-300 text-[11px] rounded-lg p-3 overflow-x-auto max-h-[400px] whitespace-pre-wrap leading-relaxed shadow-inner">
-                    {running?.config || "(no configuration available)"}
-                  </pre>
-                </div>
-                <div>
-                  <h4 className="text-xs font-bold uppercase text-slate-500 mb-2">Startup Configuration</h4>
-                  {startup?.source === "unavailable" ? (
-                    <p className="text-xs text-slate-400 italic mt-4">
-                      No startup configuration on file yet.
+                <ConfigViewer
+                  title="Running Configuration"
+                  config={running?.config}
+                  configPretty={running?.config_pretty}
+                  isXml={running?.is_xml}
+                  emptyText="(no configuration available)"
+                />
+                <ConfigViewer
+                  title="Startup Configuration"
+                  config={startup?.source === "unavailable" ? null : startup?.config}
+                  configPretty={startup?.config_pretty}
+                  isXml={startup?.is_xml}
+                  emptyText={
+                    startup?.source === "unavailable"
+                      ? "No startup configuration on file yet."
+                      : "(no startup configuration available)"
+                  }
+                />
+                <div className="xl:col-span-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                      Golden Config
+                      {golden && (
+                        <span className="ml-2 font-normal normal-case text-slate-400">
+                          approved by {golden.set_by} · {new Date(golden.updated_at).toLocaleString()}
+                        </span>
+                      )}
                     </p>
-                  ) : (
-                    <pre className="bg-slate-900 border border-slate-700 text-slate-300 text-[11px] rounded-lg p-3 overflow-x-auto max-h-[400px] whitespace-pre-wrap leading-relaxed shadow-inner">
-                      {startup?.config || "(no startup configuration available)"}
-                    </pre>
-                  )}
+                    {canManage && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={setRunningAsGolden}
+                          disabled={goldenBusy || !running?.config}
+                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-brandblue hover:bg-navy px-3 py-1.5 rounded-lg shadow-sm disabled:opacity-40"
+                        >
+                          {goldenBusy ? "Saving…" : golden ? "↻ Approve Current Running Config" : "+ Set as Golden Config"}
+                        </button>
+                        {golden && (
+                          <button
+                            onClick={clearGolden}
+                            disabled={goldenBusy}
+                            className="text-[10px] uppercase tracking-wider font-bold text-riskcrit border border-red-200 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg disabled:opacity-40"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <ConfigViewer
+                    title="Golden Config"
+                    config={golden?.config}
+                    configPretty={golden?.config_pretty}
+                    isXml={golden?.is_xml}
+                    emptyText="No golden config set for this device yet. Use the button above to approve the current running config as the baseline."
+                  />
                 </div>
               </div>
             )}
@@ -501,90 +785,323 @@ function DeviceInlineDetails({
         )}
 
         {activeTab === "Interfaces" && (
-          <div>
-            {healthLoading && metricHistory.length === 0 ? (
-              <p className="text-xs text-slate-400">Loading interface telemetry…</p>
-            ) : metricHistory.length === 0 ? (
-              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
-                <div className="text-3xl mb-2">🔌</div>
-                <p className="text-sm font-medium">No interface telemetry recorded yet for this device.</p>
-                <p className="text-xs text-slate-400 mt-1">
-                  {device.supports_snmp
-                    ? "Waiting for the next SNMP poll (or use Poll Now on the Health tab)."
-                    : "Enable SNMP monitoring on this device to start collecting it."}
-                </p>
+          <div className="flex flex-col gap-6">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-xs uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+                  Interface Status {interfaces && !interfacesError && `(${interfaces.protocol.toUpperCase()})`}
+                </h4>
+                <button
+                  onClick={loadInterfaces}
+                  disabled={interfacesLoading}
+                  className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 hover:text-brandblue border border-slate-300 dark:border-slate-600 rounded-md px-2 py-1 disabled:opacity-50"
+                >
+                  {interfacesLoading ? "Refreshing…" : "Refresh"}
+                </button>
               </div>
-            ) : (
-              <div className="flex flex-col gap-4">
-                <p className="text-xs text-slate-400">
-                  NetGuard currently tracks fleet-aggregate interface throughput and error counts per SNMP poll
-                  (not yet broken out per physical interface). Shown below: total link utilization and cumulative
-                  error count over the last 24h.
+              {interfacesLoading && !interfaces ? (
+                <p className="text-xs text-slate-400 dark:text-slate-500">Reading interface status from the device…</p>
+              ) : interfacesError || interfaces?.error ? (
+                <p className="text-xs text-riskcrit">{interfacesError || interfaces?.error}</p>
+              ) : !interfaces || interfaces.interfaces.length === 0 ? (
+                <p className="text-xs text-slate-400 dark:text-slate-500 italic">
+                  No interfaces reported by the device.
                 </p>
-                <div className="grid grid-cols-2 gap-3 max-w-md">
-                  <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
-                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Current Utilization</p>
-                    <p className="text-lg font-bold text-navy">
-                      {metricHistory[metricHistory.length - 1]?.interface_utilization_pct ?? "—"}%
-                    </p>
-                  </div>
-                  <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
-                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Current Errors</p>
-                    <p className="text-lg font-bold text-navy">
-                      {metricHistory[metricHistory.length - 1]?.interface_errors ?? "—"}
-                    </p>
-                  </div>
-                </div>
-                <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg">
+              ) : (
+                <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg">
                   <table className="w-full text-xs">
-                    <thead className="bg-slate-100 sticky top-0">
+                    <thead className="bg-slate-100 dark:bg-slate-700">
                       <tr>
-                        <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Polled</th>
-                        <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Utilization</th>
-                        <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Errors</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Interface</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Description</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Admin</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Oper</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">IP Address(es)</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">MTU</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {[...metricHistory].reverse().slice(0, 50).map((m) => (
-                        <tr key={m.id} className="bg-white">
-                          <td className="px-3 py-1.5 text-slate-500">{timeAgo(m.polled_at)}</td>
-                          <td className="px-3 py-1.5 text-slate-700">
-                            {m.interface_utilization_pct != null ? `${m.interface_utilization_pct}%` : "—"}
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {interfaces.interfaces.map((iface) => (
+                        <tr key={iface.name} className="bg-white dark:bg-slate-800">
+                          <td className="px-3 py-1.5 font-mono font-semibold text-navy dark:text-white">{iface.name}</td>
+                          <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{iface.description || "—"}</td>
+                          <td className="px-3 py-1.5">
+                            <span
+                              className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                iface.admin_status === "up"
+                                  ? "bg-green-50 text-green-700 border border-green-200"
+                                  : iface.admin_status === "down"
+                                  ? "bg-slate-100 text-slate-500 border border-slate-200"
+                                  : "bg-slate-50 text-slate-400 border border-slate-200"
+                              }`}
+                            >
+                              {iface.admin_status || "unknown"}
+                            </span>
                           </td>
-                          <td className={`px-3 py-1.5 font-bold ${m.interface_errors ? "text-riskcrit" : "text-slate-700"}`}>
-                            {m.interface_errors ?? "—"}
+                          <td className="px-3 py-1.5">
+                            <span
+                              className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                iface.oper_status === "up"
+                                  ? "bg-green-50 text-green-700 border border-green-200"
+                                  : iface.oper_status === "down"
+                                  ? "bg-red-50 text-riskcrit border border-red-200"
+                                  : "bg-slate-50 text-slate-400 border border-slate-200"
+                              }`}
+                            >
+                              {iface.oper_status || "unknown"}
+                            </span>
                           </td>
+                          <td className="px-3 py-1.5 font-mono text-slate-600 dark:text-slate-300">
+                            {iface.ip_addresses.length ? iface.ip_addresses.join(", ") : "—"}
+                          </td>
+                          <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{iface.mtu ?? "—"}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+              )}
+            </div>
+
+            <div>
+              <h4 className="text-xs uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider mb-2">
+                Fleet-Aggregate Utilization (SNMP, last 24h)
+              </h4>
+              {healthLoading && metricHistory.length === 0 ? (
+                <p className="text-xs text-slate-400 dark:text-slate-500">Loading interface telemetry…</p>
+              ) : metricHistory.length === 0 ? (
+                <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-32 opacity-60">
+                  <div className="text-3xl mb-2">🔌</div>
+                  <p className="text-sm font-medium">No interface telemetry recorded yet for this device.</p>
+                  <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+                    {device.supports_snmp
+                      ? "Waiting for the next SNMP poll (or use Poll Now on the Health tab)."
+                      : "Enable SNMP monitoring on this device to start collecting it."}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  <p className="text-xs text-slate-400 dark:text-slate-500">
+                    This chart tracks total link utilization and cumulative error count per SNMP poll across the
+                    whole device (not broken out per interface) -- use the live table above for per-interface
+                    status.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3 max-w-md">
+                    <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-3 shadow-sm">
+                      <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider">Current Utilization</p>
+                      <p className="text-lg font-bold text-navy dark:text-white">
+                        {metricHistory[metricHistory.length - 1]?.interface_utilization_pct ?? "—"}%
+                      </p>
+                    </div>
+                    <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-3 shadow-sm">
+                      <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider">Current Errors</p>
+                      <p className="text-lg font-bold text-navy dark:text-white">
+                        {metricHistory[metricHistory.length - 1]?.interface_errors ?? "—"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-100 dark:bg-slate-700 sticky top-0">
+                        <tr>
+                          <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Polled</th>
+                          <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Utilization</th>
+                          <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Errors</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {[...metricHistory].reverse().slice(0, 50).map((m) => (
+                          <tr key={m.id} className="bg-white dark:bg-slate-800">
+                            <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{timeAgo(m.polled_at)}</td>
+                            <td className="px-3 py-1.5 text-slate-700 dark:text-slate-200">
+                              {m.interface_utilization_pct != null ? `${m.interface_utilization_pct}%` : "—"}
+                            </td>
+                            <td className={`px-3 py-1.5 font-bold ${m.interface_errors ? "text-riskcrit" : "text-slate-700 dark:text-slate-200"}`}>
+                              {m.interface_errors ?? "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "Discovery" && (
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+                  SNMP Discovery
+                </h4>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+                  Reads ARP, routing, LLDP/CDP neighbors, and chassis inventory directly from the device. LLDP/CDP
+                  results are saved and used to draw confirmed links on the Topology page.
+                </p>
               </div>
+              <button
+                onClick={loadDiscovery}
+                disabled={discoveryLoading}
+                className="text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-3 py-1.5 rounded-lg shadow-sm disabled:opacity-50 shrink-0"
+              >
+                {discoveryLoading ? "Discovering…" : discovery ? "Run Discovery Again" : "Run Discovery"}
+              </button>
+            </div>
+
+            {discoveryError && (
+              <div className="text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2">
+                {discoveryError}
+              </div>
+            )}
+
+            {!discovery && !discoveryLoading && !discoveryError && (
+              <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-10 text-center">
+                <div className="text-4xl mb-3">🔎</div>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  No discovery data yet for this device. Click "Run Discovery" to poll it via SNMP.
+                </p>
+              </div>
+            )}
+
+            {discovery && (
+              <>
+                <div className="flex flex-wrap items-center gap-4 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2">
+                  <span className="text-slate-500 dark:text-slate-400">
+                    Reported hostname:{" "}
+                    <span className="font-mono font-semibold text-navy dark:text-white">
+                      {discovery.reported_hostname || "—"}
+                    </span>
+                  </span>
+                  <span className="text-slate-400 dark:text-slate-500">
+                    Retrieved {timeAgo(discovery.retrieved_at)}
+                  </span>
+                </div>
+
+                <div className="flex gap-1 border-b border-slate-200 dark:border-slate-700">
+                  {([
+                    { key: "lldp", label: `LLDP (${discovery.lldp_neighbors.length})` },
+                    { key: "cdp", label: `CDP (${discovery.cdp_neighbors.length})` },
+                    { key: "arp", label: `ARP (${discovery.arp_table.length})` },
+                    { key: "routes", label: `Routes (${discovery.routing_table.length})` },
+                    { key: "inventory", label: `Inventory (${discovery.inventory.length})` },
+                  ] as const).map((t) => (
+                    <button
+                      key={t.key}
+                      onClick={() => setDiscoverySubTab(t.key)}
+                      className={`text-xs font-semibold px-3 py-2 border-b-2 -mb-px transition-colors ${
+                        discoverySubTab === t.key
+                          ? "border-brandblue text-brandblue"
+                          : "border-transparent text-slate-400 dark:text-slate-500 hover:text-slate-600"
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+
+                {discoverySubTab === "lldp" && (
+                  <DiscoveryTable
+                    empty="No LLDP neighbors reported (LLDP may be disabled on this device)."
+                    columns={["Local Port", "Neighbor", "Neighbor Port"]}
+                    rows={discovery.lldp_neighbors.map((n) => [
+                      n.local_port_index,
+                      n.neighbor_name || "—",
+                      n.neighbor_port || "—",
+                    ])}
+                  />
+                )}
+                {discoverySubTab === "cdp" && (
+                  <DiscoveryTable
+                    empty="No CDP neighbors reported (CDP may be disabled, or this isn't a Cisco device)."
+                    columns={["Local Interface", "Neighbor", "Neighbor Port", "Platform"]}
+                    rows={discovery.cdp_neighbors.map((n) => [
+                      n.local_if_index,
+                      n.neighbor_id || "—",
+                      n.neighbor_port || "—",
+                      n.neighbor_platform || "—",
+                    ])}
+                  />
+                )}
+                {discoverySubTab === "arp" && (
+                  <DiscoveryTable
+                    empty="No ARP entries reported."
+                    columns={["Interface Index", "IP Address", "MAC Address"]}
+                    rows={discovery.arp_table.map((a) => [a.if_index, a.ip_address, a.mac_address])}
+                  />
+                )}
+                {discoverySubTab === "routes" && (
+                  <DiscoveryTable
+                    empty="No routing table entries reported."
+                    columns={["Destination", "Mask", "Next Hop", "Interface Index"]}
+                    rows={discovery.routing_table.map((r) => [
+                      r.destination,
+                      r.mask || "—",
+                      r.next_hop,
+                      r.if_index || "—",
+                    ])}
+                  />
+                )}
+                {discoverySubTab === "inventory" && (
+                  <DiscoveryTable
+                    empty="No chassis/module inventory reported."
+                    columns={["Index", "Name", "Description", "Model", "Serial Number"]}
+                    rows={discovery.inventory.map((i) => [
+                      i.index,
+                      i.name || "—",
+                      i.description || "—",
+                      i.model || "—",
+                      i.serial_number || "—",
+                    ])}
+                  />
+                )}
+              </>
             )}
           </div>
         )}
 
         {activeTab === "Backups" && (
           <div>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                On-demand backups are stored the same way as automatic pre-deployment snapshots.
+              </p>
+              {canManage && (
+                <button
+                  onClick={runBackupNow}
+                  disabled={backingUp}
+                  className="text-[10px] uppercase tracking-wider font-bold text-white bg-brandblue hover:bg-navy px-3 py-1.5 rounded-lg shadow-sm disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                >
+                  {backingUp ? "Backing up…" : "⭳ Backup Now"}
+                </button>
+              )}
+            </div>
+            {backupNotice && (
+              <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/30 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2 mb-3">
+                {backupNotice}
+              </p>
+            )}
             {historyLoading ? (
-              <p className="text-xs text-slate-400">Loading backup history...</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading backup history...</p>
             ) : historyError ? (
               <p className="text-xs text-riskcrit">{historyError}</p>
             ) : history.length === 0 ? (
-              <p className="text-xs text-slate-400 italic">No snapshots yet.</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500 italic">No snapshots yet.</p>
             ) : (
               <div className="flex flex-col gap-6">
                 <div>
-                  <h4 className="text-xs uppercase font-bold text-slate-500 mb-3 tracking-wider">Snapshot History</h4>
+                  <h4 className="text-xs uppercase font-bold text-slate-500 dark:text-slate-400 mb-3 tracking-wider">Snapshot History</h4>
                   <ul className="space-y-1.5 max-h-60 overflow-y-auto pr-2">
                     {history.map((s, idx) => (
                       <li
                         key={s.id}
-                        className="flex items-center gap-3 text-xs bg-white border border-slate-200 rounded-lg px-3 py-2 shadow-sm"
+                        className="flex items-center gap-3 text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 shadow-sm"
                       >
-                        <span className="font-mono text-slate-500 font-bold shrink-0">v{s.version}</span>
-                        <span className="font-mono text-slate-400 shrink-0">{s.checksum.slice(0, 12)}…</span>
-                        <span className="text-slate-500 font-medium">{new Date(s.created_at).toLocaleString()}</span>
+                        <span className="font-mono text-slate-500 dark:text-slate-400 font-bold shrink-0">v{s.version}</span>
+                        <span className="font-mono text-slate-400 dark:text-slate-500 shrink-0">{s.checksum.slice(0, 12)}…</span>
+                        <span className="text-slate-500 dark:text-slate-400 font-medium">{new Date(s.created_at).toLocaleString()}</span>
                         {idx === 0 && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-bold bg-navy text-white">
                             latest
@@ -595,7 +1112,7 @@ function DeviceInlineDetails({
                             onClick={() => {
                               onQueueRollback(s, "");
                             }}
-                            className="ml-auto text-amber-600 font-bold hover:text-amber-700 shrink-0 uppercase tracking-widest text-[10px] bg-amber-50 px-2 py-1 rounded"
+                            className="ml-auto text-amber-600 dark:text-amber-400 font-bold hover:text-amber-700 shrink-0 uppercase tracking-widest text-[10px] bg-amber-50 dark:bg-amber-950/40 px-2 py-1 rounded"
                           >
                             ↺ Roll back to this
                           </button>
@@ -605,8 +1122,8 @@ function DeviceInlineDetails({
                   </ul>
                 </div>
 
-                <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm max-w-2xl">
-                  <h4 className="text-xs uppercase font-bold text-slate-500 mb-3 tracking-wider flex justify-between items-center">
+                <div className="bg-white dark:bg-slate-800 p-4 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm max-w-2xl">
+                  <h4 className="text-xs uppercase font-bold text-slate-500 dark:text-slate-400 mb-3 tracking-wider flex justify-between items-center">
                     <span>Compare Snapshots</span>
                     <button onClick={runCompare} disabled={comparing} className="bg-brandblue text-white px-3 py-1 rounded text-[11px]">
                       {comparing ? "Comparing..." : "Run Compare"}
@@ -614,22 +1131,22 @@ function DeviceInlineDetails({
                   </h4>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <select className="w-full border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-600" value={baseId} onChange={(e) => setBaseId(e.target.value)}>
+                      <select className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 text-xs text-slate-600 dark:text-slate-300" value={baseId} onChange={(e) => setBaseId(e.target.value)}>
                         <option value="">Live Configuration</option>
                         {history.map(h => <option key={h.id} value={h.id}>v{h.version}</option>)}
                       </select>
                     </div>
                     <div>
-                      <select className="w-full border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-600" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+                      <select className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 text-xs text-slate-600 dark:text-slate-300" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
                         <option value="">Live Configuration</option>
                         {history.map(h => <option key={h.id} value={h.id}>v{h.version}</option>)}
                       </select>
                     </div>
                   </div>
                   {compareResult && (
-                    <div className="mt-4 border-t border-slate-100 pt-4">
+                    <div className="mt-4 border-t border-slate-100 dark:border-slate-800 pt-4">
                       {compareResult.identical ? (
-                        <p className="text-green-600 font-medium text-xs text-center">Configurations are completely identical.</p>
+                        <p className="text-green-600 dark:text-green-400 font-medium text-xs text-center">Configurations are completely identical.</p>
                       ) : (
                         <div className="max-h-64 overflow-y-auto">
                            <ConfigDiff diffText={compareResult.diff} />
@@ -645,12 +1162,23 @@ function DeviceInlineDetails({
 
         {activeTab === "Alerts" && (
           <div>
+            {deviceAlerts.length > 0 && (
+              <div className="flex justify-end mb-2">
+                <button
+                  onClick={clearDeviceAlerts}
+                  disabled={clearingAlerts || activeDeviceAlertCount === 0}
+                  className="text-[10px] uppercase tracking-wider font-bold text-white bg-riskcrit/90 hover:bg-riskcrit px-2.5 py-1.5 rounded-lg shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {clearingAlerts ? "Clearing…" : `Clear Alerts${activeDeviceAlertCount ? ` (${activeDeviceAlertCount})` : ""}`}
+                </button>
+              </div>
+            )}
             {alertsLoading ? (
-              <p className="text-xs text-slate-400">Loading alerts…</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading alerts…</p>
             ) : alertsError ? (
               <p className="text-xs text-riskcrit">{alertsError}</p>
             ) : deviceAlerts.length === 0 ? (
-              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-60">
                 <div className="text-3xl mb-2">✅</div>
                 <p className="text-sm font-medium">No alerts recorded for this device.</p>
               </div>
@@ -667,8 +1195,8 @@ function DeviceInlineDetails({
                             <p className={`text-xs font-bold uppercase tracking-wide ${style.text}`}>
                               {a.category}
                             </p>
-                            <p className="text-sm text-navy mt-0.5">{a.message}</p>
-                            <p className="text-[11px] text-slate-400 mt-1">
+                            <p className="text-sm text-navy dark:text-white mt-0.5">{a.message}</p>
+                            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
                               {timeAgo(a.created_at)} · {a.source.replace("_", " ")}
                               {a.resolved && " · resolved"}
                               {!a.resolved && a.acknowledged && " · acknowledged"}
@@ -679,7 +1207,7 @@ function DeviceInlineDetails({
                           <button
                             onClick={() => acknowledgeAlert(a.id)}
                             disabled={ackingId === a.id}
-                            className="shrink-0 text-[10px] uppercase tracking-wider font-bold text-slate-500 border border-slate-300 bg-white px-2 py-1 rounded hover:bg-slate-50 disabled:opacity-50"
+                            className="shrink-0 text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 rounded hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50"
                           >
                             {ackingId === a.id ? "…" : "Acknowledge"}
                           </button>
@@ -696,46 +1224,46 @@ function DeviceInlineDetails({
         {activeTab === "Protocol Operations" && (
           <div>
             {protocolOpsLoading ? (
-              <p className="text-xs text-slate-400">Loading protocol operations…</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading protocol operations…</p>
             ) : protocolOpsError ? (
               <p className="text-xs text-riskcrit">{protocolOpsError}</p>
             ) : protocolOps.length === 0 ? (
-              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-60">
                 <div className="text-3xl mb-2">🔗</div>
                 <p className="text-sm font-medium">No NETCONF/RESTCONF/SNMP operations recorded yet.</p>
               </div>
             ) : (
-              <div className="max-h-96 overflow-y-auto border border-slate-200 rounded-lg">
+              <div className="max-h-96 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
                 <table className="w-full text-xs">
-                  <thead className="bg-slate-100 sticky top-0">
+                  <thead className="bg-slate-100 dark:bg-slate-700 sticky top-0">
                     <tr>
-                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">When</th>
-                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Protocol</th>
-                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Operation</th>
-                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Operator</th>
-                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Result</th>
-                      <th className="text-left px-3 py-2 font-bold text-slate-500 uppercase">Duration</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">When</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Protocol</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Operation</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Operator</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Result</th>
+                      <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Duration</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {protocolOps.map((op) => (
-                      <tr key={op.id} className="bg-white">
-                        <td className="px-3 py-1.5 text-slate-500">{timeAgo(op.created_at)}</td>
-                        <td className="px-3 py-1.5 uppercase font-bold text-slate-600">{op.protocol}</td>
-                        <td className="px-3 py-1.5 text-slate-700">{op.operation}</td>
-                        <td className="px-3 py-1.5 text-slate-500">{op.operator}</td>
+                      <tr key={op.id} className="bg-white dark:bg-slate-800">
+                        <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{timeAgo(op.created_at)}</td>
+                        <td className="px-3 py-1.5 uppercase font-bold text-slate-600 dark:text-slate-300">{op.protocol}</td>
+                        <td className="px-3 py-1.5 text-slate-700 dark:text-slate-200">{op.operation}</td>
+                        <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{op.operator}</td>
                         <td className="px-3 py-1.5">
                           <span className={`font-bold ${op.success ? "text-risklow" : "text-riskcrit"}`}>
                             {op.success ? "Success" : "Failed"}
                           </span>
-                          {op.http_status != null && <span className="text-slate-400 ml-1">({op.http_status})</span>}
+                          {op.http_status != null && <span className="text-slate-400 dark:text-slate-500 ml-1">({op.http_status})</span>}
                           {!op.success && op.error_message && (
-                            <p className="text-slate-400 mt-0.5 max-w-xs truncate" title={op.error_message}>
+                            <p className="text-slate-400 dark:text-slate-500 mt-0.5 max-w-xs truncate" title={op.error_message}>
                               {op.error_message}
                             </p>
                           )}
                         </td>
-                        <td className="px-3 py-1.5 text-slate-500">
+                        <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">
                           {op.execution_time_ms != null ? `${Math.round(op.execution_time_ms)}ms` : "—"}
                         </td>
                       </tr>
@@ -750,11 +1278,11 @@ function DeviceInlineDetails({
         {activeTab === "Deployment History" && (
           <div>
             {deploymentsLoading ? (
-              <p className="text-xs text-slate-400">Loading deployment history…</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading deployment history…</p>
             ) : deploymentsError ? (
               <p className="text-xs text-riskcrit">{deploymentsError}</p>
             ) : deployments.length === 0 ? (
-              <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-60">
                 <div className="text-3xl mb-2">🚀</div>
                 <p className="text-sm font-medium">No deployments recorded yet for this device.</p>
               </div>
@@ -762,11 +1290,11 @@ function DeviceInlineDetails({
               <ul className="space-y-2 max-h-96 overflow-y-auto pr-1">
                 {deployments.map((d) => {
                   const statusStyle: Record<string, string> = {
-                    succeeded: "text-risklow bg-green-50 border-green-200",
-                    failed: "text-riskcrit bg-red-50 border-red-200",
-                    rolled_back: "text-riskmed bg-amber-50 border-amber-200",
-                    in_progress: "text-brandblue bg-blue-50 border-blue-200",
-                    queued: "text-slate-500 bg-slate-50 border-slate-200",
+                    succeeded: "text-risklow bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800",
+                    failed: "text-riskcrit bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800",
+                    rolled_back: "text-riskmed bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800",
+                    in_progress: "text-brandblue bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800",
+                    queued: "text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700",
                   };
                   const style = statusStyle[d.status] || statusStyle.queued;
                   return (
@@ -774,13 +1302,13 @@ function DeviceInlineDetails({
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="text-xs font-bold uppercase tracking-wide">{d.status.replace("_", " ")}</p>
-                          <p className="text-[11px] text-slate-500 mt-0.5">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                             {d.protocol.toUpperCase()} · {new Date(d.created_at).toLocaleString()}
                           </p>
                           {d.error_message && <p className="text-[11px] text-riskcrit mt-1">{d.error_message}</p>}
                         </div>
                         {d.health_checks.length > 0 && (
-                          <span className="text-[10px] font-bold uppercase text-slate-400 shrink-0">
+                          <span className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500 shrink-0">
                             {d.health_checks.filter((h) => h.passed).length}/{d.health_checks.length} checks passed
                           </span>
                         )}
@@ -795,7 +1323,7 @@ function DeviceInlineDetails({
 
         {/* Placeholder for remaining tabs not yet wired to a dedicated data source */}
         {["Drift"].includes(activeTab) && (
-          <div className="text-slate-500 flex flex-col items-center justify-center h-48 opacity-60">
+          <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-60">
             <div className="text-3xl mb-2">🚧</div>
             <p className="text-sm font-medium">{activeTab} data integration coming in next phase.</p>
           </div>
@@ -806,9 +1334,21 @@ function DeviceInlineDetails({
         <SnmpCredentialsModal
           device={device}
           onClose={() => setShowSnmpCredsModal(false)}
+          onDeviceUpdated={onDeviceUpdated}
           onSaved={(updated) => {
             onDeviceUpdated(updated);
             setShowSnmpCredsModal(false);
+          }}
+        />
+      )}
+
+      {showSshCredsModal && (
+        <SshCredentialsModal
+          device={device}
+          onClose={() => setShowSshCredsModal(false)}
+          onSaved={(updated) => {
+            onDeviceUpdated(updated);
+            setShowSshCredsModal(false);
           }}
         />
       )}
@@ -839,6 +1379,163 @@ export default function Devices() {
   const [rollbackSubmitting, setRollbackSubmitting] = useState(false);
   const [rollbackError, setRollbackError] = useState<string | null>(null);
   const [rollbackNotice, setRollbackNotice] = useState<string | null>(null);
+
+  // --- Bulk edit (multi-select) ---
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [bulkSiteValue, setBulkSiteValue] = useState("");
+  const [bulkVendorValue, setBulkVendorValue] = useState("cisco");
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // Human-readable "blocked" message for a 409 from DELETE /devices/{id} --
+  // shared by the single-row and bulk delete paths so they read the same.
+  const describeBlockingCounts = (counts: Record<string, number> | undefined): string => {
+    if (!counts) return "";
+    return Object.entries(counts)
+      .map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`)
+      .join(", ");
+  };
+
+  const extractErrorMessage = (err: any, fallback: string): string => {
+    const detail = err?.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail?.message) return detail.message;
+    return fallback;
+  };
+
+  /** Bulk-applies a partial PATCH to every selected device. Used for
+   * "assign site", "enable/disable SNMP monitoring", and "tag vendor" --
+   * all three are just different fields on the same endpoint the single
+   * device edit path already uses.
+   */
+  const bulkPatch = async (fields: Record<string, unknown>, label: string) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkNotice(null);
+    const updated: Device[] = [];
+    const failed: string[] = [];
+    for (const id of ids) {
+      const hostname = devices.find((d) => d.id === id)?.hostname || id;
+      try {
+        const res = await api.patch<Device>(`/devices/${id}`, fields);
+        updated.push(res.data);
+      } catch (err: any) {
+        failed.push(`${hostname} (${extractErrorMessage(err, "failed")})`);
+      }
+    }
+    if (updated.length) {
+      setDevices((prev) => prev.map((d) => updated.find((u) => u.id === d.id) || d));
+      setBulkNotice(`${label} applied to ${updated.length} device${updated.length === 1 ? "" : "s"}.`);
+    }
+    if (failed.length) setBulkError(`Failed for: ${failed.join("; ")}`);
+    setBulkBusy(false);
+  };
+
+  const bulkAssignSite = () => {
+    if (!bulkSiteValue.trim()) return;
+    bulkPatch({ site: bulkSiteValue.trim() }, `Site "${bulkSiteValue.trim()}"`);
+  };
+
+  const bulkSetSnmp = (enabled: boolean) =>
+    bulkPatch({ supports_snmp: enabled }, `SNMP monitoring ${enabled ? "enabled" : "disabled"}`);
+
+  const bulkTagVendor = () => bulkPatch({ vendor: bulkVendorValue }, `Vendor "${bulkVendorValue}"`);
+
+  /** Deletes one device, transparently retrying with force=true (after an
+   * explicit confirm listing what would be destroyed) if the backend
+   * blocks the plain delete because the device has change/deployment
+   * history. Shared by the single-row Remove button and bulk delete so
+   * both paths behave identically.
+   */
+  const deleteDeviceWithForceConfirm = async (
+    id: string,
+    hostname: string
+  ): Promise<{ result: "deleted" | "blocked-declined" | "failed"; detail?: string }> => {
+    try {
+      await api.delete(`/devices/${id}`);
+      return { result: "deleted" };
+    } catch (err: any) {
+      if (err?.response?.status === 409) {
+        const counts = err.response.data?.detail?.counts;
+        const summary = describeBlockingCounts(counts);
+        const proceed = window.confirm(
+          `'${hostname}' has change/deployment history (${summary}) and can't be removed without confirmation.\n\n` +
+            `Permanently delete it along with this history? This cannot be undone.`
+        );
+        if (!proceed) return { result: "blocked-declined" };
+        try {
+          await api.delete(`/devices/${id}?force=true`);
+          return { result: "deleted" };
+        } catch (err2: any) {
+          return { result: "failed", detail: err2?.response?.data?.detail || err2?.message };
+        }
+      }
+      return { result: "failed", detail: err?.response?.data?.detail || err?.message };
+    }
+  };
+
+  const bulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const hostnames = ids.map((id) => devices.find((d) => d.id === id)?.hostname || id);
+    if (
+      !window.confirm(
+        `Remove ${ids.length} device${ids.length === 1 ? "" : "s"} from inventory? This cannot be undone.\n\n${hostnames.join(", ")}`
+      )
+    )
+      return;
+
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkNotice(null);
+    const deleted: string[] = [];
+    const declined: string[] = [];
+    const failed: string[] = [];
+    let lastFailDetail: string | undefined;
+
+    for (const id of ids) {
+      const hostname = devices.find((d) => d.id === id)?.hostname || id;
+      const { result, detail } = await deleteDeviceWithForceConfirm(id, hostname);
+      if (result === "deleted") deleted.push(id);
+      else if (result === "blocked-declined") declined.push(hostname);
+      else {
+        failed.push(hostname);
+        if (detail) lastFailDetail = detail;
+      }
+    }
+
+    if (deleted.length) {
+      setDevices((prev) => prev.filter((d) => !deleted.includes(d.id)));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        deleted.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (deleted.some((id) => id === expandedDeviceId)) setExpandedDeviceId(null);
+    }
+    const notices: string[] = [];
+    if (deleted.length) notices.push(`Removed ${deleted.length} device${deleted.length === 1 ? "" : "s"}.`);
+    if (notices.length) setBulkNotice(notices.join(" "));
+    const problems: string[] = [];
+    if (declined.length) problems.push(`Kept (declined): ${declined.join(", ")}`);
+    if (failed.length) problems.push(`Failed: ${failed.join(", ")}${lastFailDetail ? ` — ${lastFailDetail}` : ""}`);
+    if (problems.length) setBulkError(problems.join(" · "));
+    setBulkBusy(false);
+  };
 
   const confirmRollback = async () => {
     if (!rollbackTarget) return;
@@ -879,7 +1576,7 @@ export default function Devices() {
     setLoading(true);
     setError(null);
     try {
-      await api.post("/devices", { ...form, snmp_port: form.snmp_port ? Number(form.snmp_port) : null });
+      await api.post("/devices", { ...form, snmp_port: form.snmp_port ? Number(form.snmp_port) : null, netconf_port: form.netconf_port ? Number(form.netconf_port) : null });
       setForm(emptyForm);
       setShowForm(false);
       load();
@@ -894,15 +1591,20 @@ export default function Devices() {
     if (!window.confirm(`Remove ${hostname} from inventory? This cannot be undone.`)) return;
     setDeletingId(id);
     setError(null);
-    try {
-      await api.delete(`/devices/${id}`);
+    const { result, detail } = await deleteDeviceWithForceConfirm(id, hostname);
+    if (result === "deleted") {
       setDevices((prev) => prev.filter((d) => d.id !== id));
       if (expandedDeviceId === id) setExpandedDeviceId(null);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || `Failed to remove ${hostname}.`);
-    } finally {
-      setDeletingId(null);
+      setSelectedIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    } else if (result === "failed") {
+      setError(`Failed to remove ${hostname}.${detail ? ` ${detail}` : ""}`);
     }
+    setDeletingId(null);
   };
 
   const clearUnstableFlag = async (id: string, hostname: string) => {
@@ -949,13 +1651,13 @@ export default function Devices() {
     <div className="pb-16 flex flex-col gap-6 md:p-2">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-3xl font-bold text-navy">Device Inventory</h1>
-          <p className="text-sm text-slate-500 mt-1">Centralized inventory of managed network devices.</p>
+          <h1 className="text-3xl font-bold text-navy dark:text-white">Device Inventory</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Centralized inventory of managed network devices.</p>
         </div>
         <div className="flex items-center gap-3">
             <button
             onClick={load}
-            className="text-brandblue font-medium hover:text-navy bg-white border border-brandblue hover:bg-slate-50 px-3 py-1.5 rounded-full transition shadow-sm text-xs"
+            className="text-brandblue font-medium hover:text-navy dark:hover:text-white bg-white dark:bg-slate-800 border border-brandblue hover:bg-slate-50 dark:hover:bg-slate-700 px-3 py-1.5 rounded-full transition shadow-sm text-xs"
             >
             ↻ Refresh
             </button>
@@ -971,42 +1673,42 @@ export default function Devices() {
       </div>
 
       <div className="flex flex-wrap gap-3">
-        <div className="bg-white border border-slate-200 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500">
-          Total <span className="text-navy font-bold ml-1">{devices.length}</span>
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400">
+          Total <span className="text-navy dark:text-white font-bold ml-1">{devices.length}</span>
         </div>
-        <div className="bg-white border border-slate-200 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 flex items-center gap-1.5">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full bg-risklow shadow-sm" /> Online
-          <span className="text-navy font-bold ml-1">{counts.online}</span>
+          <span className="text-navy dark:text-white font-bold ml-1">{counts.online}</span>
         </div>
-        <div className="bg-white border border-slate-200 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 flex items-center gap-1.5">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full bg-riskmed shadow-sm" /> Degraded
-          <span className="text-navy font-bold ml-1">{counts.degraded}</span>
+          <span className="text-navy dark:text-white font-bold ml-1">{counts.degraded}</span>
         </div>
-        <div className="bg-white border border-slate-200 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 flex items-center gap-1.5">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shadow-sm" /> Offline
-          <span className="text-navy font-bold ml-1">{counts.offline}</span>
+          <span className="text-navy dark:text-white font-bold ml-1">{counts.offline}</span>
         </div>
       </div>
 
       {canManage && showForm && (
-        <form onSubmit={submit} className="bg-white border-2 border-brandblue/30 rounded-xl p-5 shadow-sm">
+        <form onSubmit={submit} className="bg-white dark:bg-slate-800 border-2 border-brandblue/30 rounded-xl p-5 shadow-sm">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <input
-              className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
               placeholder="Hostname (e.g. RTR-01)"
               value={form.hostname}
               onChange={(e) => setForm({ ...form, hostname: e.target.value })}
               required
             />
             <input
-              className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
               placeholder="IP Address"
               value={form.ip_address}
               onChange={(e) => setForm({ ...form, ip_address: e.target.value })}
               required
             />
             <select
-              className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
               value={form.vendor}
               onChange={(e) => setForm({ ...form, vendor: e.target.value })}
             >
@@ -1016,7 +1718,7 @@ export default function Devices() {
               <option value="linux">Linux</option>
             </select>
             <input
-              className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
               placeholder="Site (optional)"
               value={form.site}
               onChange={(e) => setForm({ ...form, site: e.target.value })}
@@ -1025,7 +1727,7 @@ export default function Devices() {
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
             <input
-              className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
               placeholder="SSH Username"
               value={form.ssh_username}
               onChange={(e) => setForm({ ...form, ssh_username: e.target.value })}
@@ -1033,17 +1735,20 @@ export default function Devices() {
             />
             <div className="md:col-span-2">
               <input
-                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
-                placeholder="SSH Credential Ref"
+                className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                placeholder="SSH Credential Ref (legacy/optional)"
                 value={form.ssh_credential_ref}
                 onChange={(e) => setForm({ ...form, ssh_credential_ref: e.target.value })}
-                required
               />
             </div>
           </div>
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+            The SSH password itself is set after saving, via the 🔑 SSH Credentials button on the device's
+            Overview tab — they're stored encrypted, not as a plain form field.
+          </p>
 
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3 pt-3 border-t border-slate-100">
-            <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+            <label className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
               <input
                 type="checkbox"
                 checked={form.supports_snmp}
@@ -1054,7 +1759,7 @@ export default function Devices() {
             {form.supports_snmp && (
               <>
                 <select
-                  className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                   value={form.snmp_version}
                   onChange={(e) => setForm({ ...form, snmp_version: e.target.value })}
                 >
@@ -1063,7 +1768,7 @@ export default function Devices() {
                   <option value="v3">SNMP v3</option>
                 </select>
                 <input
-                  className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                   placeholder="Port"
                   type="number"
                   value={form.snmp_port}
@@ -1072,7 +1777,7 @@ export default function Devices() {
                 {form.snmp_version !== "v3" ? (
                   <div className="md:col-span-2">
                     <input
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                      className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                       placeholder="SNMP Community Credential Ref (legacy env-var fallback — or set the community itself after creating the device via 🔑 Credentials)"
                       value={form.snmp_community_ref}
                       onChange={(e) => setForm({ ...form, snmp_community_ref: e.target.value })}
@@ -1081,7 +1786,7 @@ export default function Devices() {
                 ) : (
                   <div className="md:col-span-2">
                     <input
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                      className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                       placeholder="SNMPv3 Username"
                       value={form.snmp_username}
                       onChange={(e) => setForm({ ...form, snmp_username: e.target.value })}
@@ -1091,7 +1796,7 @@ export default function Devices() {
                 {form.snmp_version === "v3" && (
                   <>
                     <select
-                      className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                      className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                       value={form.snmp_security_level}
                       onChange={(e) => setForm({ ...form, snmp_security_level: e.target.value })}
                     >
@@ -1101,7 +1806,7 @@ export default function Devices() {
                     </select>
                     {form.snmp_security_level !== "noAuthNoPriv" && (
                       <select
-                        className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                        className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                         value={form.snmp_auth_protocol}
                         onChange={(e) => setForm({ ...form, snmp_auth_protocol: e.target.value })}
                       >
@@ -1112,7 +1817,7 @@ export default function Devices() {
                     )}
                     {form.snmp_security_level === "authPriv" && (
                       <select
-                        className="border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                        className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                         value={form.snmp_priv_protocol}
                         onChange={(e) => setForm({ ...form, snmp_priv_protocol: e.target.value })}
                       >
@@ -1121,7 +1826,7 @@ export default function Devices() {
                         ))}
                       </select>
                     )}
-                    <p className="md:col-span-4 text-[11px] text-slate-400 italic">
+                    <p className="md:col-span-4 text-[11px] text-slate-400 dark:text-slate-500 italic">
                       Set the actual auth/privacy passphrases after creating the device, via the 🔑 Credentials
                       button on its Health tab — they're stored encrypted, not as plain form fields.
                     </p>
@@ -1132,7 +1837,34 @@ export default function Devices() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
-            <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+            <label className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
+              <input
+                type="checkbox"
+                checked={form.supports_netconf}
+                onChange={(e) => setForm({ ...form, supports_netconf: e.target.checked })}
+              />
+              Enable NETCONF
+            </label>
+            {form.supports_netconf && (
+              <input
+                className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                placeholder="NETCONF Port (default 830)"
+                type="number"
+                value={form.netconf_port}
+                onChange={(e) => setForm({ ...form, netconf_port: e.target.value })}
+              />
+            )}
+            {form.supports_netconf && (
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300" title="Turn off if this device's NETCONF agent doesn't support <lock> (or rejects it) -- otherwise every push/restore fails at the lock step.">
+                <input
+                  type="checkbox"
+                  checked={form.netconf_use_lock}
+                  onChange={(e) => setForm({ ...form, netconf_use_lock: e.target.checked })}
+                />
+                Lock datastore on push
+              </label>
+            )}
+            <label className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
               <input
                 type="checkbox"
                 checked={form.supports_restconf}
@@ -1143,7 +1875,7 @@ export default function Devices() {
             {form.supports_restconf && (
               <div className="md:col-span-2">
                 <input
-                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+                  className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
                   placeholder="RESTCONF URL (e.g. https://10.0.0.1/restconf)"
                   value={form.restconf_url}
                   onChange={(e) => setForm({ ...form, restconf_url: e.target.value })}
@@ -1161,11 +1893,11 @@ export default function Devices() {
         </form>
       )}
 
-      {error && <p className="text-riskcrit font-semibold text-sm bg-red-50 border border-red-200 px-3 py-2 rounded-lg">{error}</p>}
+      {error && <p className="text-riskcrit font-semibold text-sm bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg">{error}</p>}
       {rollbackNotice && (
-        <p className="text-[13px] font-medium text-brandblue bg-blue-50 border border-blue-200 shadow-sm rounded-lg px-4 py-2.5">
+        <p className="text-[13px] font-medium text-brandblue bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 shadow-sm rounded-lg px-4 py-2.5">
           {rollbackNotice}{" "}
-          <button onClick={() => setRollbackNotice(null)} className="ml-3 font-bold text-slate-400 hover:text-navy">
+          <button onClick={() => setRollbackNotice(null)} className="ml-3 font-bold text-slate-400 dark:text-slate-500 hover:text-navy dark:hover:text-white">
             ✕
           </button>
         </p>
@@ -1173,13 +1905,13 @@ export default function Devices() {
 
       <div className="flex flex-wrap gap-2 items-center">
         <input
-          className="border border-slate-300 shadow-sm rounded-full px-4 py-1.5 text-sm w-full max-w-sm focus:ring-2 focus:ring-brandblue focus:border-transparent outline-none"
+          className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm w-full max-w-sm focus:ring-2 focus:ring-brandblue focus:border-transparent outline-none"
           placeholder="Search hostname, IP, or site…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
         <select
-          className="border border-slate-300 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 focus:ring-2 focus:ring-brandblue outline-none"
+          className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 focus:ring-2 focus:ring-brandblue outline-none"
           value={vendorFilter}
           onChange={(e) => setVendorFilter(e.target.value)}
         >
@@ -1192,31 +1924,153 @@ export default function Devices() {
         </select>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+      {bulkNotice && (
+        <p className="text-[13px] font-medium text-risklow bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 shadow-sm rounded-lg px-4 py-2.5">
+          {bulkNotice}{" "}
+          <button onClick={() => setBulkNotice(null)} className="ml-3 font-bold text-slate-400 dark:text-slate-500 hover:text-navy dark:hover:text-white">
+            ✕
+          </button>
+        </p>
+      )}
+      {bulkError && (
+        <p className="text-[13px] font-medium text-riskcrit bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 shadow-sm rounded-lg px-4 py-2.5">
+          {bulkError}{" "}
+          <button onClick={() => setBulkError(null)} className="ml-3 font-bold text-slate-400 dark:text-slate-500 hover:text-navy dark:hover:text-white">
+            ✕
+          </button>
+        </p>
+      )}
+
+      {canManage && selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 bg-navy dark:bg-slate-950 text-white rounded-xl px-4 py-3 shadow-sm">
+          <span className="text-sm font-bold whitespace-nowrap">
+            {selectedIds.size} selected
+          </span>
+          <button
+            onClick={clearSelection}
+            disabled={bulkBusy}
+            className="text-xs text-slate-300 hover:text-white underline disabled:opacity-50"
+          >
+            Clear
+          </button>
+
+          <div className="w-px self-stretch bg-white/15" />
+
+          <div className="flex items-center gap-1.5">
+            <input
+              className="border border-white/20 bg-white/10 placeholder-slate-400 rounded-full px-3 py-1.5 text-xs text-white w-36 focus:ring-2 focus:ring-accent outline-none"
+              placeholder="Assign site…"
+              value={bulkSiteValue}
+              onChange={(e) => setBulkSiteValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && bulkAssignSite()}
+              disabled={bulkBusy}
+            />
+            <button
+              onClick={bulkAssignSite}
+              disabled={bulkBusy || !bulkSiteValue.trim()}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40"
+            >
+              Apply
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <select
+              className="border border-white/20 bg-white/10 rounded-full px-3 py-1.5 text-xs text-white focus:ring-2 focus:ring-accent outline-none"
+              value={bulkVendorValue}
+              onChange={(e) => setBulkVendorValue(e.target.value)}
+              disabled={bulkBusy}
+            >
+              <option value="cisco" className="text-navy">Cisco</option>
+              <option value="juniper" className="text-navy">Juniper</option>
+              <option value="arista" className="text-navy">Arista</option>
+              <option value="linux" className="text-navy">Linux</option>
+            </select>
+            <button
+              onClick={bulkTagVendor}
+              disabled={bulkBusy}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40"
+            >
+              Tag vendor
+            </button>
+          </div>
+
+          <button
+            onClick={() => bulkSetSnmp(true)}
+            disabled={bulkBusy}
+            className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+          >
+            Enable SNMP
+          </button>
+          <button
+            onClick={() => bulkSetSnmp(false)}
+            disabled={bulkBusy}
+            className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+          >
+            Disable SNMP
+          </button>
+
+          <button
+            onClick={bulkDelete}
+            disabled={bulkBusy}
+            className="ml-auto text-xs font-bold bg-riskcrit hover:bg-red-700 text-white px-3 py-1.5 rounded-full disabled:opacity-50 whitespace-nowrap"
+          >
+            {bulkBusy ? "Working…" : `Delete ${selectedIds.size}`}
+          </button>
+        </div>
+      )}
+
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
         <table className="w-full text-sm">
-          <thead className="bg-slate-100 border-b border-slate-200">
+          <thead className="bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-700">
             <tr>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Hostname</th>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">IP Address</th>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Vendor</th>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Site</th>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Status</th>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Details</th>
-              {canManage && <th className="text-right px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Actions</th>}
+              {canManage && (
+                <th className="w-10 px-4 py-3.5">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all visible devices"
+                    checked={filtered.length > 0 && filtered.every((d) => selectedIds.has(d.id))}
+                    ref={(el) => {
+                      if (el) {
+                        const someSelected = filtered.some((d) => selectedIds.has(d.id));
+                        const allSelected = filtered.length > 0 && filtered.every((d) => selectedIds.has(d.id));
+                        el.indeterminate = someSelected && !allSelected;
+                      }
+                    }}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      setSelectedIds((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) filtered.forEach((d) => next.add(d.id));
+                        else filtered.forEach((d) => next.delete(d.id));
+                        return next;
+                      });
+                    }}
+                    className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-brandblue focus:ring-brandblue"
+                  />
+                </th>
+              )}
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Hostname</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">IP Address</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Vendor</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Site</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Status</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Details</th>
+              {canManage && <th className="text-right px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Actions</th>}
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {initialLoading && (
               <tr>
-                <td colSpan={canManage ? 7 : 6} className="text-center text-slate-500 py-12">
-                   <div className="inline-block w-5 h-5 border-2 border-slate-200 border-t-brandblue rounded-full animate-spin mb-2" />
+                <td colSpan={canManage ? 8 : 6} className="text-center text-slate-500 dark:text-slate-400 py-12">
+                   <div className="inline-block w-5 h-5 border-2 border-slate-200 dark:border-slate-700 border-t-brandblue rounded-full animate-spin mb-2" />
                    <p>Loading devices…</p>
                 </td>
               </tr>
             )}
             {!initialLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={canManage ? 7 : 6} className="text-center text-slate-400 py-10 font-medium">
+                <td colSpan={canManage ? 8 : 6} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
                   {devices.length === 0 ? "No devices yet. Add one above." : "No devices match your search."}
                 </td>
               </tr>
@@ -1224,22 +2078,33 @@ export default function Devices() {
             {filtered.map((d) => (
               <Fragment key={d.id}>
                 <tr className={`cursor-pointer transition-colors hover:bg-slate-50/70 border-l-4 ${
-                    expandedDeviceId === d.id ? "bg-slate-50 border-l-navy" : "border-l-transparent bg-white"
+                    expandedDeviceId === d.id ? "bg-slate-50 dark:bg-slate-900 border-l-navy" : "border-l-transparent bg-white dark:bg-slate-800"
                   }`} 
                   onClick={() => setExpandedDeviceId(expandedDeviceId === d.id ? null : d.id)}
                 >
-                <td className="px-5 py-4 font-bold text-navy">{d.hostname}</td>
-                <td className="px-5 py-4 text-slate-500 font-mono text-xs font-semibold">{d.ip_address}</td>
-                <td className="px-5 py-4 text-slate-600 capitalize font-medium">{d.vendor}</td>
-                <td className="px-5 py-4 text-slate-600 font-medium">{d.site || "—"}</td>
+                {canManage && (
+                  <td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${d.hostname}`}
+                      checked={selectedIds.has(d.id)}
+                      onChange={() => toggleSelected(d.id)}
+                      className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-brandblue focus:ring-brandblue"
+                    />
+                  </td>
+                )}
+                <td className="px-5 py-4 font-bold text-navy dark:text-white">{d.hostname}</td>
+                <td className="px-5 py-4 text-slate-500 dark:text-slate-400 font-mono text-xs font-semibold">{d.ip_address}</td>
+                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 capitalize font-medium">{d.vendor}</td>
+                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">{d.site || "—"}</td>
                 <td className="px-5 py-4">
-                  <span className="inline-flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-full shadow-sm">
+                  <span className="inline-flex items-center gap-1.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 px-2.5 py-1 rounded-full shadow-sm">
                     <span className={`w-2 h-2 rounded-full ${statusColor[d.status]} animate-pulse`} />
-                    <span className="capitalize text-[11px] font-bold text-slate-600 tracking-wide">{d.status}</span>
+                    <span className="capitalize text-[11px] font-bold text-slate-600 dark:text-slate-300 tracking-wide">{d.status}</span>
                   </span>
                   {d.flagged_unstable && (
                     <span
-                      className="ml-2 inline-flex items-center gap-1.5 bg-red-50 border border-red-200 text-riskcrit px-2.5 py-1 rounded-full shadow-sm text-[11px] font-bold uppercase tracking-wide"
+                      className="ml-2 inline-flex items-center gap-1.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-riskcrit px-2.5 py-1 rounded-full shadow-sm text-[11px] font-bold uppercase tracking-wide"
                       title="Failed deployment repeatedly; automated deploys blocked until a Network Administrator reviews it."
                     >
                       Unstable — Review Required
@@ -1262,7 +2127,7 @@ export default function Devices() {
                               clearUnstableFlag(d.id, d.hostname);
                           }}
                           disabled={clearingUnstableId === d.id}
-                          className="text-[11px] uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-2 py-1 rounded shadow-sm hover:bg-blue-100 font-bold disabled:opacity-50"
+                          className="text-[11px] uppercase tracking-wider text-brandblue border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded shadow-sm hover:bg-blue-100 font-bold disabled:opacity-50"
                         >
                           {clearingUnstableId === d.id ? "Wait…" : "Clear Flag"}
                         </button>
@@ -1282,7 +2147,7 @@ export default function Devices() {
                             removeDevice(d.id, d.hostname);
                         }}
                         disabled={deletingId === d.id}
-                        className="text-[11px] uppercase tracking-wider text-riskcrit border border-red-200 bg-red-50 px-2 py-1 rounded shadow-sm hover:bg-red-100 font-bold disabled:opacity-50"
+                        className="text-[11px] uppercase tracking-wider text-riskcrit border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1 rounded shadow-sm hover:bg-red-100 font-bold disabled:opacity-50"
                       >
                         {deletingId === d.id ? "Wait…" : "Remove"}
                       </button>
@@ -1292,7 +2157,7 @@ export default function Devices() {
                 </tr>
                 {expandedDeviceId === d.id && (
                   <tr>
-                    <td colSpan={canManage ? 7 : 6} className="p-0 border-b-4 border-slate-200">
+                    <td colSpan={canManage ? 8 : 6} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
                         <DeviceInlineDetails 
                             device={d} 
                             canManage={canManage}
@@ -1315,25 +2180,25 @@ export default function Devices() {
 
       {rollbackTarget && (
         <div className="fixed inset-0 bg-navy/60 backdrop-blur-sm flex items-center justify-center z-50 px-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
-            <h3 className="text-xl font-bold text-navy">Roll back {rollbackTarget.device.hostname}?</h3>
-            <p className="text-[13px] text-slate-500 mt-3 leading-relaxed">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6">
+            <h3 className="text-xl font-bold text-navy dark:text-white">Roll back {rollbackTarget.device.hostname}?</h3>
+            <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">
               This triggers a full pipeline redeployment restoring snapshot <span className="font-mono font-bold">v{rollbackTarget.snapshot.version}</span> (
               {new Date(rollbackTarget.snapshot.created_at).toLocaleString()}). 
             </p>
-            <label className="block text-xs font-bold text-slate-600 mt-5 mb-1 uppercase tracking-wide">Reason (optional)</label>
+            <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mt-5 mb-1 uppercase tracking-wide">Reason (optional)</label>
             <input
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue outline-none"
+              className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue outline-none"
               placeholder="e.g. interface flapping after last change"
               value={rollbackReason}
               onChange={(e) => setRollbackReason(e.target.value)}
             />
-            {rollbackError && <p className="text-riskcrit font-semibold text-xs mt-3 bg-red-50 p-2 rounded">{rollbackError}</p>}
+            {rollbackError && <p className="text-riskcrit font-semibold text-xs mt-3 bg-red-50 dark:bg-red-950/40 p-2 rounded">{rollbackError}</p>}
             <div className="flex gap-3 justify-end mt-6">
               <button
                 onClick={() => setRollbackTarget(null)}
                 disabled={rollbackSubmitting}
-                className="px-4 py-2 text-sm font-bold text-slate-500 hover:text-slate-700 disabled:opacity-50 transition-colors bg-slate-100 rounded-lg hover:bg-slate-200"
+                className="px-4 py-2 text-sm font-bold text-slate-500 dark:text-slate-400 hover:text-slate-700 disabled:opacity-50 transition-colors bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200"
               >
                 Cancel
               </button>
@@ -1361,7 +2226,7 @@ export default function Devices() {
                 </div>
                 <button
                   onClick={() => setActiveTerminalDevice(null)}
-                  className="text-slate-400 hover:text-white font-bold text-sm bg-transparent border-0"
+                  className="text-slate-400 dark:text-slate-500 hover:text-white font-bold text-sm bg-transparent border-0"
                 >
                   Close [ X ]
                 </button>

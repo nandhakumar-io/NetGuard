@@ -1,7 +1,9 @@
+import datetime
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -13,13 +15,23 @@ from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
 from app.models.device_metric import DeviceMetric
+from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.golden_config import GoldenConfig
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
-from app.schemas.device import DeviceCreate, DeviceRead, DeviceUpdate, SnmpCredentialsUpdate, SnmpTestResult
+from app.schemas.device import (
+    DeviceCreate,
+    DeviceDiscoveryResult,
+    DeviceRead,
+    DeviceUpdate,
+    SnmpCredentialsUpdate,
+    SnmpTestResult,
+    SshCredentialsUpdate,
+    SshTestResult,
+)
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
-from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service
+from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service, protocol_manager
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -104,8 +116,12 @@ def update_device(
     for field, value in updates.items():
         setattr(device, field, value)
 
-    db.commit()
-    db.refresh(device)
+    try:
+        db.commit()
+        db.refresh(device)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to update device: {exc}")
 
     if device.supports_snmp and not was_snmp_enabled:
         _poll_snmp_best_effort(db, device)
@@ -120,17 +136,13 @@ def delete_device(
     db: Session = Depends(get_db),
     current_user: User = Depends(INVENTORY_MANAGER_ROLES),
 ):
-    """Delete a device. Fails with a clear 409 (rather than the raw FK
-    error Postgres would otherwise raise) if the device has compliance-
-    relevant history -- change requests, deployments, config snapshots, or
-    a defined golden config -- unless `force=true` is passed, since those
-    records are exactly what audit trails and compliance reports (see
-    app.services.compliance_report) are built from.
+    """Delete a device and ALL its related records.
 
-    Pure telemetry (alerts, drift records, SNMP metrics, protocol op logs)
-    has no standalone value once the device is gone, so it's always purged
-    regardless of `force` -- that's what used to trigger the bare
-    `alerts_device_id_fkey` IntegrityError this replaces.
+    If the device has compliance-relevant history (change requests,
+    deployments, config snapshots, golden configs) the caller must pass
+    ``?force=true`` — otherwise a 409 is raised so the UI can warn the
+    operator. Pure telemetry (alerts, drift, metrics, protocol ops) is
+    always purged since it has no standalone value once the device is gone.
     """
     device = db.get(Device, device_id)
     if not device:
@@ -156,14 +168,16 @@ def delete_device(
             },
         )
 
-    # Pure telemetry: no compliance value once the device is gone, always purged.
-    db.query(Alert).filter(Alert.device_id == device_id).delete(synchronize_session=False)
-    db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
-    db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
-    db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
+    try:
+        # ------- Purge ALL child rows before deleting the device -------
+        # Pure telemetry: no compliance value — always purged.
+        db.query(Alert).filter(Alert.device_id == device_id).delete(synchronize_session=False)
+        db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
+        db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
+        db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
 
-    if force and blocking_counts:
-        # Deletion order matters: children before parents.
+        # Compliance-relevant records (only reached when force=true or counts are 0).
+        # Deletion order: children before parents.
         # deployment_logs / health_check_results -> deployments -> change_requests
         deployment_ids = [
             d.id for d in db.query(Deployment.id).filter(Deployment.device_id == device_id).all()
@@ -172,28 +186,75 @@ def delete_device(
             db.query(DeploymentLog).filter(DeploymentLog.deployment_id.in_(deployment_ids)).delete(synchronize_session=False)
             db.query(HealthCheckResult).filter(HealthCheckResult.deployment_id.in_(deployment_ids)).delete(synchronize_session=False)
         db.query(Deployment).filter(Deployment.device_id == device_id).delete(synchronize_session=False)
-        db.query(ConfigSnapshot).filter(ConfigSnapshot.device_id == device_id).delete(synchronize_session=False)
-        db.query(GoldenConfig).filter(GoldenConfig.device_id == device_id).delete(synchronize_session=False)
 
         change_request_ids = [
             cr.id for cr in db.query(ChangeRequest.id).filter(ChangeRequest.device_id == device_id).all()
         ]
         if change_request_ids:
-            # Audit history is immutable/preserved for compliance -- detach
-            # the dangling reference rather than deleting the log rows.
+            # Audit history is immutable — detach the FK rather than deleting.
             db.query(AuditLog).filter(AuditLog.change_request_id.in_(change_request_ids)).update(
                 {"change_request_id": None}, synchronize_session=False
             )
+            # ChangeRequest.rollback_snapshot_id -> config_snapshots.id and
+            # ConfigSnapshot.change_request_id -> change_requests.id form a
+            # circular FK (see the note in alembic/versions/0001_baseline.py).
+            # Any change request for this device that went through a
+            # rollback has rollback_snapshot_id pointing at one of the
+            # ConfigSnapshot rows deleted right below -- detach it first or
+            # that delete throws an IntegrityError that (unlike the one
+            # guarded further down) used to propagate unhandled, producing
+            # a raw 500 that skips CORSMiddleware entirely and shows up in
+            # the browser as an opaque "Network Error" instead of a real
+            # message.
+            db.query(ChangeRequest).filter(ChangeRequest.id.in_(change_request_ids)).update(
+                {"rollback_snapshot_id": None}, synchronize_session=False
+            )
+        db.query(ConfigSnapshot).filter(ConfigSnapshot.device_id == device_id).delete(synchronize_session=False)
+        db.query(GoldenConfig).filter(GoldenConfig.device_id == device_id).delete(synchronize_session=False)
         db.query(ChangeRequest).filter(ChangeRequest.device_id == device_id).delete(synchronize_session=False)
 
-        audit_service.record_event(
-            db, actor=current_user.email, action="Device Force-Deleted", result="Deleted",
-            device_hostname=device.hostname,
-            detail=f"Purged history: {blocking_counts}",
-        )
+        if blocking_counts:
+            audit_service.record_event(
+                db, actor=current_user.email, action="Device Force-Deleted", result="Deleted",
+                device_hostname=device.hostname,
+                detail=f"Purged history: {blocking_counts}",
+            )
 
-    db.delete(device)
-    db.commit()
+        db.delete(device)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"'{device.hostname}' still has related records that prevent deletion. "
+                    "Retry with ?force=true to permanently delete the device along with all its history."
+                ),
+                "counts": {"related_records": 1},
+            },
+        )
+    except SQLAlchemyError:
+        # Belt-and-suspenders alongside the IntegrityError branch above:
+        # any *other* unexpected DB error partway through this multi-table
+        # purge (a future FK this function doesn't know about yet, a
+        # constraint added later, etc.) should still roll back and surface
+        # as a real, catchable 409 -- not propagate as a raw exception.
+        # (Even if it did propagate, app.main's global exception handler
+        # now converts it to a proper CORS-safe 500 instead of the
+        # unreadable "Network Error" this used to produce -- but failing
+        # cleanly here gives a much more actionable message than that.)
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"'{device.hostname}' could not be deleted due to an unexpected database error. "
+                    "Retry with ?force=true, or check the server logs for the underlying cause."
+                ),
+                "counts": {"related_records": 1},
+            },
+        )
 
 
 @router.get("/{device_id}/snapshots", response_model=list[SnapshotSummary])
@@ -356,6 +417,180 @@ def test_snmp_credentials(
 
     result = snmp_service.test_connection(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
     return SnmpTestResult(**result)
+
+
+@router.get("/{device_id}/discovery", response_model=DeviceDiscoveryResult)
+def discover_device(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """On-demand SNMP discovery: hostname, ARP table, routing table, LLDP/
+    CDP neighbors, and chassis/module inventory (snmp_service.discover_inventory).
+    Heavier than a routine health poll (several full table walks), so this
+    runs only when requested, not on the scheduled polling cadence.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not device.supports_snmp or not device.snmp_version:
+        raise HTTPException(status_code=400, detail="Device has no SNMP configured (supports_snmp/snmp_version unset)")
+
+    try:
+        auth = metrics_service.build_snmp_auth(device)
+    except credential_service.CredentialNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    from app.core.config import settings
+
+    result = snmp_service.discover_inventory(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
+
+    _persist_discovered_neighbors(db, device, result)
+
+    return DeviceDiscoveryResult(
+        device_id=device.id,
+        hostname=device.hostname,
+        reported_hostname=result["hostname"],
+        arp_table=result["arp_table"],
+        routing_table=result["routing_table"],
+        lldp_neighbors=result["lldp_neighbors"],
+        cdp_neighbors=result["cdp_neighbors"],
+        inventory=result["inventory"],
+        retrieved_at=datetime.datetime.utcnow(),
+    )
+
+
+def _resolve_neighbor_device_id(db: Session, name: str | None) -> uuid.UUID | None:
+    """Best-effort match of a raw LLDP/CDP-reported neighbor identity
+    (usually a hostname, sometimes an IP) against the known device
+    inventory, so the Topology graph can draw a real edge instead of
+    just displaying the raw string. Matches on exact hostname (the
+    common case) or IP address; anything else is left unresolved rather
+    than guessed at (e.g. no fuzzy/partial hostname matching), since a
+    wrong topology edge is worse than a missing one.
+    """
+    if not name:
+        return None
+    candidate = name.split(".")[0]  # LLDP/CDP sysNames are sometimes FQDNs; devices are stored by short hostname
+    device = (
+        db.query(Device)
+        .filter((Device.hostname == name) | (Device.hostname == candidate) | (Device.ip_address == name))
+        .first()
+    )
+    return device.id if device else None
+
+
+def _persist_discovered_neighbors(db: Session, device: Device, result: dict) -> None:
+    """Replaces device's prior DiscoveredNeighbor rows with the fresh
+    LLDP/CDP results from this run. Best-effort: a persistence failure
+    here should never fail the discovery response itself (the operator
+    still gets to see the live discovery data even if the DB write has
+    a problem), so this is not wrapped in the same transaction/response
+    path as anything else on this endpoint.
+    """
+    try:
+        db.query(DiscoveredNeighbor).filter(DiscoveredNeighbor.device_id == device.id).delete()
+
+        for n in result.get("lldp_neighbors", []):
+            db.add(
+                DiscoveredNeighbor(
+                    device_id=device.id,
+                    protocol="lldp",
+                    local_port=n.get("local_port_index"),
+                    neighbor_name=n.get("neighbor_name"),
+                    neighbor_port=n.get("neighbor_port"),
+                    neighbor_device_id=_resolve_neighbor_device_id(db, n.get("neighbor_name")),
+                )
+            )
+        for n in result.get("cdp_neighbors", []):
+            db.add(
+                DiscoveredNeighbor(
+                    device_id=device.id,
+                    protocol="cdp",
+                    local_port=n.get("local_if_index"),
+                    neighbor_name=n.get("neighbor_id"),
+                    neighbor_port=n.get("neighbor_port"),
+                    neighbor_platform=n.get("neighbor_platform"),
+                    neighbor_device_id=_resolve_neighbor_device_id(db, n.get("neighbor_id")),
+                )
+            )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+
+
+@router.post("/{device_id}/ssh-credentials", response_model=DeviceRead)
+def set_ssh_credentials(
+    device_id: uuid.UUID,
+    payload: SshCredentialsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Sets/updates the SSH login for a device: username (plain) and
+    password (Fernet-encrypted at rest, see app.core.crypto). Never
+    returned by any GET endpoint -- DeviceRead only exposes a derived
+    `ssh_credentials_configured` boolean.
+
+    This is the actual credential entry point for NETCONF/RESTCONF/SSH
+    deployments, config backups, and topology link inference (all of
+    which need a real running-config read to succeed) -- ssh_credential_ref
+    alone is only a *pointer* to a NETGUARD_CRED_<REF> env var and was
+    never something an operator could set from the UI.
+
+    Only fields present in the request are touched; omit a field to leave
+    it unchanged, or send password="" to explicitly clear it. This does
+    not itself verify the credential works -- use
+    POST /devices/{id}/ssh-credentials/test for that, either before or
+    after saving.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if payload.username is not None:
+        device.ssh_username = payload.username
+    if payload.password is not None:
+        credential_service.set_ssh_password(device, payload.password)
+
+    db.commit()
+    db.refresh(device)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="SSH Credentials Updated", result="Success",
+        device_hostname=device.hostname,
+        detail="username" if payload.username is not None else "password",
+    )
+
+    return DeviceRead.from_device(device)
+
+
+@router.post("/{device_id}/ssh-credentials/test", response_model=SshTestResult)
+def test_ssh_credentials(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Verifies SSH/NETCONF/RESTCONF connectivity using whatever
+    credentials are currently on file for this device (DB-encrypted
+    password first, legacy env-var ref as fallback -- see
+    credential_service), by reusing the exact same read that backups,
+    drift detection, and topology link inference depend on
+    (ProtocolManager.get_running_config) rather than opening a separate
+    test-only connection. Lets an operator confirm a password actually
+    works right after saving it, instead of waiting for the next
+    scheduled backup/poll to find out it doesn't.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    used_protocol = protocol_manager.select_protocol(device)
+    result = protocol_manager.ProtocolManager(db, device, operator=current_user.email).get_running_config()
+    return SshTestResult(
+        success=result.success,
+        message=result.error or f"Connected via {used_protocol} and read the running config.",
+        protocol=used_protocol if result.success else None,
+    )
 
 
 @router.get("/{device_id}/protocol-operations")

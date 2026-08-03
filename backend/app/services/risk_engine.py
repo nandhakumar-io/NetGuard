@@ -368,14 +368,20 @@ class RuleBasedScorer(RiskScorer):
 
 
 class LLMScorer(RiskScorer):
-    """Optional Claude-backed scorer, selected via
+    """Optional model-backed scorer, selected via
     `settings.RISK_ENGINE_BACKEND = "llm"`. Runs the same deterministic
-    NetworkAwareChecks first (so hard conflicts are never missed even if the
-    model call fails or is unavailable), then asks Claude (model =
-    settings.ANTHROPIC_MODEL) to reason about softer/contextual risk and
-    merges its findings in. Falls back to the rule-based score alone if no
-    ANTHROPIC_API_KEY is configured or the call errors, so enabling this
-    backend can never make analysis unavailable.
+    NetworkAwareChecks first (so hard conflicts are never missed even if
+    the model call fails or is unavailable), then asks the configured
+    provider (`settings.RISK_ENGINE_LLM_PROVIDER`: "anthropic" or
+    "ollama") to reason about softer/contextual risk and merges its
+    findings in. Falls back to the rule-based score alone if the provider
+    has no credential/isn't reachable or the call errors -- enabling this
+    backend can never make analysis unavailable -- but unlike the earlier
+    version, that fallback is no longer silent: the result's
+    `llm_applied`/`llm_error` fields tell the caller whether the model
+    pass actually happened, so a CR can record it (see
+    app.api.change_requests) instead of a reviewer having no way to tell
+    a rule-only score from an LLM-reviewed one.
     """
 
     def __init__(self) -> None:
@@ -388,30 +394,42 @@ class LLMScorer(RiskScorer):
         other_device_configs: dict[str, str] | None = None,
     ) -> RiskAnalysisResult:
         base = self._rule_scorer.score(proposed_config, current_config, other_device_configs)
+        provider = settings.RISK_ENGINE_LLM_PROVIDER
 
-        if not settings.ANTHROPIC_API_KEY:
+        if provider == "anthropic" and not settings.ANTHROPIC_API_KEY:
+            base.llm_error = "RISK_ENGINE_LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not configured"
+            return base
+        if provider == "ollama" and not settings.OLLAMA_BASE_URL:
+            base.llm_error = "RISK_ENGINE_LLM_PROVIDER=ollama but OLLAMA_BASE_URL is not configured"
+            return base
+        if provider not in ("anthropic", "ollama"):
+            base.llm_error = f"Unknown RISK_ENGINE_LLM_PROVIDER '{provider}'"
             return base
 
         try:
-            extra_findings, extra_score = self._call_llm(proposed_config, current_config)
-        except Exception:
+            extra_findings, extra_score = self._call_llm(provider, proposed_config, current_config)
+        except Exception as exc:
             # Never let a downstream model outage block change analysis --
-            # degrade to the deterministic rule-based result.
+            # degrade to the deterministic rule-based result, but say why.
+            base.llm_error = f"{provider} call failed: {exc}"
             return base
 
         findings = base.findings + extra_findings
         score = min(base.risk_score + extra_score, 100)
         classification, recommendation = _classify(score)
         return RiskAnalysisResult(
-            risk_score=score, classification=classification, recommendation=recommendation, findings=findings
+            risk_score=score, classification=classification, recommendation=recommendation,
+            findings=findings, llm_applied=True, llm_error=None,
         )
 
-    def _call_llm(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
-        import json
+    def _call_llm(self, provider: str, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
+        if provider == "ollama":
+            return self._call_ollama(proposed_config, current_config)
+        return self._call_anthropic(proposed_config, current_config)
 
-        import anthropic
-
-        prompt = (
+    @staticmethod
+    def _prompt(proposed_config: str, current_config: str | None) -> str:
+        return (
             "You are a network change-risk reviewer. Given the proposed device "
             "config (and current config, if provided), identify additional risks "
             "not already obvious from simple keyword matching. Respond ONLY with "
@@ -419,14 +437,71 @@ class LLMScorer(RiskScorer):
             f"CURRENT CONFIG:\n{current_config or '(none provided)'}\n\n"
             f"PROPOSED CONFIG:\n{proposed_config}"
         )
+
+    def _call_anthropic(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
+        import json
+
+        import anthropic
+
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         message = client.messages.create(
             model=settings.ANTHROPIC_MODEL,
             max_tokens=1024,
             temperature=0,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": self._prompt(proposed_config, current_config)}],
         )
         raw = "".join(block.text for block in message.content if block.type == "text")
+        data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
+        return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
+
+    def _call_ollama(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
+        """Calls a locally-running Ollama server's chat API
+        (https://github.com/ollama/ollama/blob/main/docs/api.md) over plain
+        HTTP -- no extra dependency, reuses httpx (already used by
+        app.services.restconf_service). `format: "json"` asks Ollama to
+        constrain the model's output to valid JSON so this doesn't need the
+        same markdown-fence stripping the Anthropic path does; `stream:
+        False` collects the full response in one call instead of NDJSON
+        chunks. Requires the model to already be pulled on that server
+        (`ollama pull <OLLAMA_MODEL>`) -- an unpulled model 404s the same as
+        any other call failure and is caught by score()'s try/except.
+        """
+        import json
+
+        import httpx
+
+        response = httpx.post(
+            f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/chat",
+            json={
+                "model": settings.OLLAMA_MODEL,
+                "messages": [{"role": "user", "content": self._prompt(proposed_config, current_config)}],
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0},
+            },
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        )
+        if response.status_code == 404:
+            # Ollama's own error body for this case is the actually useful
+            # part (usually {"error": "model 'X' not found, try pulling it
+            # first"}) -- a bare "Client error '404 Not Found' for url
+            # ...api/chat" (what response.raise_for_status() below would
+            # raise) reads like the *endpoint* is wrong, when in every
+            # real case seen so far it's actually OLLAMA_MODEL naming a
+            # tag that was never `ollama pull`ed on that server. Surface
+            # Ollama's message so that's obvious without having to go
+            # curl the API by hand to find out.
+            try:
+                detail = response.json().get("error", response.text)
+            except Exception:  # noqa: BLE001
+                detail = response.text
+            raise RuntimeError(
+                f"Ollama returned 404 for model '{settings.OLLAMA_MODEL}' at {settings.OLLAMA_BASE_URL}: "
+                f"{detail}. Run `ollama list` on that server to see exactly which tags are pulled -- "
+                f"OLLAMA_MODEL must match one of them exactly (e.g. 'llama3.1:8b', not 'llama3.1')."
+            )
+        response.raise_for_status()
+        raw = response.json()["message"]["content"]
         data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
         return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
 

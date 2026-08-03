@@ -61,7 +61,15 @@ class Device(Base):
     device_type = Column(String, nullable=True)  # e.g. router, switch, firewall
     status = Column(Enum(DeviceStatus), nullable=False, default=DeviceStatus.UNKNOWN)
     ssh_username = Column(String, nullable=True)
-    ssh_credential_ref = Column(String, nullable=True)  # pointer to secret store, not raw secret
+    ssh_credential_ref = Column(String, nullable=True)  # legacy: pointer to secret store, not raw secret
+    # Fernet-encrypted (app.core.crypto) SSH password, set via
+    # POST /devices/{id}/ssh-credentials -- same pattern as the SNMP
+    # *_encrypted columns below, so an operator can enter the real SSH
+    # password from the UI instead of hand-editing a NETGUARD_CRED_<REF>
+    # env var on the server. Never returned by any GET endpoint. Takes
+    # priority over ssh_credential_ref (env-var lookup) when present; see
+    # credential_service.get_ssh_password.
+    ssh_password_encrypted = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # --- Inventory detail (Device Inventory page columns) ---
@@ -77,6 +85,16 @@ class Device(Base):
 
     # --- NETCONF connection settings (ncclient) ---
     netconf_port = Column(Integer, nullable=True, default=830)
+    # Whether netconf_service.push_config should <lock>/<unlock> the target
+    # datastore around edit-config. Defaults on (the safe behavior for
+    # devices that support it), but some NETCONF agents either don't
+    # implement <lock> at all or reject it from a session that already
+    # holds an implicit lock, which makes every deploy/restore to that
+    # device fail at the lock step even though the edit-config itself
+    # would have succeeded. Per-device escape hatch: turn this off for a
+    # device that's confirmed to have that problem instead of losing
+    # locking (and the safety it gives every other device) globally.
+    netconf_use_lock = Column(Boolean, nullable=False, default=True, server_default="true")
 
     # --- RESTCONF connection settings ---
     restconf_url = Column(String, nullable=True)  # e.g. https://10.0.0.1/restconf
@@ -97,9 +115,30 @@ class Device(Base):
     # SNMPv3 USM parameters (not secret; auth/priv *keys* are the secrets,
     # stored encrypted below -- protocol choice and security level are just
     # configuration, same sensitivity as snmp_version itself).
-    snmp_security_level = Column(Enum(SnmpSecurityLevel), nullable=True)
-    snmp_auth_protocol = Column(Enum(SnmpAuthProtocol), nullable=True)
-    snmp_priv_protocol = Column(Enum(SnmpPrivProtocol), nullable=True)
+    #
+    # values_callable is required here: SQLAlchemy's Enum(PythonEnum) sends
+    # the member *name* (e.g. "AUTH_PRIV") to the DB by default, but
+    # alembic/versions/0013_snmpv3_device_columns.py created the Postgres
+    # enum types using the member *values* ("noAuthNoPriv", "authPriv",
+    # "3DES", ...). Without values_callable that mismatch makes every save
+    # with security_level=authPriv (or priv_protocol=3DES) fail with
+    # `psycopg2.errors.InvalidTextRepresentation: invalid input value for
+    # enum snmpsecuritylevel: "AUTH_PRIV"`. DeviceVendor/DeviceStatus don't
+    # need this because their DB enum types were auto-created by
+    # create_all() using the same name-based convention SQLAlchemy uses by
+    # default, so both sides already agree there.
+    snmp_security_level = Column(
+        Enum(SnmpSecurityLevel, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=True,
+    )
+    snmp_auth_protocol = Column(
+        Enum(SnmpAuthProtocol, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=True,
+    )
+    snmp_priv_protocol = Column(
+        Enum(SnmpPrivProtocol, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=True,
+    )
     # Fernet-encrypted (app.core.crypto) secrets stored directly on the
     # device row -- set via credential_service.set_snmp_credentials, called
     # from POST /devices/{id}/snmp-credentials. Never returned by any GET

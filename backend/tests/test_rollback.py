@@ -66,7 +66,7 @@ def test_list_snapshots_returns_newest_first(db_session):
     assert [s.id for s in result] == [snap2.id, snap1.id]
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=None)
+@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
 def test_initiate_rollback_builds_approved_change_request(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device, config="interface Gi0/1\n ip address 10.1.1.1\n", version="1")
@@ -82,7 +82,7 @@ def test_initiate_rollback_builds_approved_change_request(mock_read, db_session)
     assert cr.approved_by == admin.id
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=None)
+@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
 def test_initiate_rollback_rejects_snapshot_from_another_device(mock_read, db_session):
     device_a = _make_device(db_session)
     device_b = Device(
@@ -100,7 +100,7 @@ def test_initiate_rollback_rejects_snapshot_from_another_device(mock_read, db_se
         rollback_service.initiate_rollback(db_session, device_b, snapshot, admin)
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=None)
+@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
 def test_initiate_rollback_rejects_when_device_has_in_flight_change(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device)
@@ -117,7 +117,7 @@ def test_initiate_rollback_rejects_when_device_has_in_flight_change(mock_read, d
         rollback_service.initiate_rollback(db_session, device, snapshot, admin)
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value="interface Gi0/1\n live\n")
+@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=("interface Gi0/1\n live\n", "ssh"))
 def test_initiate_rollback_uses_live_read_as_current_config_when_available(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device)
@@ -128,7 +128,7 @@ def test_initiate_rollback_uses_live_read_as_current_config_when_available(mock_
     assert cr.current_config == "interface Gi0/1\n live\n"
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=None)
+@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
 def test_initiate_rollback_falls_back_to_latest_snapshot_when_live_read_unavailable(mock_read, db_session):
     device = _make_device(db_session)
     snap1 = _make_snapshot(db_session, device, config="interface Gi0/1\n old\n", version="1")

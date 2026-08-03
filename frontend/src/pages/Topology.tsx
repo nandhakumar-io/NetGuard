@@ -257,8 +257,9 @@ export default function Topology() {
         <div>
           <h1 className="text-2xl font-bold text-navy">Network Topology</h1>
           <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-            Devices and the links between them, inferred from interfaces sharing the same subnet across each
-            device's latest config snapshot. Click a device or a link for details. Scroll to zoom, drag to pan.
+            Devices and the links between them — green LLDP/CDP badges are confirmed neighbors from SNMP
+            Discovery runs, gray labels are inferred from interfaces sharing the same subnet. Click a device or
+            a link for details. Scroll to zoom, drag to pan. Run Discovery on a device to add confirmed links here.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -347,6 +348,11 @@ export default function Topology() {
                     const tgtLabelPos = pointAlong(b.x, b.y, a.x, a.y, 30);
                     const midX = (a.x + b.x) / 2;
                     const midY = (a.y + b.y) / 2;
+                    const hasIps = Boolean(e.source_ip && e.target_ip);
+                    const linkLabel =
+                      e.link_source === "subnet"
+                        ? e.subnet || ""
+                        : e.link_source.toUpperCase(); // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
                     return (
                       <g key={key} className="cursor-pointer" onClick={() => setSelection({ kind: "edge", edge: e })}>
                         {/* fat invisible hit-area so thin lines are easy to click */}
@@ -360,14 +366,16 @@ export default function Topology() {
                           strokeWidth={active ? 2.75 : 1.5}
                           strokeDasharray={active ? undefined : undefined}
                         />
-                        {/* subnet label at midpoint */}
+                        {/* subnet / link-source label at midpoint */}
                         <rect
-                          x={midX - String(e.subnet).length * 3.1 - 4}
+                          x={midX - linkLabel.length * 3.1 - 4}
                           y={midY - 15}
-                          width={String(e.subnet).length * 6.2 + 8}
+                          width={linkLabel.length * 6.2 + 8}
                           height={13}
                           rx={3}
-                          fill={active ? "#dbeafe" : "#f1f5f9"}
+                          fill={
+                            e.link_source !== "subnet" ? "#dcfce7" : active ? "#dbeafe" : "#f1f5f9"
+                          }
                           opacity={0.95}
                         />
                         <text
@@ -377,14 +385,14 @@ export default function Topology() {
                           className="pointer-events-none select-none"
                           fontSize={9.5}
                           fontWeight={600}
-                          fill={active ? "#1e3a8a" : "#64748b"}
+                          fill={e.link_source !== "subnet" ? "#166534" : active ? "#1e3a8a" : "#64748b"}
                           fontFamily="ui-monospace, monospace"
                         >
-                          {e.subnet}
+                          {linkLabel}
                         </text>
 
-                        {/* per-endpoint interface IP chips -- the piece that was missing */}
-                        {showIpLabels && (
+                        {/* per-endpoint interface IP chips -- only meaningful for subnet-inferred edges */}
+                        {showIpLabels && hasIps && (
                           <>
                             <g transform={`translate(${srcLabelPos.x}, ${srcLabelPos.y})`}>
                               <rect
@@ -591,18 +599,26 @@ export default function Topology() {
                           >
                             <div className="flex items-center justify-between">
                               <span className="font-semibold text-slate-700">{other?.hostname || "unknown"}</span>
-                              <span className="font-mono text-slate-400 text-[10px]">{e.subnet}</span>
+                              <span
+                                className={`font-mono text-[10px] ${
+                                  e.link_source !== "subnet" ? "text-green-700 font-bold" : "text-slate-400"
+                                }`}
+                              >
+                                {e.link_source !== "subnet" ? e.link_source.toUpperCase() : e.subnet}
+                              </span>
                             </div>
-                            <div className="flex items-center gap-1.5 mt-1 font-mono text-[10px] text-slate-500">
-                              <span className="bg-white border border-slate-200 rounded px-1.5 py-0.5">{localIp}</span>
-                              <span className="text-slate-300">↔</span>
-                              <span className="bg-white border border-slate-200 rounded px-1.5 py-0.5">{remoteIp}</span>
-                            </div>
+                            {(localIp || remoteIp) && (
+                              <div className="flex items-center gap-1.5 mt-1 font-mono text-[10px] text-slate-500">
+                                <span className="bg-white border border-slate-200 rounded px-1.5 py-0.5">{localIp || "—"}</span>
+                                <span className="text-slate-300">↔</span>
+                                <span className="bg-white border border-slate-200 rounded px-1.5 py-0.5">{remoteIp || "—"}</span>
+                              </div>
+                            )}
                           </li>
                         );
                       })}
                     {linkCountFor(selection.node.id) === 0 && (
-                      <li className="text-xs text-slate-400 italic">No shared-subnet links found.</li>
+                      <li className="text-xs text-slate-400 italic">No links found (no shared subnet or confirmed LLDP/CDP neighbor).</li>
                     )}
                   </ul>
                 </div>
@@ -629,28 +645,31 @@ export default function Topology() {
                       <div>
                         <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wide">Endpoint A</p>
                         <p className="text-sm font-semibold text-slate-700">{src?.hostname || "unknown"}</p>
-                        <p className="text-xs font-mono text-brandblue">{e.source_ip}</p>
+                        {e.source_ip && <p className="text-xs font-mono text-brandblue">{e.source_ip}</p>}
+                        {e.local_port && <p className="text-[10px] font-mono text-slate-400">port {e.local_port}</p>}
                       </div>
                       <div className="flex items-center gap-2 text-slate-300">
                         <div className="flex-1 border-t border-dashed border-slate-300" />
-                        <span className="text-[10px]">shared subnet</span>
+                        <span className="text-[10px]">{e.link_source === "subnet" ? "shared subnet" : `${e.link_source.toUpperCase()} confirmed`}</span>
                         <div className="flex-1 border-t border-dashed border-slate-300" />
                       </div>
                       <div>
                         <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wide">Endpoint B</p>
                         <p className="text-sm font-semibold text-slate-700">{tgt?.hostname || "unknown"}</p>
-                        <p className="text-xs font-mono text-brandblue">{e.target_ip}</p>
+                        {e.target_ip && <p className="text-xs font-mono text-brandblue">{e.target_ip}</p>}
+                        {e.neighbor_port && <p className="text-[10px] font-mono text-slate-400">port {e.neighbor_port}</p>}
                       </div>
                     </div>
                     <dl className="text-xs space-y-1.5">
                       <div className="flex justify-between">
-                        <dt className="text-slate-500">Subnet</dt>
-                        <dd className="font-mono text-slate-700">{e.subnet}</dd>
+                        <dt className="text-slate-500">{e.link_source === "subnet" ? "Subnet" : "Discovered via"}</dt>
+                        <dd className="font-mono text-slate-700">{e.link_source === "subnet" ? e.subnet : e.link_source.toUpperCase()}</dd>
                       </div>
                     </dl>
                     <p className="text-[11px] text-slate-400">
-                      Inferred because both devices have an interface configured into this subnet in their latest
-                      config snapshot.
+                      {e.link_source === "subnet"
+                        ? "Inferred because both devices have an interface configured into this subnet in their latest config snapshot."
+                        : `Confirmed by ${e.link_source.toUpperCase()} neighbor discovery — this is a real reported adjacency, not a guess.`}
                     </p>
                     <div className="flex gap-3">
                       {src && (

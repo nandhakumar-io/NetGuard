@@ -11,11 +11,12 @@ router = APIRouter(prefix="/topology", tags=["topology"])
 
 @router.get("", response_model=TopologyResponse)
 def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Fleet-wide network topology: one node per device, edges inferred
-    from shared interface subnets found in each device's latest config
-    snapshot (see app.services.topology_service for how links are
-    derived -- there's no CDP/LLDP discovery in NetGuard, so this is the
-    data-grounded substitute).
+    """Fleet-wide network topology: one node per device. Edges come from
+    two sources, merged in app.services.topology_service.build_topology:
+    real LLDP/CDP-confirmed adjacency persisted from SNMP Discovery runs
+    (edge.link_source == "lldp"/"cdp"), and, where no discovery data
+    exists for a pair, a same-subnet inference from each device's latest
+    config snapshot (edge.link_source == "subnet").
 
     Available to any authenticated user (read-only), consistent with the
     other dashboard/summary endpoints in this API.
@@ -43,6 +44,9 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
                 "subnet": e.subnet,
                 "source_ip": e.source_ip,
                 "target_ip": e.target_ip,
+                "link_source": e.link_source,
+                "local_port": e.local_port,
+                "neighbor_port": e.neighbor_port,
             }
             for e in graph.edges
         ],

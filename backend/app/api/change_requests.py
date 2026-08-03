@@ -53,6 +53,83 @@ def _fleet_configs(db: Session, exclude_device_id) -> dict[str, str]:
     return configs
 
 
+def _resolve_current_config(db: Session, device: Device, current_user: User) -> tuple[str | None, str]:
+    """Current config: prefer a fresh live read from the device itself (it's
+    already been proven reachable -- see health_monitor/snmp -- so use that
+    reachability instead of trusting a snapshot that may be stale or may
+    not exist yet for a device that's never been deployed to). Falls back
+    to the last snapshot on file if the live read fails for any reason
+    (device briefly unreachable, no supported protocol configured, etc.).
+
+    Returns (current_config, config_source) where config_source is "live",
+    "snapshot", or "none" (no live read and no snapshot on file) --
+    recorded on the CR so a reviewer can see how fresh the "current" side
+    of the diff/risk analysis actually was, and so POST
+    /change-requests/{id}/rescore has something concrete to retry.
+    """
+    pm = protocol_manager.ProtocolManager(db, device, operator=current_user.email)
+    live_running = pm.get_running_config()
+    if live_running.success:
+        return live_running.output, "live"
+    snapshot_config = _latest_config(db, device.id)
+    if snapshot_config is not None:
+        return snapshot_config, "snapshot"
+    return None, "none"
+
+
+def _score_change(
+    db: Session, device: Device, proposed_config: str, current_user: User,
+) -> dict:
+    """Shared by create_change_request and rescore_change_request: resolves
+    current_config (live, falling back to the last snapshot), runs
+    validation + risk_engine.analyze, and returns every field derived from
+    that -- so both endpoints stay in sync with exactly one implementation
+    instead of the retry/rescore action drifting from what submission does.
+    """
+    current_config, config_source = _resolve_current_config(db, device, current_user)
+    fleet_configs = _fleet_configs(db, device.id)
+    diff_text = diff_engine.generate_diff(current_config, proposed_config)
+    validation = validation_engine.validate_syntax(
+        proposed_config,
+        vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
+        current_config=current_config,
+    )
+    risk: RiskAnalysisResult = risk_engine.analyze(proposed_config, current_config, fleet_configs)
+    return {
+        "current_config": current_config,
+        "config_source": config_source,
+        "config_diff": diff_text,
+        "validation": validation,
+        "risk": risk,
+    }
+
+
+def _dual_approval(risk: RiskAnalysisResult, device_count: int) -> tuple[bool, str | None]:
+    """Blast-radius dual approval (SRS 6.2 / FR-6 extension): a change
+    fanned out to enough devices requires two distinct Network
+    Administrator approvals regardless of its individual risk score -- a
+    low-risk change pushed to 50 devices is still high blast-radius.
+    Shared by create and rescore so a rescore can't silently drop a dual-
+    approval requirement the original submission had (or vice versa)
+    through separately-maintained logic.
+    """
+    critical = risk_engine.is_critical(risk)
+    blast_radius_triggered = device_count > settings.RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD
+    critical_triggered = critical and settings.RISK_CRITICAL_DUAL_APPROVAL_ENABLED
+    requires_dual_approval = critical_triggered or blast_radius_triggered
+    reason = None
+    if critical_triggered and blast_radius_triggered:
+        reason = "Critical Risk + Blast Radius"
+    elif critical_triggered:
+        reason = "Critical Risk"
+    elif blast_radius_triggered:
+        reason = (
+            f"Blast Radius ({device_count} devices, threshold "
+            f"{settings.RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD})"
+        )
+    return requires_dual_approval, reason
+
+
 @router.get("", response_model=list[ChangeRequestRead])
 def list_change_requests(db: Session = Depends(get_db), _=Depends(get_current_user)):
     return db.query(ChangeRequest).order_by(ChangeRequest.created_at.desc()).all()
@@ -76,52 +153,12 @@ def create_change_request(
         import json
         additional_device_ids_json = json.dumps([str(i) for i in payload.additional_device_ids])
 
-    # Current config comes from the device's most recent snapshot (best
-    # effort -- analysis still runs without it, just skipping the
-    # before/after-aware checks). Every *other* device's latest config is
-    # also pulled so the analyzer can catch fleet-wide conflicts (duplicate
-    # IPs, VLAN naming conflicts) rather than only within this one device.
-    # Current config: prefer a fresh live read from the device itself (it's
-    # already been proven reachable -- see health_monitor/snmp -- so use
-    # that reachability instead of trusting a snapshot that may be stale or
-    # may not exist yet for a device that's never been deployed to). Falls
-    # back to the last snapshot on file if the live read fails for any
-    # reason (device briefly unreachable, no supported protocol configured,
-    # etc.) -- never blocks change-request submission on this being a
-    # best-effort improvement, not a hard requirement.
-    pm = protocol_manager.ProtocolManager(db, device, operator=current_user.email)
-    live_running = pm.get_running_config()
-    current_config = live_running.output if live_running.success else _latest_config(db, payload.device_id)
-    fleet_configs = _fleet_configs(db, payload.device_id)
+    result = _score_change(db, device, payload.proposed_config, current_user)
+    current_config, config_source = result["current_config"], result["config_source"]
+    diff_text, validation, risk = result["config_diff"], result["validation"], result["risk"]
 
-    diff_text = diff_engine.generate_diff(current_config, payload.proposed_config)
-    validation = validation_engine.validate_syntax(
-        payload.proposed_config,
-        vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
-        current_config=current_config,
-    )
-    risk: RiskAnalysisResult = risk_engine.analyze(payload.proposed_config, current_config, fleet_configs)
-    critical = risk_engine.is_critical(risk)
-
-    # Blast-radius dual approval (SRS 6.2 / FR-6 extension): a change fanned
-    # out to enough devices requires two distinct Network Administrator
-    # approvals regardless of its individual risk score -- a low-risk
-    # change pushed to 50 devices is still high blast-radius.
     device_count = 1 + len(payload.additional_device_ids or [])
-    blast_radius_triggered = device_count > settings.RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD
-
-    critical_triggered = critical and settings.RISK_CRITICAL_DUAL_APPROVAL_ENABLED
-    requires_dual_approval = critical_triggered or blast_radius_triggered
-    dual_approval_reason = None
-    if critical_triggered and blast_radius_triggered:
-        dual_approval_reason = "Critical Risk + Blast Radius"
-    elif critical_triggered:
-        dual_approval_reason = "Critical Risk"
-    elif blast_radius_triggered:
-        dual_approval_reason = (
-            f"Blast Radius ({device_count} devices, threshold "
-            f"{settings.RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD})"
-        )
+    requires_dual_approval, dual_approval_reason = _dual_approval(risk, device_count)
 
     cr = ChangeRequest(
         device_id=payload.device_id,
@@ -133,11 +170,18 @@ def create_change_request(
         maintenance_window_start=payload.maintenance_window_start,
         maintenance_window_end=payload.maintenance_window_end,
         current_config=current_config,
+        config_source=config_source,
         proposed_config=payload.proposed_config,
         config_diff=diff_text,
+        validation_passed="true" if validation.passed else "false",
+        validation_errors=json.dumps(validation.errors) if validation.errors else None,
+        validation_warnings=json.dumps(validation.warnings) if validation.warnings else None,
         risk_score=risk.risk_score,
         risk_findings="; ".join(risk.findings),
         risk_classification=risk.classification,
+        risk_engine_backend=settings.RISK_ENGINE_BACKEND,
+        risk_llm_applied=risk.llm_applied,
+        risk_llm_error=risk.llm_error,
         requires_dual_approval=requires_dual_approval,
         dual_approval_reason=dual_approval_reason,
         canary_enabled=payload.canary_enabled,
@@ -166,6 +210,95 @@ def get_change_request(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depend
     cr = db.get(ChangeRequest, cr_id)
     if not cr:
         raise HTTPException(status_code=404, detail="Change request not found")
+    return cr
+
+
+# Only DRAFT/PENDING_APPROVAL CRs can be rescored -- once a CR has been
+# approved (or moved beyond), the analysis that was approved must stay
+# exactly what gets deployed; rescoring after that point would silently
+# change what's about to ship without a fresh approval.
+RESCORE_ALLOWED_STATUSES = (ChangeStatus.DRAFT, ChangeStatus.PENDING_APPROVAL)
+
+
+@router.post("/{cr_id}/rescore", response_model=ChangeRequestRead)
+def rescore_change_request(
+    cr_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retry/re-score an existing change request in place, instead of the
+    submitter having to discard it and resubmit from scratch.
+
+    Two situations this exists for, both visible on the CR detail page:
+      - config_source came back "snapshot"/"none" -- the live device read
+        failed at submission time (device briefly unreachable, etc.) and
+        the analysis ran against a stale/absent snapshot instead.
+      - risk_llm_applied is False despite risk_engine_backend == "llm" --
+        the model call didn't actually run (see risk_llm_error for why:
+        no credential, Ollama/Anthropic unreachable, bad response, ...).
+
+    Re-runs the exact same live-read-with-snapshot-fallback + validation +
+    risk_engine.analyze used at submission (see _score_change), then
+    overwrites this CR's current_config/config_diff/validation_*/risk_*/
+    dual-approval fields with the fresh result. Only allowed while the CR
+    hasn't been acted on yet (DRAFT or PENDING_APPROVAL).
+    """
+    cr = db.get(ChangeRequest, cr_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request not found")
+    if cr.status not in RESCORE_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot rescore a change request in '{cr.status.value}' status -- "
+                "only draft or pending-approval change requests can be rescored."
+            ),
+        )
+
+    device = db.get(Device, cr.device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    result = _score_change(db, device, cr.proposed_config, current_user)
+    validation, risk = result["validation"], result["risk"]
+
+    import json
+    device_count = 1 + (len(json.loads(cr.additional_device_ids)) if cr.additional_device_ids else 0)
+    requires_dual_approval, dual_approval_reason = _dual_approval(risk, device_count)
+
+    cr.current_config = result["current_config"]
+    cr.config_source = result["config_source"]
+    cr.config_diff = result["config_diff"]
+    cr.validation_passed = "true" if validation.passed else "false"
+    cr.validation_errors = json.dumps(validation.errors) if validation.errors else None
+    cr.validation_warnings = json.dumps(validation.warnings) if validation.warnings else None
+    cr.risk_score = risk.risk_score
+    cr.risk_findings = "; ".join(risk.findings)
+    cr.risk_classification = risk.classification
+    cr.risk_engine_backend = settings.RISK_ENGINE_BACKEND
+    cr.risk_llm_applied = risk.llm_applied
+    cr.risk_llm_error = risk.llm_error
+    cr.requires_dual_approval = requires_dual_approval
+    cr.dual_approval_reason = dual_approval_reason
+    # A rescore that now passes validation moves a DRAFT into the approval
+    # queue; one that now fails pulls a PENDING_APPROVAL CR back to draft
+    # rather than leaving it approvable with a failing validation result.
+    cr.status = ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT
+
+    db.commit()
+    db.refresh(cr)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="Rescored CR",
+        result="Success" if validation.passed else "Validation Failed",
+        device_hostname=device.hostname, change_request_id=cr.id,
+        detail=(
+            f"config_source={result['config_source']} risk_score={risk.risk_score} "
+            f"llm_applied={risk.llm_applied}" + (f" llm_error={risk.llm_error}" if risk.llm_error else "")
+        ),
+    )
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
+
     return cr
 
 

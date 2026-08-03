@@ -11,3 +11,5 @@ from app.models.alert import Alert, AlertSeverity, AlertSource  # noqa: F401
 from app.models.config_drift import ConfigDrift, DriftBaseline, DriftSeverity, DriftStatus  # noqa: F401
 from app.models.protocol_operation import ProtocolOperation, ProtocolName  # noqa: F401
 from app.models.notification import Notification, NotificationSeverity, NotificationEventType  # noqa: F401
+from app.models.golden_config import GoldenConfig  # noqa: F401
+from app.models.discovered_neighbor import DiscoveredNeighbor  # noqa: F401

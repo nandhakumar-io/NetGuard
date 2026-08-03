@@ -195,6 +195,47 @@ def read_running_config(
         return None, "none"
 
 
+def read_startup_config(
+    device_type: str,
+    ip_address: str,
+    username: str,
+    password: str,
+) -> str | None:
+    """Best-effort live read of a device's startup-config via NAPALM's
+    get_config() -- which already returns running/startup/candidate in one
+    call, so this just asks for the same connection's "startup" key
+    instead of "running" (see read_running_config above for the running-
+    config equivalent, including a NAPALM->telnet fallback that startup
+    doesn't have: `show startup-config` over a bare Netmiko/Telnet session
+    is a reasonable fallback for *running* config, but startup-config
+    handling varies enough across platforms via raw CLI that it's not
+    worth guessing at here -- NAPALM's structured get_config() is the
+    reliable path, and this simply returns None if that's unavailable).
+
+    Returns None (not an exception) if the device doesn't support NAPALM
+    for its type, or the connection/read fails for any reason -- callers
+    already treat a None here as "startup-config wasn't captured this
+    time", same as backup_config()'s existing best-effort NETCONF startup
+    read.
+    """
+    driver_name = NAPALM_DRIVER_MAP.get(device_type)
+    if driver_name is None:
+        return None
+    try:
+        import napalm
+
+        driver = napalm.get_network_driver(driver_name)
+        device = driver(hostname=ip_address, username=username, password=password, timeout=10)
+        device.open()
+        try:
+            config = device.get_config()
+            return config.get("startup") or None
+        finally:
+            device.close()
+    except Exception:  # noqa: BLE001 - best-effort, same policy as read_running_config
+        return None
+
+
 def rollback_config(
     hostname: str,
     ip_address: str,

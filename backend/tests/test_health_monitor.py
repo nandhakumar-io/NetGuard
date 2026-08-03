@@ -410,11 +410,13 @@ def test_monitoring_window_single_round_when_window_smaller_than_interval():
 
 
 def test_monitoring_result_outcomes_flattens_all_rounds():
+    """window=30s / interval=15s -> rounds at t=0, t=15 (2 rounds), same
+    exclusive-boundary semantics as the 45s/15s -> 3-rounds case above."""
     round1 = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
     round2 = [hm.CheckOutcome("infrastructure", "ping", True, "ok")]
     with patch.object(hm, "run_health_suite", side_effect=[round1, round2]):
         result = hm.run_monitoring_window(
-            "10.0.0.1", window_seconds=15, poll_interval_seconds=15, sleep_fn=lambda s: None
+            "10.0.0.1", window_seconds=30, poll_interval_seconds=15, sleep_fn=lambda s: None
         )
     assert len(result.outcomes) == 2
 

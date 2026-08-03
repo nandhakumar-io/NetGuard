@@ -199,11 +199,17 @@ async def device_terminal(
         await websocket.close()
         return
 
-    if not device.ssh_credential_ref:
-        await websocket.send_text("\r\n\x1b[31mError: No SSH credentials mapped to this device.\x1b[0m\r\n")
-        await websocket.close()
-        return
-
+    # No premature check on device.ssh_credential_ref here -- that's only
+    # the legacy env-var-ref field. get_ssh_password() below already checks
+    # every real credential source in priority order (ssh_password_encrypted
+    # first -- the one the SSH Credentials modal actually writes to, then
+    # ssh_credential_ref, then a dev-only default) and raises
+    # CredentialNotFoundError itself if none resolve. Gating on
+    # ssh_credential_ref alone used to reject every device whose operator
+    # set a password the normal way (via the modal) but never touched the
+    # legacy ref field, even though get_ssh_password() would have found it
+    # fine -- the Terminal button failed with "No SSH credentials mapped"
+    # for exactly the devices that actually had credentials configured.
     try:
         password = credential_service.get_ssh_password(device)
     except credential_service.CredentialNotFoundError as exc:

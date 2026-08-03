@@ -15,10 +15,10 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.alert import Alert, AlertSeverity, AlertSource
+from app.models.alert import AlertSource
 from app.models.device import Device
 from app.models.device_metric import DeviceMetric, HealthColor
-from app.services import credential_service, notification_service, snmp_service
+from app.services import alert_service, credential_service, notification_service, snmp_service
 from app.services.snmp_service import SnmpMetrics
 
 
@@ -55,8 +55,18 @@ def _build_snmp_auth(device: Device) -> "snmp_service.SnmpAuthConfig":
             f"Device '{device.hostname}' is set to SNMPv3 but has no snmp_username configured."
         )
     security_level = device.snmp_security_level.value if device.snmp_security_level else "noAuthNoPriv"
-    auth_protocol = device.snmp_auth_protocol.value if device.snmp_auth_protocol else None
-    priv_protocol = device.snmp_priv_protocol.value if device.snmp_priv_protocol else None
+    # Default to SHA/AES128 when the security level requires auth/priv
+    # but the operator hasn't explicitly picked a protocol yet (the
+    # SnmpCredentialsModal only sends snmp_username + security_level in
+    # the first "Save Version & Continue" step; protocol selectors are
+    # added below in the frontend fix but we guard against None here too
+    # so the poll-on-enable path never crashes with AttributeError).
+    auth_protocol = device.snmp_auth_protocol.value if device.snmp_auth_protocol else (
+        "SHA" if security_level in ("authNoPriv", "authPriv") else None
+    )
+    priv_protocol = device.snmp_priv_protocol.value if device.snmp_priv_protocol else (
+        "AES128" if security_level == "authPriv" else None
+    )
     auth_key = credential_service.get_snmp_v3_auth_key(device)
     priv_key = credential_service.get_snmp_v3_priv_key(device)
 
@@ -116,20 +126,26 @@ def _compute_interface_utilization(
 
 def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
     """Turns snmp_service.evaluate_thresholds() findings into Alert rows
-    (Alert Engine) and fans critical ones out to Slack/Teams. Best-effort:
-    notification failures never block the poll (notification_service
-    already swallows its own errors).
+    (Alert Engine) and fans critical ones out to Slack/Teams on first
+    occurrence. Dedup-aware (alert_service.raise_alert): a still-active
+    breach found on every subsequent poll updates the same standing alert
+    rather than piling up a fresh duplicate row each time -- previously
+    every poll unconditionally inserted a new Alert, which made "Clear
+    Alerts" look broken since the next poll immediately recreated
+    whatever had just been cleared. Best-effort: notification failures
+    never block the poll (notification_service already swallows its own
+    errors).
     """
     for severity, category, message in snmp_service.evaluate_thresholds(metrics):
-        alert = Alert(
+        alert, is_new = alert_service.raise_alert(
+            db,
             device_id=device.id,
-            severity=AlertSeverity(severity),
+            severity=severity,
             source=AlertSource.HEALTH_POLL,
             category=category,
             message=f"{device.hostname}: {message}",
         )
-        db.add(alert)
-        if severity == "critical":
+        if severity == "critical" and is_new:
             notification_service.notify(
                 event=category, message=f"{device.hostname}: {message}", severity=severity
             )

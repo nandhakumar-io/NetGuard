@@ -57,28 +57,44 @@ def _fetch_dev_default() -> str | None:
 
 
 def get_ssh_password(device: Device) -> str:
-    """Resolve the SSH password for a device from the secret store.
+    """Resolve the SSH password for a device.
+
+    Priority (same order as the SNMP getters below): the DB-encrypted
+    password set via POST /devices/{id}/ssh-credentials, then the legacy
+    ssh_credential_ref -> NETGUARD_CRED_<REF> env var, then (development
+    only) NETGUARD_CRED_DEFAULT.
 
     Raises CredentialNotFoundError (rather than silently deploying with an
-    empty/wrong password) if the device has no `ssh_credential_ref` set, or
-    if that reference doesn't resolve to anything in the store -- a missing
+    empty/wrong password) if none of those resolve to anything -- a missing
     credential should fail loudly before we ever open a connection to a
-    production network device. In development, an unmapped ref falls back
-    to NETGUARD_CRED_DEFAULT (see _fetch_dev_default) before failing.
+    production network device.
     """
-    if not device.ssh_credential_ref:
-        raise CredentialNotFoundError(
-            f"Device '{device.hostname}' has no ssh_credential_ref configured; "
-            "cannot retrieve a credential to deploy with."
-        )
+    if device.ssh_password_encrypted:
+        password = crypto.decrypt(device.ssh_password_encrypted)
+        if password:
+            return password
 
-    password = _fetch_from_env(device.ssh_credential_ref) or _fetch_dev_default()
-    if not password:
-        raise CredentialNotFoundError(
-            f"No credential found in the secret store for ref "
-            f"'{device.ssh_credential_ref}' (device '{device.hostname}')."
-        )
-    return password
+    if device.ssh_credential_ref:
+        password = _fetch_from_env(device.ssh_credential_ref)
+        if password:
+            return password
+
+    password = _fetch_dev_default()
+    if password:
+        return password
+
+    raise CredentialNotFoundError(
+        f"Device '{device.hostname}' has no SSH credential configured. "
+        "Set one via POST /devices/{id}/ssh-credentials."
+    )
+
+
+def set_ssh_password(device: Device, password: str) -> None:
+    """Encrypts and stores the SSH password directly on the device row.
+    Pass "" to explicitly clear it (falls back to ssh_credential_ref / the
+    dev default again). Caller is responsible for db.commit().
+    """
+    device.ssh_password_encrypted = crypto.encrypt(password) if password else None
 
 
 def get_secret(credential_ref: str | None, *, device: Device, label: str) -> str:

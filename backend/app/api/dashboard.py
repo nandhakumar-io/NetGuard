@@ -13,6 +13,7 @@ from app.models.alert import Alert, AlertSeverity
 from app.models.device_metric import DeviceMetric
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
+from app.models.config_drift import ConfigDrift, DriftStatus
 from app.services import event_bus
 from app.models.change_request import ChangeRequest, ChangeStatus
 
@@ -37,6 +38,24 @@ def _compute_summary(db: Session) -> dict:
     active_alerts = db.query(Alert).filter(Alert.resolved == False)  # noqa: E712
     critical_alerts = active_alerts.filter(Alert.severity == AlertSeverity.CRITICAL).count()
     warning_alerts = active_alerts.filter(Alert.severity == AlertSeverity.WARNING).count()
+
+    # Open drift + circuit-breaker-flagged devices -- both tracked in the
+    # DB already (config_drifts.status, devices.flagged_unstable) but
+    # previously invisible anywhere on the dashboard.
+    open_drifts = db.query(ConfigDrift).filter(ConfigDrift.status == DriftStatus.OPEN).count()
+    flagged_unstable_devices_query = (
+        db.query(Device).filter(Device.flagged_unstable == True).order_by(Device.unstable_since.desc())  # noqa: E712
+    )
+    flagged_unstable_count = flagged_unstable_devices_query.count()
+    flagged_unstable_devices = [
+        {
+            "id": str(d.id),
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "unstable_since": d.unstable_since.isoformat() if d.unstable_since else None,
+        }
+        for d in flagged_unstable_devices_query.limit(5).all()
+    ]
 
     # --- New Dashboard Widget Data ---
     
@@ -111,6 +130,9 @@ def _compute_summary(db: Session) -> dict:
         "pending_change_requests": pending_change_requests,
         "critical_alerts": critical_alerts,
         "warning_alerts": warning_alerts,
+        "open_drifts": open_drifts,
+        "flagged_unstable_count": flagged_unstable_count,
+        "flagged_unstable_devices": flagged_unstable_devices,
         
         "global_health_score": global_health_score,
         "deployment_success_rate": success_rate,

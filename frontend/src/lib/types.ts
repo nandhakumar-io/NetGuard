@@ -11,6 +11,7 @@ export interface Device {
   status: DeviceStatus;
   ssh_username?: string | null;
   ssh_credential_ref?: string | null;
+  ssh_credentials_configured?: boolean;
   flagged_unstable?: boolean;
   unstable_since?: string | null;
   supports_snmp?: boolean;
@@ -26,6 +27,7 @@ export interface Device {
   snmp_credentials_configured?: boolean;
   supports_netconf?: boolean;
   netconf_port?: number | null;
+  netconf_use_lock?: boolean;
   supports_restconf?: boolean;
   restconf_url?: string | null;
   platform?: string | null;
@@ -62,6 +64,10 @@ export interface ChangeRequest {
   risk_score?: number | null;
   risk_findings?: string | null;
   risk_classification?: string | null;
+  config_source?: string | null;
+  risk_engine_backend?: string | null;
+  risk_llm_applied?: boolean;
+  risk_llm_error?: string | null;
   requires_dual_approval?: boolean;
   dual_approval_reason?: string | null;
   first_approved_by?: string | null;
@@ -96,6 +102,8 @@ export interface RunningConfig {
   hostname: string;
   protocol: string;
   config: string;
+  config_pretty?: string | null;
+  is_xml?: boolean;
   retrieved_at: string;
 }
 
@@ -103,9 +111,42 @@ export interface StartupConfig {
   device_id: string;
   hostname: string;
   config: string | null;
+  config_pretty?: string | null;
+  is_xml?: boolean;
   source: "snapshot" | "unavailable";
   snapshot_id?: string | null;
   retrieved_at: string;
+}
+
+export interface GoldenConfig {
+  device_id: string;
+  config: string;
+  config_pretty?: string | null;
+  is_xml?: boolean;
+  checksum: string;
+  set_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InterfaceStatus {
+  name: string;
+  description?: string | null;
+  admin_status?: string | null;
+  oper_status?: string | null;
+  ip_addresses: string[];
+  mtu?: number | null;
+  speed?: string | null;
+  mac_address?: string | null;
+}
+
+export interface InterfacesResponse {
+  device_id: string;
+  hostname: string;
+  protocol: string;
+  interfaces: InterfaceStatus[];
+  retrieved_at: string;
+  error?: string | null;
 }
 
 export interface BackupHistoryEntry {
@@ -224,6 +265,9 @@ export interface DashboardSummary {
   pending_change_requests: number;
   critical_alerts: number;
   warning_alerts: number;
+  open_drifts: number;
+  flagged_unstable_count: number;
+  flagged_unstable_devices: { id: string; hostname: string; ip_address: string; unstable_since: string | null }[];
   global_health_score: number;
   deployment_success_rate: number;
   top_cpu_devices: { hostname: string; ip_address: string; cpu: number }[];
@@ -383,9 +427,60 @@ export interface TopologyNode {
 export interface TopologyEdge {
   source: string;
   target: string;
-  subnet: string;
-  source_ip: string;
-  target_ip: string;
+  subnet: string | null;
+  source_ip: string | null;
+  target_ip: string | null;
+  link_source: "lldp" | "cdp" | "subnet";
+  local_port: string | null;
+  neighbor_port: string | null;
+}
+
+// --- SNMP Discovery (per-device Discovery tab) ---
+
+export interface ArpEntry {
+  if_index: string;
+  ip_address: string;
+  mac_address: string;
+}
+
+export interface RouteEntry {
+  destination: string;
+  mask: string | null;
+  next_hop: string;
+  if_index: string | null;
+}
+
+export interface LldpNeighbor {
+  local_port_index: string;
+  neighbor_name: string | null;
+  neighbor_port: string | null;
+}
+
+export interface CdpNeighbor {
+  local_if_index: string;
+  neighbor_id: string | null;
+  neighbor_port: string | null;
+  neighbor_platform: string | null;
+}
+
+export interface InventoryItem {
+  index: string;
+  name: string | null;
+  description: string | null;
+  model: string | null;
+  serial_number: string | null;
+}
+
+export interface DeviceDiscoveryResult {
+  device_id: string;
+  hostname: string | null;
+  reported_hostname: string | null;
+  arp_table: ArpEntry[];
+  routing_table: RouteEntry[];
+  lldp_neighbors: LldpNeighbor[];
+  cdp_neighbors: CdpNeighbor[];
+  inventory: InventoryItem[];
+  retrieved_at: string;
 }
 
 export interface TopologyResponse {

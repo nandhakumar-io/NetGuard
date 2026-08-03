@@ -98,6 +98,7 @@ def push_config(
     config_xml: str,
     target: str = "candidate",
     vendor: str | None = None,
+    use_lock: bool = True,
 ) -> NetconfResult:
     """Lock -> edit-config -> validate -> commit -> unlock, in order.
 
@@ -105,6 +106,12 @@ def push_config(
     commit rejection) triggers a `discard-changes` + `unlock` best-effort
     cleanup before returning success=False, so a failed push never leaves
     the candidate datastore locked or dirty for the next caller.
+
+    `use_lock` (per-device Device.netconf_use_lock) skips the <lock>/
+    <unlock> calls entirely -- an escape hatch for agents that either
+    don't implement <lock> or reject it outright, which would otherwise
+    fail every push against that device at the lock step even though
+    edit-config itself would have gone through fine.
     """
     start = time.perf_counter()
     request_xml = (
@@ -114,7 +121,8 @@ def push_config(
     responses: list[str] = []
     try:
         with _connect(ip_address, port, username, password, vendor=vendor) as conn:
-            conn.lock(target=target)
+            if use_lock:
+                conn.lock(target=target)
             try:
                 edit_reply = conn.edit_config(target=target, config=config_xml)
                 responses.append(str(edit_reply))
@@ -137,10 +145,11 @@ def push_config(
                     pass
                 raise inner_exc
             finally:
-                try:
-                    conn.unlock(target=target)
-                except Exception:  # noqa: BLE001 - best-effort cleanup
-                    pass
+                if use_lock:
+                    try:
+                        conn.unlock(target=target)
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
     except Exception as exc:  # noqa: BLE001
         elapsed = (time.perf_counter() - start) * 1000
         return NetconfResult(False, request_xml, "\n".join(responses), elapsed, error=str(exc))

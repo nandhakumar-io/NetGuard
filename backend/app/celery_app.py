@@ -25,6 +25,12 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    # Eager mode also implicitly propagates exceptions from tasks called
+    # via .delay()/.apply_async() to the caller instead of swallowing them
+    # into a result backend nobody's polling -- fine here since it's only
+    # used for the no-broker prototype path.
+    task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+    task_eager_propagates=settings.CELERY_TASK_ALWAYS_EAGER,
     # A deploy/rollback can legitimately take a while (retries + backoff in
     # deployment_engine can add up to ~14s of sleep alone, plus device I/O),
     # so give tasks headroom before Celery/the broker considers them stuck.

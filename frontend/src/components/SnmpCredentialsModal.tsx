@@ -23,16 +23,103 @@ export default function SnmpCredentialsModal({
   device,
   onClose,
   onSaved,
+  onDeviceUpdated,
 }: {
   device: Device;
   onClose: () => void;
   onSaved: (updated: Device) => void;
+  /** Same as onSaved but doesn't close the modal -- used when finishing
+   * the version-setup step still needs to hand off into the credential
+   * step below, in the same modal session. */
+  onDeviceUpdated: (updated: Device) => void;
 }) {
-  const isV3 = device.snmp_version === "v3";
+  // Local copy of the device so switching SNMP version / finishing setup
+  // updates what this modal renders immediately, without waiting for the
+  // parent to re-render (and without the modal closing in between).
+  const [localDevice, setLocalDevice] = useState<Device>(device);
+  const isV3 = localDevice.snmp_version === "v3";
 
   const [community, setCommunity] = useState("");
   const [authKey, setAuthKey] = useState("");
   const [privKey, setPrivKey] = useState("");
+
+  // Version/protocol setup -- shown automatically the first time SNMP is
+  // configured for a device, and also reachable afterwards via "Change
+  // SNMP version" so an admin can move a device from v2c to v3 (or just
+  // change the port/security level) without deleting and re-adding it.
+  const [changingVersion, setChangingVersion] = useState(!localDevice.snmp_version);
+  const [setupVersion, setSetupVersion] = useState<"v1" | "v2c" | "v3">(
+    (localDevice.snmp_version as "v1" | "v2c" | "v3") || "v2c"
+  );
+  const [setupPort, setSetupPort] = useState(String(localDevice.snmp_port || 161));
+  const [setupSecurityLevel, setSetupSecurityLevel] = useState<"noAuthNoPriv" | "authNoPriv" | "authPriv">(
+    (localDevice.snmp_security_level as "noAuthNoPriv" | "authNoPriv" | "authPriv") || "authPriv"
+  );
+  const [setupAuthProtocol, setSetupAuthProtocol] = useState<string>(localDevice.snmp_auth_protocol || "SHA");
+  const [setupPrivProtocol, setSetupPrivProtocol] = useState<string>(localDevice.snmp_priv_protocol || "AES128");
+  const [setupUsername, setSetupUsername] = useState(localDevice.snmp_username || "");
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+
+  const startChangeVersion = () => {
+    // Re-seed the form from whatever's currently configured, not stale
+    // defaults from when the modal first opened.
+    setSetupVersion((localDevice.snmp_version as "v1" | "v2c" | "v3") || "v2c");
+    setSetupPort(String(localDevice.snmp_port || 161));
+    setSetupSecurityLevel((localDevice.snmp_security_level as "noAuthNoPriv" | "authNoPriv" | "authPriv") || "authPriv");
+    setSetupAuthProtocol(localDevice.snmp_auth_protocol || "SHA");
+    setSetupPrivProtocol(localDevice.snmp_priv_protocol || "AES128");
+    setSetupUsername(localDevice.snmp_username || "");
+    setSetupError(null);
+    setChangingVersion(true);
+  };
+
+  const setupSnmp = async () => {
+    if (setupVersion === "v3" && !setupUsername.trim()) {
+      setSetupError("SNMPv3 requires a username.");
+      return;
+    }
+    setSettingUp(true);
+    setSetupError(null);
+    try {
+      const body: Record<string, unknown> = {
+        supports_snmp: true,
+        snmp_version: setupVersion,
+        snmp_port: setupPort ? Number(setupPort) : 161,
+      };
+      if (setupVersion === "v3") {
+        body.snmp_username = setupUsername.trim();
+        body.snmp_security_level = setupSecurityLevel;
+        if (setupSecurityLevel !== "noAuthNoPriv") {
+          body.snmp_auth_protocol = setupAuthProtocol;
+        }
+        if (setupSecurityLevel === "authPriv") {
+          body.snmp_priv_protocol = setupPrivProtocol;
+        }
+      } else {
+        // Switching away from v3 back to v1/v2c -- clear the now-irrelevant
+        // v3 USM fields so a stale security level doesn't linger on the
+        // device record and confuse the next person who opens this modal.
+        body.snmp_username = null;
+        body.snmp_security_level = null;
+      }
+      const res = await api.patch<Device>(`/devices/${device.id}`, body);
+      setLocalDevice(res.data);
+      onDeviceUpdated(res.data);
+      // Version/protocol is set -- now every version (v1/v2c community,
+      // or v3 auth/priv passphrases) needs actual secret material before
+      // polling can work, so always continue straight into the
+      // credentials step rather than closing here.
+      setChangingVersion(false);
+      setCommunity("");
+      setAuthKey("");
+      setPrivKey("");
+    } catch (err: any) {
+      setSetupError(err?.response?.data?.detail || "Failed to enable SNMP for this device.");
+    } finally {
+      setSettingUp(false);
+    }
+  };
 
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -54,6 +141,7 @@ export default function SnmpCredentialsModal({
       }
       const res = await api.post<Device>(`/devices/${device.id}/snmp-credentials`, body);
       setSaved(true);
+      setLocalDevice(res.data);
       onSaved(res.data);
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Failed to save SNMP credentials.");
@@ -76,78 +164,203 @@ export default function SnmpCredentialsModal({
     }
   };
 
+  // v3 needs at least the auth key whenever the security level requires
+  // auth (authNoPriv/authPriv), and the priv key too for authPriv --
+  // "no creds entered yet" is only an acceptable Save state for
+  // noAuthNoPriv, where there's genuinely nothing secret to store.
+  const v3NeedsAuth = isV3 && (localDevice.snmp_security_level === "authNoPriv" || localDevice.snmp_security_level === "authPriv");
+  const v3NeedsPriv = isV3 && localDevice.snmp_security_level === "authPriv";
+  const saveDisabled =
+    saving ||
+    (!isV3 && !community) ||
+    (isV3 && !localDevice.snmp_credentials_configured && ((v3NeedsAuth && !authKey) || (v3NeedsPriv && !privKey)));
+
   return (
-    <div className="fixed inset-0 bg-navy/40 flex items-center justify-center z-50 px-4">
-      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5">
+    <div className="fixed inset-0 bg-navy dark:bg-slate-950/40 flex items-center justify-center z-50 px-4">
+      <div className="bg-white dark:bg-slate-800 rounded-xl shadow-xl max-w-md w-full p-5">
         <div className="flex items-start justify-between">
           <div>
-            <h3 className="font-semibold text-navy">SNMP Credentials — {device.hostname}</h3>
-            <p className="text-xs text-slate-500 mt-1">
-              {isV3
-                ? `SNMPv3 (${device.snmp_security_level || "noAuthNoPriv"}) for user "${device.snmp_username || "—"}"`
-                : `SNMP ${device.snmp_version?.toUpperCase() || "v2c"} community string`}
-              . Stored encrypted; never shown again after saving.
+            <h3 className="font-semibold text-navy dark:text-white">SNMP Credentials — {localDevice.hostname}</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              {localDevice.snmp_version
+                ? isV3
+                  ? `SNMPv3 (${localDevice.snmp_security_level || "noAuthNoPriv"}) for user "${localDevice.snmp_username || "—"}"`
+                  : `SNMP ${localDevice.snmp_version?.toUpperCase() || "v2c"} community string`
+                : "SNMP isn't configured for this device yet."}
+              {localDevice.snmp_version && ". Stored encrypted; never shown again after saving."}
             </p>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-lg leading-none">
+          <button onClick={onClose} className="text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:text-slate-300 text-lg leading-none">
             ✕
           </button>
         </div>
 
-        {!device.snmp_version && (
-          <p className="text-xs text-riskcrit mt-4">
-            This device has no SNMP version configured yet — set one under Edit Device first.
-          </p>
+        {changingVersion && (
+          <div className="mt-4 space-y-3">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {localDevice.snmp_version
+                ? "Changing the version, port, or security level doesn't touch any secret already on file, but a mismatched security level (e.g. switching from noAuthNoPriv to authPriv) needs a fresh passphrase entered below before polling will work."
+                : "Set the protocol version first, then save credentials."}
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Version</label>
+                <select
+                  value={setupVersion}
+                  onChange={(e) => setSetupVersion(e.target.value as "v1" | "v2c" | "v3")}
+                  className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-2 text-sm bg-white dark:bg-slate-800"
+                >
+                  <option value="v2c">v2c</option>
+                  <option value="v1">v1</option>
+                  <option value="v3">v3</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Port</label>
+                <input
+                  type="number"
+                  className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-2 text-sm"
+                  value={setupPort}
+                  onChange={(e) => setSetupPort(e.target.value)}
+                />
+              </div>
+            </div>
+            {setupVersion === "v3" && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Username</label>
+                  <input
+                    className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
+                    value={setupUsername}
+                    onChange={(e) => setSetupUsername(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Security level</label>
+                  <select
+                    value={setupSecurityLevel}
+                    onChange={(e) => setSetupSecurityLevel(e.target.value as "noAuthNoPriv" | "authNoPriv" | "authPriv")}
+                    className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-2 text-sm bg-white dark:bg-slate-800"
+                  >
+                    <option value="authPriv">authPriv (auth + encryption)</option>
+                    <option value="authNoPriv">authNoPriv (auth only)</option>
+                    <option value="noAuthNoPriv">noAuthNoPriv (none)</option>
+                  </select>
+                </div>
+                {setupSecurityLevel !== "noAuthNoPriv" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Auth Protocol</label>
+                      <select
+                        value={setupAuthProtocol}
+                        onChange={(e) => setSetupAuthProtocol(e.target.value)}
+                        className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-2 text-sm bg-white dark:bg-slate-800"
+                      >
+                        {["MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"].map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {setupSecurityLevel === "authPriv" && (
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Privacy Protocol</label>
+                        <select
+                          value={setupPrivProtocol}
+                          onChange={(e) => setSetupPrivProtocol(e.target.value)}
+                          className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-2 text-sm bg-white dark:bg-slate-800"
+                        >
+                          {["DES", "3DES", "AES128", "AES192", "AES256"].map((p) => (
+                            <option key={p} value={p}>{p}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 italic">
+                  You'll be asked for the {setupSecurityLevel === "authPriv" ? "auth and privacy passphrases" : setupSecurityLevel === "authNoPriv" ? "auth passphrase" : "credentials"} next, since SNMPv3 needs {setupSecurityLevel === "noAuthNoPriv" ? "just the username" : "more than just a username"} to actually poll a device.
+                </p>
+              </>
+            )}
+            {setupError && <p className="text-riskcrit text-xs">{setupError}</p>}
+            <div className="flex justify-end gap-2 pt-1">
+              {localDevice.snmp_version && (
+                <button
+                  onClick={() => setChangingVersion(false)}
+                  disabled={settingUp}
+                  className="px-3 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                onClick={setupSnmp}
+                disabled={settingUp}
+                className="px-4 py-2 text-xs font-semibold text-white bg-brandblue rounded-lg hover:bg-navy dark:bg-slate-950 disabled:opacity-50"
+              >
+                {settingUp ? "Saving…" : localDevice.snmp_version ? "Save Version & Continue" : "Enable SNMP & Continue"}
+              </button>
+            </div>
+          </div>
         )}
 
-        {device.snmp_version && (
+        {!changingVersion && localDevice.snmp_version && (
           <div className="mt-4 space-y-3">
+            <div className="flex justify-end -mt-1">
+              <button
+                onClick={startChangeVersion}
+                className="text-[11px] font-semibold text-brandblue hover:underline"
+              >
+                Change SNMP version
+              </button>
+            </div>
+
             {!isV3 ? (
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Community string</label>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Community string</label>
                 <input
                   type="password"
                   autoComplete="new-password"
-                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  placeholder={device.snmp_credentials_configured ? "•••••••• (leave blank to keep current)" : "e.g. public"}
+                  className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
+                  placeholder={localDevice.snmp_credentials_configured ? "•••••••• (leave blank to keep current)" : "e.g. public"}
                   value={community}
                   onChange={(e) => setCommunity(e.target.value)}
                 />
               </div>
             ) : (
               <>
-                {(device.snmp_security_level === "authNoPriv" || device.snmp_security_level === "authPriv") && (
+                {(localDevice.snmp_security_level === "authNoPriv" || localDevice.snmp_security_level === "authPriv") && (
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Auth passphrase ({device.snmp_auth_protocol || "SHA"})
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+                      Auth passphrase ({localDevice.snmp_auth_protocol || "SHA"})
                     </label>
                     <input
                       type="password"
                       autoComplete="new-password"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                      placeholder={device.snmp_credentials_configured ? "•••••••• (leave blank to keep current)" : ""}
+                      className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
+                      placeholder={localDevice.snmp_credentials_configured ? "•••••••• (leave blank to keep current)" : "required"}
                       value={authKey}
                       onChange={(e) => setAuthKey(e.target.value)}
                     />
                   </div>
                 )}
-                {device.snmp_security_level === "authPriv" && (
+                {localDevice.snmp_security_level === "authPriv" && (
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Privacy passphrase ({device.snmp_priv_protocol || "AES128"})
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+                      Privacy passphrase ({localDevice.snmp_priv_protocol || "AES128"})
                     </label>
                     <input
                       type="password"
                       autoComplete="new-password"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                      placeholder={device.snmp_credentials_configured ? "•••••••• (leave blank to keep current)" : ""}
+                      className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
+                      placeholder={localDevice.snmp_credentials_configured ? "•••••••• (leave blank to keep current)" : "required"}
                       value={privKey}
                       onChange={(e) => setPrivKey(e.target.value)}
                     />
                   </div>
                 )}
-                {(!device.snmp_security_level || device.snmp_security_level === "noAuthNoPriv") && (
-                  <p className="text-xs text-slate-400 italic">
+                {(!localDevice.snmp_security_level || localDevice.snmp_security_level === "noAuthNoPriv") && (
+                  <p className="text-xs text-slate-400 dark:text-slate-500 italic">
                     Security level is noAuthNoPriv — no auth/privacy passphrase needed, just the username
                     (already set on the device record).
                   </p>
@@ -166,9 +379,9 @@ export default function SnmpCredentialsModal({
               >
                 <p className="font-medium">{testResult.success ? "✓ Connection succeeded" : "✕ Connection failed"}</p>
                 <p className="mt-0.5">{testResult.message}</p>
-                {testResult.sys_descr && <p className="mt-1 text-slate-500 truncate">{testResult.sys_descr}</p>}
+                {testResult.sys_descr && <p className="mt-1 text-slate-500 dark:text-slate-400 truncate">{testResult.sys_descr}</p>}
                 {testResult.sys_uptime_seconds != null && (
-                  <p className="text-slate-400">{formatUptime(testResult.sys_uptime_seconds)}</p>
+                  <p className="text-slate-400 dark:text-slate-500">{formatUptime(testResult.sys_uptime_seconds)}</p>
                 )}
               </div>
             )}
@@ -184,8 +397,8 @@ export default function SnmpCredentialsModal({
               </button>
               <button
                 onClick={save}
-                disabled={saving || (!isV3 && !community) || (isV3 && !authKey && !privKey)}
-                className="px-4 py-2 text-xs font-semibold text-white bg-brandblue rounded-lg hover:bg-navy disabled:opacity-50"
+                disabled={saveDisabled}
+                className="px-4 py-2 text-xs font-semibold text-white bg-brandblue rounded-lg hover:bg-navy dark:bg-slate-950 disabled:opacity-50"
               >
                 {saving ? "Saving…" : "Save Credentials"}
               </button>

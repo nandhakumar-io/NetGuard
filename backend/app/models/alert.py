@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -45,5 +45,15 @@ class Alert(Base):
     resolved = Column(Boolean, nullable=False, default=False, server_default="false")
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     resolved_by = Column(String, nullable=True)
+
+    # Dedup support (see app.services.alert_service.raise_alert): rather
+    # than inserting a brand-new row every time a poll/check finds the
+    # same still-active condition, an existing unresolved alert for the
+    # same device_id+category is updated in place. Without this, clearing
+    # alerts looked broken -- the next poll cycle would immediately
+    # re-create duplicates for any condition that hadn't actually gone
+    # away yet.
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    occurrence_count = Column(Integer, nullable=False, default=1, server_default="1")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

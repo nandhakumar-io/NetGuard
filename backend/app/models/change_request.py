@@ -53,6 +53,32 @@ class ChangeRequest(Base):
     risk_findings = Column(Text, nullable=True)  # JSON-encoded list of detected risks
     risk_classification = Column(String, nullable=True)  # Low Risk | Medium Risk | Critical Risk
 
+    # Where current_config came from: "live" (a fresh read off the device
+    # right before scoring), "snapshot" (the live read failed/wasn't
+    # possible, fell back to the last ConfigSnapshot on file), or "none"
+    # (neither -- first-ever config for this device). Surfaced on the CR
+    # detail page so a reviewer knows how fresh the "current" side of the
+    # diff/risk analysis actually was, and is what the retry/rescore
+    # action (POST /change-requests/{id}/rescore) tries to upgrade from
+    # "snapshot"/"none" to "live".
+    config_source = Column(String, nullable=True)
+    # settings.RISK_ENGINE_BACKEND ("rules" | "llm") at the time this CR's
+    # risk score was last computed -- NOT the same as risk_llm_applied
+    # below: backend can be "llm" while the call still fell back silently
+    # (no credential / provider unreachable). Kept alongside risk_llm_applied
+    # so the CR detail page can show *both* "LLM backend was selected" and
+    # "an LLM pass actually ran", rather than conflating the two.
+    risk_engine_backend = Column(String, nullable=True)
+    # True only when risk_engine_backend == "llm" AND the model call
+    # actually succeeded and its findings were merged into risk_score/
+    # risk_findings -- what the "AI-reviewed" badge is keyed off.
+    risk_llm_applied = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Why risk_llm_applied is False despite backend == "llm" (no credential,
+    # provider unreachable, bad response, ...). None when llm_applied is
+    # True, or when the backend was never "llm" in the first place. This is
+    # what the retry/rescore action shows a reviewer before they click it.
+    risk_llm_error = Column(Text, nullable=True)
+
     # Critical Risk dual approval (SRS 6.2 / FR-6): when true, a single
     # approve() call is not enough -- the first call records
     # first_approved_by/first_approved_at and leaves status unchanged; a

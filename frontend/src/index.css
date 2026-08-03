@@ -9,3 +9,17 @@ body {
 code, pre {
   font-family: "SF Mono", Menlo, Consolas, monospace;
 }
+
+html.dark body {
+  @apply bg-slate-900 text-slate-100;
+}
+
+/* Scrollbars left to the OS/browser default in light mode; a light
+   scrollbar on a dark page reads as a bug, so darken it to match. */
+html.dark ::-webkit-scrollbar-track {
+  background: #1e293b; /* slate-800 */
+}
+html.dark ::-webkit-scrollbar-thumb {
+  background: #475569; /* slate-600 */
+  border-radius: 9999px;
+}

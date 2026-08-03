@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
+from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
 from app.services import risk_engine, snapshot_service
 
@@ -46,9 +47,12 @@ class TopologyNode:
 class TopologyEdge:
     source: str  # device id
     target: str  # device id
-    subnet: str  # e.g. "10.0.12.0/30" -- the shared subnet that ties them together
-    source_ip: str
-    target_ip: str
+    subnet: str | None  # e.g. "10.0.12.0/30" -- the shared subnet that ties them together (None for lldp/cdp edges)
+    source_ip: str | None
+    target_ip: str | None
+    link_source: str = "subnet"  # "lldp" | "cdp" | "subnet" -- how this edge was inferred
+    local_port: str | None = None  # source device's port, if known (lldp/cdp only)
+    neighbor_port: str | None = None  # target device's port, as reported by the source device
 
 
 @dataclass
@@ -144,5 +148,47 @@ def build_topology(db: Session) -> TopologyGraph:
                     edges.append(
                         TopologyEdge(source=a_id, target=b_id, subnet=str(net_a), source_ip=ip_a, target_ip=ip_b)
                     )
+
+    # Real LLDP/CDP-confirmed edges from persisted discovery runs (see
+    # app.api.devices.discover_device / _persist_discovered_neighbors).
+    # These are ground-truth adjacency, unlike the subnet-overlap guess
+    # above -- they catch links the subnet heuristic can't see at all
+    # (trunked L2-only links, unnumbered point-to-point interfaces,
+    # devices without a matching IP on the wire).
+    confirmed_pairs: set[tuple[str, str]] = set()
+    neighbor_rows = (
+        db.query(DiscoveredNeighbor)
+        .filter(DiscoveredNeighbor.neighbor_device_id.isnot(None))
+        .all()
+    )
+    for row in neighbor_rows:
+        a_id, b_id = str(row.device_id), str(row.neighbor_device_id)
+        if a_id == b_id:
+            continue
+        pair_key = tuple(sorted((a_id, b_id)))
+        if pair_key in confirmed_pairs:
+            continue
+        confirmed_pairs.add(pair_key)
+        edges.append(
+            TopologyEdge(
+                source=a_id,
+                target=b_id,
+                subnet=None,
+                source_ip=None,
+                target_ip=None,
+                link_source=row.protocol,
+                local_port=row.local_port,
+                neighbor_port=row.neighbor_port,
+            )
+        )
+
+    # Drop any subnet-guessed edge that a confirmed LLDP/CDP edge already
+    # covers for the same device pair -- real data wins, no need to show
+    # the same link twice with different provenance.
+    edges = [
+        e
+        for e in edges
+        if e.link_source != "subnet" or tuple(sorted((e.source, e.target))) not in confirmed_pairs
+    ]
 
     return TopologyGraph(nodes=nodes, edges=edges)

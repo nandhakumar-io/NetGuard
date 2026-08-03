@@ -68,11 +68,33 @@ class Settings(BaseSettings):
     # deterministic v1 scorer (regex + network-aware checks). "llm" layers
     # an optional model-backed review on top of the same deterministic
     # checks -- see app.services.risk_engine.LLMScorer -- and silently
-    # degrades to "rules" behavior if ANTHROPIC_API_KEY is unset or the
-    # call fails, so switching this never makes analysis unavailable.
+    # degrades to "rules" behavior if the configured provider has no
+    # credential/isn't reachable or the call fails, so switching this
+    # never makes analysis unavailable.
     RISK_ENGINE_BACKEND: str = "rules"
+
+    # Which model provider LLMScorer calls when RISK_ENGINE_BACKEND == "llm".
+    # "anthropic" (default, hosted) or "ollama" (any locally-running Ollama
+    # server -- e.g. `ollama serve`, reachable at OLLAMA_BASE_URL). Only one
+    # provider is active at a time.
+    RISK_ENGINE_LLM_PROVIDER: str = "anthropic"
     ANTHROPIC_API_KEY: str | None = None
     ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
+
+    # Local Ollama server (RISK_ENGINE_LLM_PROVIDER == "ollama"). No API key
+    # needed -- Ollama's HTTP API is unauthenticated by default, so this is
+    # just where to find it. OLLAMA_BASE_URL defaults to Ollama's standard
+    # local port; point it at a remote host if Ollama isn't running on the
+    # same machine as the backend (e.g. "http://ollama-host:11434").
+    # OLLAMA_MODEL must be the *exact* tag `ollama pull` used -- "llama3.1"
+    # and "llama3.1:8b" are different pulls/tags to Ollama's API; asking
+    # for a tag that was never pulled 404s the /api/chat call (caught by
+    # LLMScorer.score()'s try/except and falls back to the rule-based
+    # score, same as any other LLM-call failure, but silently -- always
+    # `ollama list` on that server first to see what's actually pulled).
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.1:8b"
+    OLLAMA_TIMEOUT_SECONDS: float = 30.0
 
     # Critical Risk changes (score > RISK_MEDIUM_MAX) require a second,
     # distinct Network Administrator approval before deployment is
@@ -140,6 +162,18 @@ class Settings(BaseSettings):
     # Set to False once Celery worker + beat are actually running (e.g. in
     # production) so devices aren't polled twice on the same interval.
     SNMP_INPROCESS_POLLING_ENABLED: bool = True
+
+    # When true, every Celery task (.delay()/.apply_async(), including
+    # chain()/chord() used by the multi-device deployment pipeline) runs
+    # synchronously in-process the moment it's called, instead of being
+    # published to Redis for a separate `celery worker` process to pick
+    # up. This is Celery's own supported "eager" mode -- it's what makes
+    # approving a change request (or rolling one back) actually deploy
+    # something when no Redis/Celery worker is running, which is the
+    # normal case for this prototype. Turn it off once a real worker +
+    # Redis are deployed, so deploys go through the proper async queue
+    # and don't block the approving admin's HTTP request.
+    CELERY_TASK_ALWAYS_EAGER: bool = True
 
     # GNS3 Lab Integration: lets change requests be validated end-to-end
     # (deploy -> health monitor -> rollback) against real virtual routers

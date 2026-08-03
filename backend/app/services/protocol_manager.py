@@ -23,17 +23,20 @@ Extending Device with protocol-specific credential refs is a schema change
 outside this integration's scope (Device is one of the "already
 implemented, do not regenerate" models).
 """
+import logging
 import time
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.models.alert import Alert, AlertSeverity, AlertSource
+from app.models.alert import AlertSeverity, AlertSource
 from app.models.device import Device
 from app.models.protocol_operation import ProtocolName, ProtocolOperation
-from app.services import audit_service, credential_service, deployment_engine, netconf_service, restconf_service
+from app.services import alert_service, audit_service, credential_service, deployment_engine, netconf_service, restconf_service
 from app.services.credential_service import CredentialNotFoundError
+
+logger = logging.getLogger("netguard.protocol_manager")
 
 
 class ProtocolUnavailableError(Exception):
@@ -50,6 +53,13 @@ class ProtocolResult:
     execution_time_ms: float
     correlation_id: str
     protocol_operation_id: uuid.UUID | None = None
+    # Populated only by backup_config() for NETCONF-capable devices --
+    # NETCONF's <get-config><source><startup/></source> gives a real
+    # startup-config read, unlike RESTCONF/SSH which have no equivalent
+    # standardized primitive. See backup_config() below and
+    # app.api.config_management.backup_config, which persists this into
+    # ConfigSnapshot.startup_config_encrypted when present.
+    startup_config: str | None = None
 
 
 def select_protocol(device: Device) -> str:
@@ -154,15 +164,17 @@ class ProtocolManager:
         )
 
         if not success:
-            alert = Alert(
+            # Dedup-aware: a device stuck failing the same operation on
+            # every retry/poll updates one standing alert instead of
+            # piling up a new row per attempt (see alert_service.raise_alert).
+            alert_service.raise_alert(
+                self.db,
                 device_id=self.device.id,
                 severity=AlertSeverity.WARNING,
                 source=AlertSource.PROTOCOL_FAILURE,
                 category=f"Protocol {operation.replace('_', ' ').title()} Failed",
                 message=f"{protocol.upper()} {operation} failed on {self.device.hostname}: {error or 'unknown error'}",
             )
-            self.db.add(alert)
-            self.db.commit()
 
         return ProtocolResult(
             success=success,
@@ -177,32 +189,8 @@ class ProtocolManager:
 
     # -- public API ------------------------------------------------------
 
-    def get_running_config(self) -> ProtocolResult:
-        protocol = select_protocol(self.device)
-        creds = self._safe_credentials(protocol=protocol, operation="get_running_config")
-        if isinstance(creds, ProtocolResult):
-            return creds
-        username, password = creds
-
-        if protocol == ProtocolName.NETCONF:
-            result = netconf_service.get_config(
-                self.device.ip_address, self.device.netconf_port, username, password, source="running"
-            )
-            return self._record(
-                protocol="netconf", operation="get_running_config", success=result.success,
-                request=result.request_xml, response=result.response_xml, http_status=None,
-                error=result.error, execution_time_ms=result.execution_time_ms,
-            )
-
-        if protocol == ProtocolName.RESTCONF:
-            result = restconf_service.get(self.device.restconf_url, "data", username, password)
-            return self._record(
-                protocol="restconf", operation="get_running_config", success=result.success,
-                request=None, response=result.response_body, http_status=result.http_status,
-                error=result.error, execution_time_ms=result.execution_time_ms,
-            )
-
-        # SSH first, Netmiko-over-Telnet fallback (deployment_engine.read_running_config)
+    def _get_running_config_ssh(self, username: str, password: str) -> ProtocolResult:
+        """SSH first, Netmiko-over-Telnet fallback (deployment_engine.read_running_config)."""
         start = time.perf_counter()
         device_type = _netmiko_device_type(self.device)
         config, used_protocol = deployment_engine.read_running_config(device_type, self.device.ip_address, username, password)
@@ -218,6 +206,58 @@ class ProtocolManager:
             error=error, execution_time_ms=elapsed,
         )
 
+    def get_running_config(self) -> ProtocolResult:
+        protocol = select_protocol(self.device)
+        creds = self._safe_credentials(protocol=protocol, operation="get_running_config")
+        if isinstance(creds, ProtocolResult):
+            return creds
+        username, password = creds
+
+        if protocol == ProtocolName.NETCONF:
+            result = netconf_service.get_config(
+                self.device.ip_address, self.device.netconf_port, username, password, source="running"
+            )
+            if not result.success and self.device.ssh_username:
+                # NETCONF is marked supported on the device record but the
+                # live session failed (wrong port, feature not actually
+                # enabled, auth rejected over NETCONF specifically, etc.).
+                # Previously this was a hard failure -- "Backup" would
+                # error out even though the same device is perfectly
+                # reachable over SSH. Fall back to SSH/NAPALM instead of
+                # giving up, same tolerant "best available protocol"
+                # philosophy this class already uses for startup-config
+                # and everywhere else in the app.
+                logger.debug(
+                    "NETCONF get_running_config failed for %s (%s); falling back to SSH",
+                    self.device.hostname, result.error,
+                )
+                fallback = self._get_running_config_ssh(username, password)
+                if fallback.success:
+                    return fallback
+            return self._record(
+                protocol="netconf", operation="get_running_config", success=result.success,
+                request=result.request_xml, response=result.response_xml, http_status=None,
+                error=result.error, execution_time_ms=result.execution_time_ms,
+            )
+
+        if protocol == ProtocolName.RESTCONF:
+            result = restconf_service.get(self.device.restconf_url, "data", username, password)
+            if not result.success and self.device.ssh_username:
+                logger.debug(
+                    "RESTCONF get_running_config failed for %s (%s); falling back to SSH",
+                    self.device.hostname, result.error,
+                )
+                fallback = self._get_running_config_ssh(username, password)
+                if fallback.success:
+                    return fallback
+            return self._record(
+                protocol="restconf", operation="get_running_config", success=result.success,
+                request=None, response=result.response_body, http_status=result.http_status,
+                error=result.error, execution_time_ms=result.execution_time_ms,
+            )
+
+        return self._get_running_config_ssh(username, password)
+
     def deploy_config(self, config_text: str) -> ProtocolResult:
         protocol = select_protocol(self.device)
         creds = self._safe_credentials(protocol=protocol, operation="deploy_config")
@@ -226,7 +266,10 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == ProtocolName.NETCONF:
-            result = netconf_service.push_config(self.device.ip_address, self.device.netconf_port, username, password, config_text)
+            result = netconf_service.push_config(
+                self.device.ip_address, self.device.netconf_port, username, password, config_text,
+                use_lock=getattr(self.device, "netconf_use_lock", True),
+            )
             return self._record(
                 protocol="netconf", operation="deploy_config", success=result.success,
                 request=result.request_xml, response=result.response_xml, http_status=None,
@@ -258,9 +301,45 @@ class ProtocolManager:
         responsible for turning that into a ConfigSnapshot via
         snapshot_service, same as the deployment pipeline already does --
         ProtocolManager doesn't duplicate that persistence logic.
+
+        Also attempts a genuine startup-config read and attaches it as
+        `result.startup_config`, so backups actually capture both
+        datastores instead of running-config only:
+          - NETCONF-capable devices: <get-config><source><startup/>.
+          - SSH-managed devices: NAPALM's get_config()["startup"] (the
+            same call get_running_config's SSH path already makes for
+            "running", just reading the other key).
+        RESTCONF has no equivalent standardized "read startup config"
+        primitive, so it stays running-config only. Either read failing
+        (unsupported platform, device rejects it, no startup datastore)
+        is swallowed here -- it's a best-effort addition to the backup,
+        never a reason to fail the backup itself.
         """
         result = self.get_running_config()
         result.operation = "backup_config"
+
+        if not result.success:
+            return result
+
+        protocol = select_protocol(self.device)
+        creds = self._safe_credentials(protocol=protocol, operation="backup_config")
+        if isinstance(creds, ProtocolResult):
+            return result
+        username, password = creds
+
+        if protocol == ProtocolName.NETCONF:
+            startup_result = netconf_service.get_config(
+                self.device.ip_address, self.device.netconf_port, username, password,
+                source="startup", vendor=self._vendor,
+            )
+            if startup_result.success and startup_result.response_xml:
+                result.startup_config = startup_result.response_xml
+        elif protocol not in (ProtocolName.RESTCONF,):
+            device_type = _netmiko_device_type(self.device)
+            result.startup_config = deployment_engine.read_startup_config(
+                device_type, self.device.ip_address, username, password
+            )
+
         return result
 
     def restore_config(self, config_text: str) -> ProtocolResult:

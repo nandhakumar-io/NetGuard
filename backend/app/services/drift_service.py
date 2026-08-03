@@ -28,12 +28,12 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from app.models.alert import Alert, AlertSeverity, AlertSource
+from app.models.alert import Alert, AlertSource
 from app.models.config_drift import ConfigDrift, DriftBaseline, DriftSeverity, DriftStatus
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
 from app.models.snapshot import ConfigSnapshot
-from app.services import audit_service, diff_engine, event_bus, notification_service, risk_engine, snapshot_service
+from app.services import alert_service, audit_service, diff_engine, event_bus, notification_service, risk_engine, snapshot_service
 from app.services.protocol_manager import ProtocolManager
 
 # Compliance score starts at 100 (fully compliant) and is docked per
@@ -203,9 +203,13 @@ def detect_drift(
 
     alert = None
     if severity in ALERTING_SEVERITIES and (added or removed):
-        alert = Alert(
+        # Dedup-aware: a device that keeps drifting the same way on every
+        # scheduled sweep updates one standing alert instead of piling up
+        # a fresh row every sweep (see alert_service.raise_alert).
+        alert, is_new = alert_service.raise_alert(
+            db,
             device_id=device.id,
-            severity=AlertSeverity.CRITICAL if severity == DriftSeverity.CRITICAL else AlertSeverity.WARNING,
+            severity="critical" if severity == DriftSeverity.CRITICAL else "warning",
             source=AlertSource.DRIFT,
             category=f"Configuration Drift ({severity.value.title()})",
             message=(
@@ -213,16 +217,14 @@ def detect_drift(
                 f"{ai_summary} (compliance {compliance_score}/100, risk {risk.risk_score}/100)."
             ),
         )
-        db.add(alert)
-        db.commit()
-        db.refresh(alert)
 
-        notification_service.notify(
-            event="Configuration Drift Detected",
-            message=alert.message,
-            severity="critical" if severity == DriftSeverity.CRITICAL else "warning",
-            device_hostname=device.hostname,
-        )
+        if is_new:
+            notification_service.notify(
+                event="Configuration Drift Detected",
+                message=alert.message,
+                severity="critical" if severity == DriftSeverity.CRITICAL else "warning",
+                device_hostname=device.hostname,
+            )
 
     event_bus.publish_event(
         "drift_detected",

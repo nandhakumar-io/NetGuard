@@ -112,29 +112,58 @@ export default function AlertCenter() {
     api.patch(`/alerts/${id}/resolve`).then(() => { fetchAlerts(); fetchSummary(); }).catch(() => {});
   };
 
+  const [clearing, setClearing] = useState(false);
+  const activeCount = summary ? summary.active_total : 0;
+
+  const handleClearAlerts = async () => {
+    if (activeCount === 0) return;
+    if (!window.confirm(`Clear ${activeCount} active alert${activeCount === 1 ? "" : "s"}? They'll be marked resolved and removed from the active list.`)) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await api.post("/alerts/clear");
+      fetchAlerts();
+      fetchSummary();
+    } catch {
+      // fetchAlerts/fetchSummary already no-op on failure; nothing else to do
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div>
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold text-navy">Alert Center</h1>
-          <p className="text-sm text-slate-500 mt-1">
+          <h1 className="text-2xl font-bold text-navy dark:text-white">Alert Center</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Monitor, acknowledge, and resolve network alerts in real time.
           </p>
         </div>
-        <div className="text-right text-xs text-slate-400">
+        <div className="text-right">
+          <button
+            onClick={handleClearAlerts}
+            disabled={clearing || activeCount === 0}
+            className="text-xs font-bold uppercase tracking-wider text-white bg-riskcrit/90 hover:bg-riskcrit px-3 py-1.5 rounded-lg shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {clearing ? "Clearing…" : `Clear Alerts${activeCount ? ` (${activeCount})` : ""}`}
+          </button>
+          <div className="text-xs text-slate-400 dark:text-slate-500 mt-2">
           <span
             className={`inline-flex items-center gap-1.5 font-medium mr-1 ${
-              connection === "live" ? "text-risklow" : connection === "polling" ? "text-riskmed" : "text-slate-400"
+              connection === "live" ? "text-risklow" : connection === "polling" ? "text-riskmed" : "text-slate-400 dark:text-slate-500"
             }`}
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                connection === "live" ? "bg-risklow animate-pulse" : connection === "polling" ? "bg-riskmed" : "bg-slate-300"
+                connection === "live" ? "bg-risklow animate-pulse" : connection === "polling" ? "bg-riskmed" : "bg-slate-300 dark:bg-slate-600"
               }`}
             />
             {connection === "live" ? "Live" : connection === "polling" ? "Polling" : "Connecting…"}
           </span>
+          </div>
         </div>
       </div>
 
@@ -148,10 +177,10 @@ export default function AlertCenter() {
             { label: "Active Total", value: summary.active_total, color: "navy", icon: "📋" },
             { label: "Resolved", value: summary.resolved, color: "risklow", icon: "✅" },
           ] as const).map((s) => (
-            <div key={s.label} className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm group hover:shadow-md transition-shadow">
+            <div key={s.label} className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 shadow-sm group hover:shadow-md transition-shadow">
               <div className="flex items-center gap-2">
                 <span className="text-lg">{s.icon}</span>
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{s.label}</p>
+                <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{s.label}</p>
               </div>
               <p className={`text-3xl font-bold mt-2 text-${s.color}`}>{s.value}</p>
             </div>
@@ -160,14 +189,14 @@ export default function AlertCenter() {
       )}
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 mt-6 bg-white rounded-xl border border-slate-200 px-5 py-3 shadow-sm">
-        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider mr-1">Filters</span>
+      <div className="flex flex-wrap items-center gap-3 mt-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 px-5 py-3 shadow-sm">
+        <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mr-1">Filters</span>
 
         <select
           id="severity-filter"
           value={severityFilter}
           onChange={(e) => setSeverityFilter(e.target.value)}
-          className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 bg-slate-50 focus:ring-2 focus:ring-brandblue/30 focus:border-brandblue outline-none transition"
+          className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 bg-slate-50 dark:bg-slate-900 focus:ring-2 focus:ring-brandblue/30 focus:border-brandblue outline-none transition"
         >
           <option value="">All Severities</option>
           <option value="critical">Critical</option>
@@ -179,7 +208,7 @@ export default function AlertCenter() {
           id="source-filter"
           value={sourceFilter}
           onChange={(e) => setSourceFilter(e.target.value)}
-          className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 bg-slate-50 focus:ring-2 focus:ring-brandblue/30 focus:border-brandblue outline-none transition"
+          className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 bg-slate-50 dark:bg-slate-900 focus:ring-2 focus:ring-brandblue/30 focus:border-brandblue outline-none transition"
         >
           <option value="">All Sources</option>
           <option value="snmp_trap">SNMP Trap</option>
@@ -192,7 +221,7 @@ export default function AlertCenter() {
           id="status-filter"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 bg-slate-50 focus:ring-2 focus:ring-brandblue/30 focus:border-brandblue outline-none transition"
+          className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 bg-slate-50 dark:bg-slate-900 focus:ring-2 focus:ring-brandblue/30 focus:border-brandblue outline-none transition"
         >
           <option value="">All Statuses</option>
           <option value="active">Active</option>
@@ -203,7 +232,7 @@ export default function AlertCenter() {
         {(severityFilter || sourceFilter || statusFilter !== "active") && (
           <button
             onClick={() => { setSeverityFilter(""); setSourceFilter(""); setStatusFilter("active"); }}
-            className="text-xs text-brandblue hover:text-navy font-medium transition-colors"
+            className="text-xs text-brandblue hover:text-navy dark:text-white font-medium transition-colors"
           >
             Reset
           </button>
@@ -213,15 +242,15 @@ export default function AlertCenter() {
       {/* Alert Timeline */}
       <div className="mt-6 space-y-3">
         {loading ? (
-          <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-12 text-center">
             <div className="inline-block w-6 h-6 border-2 border-brandblue/30 border-t-brandblue rounded-full animate-spin" />
-            <p className="text-sm text-slate-500 mt-3">Loading alerts…</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-3">Loading alerts…</p>
           </div>
         ) : alerts.length === 0 ? (
-          <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-12 text-center">
             <div className="text-5xl mb-4">🛡️</div>
-            <h3 className="text-lg font-semibold text-navy">All Clear</h3>
-            <p className="text-sm text-slate-500 mt-1">No alerts match the current filters. Your network is looking healthy.</p>
+            <h3 className="text-lg font-semibold text-navy dark:text-white">All Clear</h3>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">No alerts match the current filters. Your network is looking healthy.</p>
           </div>
         ) : (
           alerts.map((alert, idx) => {
@@ -229,7 +258,7 @@ export default function AlertCenter() {
             return (
               <div
                 key={alert.id}
-                className={`bg-white rounded-xl border ${sev.border} shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden ${
+                className={`bg-white dark:bg-slate-800 rounded-xl border ${sev.border} shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden ${
                   alert.resolved ? "opacity-60" : ""
                 }`}
                 style={{ animationDelay: `${idx * 30}ms` }}
@@ -246,7 +275,7 @@ export default function AlertCenter() {
                           <span className={`text-[11px] font-bold uppercase tracking-wider ${sev.color} ${sev.bgLight} px-2 py-0.5 rounded-full`}>
                             {sev.label}
                           </span>
-                          <span className="text-[11px] font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                          <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded-full">
                             {SOURCE_LABELS[alert.source] || alert.source}
                           </span>
                           {alert.acknowledged && !alert.resolved && (
@@ -260,9 +289,9 @@ export default function AlertCenter() {
                             </span>
                           )}
                         </div>
-                        <h3 className="font-semibold text-navy mt-1.5 text-sm">{alert.category}</h3>
-                        <p className="text-sm text-slate-600 mt-0.5">{alert.message}</p>
-                        <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-400">
+                        <h3 className="font-semibold text-navy dark:text-white mt-1.5 text-sm">{alert.category}</h3>
+                        <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{alert.message}</p>
+                        <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-400 dark:text-slate-500">
                           <span>{timeAgo(alert.created_at)}</span>
                           {alert.device_id && <span>Device: {alert.device_id.slice(0, 8)}…</span>}
                           {alert.acknowledged_by && <span>Ack'd by {alert.acknowledged_by}</span>}
@@ -276,7 +305,7 @@ export default function AlertCenter() {
                           {!alert.acknowledged && (
                             <button
                               onClick={() => handleAcknowledge(alert.id)}
-                              className="text-xs font-medium text-brandblue hover:text-navy bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
+                              className="text-xs font-medium text-brandblue hover:text-navy dark:text-white bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
                             >
                               Acknowledge
                             </button>

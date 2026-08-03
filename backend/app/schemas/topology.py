@@ -16,9 +16,12 @@ class TopologyNodeRead(BaseModel):
 class TopologyEdgeRead(BaseModel):
     source: str
     target: str
-    subnet: str
-    source_ip: str
-    target_ip: str
+    subnet: str | None = None
+    source_ip: str | None = None
+    target_ip: str | None = None
+    link_source: str = "subnet"  # "lldp" | "cdp" | "subnet"
+    local_port: str | None = None
+    neighbor_port: str | None = None
 
 
 class TopologyResponse(BaseModel):
