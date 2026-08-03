@@ -1,3 +1,5 @@
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -25,6 +27,7 @@ from app.services import (
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
+logger = logging.getLogger(__name__)
 
 # Roles permitted to approve/reject change requests (FR-1 RBAC)
 APPROVER_ROLES = (UserRole.NETWORK_ADMIN,)
@@ -188,10 +191,19 @@ def create_change_request(
         for extra_id in payload.additional_device_ids:
             if not db.get(Device, extra_id):
                 raise HTTPException(status_code=404, detail=f"Device {extra_id} not found")
-        import json
         additional_device_ids_json = json.dumps([str(i) for i in payload.additional_device_ids])
 
-    result = _score_change(db, device, payload.proposed_config, current_user)
+    try:
+        result = _score_change(db, device, payload.proposed_config, current_user)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Change request scoring failed for device %s", device.hostname)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Risk analysis failed while scoring this change: {exc}. "
+            "The change was not submitted -- fix the underlying issue (e.g. an "
+            "unreachable/misconfigured LLM provider, or a malformed proposed "
+            "config) and try again.",
+        )
     current_config, config_source = result["current_config"], result["config_source"]
     diff_text, validation, risk = result["config_diff"], result["validation"], result["risk"]
 
@@ -227,9 +239,19 @@ def create_change_request(
         canary_enabled=payload.canary_enabled,
         status=ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT,
     )
-    db.add(cr)
-    db.commit()
-    db.refresh(cr)
+    try:
+        db.add(cr)
+        db.commit()
+        db.refresh(cr)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.exception("Change request DB commit failed for device %s", device.hostname)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Change request was scored successfully but failed to save: {exc}. "
+            "This usually means the database schema is out of date -- run "
+            "`alembic upgrade head` in backend/ and try again.",
+        )
 
     audit_service.record_event(
         db,
@@ -299,7 +321,15 @@ def rescore_change_request(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    result = _score_change(db, device, cr.proposed_config, current_user, interactive=False)
+    try:
+        result = _score_change(db, device, cr.proposed_config, current_user, interactive=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Rescore failed for change request %s (device %s)", cr_id, device.hostname)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Risk analysis failed while rescoring this change: {exc}. "
+            "The existing change request was not modified.",
+        )
     validation, risk = result["validation"], result["risk"]
 
     import json

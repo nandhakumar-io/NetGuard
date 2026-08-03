@@ -1,0 +1,45 @@
+nohup: ignoring input
+ 
+ -------------- celery@kenpachi v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- Linux-6.18.19-x86_64-with-glibc2.42 2026-08-03 15:09:31
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         netguard:0x7f144f912f90
+- ** ---------- .> transport:   redis://localhost:6379/1
+- ** ---------- .> results:     redis://localhost:6379/2
+- *** --- * --- .> concurrency: 20 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . app.tasks.canary_gate_task
+  . app.tasks.deploy_device_task
+  . app.tasks.drift_detection_task
+  . app.tasks.finalize_change_request_task
+  . app.tasks.run_deployment_pipeline_task
+  . app.tasks.run_monthly_compliance_report_task
+  . app.tasks.run_nightly_drift_sweep_task
+  . app.tasks.run_snmp_poll_sweep_task
+  . app.tasks.run_weekly_compliance_report_task
+  . app.tasks.snmp_poll_task
+
+[2026-08-03 15:09:32,755: WARNING/MainProcess] /home/kenpachi-zaraki/NetGuard/.venv/lib/python3.13/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2026-08-03 15:09:32,774: INFO/MainProcess] Connected to redis://localhost:6379/1
+[2026-08-03 15:09:32,776: WARNING/MainProcess] /home/kenpachi-zaraki/NetGuard/.venv/lib/python3.13/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2026-08-03 15:09:32,780: INFO/MainProcess] mingle: searching for neighbors
+[2026-08-03 15:09:33,803: INFO/MainProcess] mingle: all alone
+[2026-08-03 15:09:33,829: INFO/MainProcess] celery@kenpachi ready.

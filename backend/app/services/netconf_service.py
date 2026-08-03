@@ -196,6 +196,7 @@ def push_config(
     # mismatch, not a malformed-XML bug. Convert it here, once, right
     # before it goes over the wire, rather than pushing the conversion
     # requirement onto every caller of push_config.
+    used_cli_config_data = False
     if not looks_like_xml(config_xml):
         if (vendor or "cisco").lower() != "cisco":
             elapsed = (time.perf_counter() - start) * 1000
@@ -210,6 +211,7 @@ def push_config(
                 ),
             )
         config_xml = cli_to_netconf_config(config_xml)
+        used_cli_config_data = True
     else:
         stripped = strip_rpc_envelope(config_xml)
         if stripped is not None and stripped != config_xml:
@@ -260,6 +262,32 @@ def push_config(
     try:
         with _connect(ip_address, port, username, password, vendor=vendor) as conn:
             caps = list(conn.server_capabilities or [])
+
+            if used_cli_config_data and not any("cisco-ia" in c.lower() for c in caps):
+                # This device's NETCONF <hello> doesn't advertise Cisco's
+                # cli-config-data YANG extension at all -- pushing anyway
+                # gets a device-side rpc-error (tag "unknown-element",
+                # bad-element "cli-config-data") only after a full
+                # lock/edit-config round trip, which reads like a bug in
+                # our payload rather than what it actually is: this image/
+                # platform doesn't support turning CLI text into NETCONF
+                # edits this way. Fail fast with a message that says what
+                # to actually do about it, instead of a raw rpc-error dump.
+                elapsed = (time.perf_counter() - start) * 1000
+                return NetconfResult(
+                    False, request_xml, "", elapsed,
+                    error=(
+                        "This device's NETCONF server doesn't advertise Cisco's "
+                        "cli-config-data extension (capability containing "
+                        "'cisco-ia'), which is what NETCONF pushes use to apply "
+                        "plain CLI text on IOS-XE. That extension isn't present "
+                        "on every IOS-XE image/platform -- deploy this change "
+                        "over SSH instead (same CLI commands, no translation "
+                        "needed), or confirm 'netconf-yang' and the Cisco-IA "
+                        "model are enabled on this device."
+                    ),
+                )
+
             effective_target = target
             if effective_target == "candidate" and not any(":candidate" in c for c in caps):
                 logger.debug(

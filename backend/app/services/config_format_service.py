@@ -412,14 +412,57 @@ def _diff_dicts(
     if isinstance(old, list) or isinstance(new, list):
         old_list = old if isinstance(old, list) else ([old] if old else [])
         new_list = new if isinstance(new, list) else ([new] if new else [])
-        # Simple positional diff for list items
-        for i, item in enumerate(new_list):
-            if i < len(old_list):
-                _diff_dicts(old_list[i], item, path, changes)
+
+        def _canonical(item) -> str:
+            # Stable string form of a list item for value-based matching.
+            # dict order doesn't matter for equality here -- sort keys so
+            # {"a": "1", "b": "2"} and {"b": "2", "a": "1"} (same entry,
+            # keys emitted in a different order by a different device
+            # poll) compare equal.
+            if isinstance(item, dict):
+                return repr(sorted(item.items()))
+            if isinstance(item, list):
+                return repr(sorted(_canonical(i) for i in item))
+            return repr(item)
+
+        # Multiset match by value: entries present (the same number of
+        # times) in both lists are genuinely unchanged and shouldn't
+        # appear as a change at all, regardless of what position they're
+        # in either list. Only leftover, unmatched entries are real
+        # adds/removes. Bucketing by canonical value (rather than a plain
+        # set) preserves multiplicity, so legitimate duplicate entries
+        # don't collapse into one.
+        old_counts: dict[str, list] = {}
+        for item in old_list:
+            old_counts.setdefault(_canonical(item), []).append(item)
+        new_counts: dict[str, list] = {}
+        for item in new_list:
+            new_counts.setdefault(_canonical(item), []).append(item)
+
+        unmatched_old: list = []
+        unmatched_new: list = []
+        for key, new_items in new_counts.items():
+            old_items = old_counts.get(key, [])
+            matched = min(len(old_items), len(new_items))
+            unmatched_new.extend(new_items[matched:])
+        for key, old_items in old_counts.items():
+            new_items = new_counts.get(key, [])
+            matched = min(len(old_items), len(new_items))
+            unmatched_old.extend(old_items[matched:])
+
+        # Whatever's left over after value-matching, pair up positionally
+        # (an unmatched old entry and an unmatched new entry at the same
+        # spot are most often the same logical slot with an actual field
+        # changed -- e.g. an interface's IP literally changing -- so this
+        # still reports it as "modified" rather than "removed X" +
+        # "added Y" for what's really one edit) and diff those normally.
+        for i, item in enumerate(unmatched_new):
+            if i < len(unmatched_old):
+                _diff_dicts(unmatched_old[i], item, path, changes)
             else:
                 _collect_added(item, path, changes)
-        for i in range(len(new_list), len(old_list)):
-            _collect_removed(old_list[i], path, changes)
+        for i in range(len(unmatched_new), len(unmatched_old)):
+            _collect_removed(unmatched_old[i], path, changes)
         return
 
     # Both are dicts

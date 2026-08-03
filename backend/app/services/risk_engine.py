@@ -30,13 +30,20 @@ RISK_RULES: list[tuple[str, int, str]] = [
     (r"\bno\s+router\s+bgp\b", 35, "BGP process removal detected"),
     (r"\bno\s+neighbor\s+\S+", 30, "BGP neighbor removal detected"),
     (r"\bno\s+router\s+ospf\b", 30, "OSPF process removal detected"),
-    (r"\bshutdown\b", 20, "Interface shutdown detected"),
     (r"\bip\s+route\s+0\.0\.0\.0\s+0\.0\.0\.0\b", 15, "Default route change detected"),
     (r"\bno\s+ip\s+route\b", 15, "Static route removal detected"),
     (r"\baccess-list\s+\d+\s+deny\s+any\b", 15, "Broad ACL deny rule detected"),
     (r"\bno\s+vlan\s+\d+\b", 10, "VLAN removal detected"),
     (r"\bip\s+address\s+(\d{1,3}\.){3}\d{1,3}\s+255\.255\.255\.255\b", 10, "Suspicious /32 subnet mask"),
 ]
+
+# Matched line-by-line rather than folded into RISK_RULES above, because a
+# plain `\bshutdown\b` regex can't distinguish "shutdown" (administratively
+# disabling an interface) from "no shutdown" (bringing one back up) -- both
+# contain the same substring. Treated separately so an interface being
+# *enabled* isn't misreported and scored as if it were being disabled.
+_SHUTDOWN_LINE_RE = re.compile(r"^\s*shutdown\s*$", re.I | re.M)
+_NO_SHUTDOWN_LINE_RE = re.compile(r"^\s*no\s+shutdown\s*$", re.I | re.M)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +357,24 @@ class RuleBasedScorer(RiskScorer):
                 findings.append(message)
                 score += weight
 
+        shutdown_count = len(_SHUTDOWN_LINE_RE.findall(scan_text))
+        no_shutdown_count = len(_NO_SHUTDOWN_LINE_RE.findall(scan_text))
+        # A bare "shutdown" line also matches "no shutdown" as a substring
+        # search but not as ^\s*shutdown\s*$ line match, so these two
+        # counts are already mutually exclusive -- no double counting.
+        if shutdown_count:
+            findings.append(
+                f"Interface shutdown detected ({shutdown_count} interface{'s' if shutdown_count != 1 else ''} being administratively disabled)"
+            )
+            score += 20
+        if no_shutdown_count:
+            findings.append(
+                f"Interface(s) being administratively enabled ({no_shutdown_count} interface{'s' if no_shutdown_count != 1 else ''} — 'no shutdown')"
+            )
+            # Bringing an interface up isn't inherently risky the way taking
+            # one down is -- no score contribution, just visibility in the
+            # findings list so the reviewer sees it called out.
+
         checks = NetworkAwareChecks(proposed_config, current_config, other_device_configs)
         for message, weight in checks.run():
             findings.append(message)
@@ -396,6 +421,17 @@ class LLMScorer(RiskScorer):
         other_device_configs: dict[str, str] | None = None,
         llm_timeout: float | None = None,
     ) -> RiskAnalysisResult:
+        # Compute the deterministic rule-based score first and hold onto it
+        # as a guaranteed-safe fallback -- everything below this line
+        # (provider dispatch, the network call itself, and assembling the
+        # merged result from whatever the model handed back) is wrapped in
+        # one broad try/except so a bad/unexpected LLM response can never
+        # take the whole change-request submission down with it. This used
+        # to only wrap the _call_llm() call itself; a failure in result
+        # assembly (e.g. the model returning a non-numeric
+        # additional_risk_points, or a findings value that isn't actually a
+        # list) still propagated as a raw 500 with nothing in the response
+        # body to diagnose it from.
         base = self._rule_scorer.score(proposed_config, current_config, other_device_configs)
         provider = settings.RISK_ENGINE_LLM_PROVIDER
 
@@ -411,19 +447,24 @@ class LLMScorer(RiskScorer):
 
         try:
             extra_findings, extra_score = self._call_llm(provider, proposed_config, current_config, llm_timeout)
+            extra_findings = [str(f) for f in extra_findings] if isinstance(extra_findings, (list, tuple)) else []
+            extra_score = int(extra_score)
+
+            findings = base.findings + extra_findings
+            score = min(base.risk_score + extra_score, 100)
+            classification, recommendation = _classify(score)
+            return RiskAnalysisResult(
+                risk_score=score, classification=classification, recommendation=recommendation,
+                findings=findings, llm_applied=True, llm_error=None,
+            )
         except Exception as exc:
-            # Never let a downstream model outage block change analysis --
-            # degrade to the deterministic rule-based result, but say why.
+            # Never let a downstream model outage -- or a malformed/
+            # unexpected response shape from it -- block change analysis.
+            # Degrade to the deterministic rule-based result, but say why,
+            # so this is diagnosable from the API response instead of only
+            # from a server-side traceback.
             base.llm_error = f"{provider} call failed: {exc}"
             return base
-
-        findings = base.findings + extra_findings
-        score = min(base.risk_score + extra_score, 100)
-        classification, recommendation = _classify(score)
-        return RiskAnalysisResult(
-            risk_score=score, classification=classification, recommendation=recommendation,
-            findings=findings, llm_applied=True, llm_error=None,
-        )
 
     def _call_llm(
         self, provider: str, proposed_config: str, current_config: str | None, timeout: float | None = None,

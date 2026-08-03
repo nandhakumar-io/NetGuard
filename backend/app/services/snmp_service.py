@@ -406,7 +406,8 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                     )
                     if error_indication or error_status or not var_binds:
                         break
-                    oid, value = var_binds[0]
+                    obj = var_binds[0][0] if isinstance(var_binds[0], list) else var_binds[0]
+                    oid, value = obj[0], obj[1]
                     oid_str = str(oid)
                     if not oid_str.startswith(base_oid + "."):
                         break
@@ -463,7 +464,8 @@ def _walk_via_pysnmp_v3(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, 
                 )
                 if error_indication or error_status or not var_binds:
                     break
-                oid, value = var_binds[0]
+                obj = var_binds[0][0] if isinstance(var_binds[0], list) else var_binds[0]
+                oid, value = obj[0], obj[1]
                 oid_str = str(oid)
                 if not oid_str.startswith(base_oid + "."):
                     break
