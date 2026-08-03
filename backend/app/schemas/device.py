@@ -118,6 +118,10 @@ class DeviceRead(DeviceBase):
     # plain on DeviceBase (it's just a pointer, not a secret) -- this flag
     # is specifically about whether a real password is on file.
     ssh_credentials_configured: bool = False
+    # Set by every SNMP poll attempt (success or failure) -- see
+    # metrics_service.poll_device. None until the first poll ever runs.
+    last_snmp_poll_at: datetime.datetime | None = None
+    last_snmp_poll_error: str | None = None
 
     @classmethod
     def from_device(cls, device) -> "DeviceRead":

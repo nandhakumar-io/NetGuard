@@ -342,7 +342,22 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                     oid_str = str(oid)
                     if not oid_str.startswith(base_oid + "."):
                         break  # walked past the end of this column
-                    index = oid_str.rsplit(".", 1)[-1]
+                    # Full index suffix (everything after "base_oid."), NOT
+                    # just the last OID component. This used to be
+                    # `oid_str.rsplit(".", 1)[-1]`, which is correct only
+                    # for single-component indices (ifTable's plain
+                    # ifIndex) -- every *composite*-index table (ARP's
+                    # ifIndex.a.b.c.d, routes' dest.mask.tos.nexthop,
+                    # LLDP/CDP's multi-part indices) got silently
+                    # truncated down to just its last octet. That's
+                    # confirmed against a real device: ARP and routing
+                    # discovery came back completely empty (their callers
+                    # require >=5 / >=13 index components, so a 1-component
+                    # truncated index always got filtered out), while CDP
+                    # (2-component) still showed rows but with the wrong
+                    # local interface index -- exactly the "CDP half-works,
+                    # ARP/routes are empty" symptom this fixes.
+                    index = oid_str[len(base_oid) + 1:]
                     results[index] = str(value)
                     if len(results) >= MAX_INTERFACES_WALKED:
                         break
@@ -350,9 +365,31 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
 
         asyncio.run(_run())
     except ImportError:
-        # pysnmp.hlapi.v1arch.asyncio may not exist in all pysnmp builds;
-        # fall back to the v3arch nextCmd path (same as _walk_via_pysnmp_v3
-        # but with CommunityData instead of UsmUserData).
+        # pysnmp.hlapi.v1arch.asyncio doesn't exist at all in the pinned
+        # build (pysnmp==6.2.5 has no `v1arch` submodule -- confirmed via
+        # `python3 -c "import pysnmp.hlapi.v1arch.asyncio"` ->
+        # ModuleNotFoundError), so this ImportError branch is taken on
+        # EVERY call, for every device -- it isn't a rare fallback, it's
+        # the only path that ever actually runs.
+        #
+        # And the fallback itself was silently broken: it did
+        # `async for ... in m.nextCmd(...)`, but in this build `nextCmd`
+        # is a plain coroutine that returns ONE (errorIndication,
+        # errorStatus, errorIndex, varBinds) tuple per call -- the same
+        # shape as `getCmd`, which _get_via_pysnmp already awaits
+        # directly -- not an async generator. Confirmed directly:
+        # `async for x in m.nextCmd(...)` raises `TypeError: 'async for'
+        # requires an object with __aiter__ method, got coroutine` before
+        # a single SNMP packet is even sent. That TypeError was swallowed
+        # by the bare `except Exception` below, so _walk() always
+        # returned {} -- which is why CPU/mem/temp/fan/interface stats
+        # AND ARP/routing/LLDP/CDP/inventory discovery (everything in
+        # this file that walks a table instead of GETting a scalar) came
+        # back empty even though the same OIDs read fine with
+        # `snmpwalk` directly against the device. Fixed by awaiting
+        # nextCmd in a loop, one GETNEXT per iteration, feeding the
+        # returned oid back in as the next request's var_bind -- same
+        # pattern the v1arch branch above already uses correctly.
         logger.debug("v1arch walk module not available, falling back to v3arch for walk")
         try:
             import pysnmp.hlapi.asyncio as m
@@ -363,19 +400,21 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                 auth_data = m.CommunityData(community, mpModel=mp_model)
                 transport = m.UdpTransportTarget((ip_address, port), timeout=timeout, retries=1)
                 var_bind = m.ObjectType(m.ObjectIdentity(base_oid))
-                async for error_indication, error_status, _, var_binds in m.nextCmd(
-                    engine, auth_data, transport, m.ContextData(), var_bind, lexicographicMode=False,
-                ):
+                while True:
+                    error_indication, error_status, _, var_binds = await m.nextCmd(
+                        engine, auth_data, transport, m.ContextData(), var_bind, lexicographicMode=False,
+                    )
                     if error_indication or error_status or not var_binds:
                         break
                     oid, value = var_binds[0]
                     oid_str = str(oid)
                     if not oid_str.startswith(base_oid + "."):
                         break
-                    index = oid_str.rsplit(".", 1)[-1]
+                    index = oid_str[len(base_oid) + 1:]
                     results[index] = str(value)
                     if len(results) >= MAX_INTERFACES_WALKED:
                         break
+                    var_bind = m.ObjectType(m.ObjectIdentity(oid))
 
             asyncio.run(_run_v3arch())
         except Exception:  # noqa: BLE001
@@ -396,13 +435,18 @@ def _walk_via_pysnmp_v3(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, 
     Uses the same flat `pysnmp.hlapi.asyncio` module as _get_via_pysnmp
     (which already supports UsmUserData for GET) rather than
     `pysnmp.hlapi.v1arch.asyncio` (community-only by design -- "v1arch"
-    has no USM support at all). Classic pysnmp.hlapi's `nextCmd` walks by
-    being an async generator you iterate with `async for`, unlike
-    `getCmd`'s single awaitable -- if this build's `nextCmd` turns out not
-    to behave that way, this fails closed (returns {} via the except
-    below) rather than raising into the poll loop; verify with
-    `python3 -c "import pysnmp.hlapi.asyncio as m; help(m.nextCmd)"`
-    against your installed build if v3 interface stats stay empty.
+    has no USM support at all, and doesn't exist in this pysnmp build to
+    begin with).
+
+    In this build, `nextCmd` is a plain coroutine that returns ONE
+    (errorIndication, errorStatus, errorIndex, varBinds) tuple per call --
+    the same shape as `getCmd` -- NOT an async generator, despite older
+    pysnmp.hlapi docs describing it that way. Confirmed directly:
+    `async for x in m.nextCmd(...)` raises `TypeError: 'async for'
+    requires an object with __aiter__ method, got coroutine`. This walks
+    it correctly instead: one GETNEXT per loop iteration, awaited
+    directly, feeding the returned oid back in as the next request's
+    var_bind (same pattern as the v1/v2c walk path in _walk_via_pysnmp).
     """
     results: dict[str, str] = {}
     try:
@@ -413,19 +457,21 @@ def _walk_via_pysnmp_v3(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, 
             auth_data = _build_usm_user_data(auth, m)
             transport = m.UdpTransportTarget((ip_address, auth.port or 161), timeout=timeout, retries=1)
             var_bind = m.ObjectType(m.ObjectIdentity(base_oid))
-            async for error_indication, error_status, _, var_binds in m.nextCmd(
-                engine, auth_data, transport, m.ContextData(), var_bind, lexicographicMode=False,
-            ):
+            while True:
+                error_indication, error_status, _, var_binds = await m.nextCmd(
+                    engine, auth_data, transport, m.ContextData(), var_bind, lexicographicMode=False,
+                )
                 if error_indication or error_status or not var_binds:
                     break
                 oid, value = var_binds[0]
                 oid_str = str(oid)
                 if not oid_str.startswith(base_oid + "."):
                     break
-                index = oid_str.rsplit(".", 1)[-1]
+                index = oid_str[len(base_oid) + 1:]
                 results[index] = str(value)
                 if len(results) >= MAX_INTERFACES_WALKED:
                     break
+                var_bind = m.ObjectType(m.ObjectIdentity(oid))
 
         asyncio.run(_run())
     except Exception:  # noqa: BLE001
@@ -514,6 +560,17 @@ def _mac_from_snmp_value(raw: str) -> str:
     cleaned = raw.strip()
     if re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", cleaned):
         return cleaned.lower()
+    # Colon-separated but with un-zero-padded single-digit octets (real
+    # devices return e.g. "8:bf:b8:70:9d:fd", not "08:bf:..."). Handle
+    # this explicitly and pad each group to 2 digits -- the generic
+    # hex-token fallback below can't recover this case: scanning for
+    # 2-char hex runs across a colon-delimited string with an odd-length
+    # leading octet just drops that octet entirely (it never pairs up
+    # with a neighboring hex char before hitting the colon), leaving too
+    # few tokens and falling through to returning the raw, unparsed string.
+    groups = cleaned.split(":")
+    if len(groups) == 6 and all(re.fullmatch(r"[0-9A-Fa-f]{1,2}", g) for g in groups):
+        return ":".join(g.zfill(2) for g in groups).lower()
     # Fallback: pull out any hex-looking byte tokens (handles pysnmp's
     # '0xaabbccddeeff' / escaped-octet renderings) and re-join as MAC.
     hex_bytes = re.findall(r"[0-9A-Fa-f]{2}", cleaned.replace("0x", ""))

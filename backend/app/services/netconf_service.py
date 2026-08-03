@@ -10,8 +10,50 @@ same convention as netmiko/napalm in deployment_engine.py) so the rest of
 the app depends on the `NetconfResult` dataclass, not on ncclient's API
 directly.
 """
+import logging
 import time
 from dataclasses import dataclass
+
+from app.services.config_format_service import (
+    cli_to_netconf_config,
+    looks_like_xml,
+    pretty_xml,
+    strip_rpc_envelope,
+)
+
+logger = logging.getLogger("netguard.netconf")
+
+
+def _pretty_xml(xml_text: str) -> str:
+    """Thin wrapper around config_format_service.pretty_xml that falls
+    back to the original text (instead of None) when it isn't parseable
+    XML, so every call site here can use it unconditionally.
+
+    ncclient's `str(reply)` gives back the exact bytes the device sent,
+    which for most NETCONF servers (including the Cisco IOS-XE devices
+    this app targets) is a single unbroken line with no whitespace
+    between elements. Every caller that stores this text downstream --
+    ConfigSnapshot/GoldenConfig backups, drift baselines, the live-config
+    read used for drift comparison -- ends up treating "the whole config"
+    as one diff_engine.generate_diff() line, which has two bad effects
+    that show up together on the Drift page:
+
+      1. The AI/rule-based drift summary becomes unreadable: instead of
+         "Interface GigabitEthernet0/3 was administratively shut down" it
+         shows the *entire* multi-KB XML blob as a single "Removed:"/
+         "Added:" line.
+      2. Keyword rules (e.g. the `shutdown` risk rule) scan that entire
+         blob as "changed", so a `<shutdown/>` element on some unrelated,
+         already-shut interface that hasn't changed at all still fires a
+         false-positive "Interface shutdown detected" finding on every
+         scan, just because it happens to exist somewhere in a config
+         that differs from baseline for a completely different reason.
+
+    Pretty-printing so each element lands on its own line fixes both:
+    line-level diffing then only flags lines that actually changed, and
+    the resulting diff/summary is something a human can actually read.
+    """
+    return pretty_xml(xml_text) or xml_text
 
 
 @dataclass
@@ -84,7 +126,8 @@ def get_config(
         with _connect(ip_address, port, username, password, vendor=vendor) as conn:
             reply = conn.get_config(source=source)
             elapsed = (time.perf_counter() - start) * 1000
-            return NetconfResult(True, request_xml, str(reply), elapsed)
+            content = strip_rpc_envelope(str(reply)) or str(reply)
+            return NetconfResult(True, request_xml, _pretty_xml(content), elapsed)
     except Exception as exc:  # noqa: BLE001
         elapsed = (time.perf_counter() - start) * 1000
         return NetconfResult(False, request_xml, "", elapsed, error=str(exc))
@@ -112,47 +155,140 @@ def push_config(
     don't implement <lock> or reject it outright, which would otherwise
     fail every push against that device at the lock step even though
     edit-config itself would have gone through fine.
+
+    `target="candidate"` is only a *request*, not a guarantee -- plenty
+    of real devices (classic IOS, most lab/virtual images) never
+    advertise the :candidate capability in their NETCONF <hello> at all
+    and only support editing :running directly. ncclient itself raises
+    "Unsupported capability :candidate" the moment `lock`/`edit_config`
+    is called with target="candidate" against one of those devices --
+    every deploy against them failed at that exact step even though the
+    device is perfectly capable of taking the same config against
+    :running. Once connected (server_capabilities is only known *after*
+    the NETCONF <hello> exchange, so this can't be decided before
+    `_connect`), we downgrade target to "running" when :candidate isn't
+    advertised, and skip the candidate-only `commit()` step to match --
+    an edit-config against :running applies immediately, there's nothing
+    to commit.
+
+    That preemptive check isn't quite enough on its own, though: some
+    IOS-XE images (several of the GNS3 lab Catalyst 8000v boxes included)
+    advertise `:candidate` in their <hello> capabilities but reject an
+    actual `<lock>`/`<edit-config>` against it with that exact same
+    "Unsupported capability :candidate" error -- i.e. the capability list
+    doesn't reliably reflect whether the candidate datastore is actually
+    usable on that box. So in addition to the preemptive check, a
+    candidate-target attempt that still fails with a capability-shaped
+    error is retried once, live, against :running before giving up --
+    this is what actually fixes deploys against those boxes; the
+    preemptive check above just avoids the round trip for devices that
+    are known upfront not to advertise it at all.
     """
     start = time.perf_counter()
-    request_xml = (
-        f'<edit-config><target><{target}/></target>'
-        f'<config>{config_xml}</config></edit-config>'
-    )
-    responses: list[str] = []
-    try:
-        with _connect(ip_address, port, username, password, vendor=vendor) as conn:
-            if use_lock:
-                conn.lock(target=target)
+
+    # Every change request in this app is authored, validated
+    # (validation_engine), diffed (diff_engine), and risk-scored
+    # (risk_engine) as plain IOS-style CLI text -- there's no separate
+    # "XML mode" a caller opts into. Handing that straight to ncclient's
+    # edit_config() as the NETCONF `config` payload fails immediately
+    # with an XML parser error ("Start tag expected, '<' not found") --
+    # it was never going to parse as XML, this is a payload-shape
+    # mismatch, not a malformed-XML bug. Convert it here, once, right
+    # before it goes over the wire, rather than pushing the conversion
+    # requirement onto every caller of push_config.
+    if not looks_like_xml(config_xml):
+        if (vendor or "cisco").lower() != "cisco":
+            elapsed = (time.perf_counter() - start) * 1000
+            return NetconfResult(
+                False, config_xml, "", elapsed,
+                error=(
+                    f"proposed_config is plain CLI text, not XML, and vendor="
+                    f"'{vendor}' has no CLI-to-NETCONF translation configured "
+                    "(only Cisco IOS-XE's cli-config-data extension is "
+                    "supported today) -- NETCONF push needs an XML <config> "
+                    "payload for this vendor."
+                ),
+            )
+        config_xml = cli_to_netconf_config(config_xml)
+    else:
+        stripped = strip_rpc_envelope(config_xml)
+        if stripped is not None and stripped != config_xml:
+            config_xml = stripped
+            
+        # Ensure it has a <config> envelope because ncclient's edit_config expects the actual <config> node
+        # if you pass a string, or it passes it verbatim which fails if not wrapped.
+        if not config_xml.strip().startswith("<config"):
+            config_xml = f'<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">\n{config_xml}\n</config>'
+
+    def _push_once(conn, push_target: str, caps) -> tuple[str, list[str]]:
+        """One lock -> edit-config -> validate -> commit -> unlock
+        sequence against `push_target`. Returns (request_xml, responses)
+        or raises on failure -- callers decide whether a failure here is
+        worth retrying against a different target."""
+        responses: list[str] = []
+        request_xml = f'<edit-config><target><{push_target}/></target>{config_xml}</edit-config>'
+        if use_lock:
+            conn.lock(target=push_target)
+        try:
+            edit_reply = conn.edit_config(target=push_target, config=config_xml)
+            responses.append(_pretty_xml(str(edit_reply)))
+
+            if any("validate" in c for c in caps):
+                validate_reply = conn.validate(source=push_target)
+                responses.append(_pretty_xml(str(validate_reply)))
+
+            if push_target == "candidate":
+                commit_reply = conn.commit()
+                responses.append(_pretty_xml(str(commit_reply)))
+
+            return request_xml, responses
+        except Exception:
             try:
-                edit_reply = conn.edit_config(target=target, config=config_xml)
-                responses.append(str(edit_reply))
-
-                if conn.server_capabilities and any("validate" in c for c in conn.server_capabilities):
-                    validate_reply = conn.validate(source=target)
-                    responses.append(str(validate_reply))
-
-                if target == "candidate":
-                    commit_reply = conn.commit()
-                    responses.append(str(commit_reply))
-
-                elapsed = (time.perf_counter() - start) * 1000
-                return NetconfResult(True, request_xml, "\n".join(responses), elapsed)
-            except Exception as inner_exc:  # noqa: BLE001
+                if push_target == "candidate":
+                    conn.discard_changes()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+            raise
+        finally:
+            if use_lock:
                 try:
-                    if target == "candidate":
-                        conn.discard_changes()
+                    conn.unlock(target=push_target)
                 except Exception:  # noqa: BLE001 - best-effort cleanup
                     pass
-                raise inner_exc
-            finally:
-                if use_lock:
-                    try:
-                        conn.unlock(target=target)
-                    except Exception:  # noqa: BLE001 - best-effort cleanup
-                        pass
+
+    request_xml = f'<edit-config><target><{target}/></target>{config_xml}</edit-config>'
+    try:
+        with _connect(ip_address, port, username, password, vendor=vendor) as conn:
+            caps = list(conn.server_capabilities or [])
+            effective_target = target
+            if effective_target == "candidate" and not any(":candidate" in c for c in caps):
+                logger.debug(
+                    "%s does not advertise :candidate NETCONF capability; editing :running directly",
+                    ip_address,
+                )
+                effective_target = "running"
+
+            try:
+                request_xml, responses = _push_once(conn, effective_target, caps)
+            except Exception as first_exc:
+                is_candidate_capability_error = (
+                    effective_target == "candidate" and "candidate" in str(first_exc).lower()
+                )
+                if not is_candidate_capability_error:
+                    raise
+                logger.warning(
+                    "%s advertised :candidate but rejected it at edit-config time (%s); "
+                    "retrying against :running",
+                    ip_address, first_exc,
+                )
+                request_xml, responses = _push_once(conn, "running", caps)
+                effective_target = "running"
+
+            elapsed = (time.perf_counter() - start) * 1000
+            return NetconfResult(True, request_xml, "\n".join(responses), elapsed)
     except Exception as exc:  # noqa: BLE001
         elapsed = (time.perf_counter() - start) * 1000
-        return NetconfResult(False, request_xml, "\n".join(responses), elapsed, error=str(exc))
+        return NetconfResult(False, request_xml, "", elapsed, error=str(exc))
 
 
 def discover_capabilities(

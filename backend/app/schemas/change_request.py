@@ -35,6 +35,8 @@ class ChangeRequestRead(ChangeRequestBase):
     approved_by: uuid.UUID | None = None
     current_config: str | None = None
     config_diff: str | None = None
+    config_diff_cli: str | None = None
+    config_diff_summary: str | None = None
     risk_score: int | None = None
     risk_findings: str | None = None
     validation_passed: str | None = None

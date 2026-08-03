@@ -45,6 +45,7 @@ nothing to conflict-check against yet (e.g. a brand new device).
 import ipaddress
 import re
 from dataclasses import dataclass, field
+from app.services.config_format_service import looks_like_xml
 
 
 @dataclass
@@ -338,6 +339,13 @@ def validate_syntax(config_text: str, vendor: str = "cisco", current_config: str
     for token in KNOWN_INVALID_TOKENS:
         if token.lower() in config_text.lower():
             errors.append(f"Placeholder/unsupported token found: '{token}'")
+
+    if looks_like_xml(config_text):
+        # Rollbacks for NETCONF devices supply raw XML snapshots, and
+        # users can theoretically paste XML natively. Skip CLI-specific
+        # syntax and cross-checks entirely -- the NETCONF commit/validate
+        # phase handles structural integrity of XML payloads natively.
+        return ValidationResult(passed=len(errors) == 0, errors=errors, warnings=warnings)
 
     lines = [line for line in config_text.splitlines() if line.strip()]
     vendor = (vendor or "cisco").lower()

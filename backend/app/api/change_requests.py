@@ -12,7 +12,16 @@ from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
-from app.services import diff_engine, event_bus, protocol_manager, risk_engine, snapshot_service, validation_engine, audit_service
+from app.services import (
+    audit_service,
+    config_format_service,
+    diff_engine,
+    event_bus,
+    protocol_manager,
+    risk_engine,
+    snapshot_service,
+    validation_engine,
+)
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
@@ -78,27 +87,56 @@ def _resolve_current_config(db: Session, device: Device, current_user: User) -> 
 
 
 def _score_change(
-    db: Session, device: Device, proposed_config: str, current_user: User,
+    db: Session, device: Device, proposed_config: str, current_user: User, interactive: bool = True,
 ) -> dict:
     """Shared by create_change_request and rescore_change_request: resolves
     current_config (live, falling back to the last snapshot), runs
     validation + risk_engine.analyze, and returns every field derived from
     that -- so both endpoints stay in sync with exactly one implementation
     instead of the retry/rescore action drifting from what submission does.
+
+    `interactive` caps the LLM call at
+    settings.RISK_ENGINE_INTERACTIVE_TIMEOUT_SECONDS instead of the full
+    OLLAMA_TIMEOUT_SECONDS/ANTHROPIC_TIMEOUT_SECONDS budget -- submission
+    (create_change_request) is a person waiting in their browser and
+    should never hang for minutes on a slow model; rescore is an explicit
+    "run the deeper pass" action where the longer wait is expected.
     """
     current_config, config_source = _resolve_current_config(db, device, current_user)
     fleet_configs = _fleet_configs(db, device.id)
     diff_text = diff_engine.generate_diff(current_config, proposed_config)
+    # Structural (path-based) diff -- only meaningful when both sides are
+    # XML (a live/backed-up NETCONF config vs. another full XML config).
+    # A CLI-snippet proposed_config (e.g. "no cdp run") diffed against an
+    # XML current_config isn't a case this can translate -- that's still
+    # a real, valid change request, it just won't get a CLI/summary
+    # rendering and the frontend falls back to the raw diff for it.
+    structural_changes = config_format_service.xml_structural_diff(current_config, proposed_config)
+    config_diff_cli = (
+        "\n".join(config_format_service.to_cli_commands(structural_changes)) if structural_changes else None
+    )
+    config_diff_summary = (
+        "\n".join(config_format_service.humanize_structural_diff(structural_changes))
+        if structural_changes
+        else None
+    )
     validation = validation_engine.validate_syntax(
         proposed_config,
         vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
         current_config=current_config,
     )
-    risk: RiskAnalysisResult = risk_engine.analyze(proposed_config, current_config, fleet_configs)
+    risk: RiskAnalysisResult = risk_engine.analyze(
+        proposed_config,
+        current_config,
+        fleet_configs,
+        llm_timeout=settings.RISK_ENGINE_INTERACTIVE_TIMEOUT_SECONDS if interactive else None,
+    )
     return {
         "current_config": current_config,
         "config_source": config_source,
         "config_diff": diff_text,
+        "config_diff_cli": config_diff_cli,
+        "config_diff_summary": config_diff_summary,
         "validation": validation,
         "risk": risk,
     }
@@ -173,6 +211,8 @@ def create_change_request(
         config_source=config_source,
         proposed_config=payload.proposed_config,
         config_diff=diff_text,
+        config_diff_cli=result["config_diff_cli"],
+        config_diff_summary=result["config_diff_summary"],
         validation_passed="true" if validation.passed else "false",
         validation_errors=json.dumps(validation.errors) if validation.errors else None,
         validation_warnings=json.dumps(validation.warnings) if validation.warnings else None,
@@ -259,7 +299,7 @@ def rescore_change_request(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    result = _score_change(db, device, cr.proposed_config, current_user)
+    result = _score_change(db, device, cr.proposed_config, current_user, interactive=False)
     validation, risk = result["validation"], result["risk"]
 
     import json
@@ -269,6 +309,8 @@ def rescore_change_request(
     cr.current_config = result["current_config"]
     cr.config_source = result["config_source"]
     cr.config_diff = result["config_diff"]
+    cr.config_diff_cli = result["config_diff_cli"]
+    cr.config_diff_summary = result["config_diff_summary"]
     cr.validation_passed = "true" if validation.passed else "false"
     cr.validation_errors = json.dumps(validation.errors) if validation.errors else None
     cr.validation_warnings = json.dumps(validation.warnings) if validation.warnings else None

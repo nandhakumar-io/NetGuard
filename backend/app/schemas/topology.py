@@ -19,7 +19,7 @@ class TopologyEdgeRead(BaseModel):
     subnet: str | None = None
     source_ip: str | None = None
     target_ip: str | None = None
-    link_source: str = "subnet"  # "lldp" | "cdp" | "subnet"
+    link_source: str = "subnet"  # "lldp" | "cdp" | "gns3" | "subnet"
     local_port: str | None = None
     neighbor_port: str | None = None
 

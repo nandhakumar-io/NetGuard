@@ -50,6 +50,14 @@ class ConfigDrift(Base):
     severity = Column(Enum(DriftSeverity), nullable=False, default=DriftSeverity.LOW)
 
     ai_summary = Column(Text, nullable=True)  # human-readable findings, e.g. "ACL modified, VLAN removed"
+    # Best-effort IOS-style CLI-equivalent lines derived from the
+    # structural XML diff (config_format_service.xml_structural_diff +
+    # to_cli_commands) -- e.g. "interface GigabitEthernet0/1" /
+    # "  shutdown" instead of the raw <shutdown/> XML element. Covers the
+    # common cases (interfaces, hostname, cdp); anything not specifically
+    # mapped falls back to a readable "container > leaf: value" line, not
+    # raw tags. Newline-joined, same convention as ai_summary/diff_text.
+    cli_diff = Column(Text, nullable=True)
     status = Column(Enum(DriftStatus), nullable=False, default=DriftStatus.OPEN)
 
     detected_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

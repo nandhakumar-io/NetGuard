@@ -97,7 +97,7 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
   }));
 
   return (
-    <div className="flex flex-col gap-6 p-4 bg-slate-50 border-t border-slate-200">
+    <div className="flex flex-col gap-6 p-4 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800">
       <div className="overflow-x-auto pb-1">
         <PipelineStages stages={pipelineStages} />
       </div>
@@ -215,10 +215,10 @@ export default function Deployments() {
   const hasActive = deployments.some((d) => d.status === "queued" || d.status === "in_progress");
 
   return (
-    <div className="pb-16 flex flex-col gap-6 md:p-2">
+    <div className="pb-16 flex flex-col gap-6 md:p-2 text-slate-800 dark:text-slate-200">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-3xl font-bold text-navy">Deployments & Logs</h1>
+          <h1 className="text-3xl font-bold text-navy dark:text-white">Deployments & Logs</h1>
           <p className="text-sm text-slate-500 mt-1">
             Jenkins-style pipeline view (Snapshot → Deploy → Verify → Complete) with real-time logs.
           </p>
@@ -252,9 +252,9 @@ export default function Deployments() {
         ))}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
         <table className="w-full text-sm">
-          <thead className="bg-slate-100/80 border-b border-slate-200">
+          <thead className="bg-slate-100/80 dark:bg-slate-700/80 border-b border-slate-200 dark:border-slate-600">
             <tr>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Started</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Change Request</th>
@@ -265,7 +265,7 @@ export default function Deployments() {
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 uppercase text-xs tracking-wider">Health Checks</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
             {loading && (
               <tr>
                 <td colSpan={7} className="text-center text-slate-400 py-12">
@@ -286,12 +286,12 @@ export default function Deployments() {
             {filtered.map((d) => (
               <React.Fragment key={d.id}>
                 <tr
-                  className={`cursor-pointer transition-colors hover:bg-slate-50/70 border-l-4 ${
-                    expanded === d.id ? "bg-slate-50 border-l-brandblue" : "border-l-transparent bg-white"
+                  className={`cursor-pointer transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-700/50 border-l-4 ${
+                    expanded === d.id ? "bg-slate-50 dark:bg-slate-700 border-l-brandblue" : "border-l-transparent bg-white dark:bg-transparent"
                   }`}
                   onClick={() => setExpanded(expanded === d.id ? null : d.id)}
                 >
-                  <td className="px-5 py-4 text-slate-600 whitespace-nowrap font-medium">{new Date(d.created_at).toLocaleString()}</td>
+                  <td className="px-5 py-4 text-slate-600 dark:text-slate-300 whitespace-nowrap font-medium">{new Date(d.created_at).toLocaleString()}</td>
                   <td className="px-5 py-4 font-mono text-xs text-brandblue font-semibold">{d.change_request_id.slice(0, 8)}</td>
                   <td className="px-5 py-4 font-mono text-xs text-slate-500 font-semibold">{d.device_id.slice(0, 8)}</td>
                   <td className="px-5 py-4 text-slate-600 font-bold tracking-wide">{d.protocol.toUpperCase()}</td>

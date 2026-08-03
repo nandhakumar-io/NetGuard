@@ -363,9 +363,44 @@ export default function ChangeRequests() {
                     )}
                 </div>
               )}
-              <div>
-                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1">Configuration Diff</p>
-                <ConfigDiff diffText={selected.config_diff} />
+              <div className="space-y-3">
+                {selected.config_diff_summary && (
+                  <div>
+                    <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1">Change Summary</p>
+                    <ul className="text-xs text-slate-600 dark:text-slate-300 list-disc list-inside space-y-0.5">
+                      {selected.config_diff_summary.split("\n").filter(Boolean).map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {selected.config_diff_cli && (
+                  <div>
+                    <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1">CLI Commands</p>
+                    <pre className="bg-slate-900 text-xs rounded-lg p-4 overflow-x-auto leading-relaxed">
+                      {selected.config_diff_cli.split("\n").map((line, i) => {
+                        let cls = "text-slate-300";
+                        if (line.startsWith("interface ") || line.startsWith("router ")) cls = "text-accent font-semibold block";
+                        else if (line.trimStart().startsWith("no ")) cls = "text-riskcrit bg-red-950/40 block";
+                        else if (line.startsWith("  ")) cls = "text-risklow bg-green-950/40 block";
+                        return (
+                          <span key={i} className={cls}>
+                            {line || " "}
+                            {"\n"}
+                          </span>
+                        );
+                      })}
+                    </pre>
+                  </div>
+                )}
+                <details className="group">
+                  <summary className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1 cursor-pointer hover:text-brandblue select-none">
+                    {selected.config_diff_cli ? "Raw Configuration Diff ▸" : "Configuration Diff"}
+                  </summary>
+                  <div className="mt-1">
+                    <ConfigDiff diffText={selected.config_diff} />
+                  </div>
+                </details>
               </div>
               {selected.requires_dual_approval && selected.status === "pending_approval" && (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2">

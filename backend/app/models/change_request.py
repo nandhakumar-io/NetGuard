@@ -48,6 +48,14 @@ class ChangeRequest(Base):
     current_config = Column(Text, nullable=True)
     proposed_config = Column(Text, nullable=False)
     config_diff = Column(Text, nullable=True)
+    # Structural, human-readable companions to the raw config_diff above
+    # (see config_format_service.xml_structural_diff) -- config_diff_cli
+    # is best-effort IOS CLI-equivalent lines, config_diff_summary is a
+    # plain-English one-line-per-change list. Both None when either side
+    # of the diff isn't XML (plain CLI-sourced config diffs just fine as
+    # raw text already) or the structural diff couldn't be computed.
+    config_diff_cli = Column(Text, nullable=True)
+    config_diff_summary = Column(Text, nullable=True)
 
     risk_score = Column(Integer, nullable=True)  # 0-100, set by AI Configuration Analyzer
     risk_findings = Column(Text, nullable=True)  # JSON-encoded list of detected risks

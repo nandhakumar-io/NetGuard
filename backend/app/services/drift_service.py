@@ -128,14 +128,6 @@ def _resolve_baseline_config(db: Session, device: Device, baseline: DriftBaselin
     )
 
 
-def _build_ai_summary(findings: list[str], added: int, removed: int) -> str:
-    if not findings or findings == ["No significant risk patterns detected"]:
-        if added == 0 and removed == 0:
-            return "No drift detected. Live configuration matches baseline."
-        return f"{added} line(s) added, {removed} line(s) removed. No high-risk patterns detected."
-    return "; ".join(findings)
-
-
 def _rollback_recommended(severity: DriftSeverity, compliance_score: int) -> bool:
     return severity in (DriftSeverity.HIGH, DriftSeverity.CRITICAL) or compliance_score < 60
 
@@ -162,15 +154,15 @@ def detect_drift(
     diff_text = diff_engine.generate_diff(baseline_config, live_config)
     added, removed, modified = _count_diff_lines(diff_text)
 
-    risk = risk_engine.analyze(live_config, baseline_config)
+    drift_analysis = risk_engine.analyze_drift(live_config, baseline_config, diff_text, added, removed)
     line_penalty = min((added + removed) * COMPLIANCE_PENALTY_PER_LINE, 60)
     finding_penalty = 0
-    if risk.findings and risk.findings != ["No significant risk patterns detected"]:
-        finding_penalty = len(risk.findings) * COMPLIANCE_PENALTY_PER_RISK_FINDING
+    if drift_analysis.findings and drift_analysis.findings != ["No significant risk patterns detected"]:
+        finding_penalty = len(drift_analysis.findings) * COMPLIANCE_PENALTY_PER_RISK_FINDING
     compliance_score = max(COMPLIANCE_FLOOR, 100 - line_penalty - finding_penalty)
 
-    severity = _classify_severity(risk.risk_score, compliance_score)
-    ai_summary = _build_ai_summary(risk.findings, added, removed)
+    severity = _classify_severity(drift_analysis.risk_score, compliance_score)
+    ai_summary = drift_analysis.ai_summary
 
     drift = ConfigDrift(
         device_id=device.id,
@@ -179,10 +171,11 @@ def detect_drift(
         added_lines=added,
         removed_lines=removed,
         modified_lines=modified,
-        risk_score=risk.risk_score,
+        risk_score=drift_analysis.risk_score,
         compliance_score=compliance_score,
         severity=severity,
         ai_summary=ai_summary,
+        cli_diff="\n".join(drift_analysis.cli_diff) if drift_analysis.cli_diff else None,
         status=DriftStatus.OPEN,
     )
     db.add(drift)
@@ -197,7 +190,9 @@ def detect_drift(
         device_hostname=device.hostname,
         detail=(
             f"baseline={baseline_label} +{added}/-{removed} lines "
-            f"risk={risk.risk_score} compliance={compliance_score}"
+            f"risk={drift_analysis.risk_score} compliance={compliance_score} "
+            f"ai_summary={'llm' if drift_analysis.llm_applied else 'rules-fallback'}"
+            + (f" llm_error={drift_analysis.llm_error}" if drift_analysis.llm_error else "")
         ),
     )
 
@@ -214,7 +209,7 @@ def detect_drift(
             category=f"Configuration Drift ({severity.value.title()})",
             message=(
                 f"{device.hostname} has drifted from its {baseline_label}: "
-                f"{ai_summary} (compliance {compliance_score}/100, risk {risk.risk_score}/100)."
+                f"{ai_summary} (compliance {compliance_score}/100, risk {drift_analysis.risk_score}/100)."
             ),
         )
 
@@ -240,7 +235,7 @@ def detect_drift(
         live_config=live_config,
         baseline_config=baseline_config,
         alert=alert,
-        findings=risk.findings,
+        findings=drift_analysis.findings,
     )
 
 

@@ -157,11 +157,30 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     row. This is the single entry point both the Celery poll task and the
     on-demand "poll now" API call go through, so both paths get identical
     behavior (same alerting, same interface-utilization math).
+
+    Also stamps device.last_snmp_poll_at/last_snmp_poll_error on every
+    attempt -- success, "device didn't respond" (a poll that completes
+    without exception but comes back with nothing, e.g. an unreachable
+    device -- see the all-None SnmpMetrics case below), and a hard
+    failure before any SNMP call went out (not configured / credentials
+    missing). Previously none of that was visible anywhere but the
+    server log, so a device with an empty Health tab looked identical
+    whether it had never been polled, had incomplete SNMPv3 credentials,
+    or was simply unreachable.
     """
+    device.last_snmp_poll_at = datetime.datetime.now(datetime.timezone.utc)
+
     if not device.supports_snmp or not device.snmp_version:
+        device.last_snmp_poll_error = "SNMP monitoring is not enabled for this device"
+        db.commit()
         raise SnmpNotConfiguredError(f"Device '{device.hostname}' is not configured for SNMP polling")
 
-    auth = _build_snmp_auth(device)
+    try:
+        auth = _build_snmp_auth(device)
+    except credential_service.CredentialNotFoundError as exc:
+        device.last_snmp_poll_error = str(exc)
+        db.commit()
+        raise
 
     previous = (
         db.query(DeviceMetric)
@@ -185,6 +204,17 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     metrics.interface_utilization_pct = _compute_interface_utilization(metrics, previous, interval_seconds)
 
     score, color = snmp_service.compute_health_score(metrics)
+
+    # poll_health doesn't raise on an unreachable device -- it returns an
+    # all-None SnmpMetrics (sysUpTime is the one OID every SNMP agent
+    # answers, so its absence means nothing came back at all) and lets
+    # evaluate_thresholds() below turn that into an Alert. That's still a
+    # real, worth-surfacing failure for last_snmp_poll_error even though
+    # poll_device itself completes "successfully" (a DeviceMetric row is
+    # still written, just an empty one).
+    device.last_snmp_poll_error = (
+        None if metrics.uptime_seconds is not None else "Device did not respond to SNMP GET (sysUpTime)"
+    )
 
     row = DeviceMetric(
         device_id=device.id,

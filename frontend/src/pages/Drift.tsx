@@ -328,10 +328,34 @@ export default function DriftPage() {
                 </div>
               )}
 
-              <div>
-                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Configuration Diff</p>
-                <ConfigDiff diffText={detail.diff_text} />
-              </div>
+              {detail.cli_diff && (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">CLI Commands (What Changed)</p>
+                  <pre className="bg-slate-900 text-xs rounded-lg p-4 overflow-x-auto leading-relaxed">
+                    {detail.cli_diff.split("\n").map((line, i) => {
+                      let cls = "text-slate-300";
+                      if (line.startsWith("interface ") || line.startsWith("router ")) cls = "text-accent font-semibold block";
+                      else if (line.trimStart().startsWith("no ")) cls = "text-riskcrit bg-red-950/40 block";
+                      else if (line.startsWith("  ")) cls = "text-risklow bg-green-950/40 block";
+                      return (
+                        <span key={i} className={cls}>
+                          {line || " "}
+                          {"\n"}
+                        </span>
+                      );
+                    })}
+                  </pre>
+                </div>
+              )}
+
+              <details className="group">
+                <summary className="text-xs font-semibold text-slate-500 uppercase mb-1 cursor-pointer hover:text-brandblue select-none">
+                  {detail.cli_diff ? "Raw Configuration Diff ▸" : "Configuration Diff"}
+                </summary>
+                <div className="mt-1">
+                  <ConfigDiff diffText={detail.diff_text} />
+                </div>
+              </details>
 
               {reviewError && <p className="text-riskcrit text-xs">{reviewError}</p>}
               {detail.status === "open" &&

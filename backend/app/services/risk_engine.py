@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from app.core.config import settings
 from app.schemas.change_request import RiskAnalysisResult
-from app.services import diff_engine
+from app.services import config_format_service, diff_engine
 
 # (regex pattern, weight, human-readable finding)
 RISK_RULES: list[tuple[str, int, str]] = [
@@ -306,6 +306,7 @@ class RiskScorer(ABC):
         proposed_config: str,
         current_config: str | None = None,
         other_device_configs: dict[str, str] | None = None,
+        llm_timeout: float | None = None,
     ) -> RiskAnalysisResult:
         raise NotImplementedError
 
@@ -326,6 +327,7 @@ class RuleBasedScorer(RiskScorer):
         proposed_config: str,
         current_config: str | None = None,
         other_device_configs: dict[str, str] | None = None,
+        llm_timeout: float | None = None,
     ) -> RiskAnalysisResult:
         findings: list[str] = []
         score = 0
@@ -392,6 +394,7 @@ class LLMScorer(RiskScorer):
         proposed_config: str,
         current_config: str | None = None,
         other_device_configs: dict[str, str] | None = None,
+        llm_timeout: float | None = None,
     ) -> RiskAnalysisResult:
         base = self._rule_scorer.score(proposed_config, current_config, other_device_configs)
         provider = settings.RISK_ENGINE_LLM_PROVIDER
@@ -407,7 +410,7 @@ class LLMScorer(RiskScorer):
             return base
 
         try:
-            extra_findings, extra_score = self._call_llm(provider, proposed_config, current_config)
+            extra_findings, extra_score = self._call_llm(provider, proposed_config, current_config, llm_timeout)
         except Exception as exc:
             # Never let a downstream model outage block change analysis --
             # degrade to the deterministic rule-based result, but say why.
@@ -422,39 +425,74 @@ class LLMScorer(RiskScorer):
             findings=findings, llm_applied=True, llm_error=None,
         )
 
-    def _call_llm(self, provider: str, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
+    def _call_llm(
+        self, provider: str, proposed_config: str, current_config: str | None, timeout: float | None = None,
+    ) -> tuple[list[str], int]:
+        data = self._call_llm_raw(provider, self._prompt(proposed_config, current_config), timeout)
+        return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
+
+    def _call_llm_raw(self, provider: str, prompt: str, timeout: float | None = None) -> dict:
+        """Shared provider dispatch: sends `prompt`, returns the parsed JSON
+        response body. Used by both the change-request risk prompt
+        (_prompt/_call_llm above) and the drift-analysis prompt
+        (_drift_prompt/analyze_drift below) so there's one place that knows
+        how to actually talk to Anthropic/Ollama and parse a JSON reply out
+        of it, instead of two near-duplicate call paths drifting apart.
+        """
         if provider == "ollama":
-            return self._call_ollama(proposed_config, current_config)
-        return self._call_anthropic(proposed_config, current_config)
+            return self._call_ollama_raw(prompt, timeout)
+        return self._call_anthropic_raw(prompt, timeout)
 
     @staticmethod
     def _prompt(proposed_config: str, current_config: str | None) -> str:
+        # Same defensive cap _drift_prompt applies to the unified diff --
+        # this prompt previously sent the *entire* current_config and
+        # proposed_config untruncated, so a full device config (which,
+        # before the rpc-reply envelope was stripped in
+        # config_format_service, could run to thousands of XML lines)
+        # produced a multi-thousand-token prompt on every single change
+        # request submission, not just large-scale drift scans. That's
+        # slow to process on a local model regardless of OLLAMA_TIMEOUT_
+        # SECONDS and risks blowing past OLLAMA_NUM_CTX, so trim each
+        # side independently the same way.
+        current = current_config or "(none provided)"
+        proposed = proposed_config
+        truncated = False
+        if len(current) > _MAX_DIFF_CHARS_FOR_PROMPT:
+            current = current[:_MAX_DIFF_CHARS_FOR_PROMPT]
+            truncated = True
+        if len(proposed) > _MAX_DIFF_CHARS_FOR_PROMPT:
+            proposed = proposed[:_MAX_DIFF_CHARS_FOR_PROMPT]
+            truncated = True
         return (
             "You are a network change-risk reviewer. Given the proposed device "
             "config (and current config, if provided), identify additional risks "
             "not already obvious from simple keyword matching. Respond ONLY with "
             'JSON: {"findings": ["..."], "additional_risk_points": <0-30 int>}.\n\n'
-            f"CURRENT CONFIG:\n{current_config or '(none provided)'}\n\n"
-            f"PROPOSED CONFIG:\n{proposed_config}"
+            f"CURRENT CONFIG:\n{current}\n\n"
+            f"PROPOSED CONFIG:\n{proposed}"
+            + ("\n\n[config truncated for length]" if truncated else "")
         )
 
-    def _call_anthropic(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
+    def _call_anthropic_raw(self, prompt: str, timeout: float | None = None) -> dict:
         import json
 
         import anthropic
 
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(
+            api_key=settings.ANTHROPIC_API_KEY,
+            timeout=timeout if timeout is not None else settings.ANTHROPIC_TIMEOUT_SECONDS,
+        )
         message = client.messages.create(
             model=settings.ANTHROPIC_MODEL,
             max_tokens=1024,
             temperature=0,
-            messages=[{"role": "user", "content": self._prompt(proposed_config, current_config)}],
+            messages=[{"role": "user", "content": prompt}],
         )
         raw = "".join(block.text for block in message.content if block.type == "text")
-        data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
-        return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
+        return json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
 
-    def _call_ollama(self, proposed_config: str, current_config: str | None) -> tuple[list[str], int]:
+    def _call_ollama_raw(self, prompt: str, timeout: float | None = None) -> dict:
         """Calls a locally-running Ollama server's chat API
         (https://github.com/ollama/ollama/blob/main/docs/api.md) over plain
         HTTP -- no extra dependency, reuses httpx (already used by
@@ -464,7 +502,14 @@ class LLMScorer(RiskScorer):
         False` collects the full response in one call instead of NDJSON
         chunks. Requires the model to already be pulled on that server
         (`ollama pull <OLLAMA_MODEL>`) -- an unpulled model 404s the same as
-        any other call failure and is caught by score()'s try/except.
+        any other call failure and is caught by the caller's try/except.
+
+        `num_ctx` is set explicitly on every call: Ollama defaults to a
+        2048-token context window regardless of what the model itself
+        supports, and silently truncates the prompt to fit rather than
+        erroring -- so without this, a full device config was routinely
+        cut off before the model ever reached the actual instructions.
+        See settings.OLLAMA_NUM_CTX.
         """
         import json
 
@@ -474,12 +519,12 @@ class LLMScorer(RiskScorer):
             f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/chat",
             json={
                 "model": settings.OLLAMA_MODEL,
-                "messages": [{"role": "user", "content": self._prompt(proposed_config, current_config)}],
+                "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
                 "format": "json",
-                "options": {"temperature": 0},
+                "options": {"temperature": 0, "num_ctx": settings.OLLAMA_NUM_CTX},
             },
-            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+            timeout=timeout if timeout is not None else settings.OLLAMA_TIMEOUT_SECONDS,
         )
         if response.status_code == 404:
             # Ollama's own error body for this case is the actually useful
@@ -502,8 +547,7 @@ class LLMScorer(RiskScorer):
             )
         response.raise_for_status()
         raw = response.json()["message"]["content"]
-        data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
-        return list(data.get("findings", [])), int(data.get("additional_risk_points", 0))
+        return json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
 
 
 def _classify(score: int) -> tuple[str, str]:
@@ -512,6 +556,220 @@ def _classify(score: int) -> tuple[str, str]:
     elif score <= settings.RISK_MEDIUM_MAX:
         return "Medium Risk", "Review Recommended Before Deploy"
     return "Critical Risk", "Deployment Not Recommended -- Dual Approval Required"
+
+
+# ---------------------------------------------------------------------------
+# Drift-specific analysis (AI summary + risk score + clear-English diff)
+# ---------------------------------------------------------------------------
+# Unlike change-request scoring (gated behind settings.RISK_ENGINE_BACKEND,
+# since a proposed change is scored before every single deploy and an
+# operator may deliberately want the cheap rules-only path there), the
+# Drift page's whole point is a human-readable AI summary of *why* a
+# device's live config diverged from baseline and what to do about it --
+# a rule engine can only ever hand back a list of regex-matched keywords
+# ("BGP process removal detected"), not a written explanation. So
+# analyze_drift() always attempts the configured LLM provider regardless of
+# RISK_ENGINE_BACKEND, and only degrades to the deterministic rule-based
+# score + a plain diff-line summary if no provider is configured or the
+# call fails -- same tolerant "never make analysis unavailable" pattern as
+# LLMScorer.score(), just always-on for this one caller.
+
+
+@dataclass
+class DriftAnalysisResult:
+    risk_score: int
+    ai_summary: str
+    findings: list[str]
+    llm_applied: bool
+    llm_error: str | None = None
+    cli_diff: list[str] = field(default_factory=list)
+
+
+def _fallback_drift_summary(findings: list[str], added: int, removed: int) -> str:
+    if not findings or findings == ["No significant risk patterns detected"]:
+        if added == 0 and removed == 0:
+            return "No drift detected. Live configuration matches baseline."
+        return f"{added} line(s) added, {removed} line(s) removed. No high-risk patterns detected."
+    return "; ".join(findings)
+
+
+# Matches a single leaf XML element with text content on one line, e.g.
+# "<name>3</name>" or '<address>172.17.1.26</address>' -- after
+# netconf_service._pretty_xml, every element is on its own line, so most
+# diff lines are exactly this shape.
+_XML_LEAF_RE = re.compile(r"^<([\w.-]+)(?:\s[^>]*)?>([^<]+)</\1>\s*$")
+# Matches a self-closing element with no text, e.g. "<shutdown/>" --
+# presence/absence of these is usually the meaningful signal (a flag
+# being set or cleared), not the tag name itself.
+_XML_EMPTY_RE = re.compile(r"^<([\w.-]+)(?:\s[^>]*)?/>\s*$")
+# Matches a bare opening/closing structural tag with nothing else on the
+# line, e.g. "<GigabitEthernet>" or "</native>" -- these are just
+# nesting/container noise once each element has its own line, not a
+# change worth surfacing on its own.
+_XML_CONTAINER_RE = re.compile(r"^</?[\w.-]+(?:\s[^>]*)?>\s*$")
+# Matches the XML declaration / a processing instruction, e.g.
+# '<?xml version="1.0" encoding="UTF-8"?>' -- these start with "<?", not
+# "<" + a tag name, so none of the three patterns above ever matched them
+# and they fell through to the raw-line return, which is exactly the
+# "Removed: <?xml version=...?>" noise callers of _humanize_xml_line are
+# trying to avoid.
+_XML_DECL_RE = re.compile(r"^<\?[\w.-]+(?:\s[^>]*)?\?>\s*$")
+
+
+def _humanize_xml_line(line: str) -> str | None:
+    """Best-effort plain-English rendering of one pretty-printed XML diff
+    line. Returns None for pure container/nesting lines (e.g. `<native>`)
+    or the XML declaration, which carry no information on their own --
+    callers skip those so the bullet list only shows lines that actually
+    say something."""
+    leaf = _XML_LEAF_RE.match(line)
+    if leaf:
+        tag, value = leaf.group(1), leaf.group(2).strip()
+        return f"{tag.replace('-', ' ')}: {value}"
+    empty = _XML_EMPTY_RE.match(line)
+    if empty:
+        return f"'{empty.group(1).replace('-', ' ')}' flag"
+    if _XML_CONTAINER_RE.match(line) or _XML_DECL_RE.match(line):
+        return None
+    return line
+
+
+def _fallback_clear_diff(diff_text: str, max_bullets: int = 25) -> list[str]:
+    """Turns a raw unified diff into a plain-English bullet list when no
+    LLM is available to write one -- "Added: <line>" / "Removed: <line>"
+    per changed line, skipping the +++ / --- / @@ diff-header noise, so the
+    Drift page always has *something* readable even with the LLM off.
+    Each line is humanized via `_humanize_xml_line` (turning e.g.
+    "<shutdown/>" into "'shutdown' flag" rather than showing the raw tag),
+    and capped at `max_bullets` so a large-scale drift doesn't dump
+    hundreds of one-line bullets onto the page."""
+    lines: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        if line.startswith("+") and line[1:].strip():
+            content = _humanize_xml_line(line[1:].strip())
+            if content is not None:
+                lines.append(f"Added: {content}")
+        elif line.startswith("-") and line[1:].strip():
+            content = _humanize_xml_line(line[1:].strip())
+            if content is not None:
+                lines.append(f"Removed: {content}")
+        if len(lines) >= max_bullets:
+            lines.append(f"...and more changes not shown ({len(diff_text.splitlines())} diff lines total)")
+            break
+    return lines
+
+
+# Cap on how much of the unified diff goes into the LLM prompt. Sending the
+# *full* baseline + live config on top of the diff (the previous prompt did
+# all three) meant a single drift scan could push several thousand tokens
+# of largely-redundant XML into the model -- slower, more likely to hit
+# num_ctx/timeout limits, and it left the model free to just quote chunks
+# of raw config back as the "summary" instead of describing the change,
+# which is exactly the unreadable wall-of-XML the Drift page was showing.
+# The unified diff alone (already just the changed lines, plus a few lines
+# of surrounding context from difflib) has everything needed to describe
+# *what changed*; a huge diff still gets truncated defensively here since
+# a from-scratch baseline (first-ever scan) can in principle diff the
+# entire config as "added".
+_MAX_DIFF_CHARS_FOR_PROMPT = 12_000
+
+
+def _drift_prompt(diff_text: str) -> str:
+    diff_for_prompt = diff_text
+    truncated = False
+    if len(diff_for_prompt) > _MAX_DIFF_CHARS_FOR_PROMPT:
+        diff_for_prompt = diff_for_prompt[:_MAX_DIFF_CHARS_FOR_PROMPT]
+        truncated = True
+
+    return (
+        "You are a network configuration drift analyst. Below is a unified "
+        "diff between a device's approved baseline configuration and its "
+        "current live configuration. Respond ONLY with JSON of the form: "
+        '{"ai_summary": "<2-4 sentence plain-English paragraph summarizing '
+        'what changed and why it matters operationally or from a security '
+        'standpoint -- describe the changes, do not quote or reproduce raw '
+        'config/XML text>", "clear_diff": ["<one short plain-English '
+        "sentence per distinct change, e.g. 'Interface GigabitEthernet0/1 "
+        "was administratively shut down' or 'ACL 101 gained a broad "
+        'deny-any rule\'>"], "risk_score": <0-100 int, how risky this '
+        'specific drift is>, "findings": ["<short risk finding phrase>", '
+        '...]}. Every field must be written in your own words -- never '
+        "copy XML tags, element names, or raw config lines into "
+        "ai_summary or clear_diff; translate them into what changed on "
+        "the device instead (e.g. a <shutdown/> element appearing under "
+        "an interface means that interface was administratively shut "
+        "down).\n\n"
+        f"UNIFIED DIFF (- baseline / + live):\n{diff_for_prompt}"
+        + ("\n\n[diff truncated for length]" if truncated else "")
+    )
+
+
+def analyze_drift(
+    live_config: str,
+    baseline_config: str,
+    diff_text: str,
+    added: int,
+    removed: int,
+) -> DriftAnalysisResult:
+    rule_result = RuleBasedScorer().score(live_config, baseline_config)
+    fallback_summary = _fallback_drift_summary(rule_result.findings, added, removed)
+
+    # Path-based diff (baseline -> live) when both sides are XML -- far
+    # more reliable than the line diff for both the human-readable
+    # fallback bullets (no more raw XML leaking into ai_summary when the
+    # LLM is unavailable) and the CLI-equivalent translation. None when
+    # either side isn't XML (e.g. an SSH/NAPALM-sourced plain-CLI
+    # config), in which case both stay empty/line-diff-based as before.
+    structural_changes = config_format_service.xml_structural_diff(baseline_config, live_config)
+    cli_diff = config_format_service.to_cli_commands(structural_changes) if structural_changes else []
+
+    def _fallback(error: str | None) -> DriftAnalysisResult:
+        summary = fallback_summary
+        diff_bullets = (
+            config_format_service.humanize_structural_diff(structural_changes)
+            if structural_changes is not None
+            else _fallback_clear_diff(diff_text)
+        )
+        if diff_bullets:
+            summary = summary + "\n\nChanges:\n" + "\n".join(f"- {b}" for b in diff_bullets)
+        return DriftAnalysisResult(
+            risk_score=rule_result.risk_score, ai_summary=summary,
+            findings=rule_result.findings, llm_applied=False, llm_error=error,
+            cli_diff=cli_diff,
+        )
+
+    provider = settings.RISK_ENGINE_LLM_PROVIDER
+    if provider == "anthropic" and not settings.ANTHROPIC_API_KEY:
+        return _fallback("RISK_ENGINE_LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not configured")
+    if provider == "ollama" and not settings.OLLAMA_BASE_URL:
+        return _fallback("RISK_ENGINE_LLM_PROVIDER=ollama but OLLAMA_BASE_URL is not configured")
+    if provider not in ("anthropic", "ollama"):
+        return _fallback(f"Unknown RISK_ENGINE_LLM_PROVIDER '{provider}'")
+
+    try:
+        scorer = LLMScorer()
+        data = scorer._call_llm_raw(provider, _drift_prompt(diff_text))
+    except Exception as exc:  # noqa: BLE001 - never let a model outage block drift detection
+        return _fallback(f"{provider} call failed: {exc}")
+
+    ai_summary = str(data.get("ai_summary") or "").strip() or fallback_summary
+    clear_diff = [str(c) for c in (data.get("clear_diff") or []) if str(c).strip()]
+    if clear_diff:
+        ai_summary = ai_summary + "\n\nChanges:\n" + "\n".join(f"- {c}" for c in clear_diff)
+    findings = [str(f) for f in (data.get("findings") or [])] or rule_result.findings
+
+    llm_risk = data.get("risk_score")
+    try:
+        risk_score = max(rule_result.risk_score, min(100, int(llm_risk)))
+    except (TypeError, ValueError):
+        risk_score = rule_result.risk_score
+
+    return DriftAnalysisResult(
+        risk_score=risk_score, ai_summary=ai_summary, findings=findings,
+        llm_applied=True, llm_error=None, cli_diff=cli_diff,
+    )
 
 
 _SCORERS: dict[str, RiskScorer] = {}
@@ -531,11 +789,17 @@ def analyze(
     proposed_config: str,
     current_config: str | None = None,
     other_device_configs: dict[str, str] | None = None,
+    llm_timeout: float | None = None,
 ) -> RiskAnalysisResult:
     """Entrypoint every caller uses. Backend-agnostic -- swapping
     `settings.RISK_ENGINE_BACKEND` changes behavior without touching any
-    caller of this function."""
-    return _get_scorer().score(proposed_config, current_config, other_device_configs)
+    caller of this function. `llm_timeout` lets a caller override
+    settings.OLLAMA_TIMEOUT_SECONDS/ANTHROPIC_TIMEOUT_SECONDS for this one
+    call -- see create_change_request, which passes a short interactive
+    budget so a slow/unreachable model degrades to the rule-based score
+    in seconds instead of leaving the submitting browser tab hanging for
+    however long the configured steady-state timeout is."""
+    return _get_scorer().score(proposed_config, current_config, other_device_configs, llm_timeout=llm_timeout)
 
 
 def is_critical(risk: RiskAnalysisResult) -> bool:

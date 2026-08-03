@@ -61,6 +61,8 @@ export interface ChangeRequest {
   current_config?: string | null;
   proposed_config: string;
   config_diff?: string | null;
+  config_diff_cli?: string | null;
+  config_diff_summary?: string | null;
   risk_score?: number | null;
   risk_findings?: string | null;
   risk_classification?: string | null;
@@ -206,6 +208,7 @@ export interface Drift {
 
 export interface DriftDetail extends Drift {
   diff_text: string;
+  cli_diff?: string | null;
 }
 
 export interface RollbackRecommendation {

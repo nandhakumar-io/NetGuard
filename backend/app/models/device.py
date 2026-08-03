@@ -82,6 +82,12 @@ class Device(Base):
     supports_netconf = Column(Boolean, nullable=False, default=False, server_default="false")
     supports_restconf = Column(Boolean, nullable=False, default=False, server_default="false")
     supports_snmp = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Set/cleared by every poll attempt (scheduled or on-demand), success
+    # or failure -- see metrics_service.poll_device. Lets the UI show
+    # *why* a device has no metrics (never polled / unreachable /
+    # credentials incomplete) instead of just an empty Health tab.
+    last_snmp_poll_at = Column(DateTime(timezone=True), nullable=True)
+    last_snmp_poll_error = Column(Text, nullable=True)
 
     # --- NETCONF connection settings (ncclient) ---
     netconf_port = Column(Integer, nullable=True, default=830)

@@ -1,17 +1,21 @@
 """Network Topology view.
 
-NetGuard has no CDP/LLDP-style neighbor discovery (no protocol_manager
-"show cdp neighbors" read, no separate interface-inventory table) -- what
-it *does* have is every device's latest config snapshot, already parsed
-for interface IP addresses by the risk engine (`app.services.risk_engine.
-parse_config`, used today for duplicate-IP / VLAN-conflict detection).
+Edges are built from three sources, in order of trust:
 
-This reuses that exact same parsing rather than inventing a second config
-parser: two devices that each have an interface configured into the same
-subnet are, by construction, on the same L2/L3 segment -- i.e. adjacent.
-That's a real, data-grounded inference (the same logic that already
-crosses devices for duplicate-IP checks), not a guess based on hostname
-naming or site grouping.
+  1. Confirmed LLDP/CDP neighbor discovery (app.models.discovered_neighbor,
+     populated by app.api.devices.discover_device via SNMP) -- real,
+     device-reported adjacency.
+  2. Imported GNS3 lab link topology (app.services.gns3_service.list_links)
+     for any device that was created from/bootstrapped in a GNS3 project
+     (Device.gns3_project_id/gns3_node_id set) -- GNS3 knows its own
+     virtual cabling exactly, so this is just as authoritative as
+     LLDP/CDP for lab devices, and catches links a lab node hasn't (or
+     can't) run SNMP Discovery against yet.
+  3. Shared-interface-subnet inference (risk_engine.parse_config over each
+     device's latest config snapshot) as a last-resort fallback for
+     devices with neither of the above -- two devices that each have an
+     interface configured into the same subnet are, by construction, on
+     the same L2/L3 segment.
 
 Devices with no snapshot on file yet still appear as nodes (inventory-only,
 no edges) rather than being dropped, so the graph always reflects the full
@@ -27,7 +31,7 @@ from sqlalchemy.orm import Session
 from app.models.device import Device
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
-from app.services import risk_engine, snapshot_service
+from app.services import gns3_service, risk_engine, snapshot_service
 
 
 @dataclass
@@ -47,11 +51,11 @@ class TopologyNode:
 class TopologyEdge:
     source: str  # device id
     target: str  # device id
-    subnet: str | None  # e.g. "10.0.12.0/30" -- the shared subnet that ties them together (None for lldp/cdp edges)
+    subnet: str | None  # e.g. "10.0.12.0/30" -- the shared subnet that ties them together (None for lldp/cdp/gns3 edges)
     source_ip: str | None
     target_ip: str | None
-    link_source: str = "subnet"  # "lldp" | "cdp" | "subnet" -- how this edge was inferred
-    local_port: str | None = None  # source device's port, if known (lldp/cdp only)
+    link_source: str = "subnet"  # "lldp" | "cdp" | "gns3" | "subnet" -- how this edge was inferred
+    local_port: str | None = None  # source device's port, if known (lldp/cdp/gns3 only)
     neighbor_port: str | None = None  # target device's port, as reported by the source device
 
 
@@ -191,4 +195,94 @@ def build_topology(db: Session) -> TopologyGraph:
         if e.link_source != "subnet" or tuple(sorted((e.source, e.target))) not in confirmed_pairs
     ]
 
+    # Imported GNS3 lab link topology: for any device that came from a GNS3
+    # project (Device.gns3_project_id/gns3_node_id set), pull the project's
+    # actual cabling and treat each link as a confirmed edge -- GNS3 knows
+    # its own topology exactly, so this is just as trustworthy as LLDP/CDP,
+    # and it fills in for lab nodes that haven't (or structurally can't --
+    # e.g. an unconfigured/freshly-booted image) run SNMP Discovery yet.
+    for edge in _gns3_edges(db, devices, confirmed_pairs):
+        edges.append(edge)
+        confirmed_pairs.add(tuple(sorted((edge.source, edge.target))))
+
+    # Re-run the same "real data wins" de-dup now that GNS3 edges may have
+    # confirmed additional pairs the LLDP/CDP pass didn't know about yet.
+    edges = [
+        e
+        for e in edges
+        if e.link_source != "subnet" or tuple(sorted((e.source, e.target))) not in confirmed_pairs
+    ]
+
     return TopologyGraph(nodes=nodes, edges=edges)
+
+
+def _gns3_edges(
+    db: Session,
+    devices: list[Device],
+    already_confirmed: set[tuple[str, str]],
+) -> list[TopologyEdge]:
+    """Best-effort: groups GNS3-backed devices by project, fetches each
+    project's link list once, and maps GNS3 node_id pairs back to Device
+    rows via gns3_node_id. Returns [] (never raises) if GNS3 integration is
+    disabled, the controller is unreachable, or a project has since been
+    deleted on the controller side -- a Topology page that can't reach
+    GNS3 should still render everything it *does* know (LLDP/CDP/subnet),
+    not fail outright, same tolerant pattern as the rest of the app's GNS3
+    integration.
+    """
+    by_project: dict[str, dict[str, Device]] = {}
+    for d in devices:
+        if d.gns3_project_id and d.gns3_node_id:
+            by_project.setdefault(d.gns3_project_id, {})[d.gns3_node_id] = d
+
+    edges: list[TopologyEdge] = []
+    for project_id, node_map in by_project.items():
+        try:
+            links = gns3_service.list_links(project_id)
+        except gns3_service.GNS3Error:
+            continue  # controller unreachable / project gone -- skip this project, not the whole graph
+
+        for link in links:
+            nodes = link.get("nodes") or []
+            if len(nodes) != 2:
+                continue  # not a simple point-to-point cable (or malformed) -- skip
+            (node_a, node_b) = nodes
+            device_a = node_map.get(node_a.get("node_id"))
+            device_b = node_map.get(node_b.get("node_id"))
+            if not device_a or not device_b or device_a.id == device_b.id:
+                continue  # neighbor is outside our inventory, or not GNS3-mapped, or a self-link
+
+            a_id, b_id = str(device_a.id), str(device_b.id)
+            pair_key = tuple(sorted((a_id, b_id)))
+            if pair_key in already_confirmed:
+                continue  # LLDP/CDP already confirmed this exact pair -- no need for a parallel edge
+
+            edges.append(
+                TopologyEdge(
+                    source=a_id,
+                    target=b_id,
+                    subnet=None,
+                    source_ip=None,
+                    target_ip=None,
+                    link_source="gns3",
+                    local_port=_gns3_port_label(node_a),
+                    neighbor_port=_gns3_port_label(node_b),
+                )
+            )
+            already_confirmed.add(pair_key)
+
+    return edges
+
+
+def _gns3_port_label(node_link_entry: dict) -> str | None:
+    """A link endpoint's port, as GNS3 reports it: prefers the human label
+    text (e.g. "Ethernet0/1") if the topology has one set, else falls back
+    to "adapter/port" numbers, which every link endpoint always has."""
+    label = (node_link_entry.get("label") or {}).get("text")
+    if label:
+        return str(label)
+    adapter = node_link_entry.get("adapter_number")
+    port = node_link_entry.get("port_number")
+    if adapter is not None and port is not None:
+        return f"a{adapter}/{port}"
+    return None

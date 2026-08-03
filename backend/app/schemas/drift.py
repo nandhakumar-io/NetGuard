@@ -29,6 +29,7 @@ class DriftRead(BaseModel):
 
 class DriftDetail(DriftRead):
     diff_text: str
+    cli_diff: str | None = None
 
 
 class DriftScanResponse(BaseModel):

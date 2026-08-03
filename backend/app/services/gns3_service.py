@@ -232,6 +232,25 @@ def guess_vendor(node: dict) -> str:
     return "cisco"
 
 
+def list_links(project_id: str) -> list[dict]:
+    """Every link (cable) in a GNS3 project: `{"link_id": ..., "nodes": [
+    {"node_id": ..., "adapter_number": ..., "port_number": ..., "label":
+    {"text": ...}}, {"node_id": ..., ...}]}` -- exactly two entries per
+    link for a point-to-point cable, which is all GNS3 topologies use.
+    Used by app.services.topology_service to import GNS3's own
+    known-accurate wiring as topology edges for lab devices, instead of
+    only inferring adjacency from SNMP LLDP/CDP or shared-subnet guessing
+    (which a lab device may not have run Discovery against yet, or may
+    have no matching interface IPs for at all).
+    """
+    try:
+        resp = _request("GET", f"/v3/projects/{project_id}/links")
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else []
+    except httpx.HTTPError as exc:
+        raise GNS3Error(f"Failed to list links for GNS3 project {project_id}: {exc}") from exc
+
+
 def node_console_info(node: dict) -> tuple[str | None, int | None, str]:
     """Returns (console_host, console_port, console_type) for a GNS3 node."""
     console_type = (node.get("console_type") or "none").lower()

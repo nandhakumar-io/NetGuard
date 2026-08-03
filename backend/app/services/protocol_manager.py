@@ -213,7 +213,7 @@ class ProtocolManager:
             return creds
         username, password = creds
 
-        if protocol == ProtocolName.NETCONF:
+        if protocol == "netconf":
             result = netconf_service.get_config(
                 self.device.ip_address, self.device.netconf_port, username, password, source="running"
             )
@@ -240,7 +240,7 @@ class ProtocolManager:
                 error=result.error, execution_time_ms=result.execution_time_ms,
             )
 
-        if protocol == ProtocolName.RESTCONF:
+        if protocol == "restconf":
             result = restconf_service.get(self.device.restconf_url, "data", username, password)
             if not result.success and self.device.ssh_username:
                 logger.debug(
@@ -265,7 +265,7 @@ class ProtocolManager:
             return creds
         username, password = creds
 
-        if protocol == ProtocolName.NETCONF:
+        if protocol == "netconf":
             result = netconf_service.push_config(
                 self.device.ip_address, self.device.netconf_port, username, password, config_text,
                 use_lock=getattr(self.device, "netconf_use_lock", True),
@@ -276,7 +276,7 @@ class ProtocolManager:
                 error=result.error, execution_time_ms=result.execution_time_ms,
             )
 
-        if protocol == ProtocolName.RESTCONF:
+        if protocol == "restconf":
             result = restconf_service.patch(self.device.restconf_url, "data", username, password, {"raw": config_text})
             return self._record(
                 protocol="restconf", operation="deploy_config", success=result.success,
@@ -327,14 +327,14 @@ class ProtocolManager:
             return result
         username, password = creds
 
-        if protocol == ProtocolName.NETCONF:
+        if protocol == "netconf":
             startup_result = netconf_service.get_config(
                 self.device.ip_address, self.device.netconf_port, username, password,
-                source="startup", vendor=self._vendor,
+                source="startup", vendor=self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor),
             )
             if startup_result.success and startup_result.response_xml:
                 result.startup_config = startup_result.response_xml
-        elif protocol not in (ProtocolName.RESTCONF,):
+        elif protocol != "restconf":
             device_type = _netmiko_device_type(self.device)
             result.startup_config = deployment_engine.read_startup_config(
                 device_type, self.device.ip_address, username, password
@@ -354,7 +354,7 @@ class ProtocolManager:
             return creds
         username, password = creds
 
-        if protocol == ProtocolName.NETCONF:
+        if protocol == "netconf":
             result = netconf_service.get_config(self.device.ip_address, self.device.netconf_port, username, password, source="running")
             return self._record(
                 protocol="netconf", operation="get_interfaces", success=result.success,
@@ -362,7 +362,7 @@ class ProtocolManager:
                 error=result.error, execution_time_ms=result.execution_time_ms,
             )
 
-        if protocol == ProtocolName.RESTCONF:
+        if protocol == "restconf":
             result = restconf_service.get(self.device.restconf_url, "data/ietf-interfaces:interfaces", username, password)
             return self._record(
                 protocol="restconf", operation="get_interfaces", success=result.success,
@@ -387,7 +387,7 @@ class ProtocolManager:
             return creds
         username, password = creds
 
-        if protocol == ProtocolName.NETCONF:
+        if protocol == "netconf":
             caps = netconf_service.discover_capabilities(self.device.ip_address, self.device.netconf_port, username, password)
             return self._record(
                 protocol="netconf", operation="get_facts", success=caps is not None,
@@ -396,7 +396,7 @@ class ProtocolManager:
                 execution_time_ms=0.0,
             )
 
-        if protocol == ProtocolName.RESTCONF:
+        if protocol == "restconf":
             result = restconf_service.get(self.device.restconf_url, "data/ietf-yang-library:yang-library", username, password)
             return self._record(
                 protocol="restconf", operation="get_facts", success=result.success,
@@ -426,7 +426,7 @@ class ProtocolManager:
             return creds
         username, password = creds
 
-        if protocol == ProtocolName.NETCONF:
+        if protocol == "netconf":
             caps = netconf_service.discover_capabilities(self.device.ip_address, self.device.netconf_port, username, password)
             return self._record(
                 protocol="netconf", operation="health_check", success=caps is not None,
@@ -434,7 +434,7 @@ class ProtocolManager:
                 error=None if caps is not None else "NETCONF unreachable", execution_time_ms=0.0,
             )
 
-        if protocol == ProtocolName.RESTCONF:
+        if protocol == "restconf":
             result = restconf_service.get(self.device.restconf_url, "data", username, password)
             return self._record(
                 protocol="restconf", operation="health_check", success=result.success,

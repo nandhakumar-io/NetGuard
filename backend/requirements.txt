@@ -27,6 +27,8 @@ pyasn1==0.4.8  # pysnmp 6.2.5 imports pyasn1.compat.octets directly; unpinned py
                 # can resolve to 0.6.1, a broken PyPI release that shipped without
                 # that module entirely and breaks every pysnmp import.
 ncclient==0.6.15
+lxml>=4.9
 reportlab==4.2.5
 python-dotenv==1.0.1
 anthropic==0.40.0
+setuptools<70.0.0

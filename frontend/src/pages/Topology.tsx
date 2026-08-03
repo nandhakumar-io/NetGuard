@@ -257,9 +257,10 @@ export default function Topology() {
         <div>
           <h1 className="text-2xl font-bold text-navy">Network Topology</h1>
           <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-            Devices and the links between them — green LLDP/CDP badges are confirmed neighbors from SNMP
-            Discovery runs, gray labels are inferred from interfaces sharing the same subnet. Click a device or
-            a link for details. Scroll to zoom, drag to pan. Run Discovery on a device to add confirmed links here.
+            Devices and the links between them — green badges are confirmed links (LLDP/CDP neighbor discovery
+            via SNMP, or imported GNS3 lab wiring), gray labels are inferred from interfaces sharing the same
+            subnet. Click a device or a link for details. Scroll to zoom, drag to pan. Run Discovery on a
+            device to add confirmed links here.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -618,7 +619,7 @@ export default function Topology() {
                         );
                       })}
                     {linkCountFor(selection.node.id) === 0 && (
-                      <li className="text-xs text-slate-400 italic">No links found (no shared subnet or confirmed LLDP/CDP neighbor).</li>
+                      <li className="text-xs text-slate-400 italic">No links found (no shared subnet, confirmed LLDP/CDP neighbor, or GNS3 wiring).</li>
                     )}
                   </ul>
                 </div>
