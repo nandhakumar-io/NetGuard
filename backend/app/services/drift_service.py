@@ -1,10 +1,14 @@
 """Configuration Drift Detection Service.
 
 Detects when a device's live running configuration has diverged from a
-baseline -- either its own last-known-good ConfigSnapshot
-(DriftBaseline.PREVIOUS_BACKUP) or an explicitly approved GoldenConfig
-(DriftBaseline.GOLDEN_CONFIG) -- and records the result as a ConfigDrift
-row.
+baseline -- its own last-known-good ConfigSnapshot
+(DriftBaseline.PREVIOUS_BACKUP), an explicitly approved per-device
+GoldenConfig (DriftBaseline.GOLDEN_CONFIG), or the shared compliance
+template for its role (DriftBaseline.ROLE_BASELINE, via
+ComplianceBaseline + Device.device_role -- a core switch and an access
+switch shouldn't be judged against the same baseline just because
+nobody's set a per-device GoldenConfig for either of them) -- and
+records the result as a ConfigDrift row.
 
 Reuses existing building blocks rather than duplicating them:
   - app.services.protocol_manager.ProtocolManager for the live config read
@@ -32,6 +36,7 @@ from app.models.alert import Alert, AlertSource
 from app.models.config_drift import ConfigDrift, DriftBaseline, DriftSeverity, DriftStatus
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
+from app.models.compliance_baseline import ComplianceBaseline
 from app.models.snapshot import ConfigSnapshot
 from app.services import alert_service, audit_service, diff_engine, event_bus, notification_service, risk_engine, snapshot_service
 from app.services.protocol_manager import ProtocolManager
@@ -111,6 +116,28 @@ def _resolve_baseline_config(db: Session, device: Device, baseline: DriftBaselin
                 "Set one via Configuration Management, or scan against the previous backup instead."
             )
         return "golden config", snapshot_service.decrypt_config(golden.config_encrypted)
+
+    if baseline == DriftBaseline.ROLE_BASELINE:
+        if not device.device_role:
+            raise NoBaselineError(
+                f"'{device.hostname}' has no device_role set, so there's no role to look up a "
+                "compliance baseline for. Set one via PATCH /devices/{id} (device_role), or scan "
+                "against the golden config / previous backup instead."
+            )
+        role_baseline = (
+            db.query(ComplianceBaseline)
+            .filter(ComplianceBaseline.device_role == device.device_role)
+            .first()
+        )
+        if role_baseline is None:
+            raise NoBaselineError(
+                f"No compliance baseline has been set for the '{device.device_role}' role yet "
+                f"(device '{device.hostname}'). Set one via PUT /compliance-baselines/{device.device_role}."
+            )
+        return (
+            f"role baseline ({device.device_role})",
+            snapshot_service.decrypt_config(role_baseline.config_encrypted),
+        )
 
     latest_snapshot = (
         db.query(ConfigSnapshot)

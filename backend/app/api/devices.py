@@ -1,5 +1,4 @@
 import datetime
-import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,7 +15,6 @@ from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
 from app.models.device_metric import DeviceMetric
-from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.golden_config import GoldenConfig
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
@@ -32,7 +30,8 @@ from app.schemas.device import (
     SshTestResult,
 )
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
-from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service, protocol_manager
+from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service, protocol_manager, reachability_service, netbox_service, eol_service
+from app.services.health_monitor import ALL_CHECKS
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -72,9 +71,7 @@ def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
 def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
     if db.query(Device).filter(Device.hostname == payload.hostname).first():
         raise HTTPException(status_code=400, detail="Device with this hostname already exists")
-    data = payload.model_dump()
-    checks = data.pop("enabled_health_checks", None)
-    device = Device(**data, enabled_health_checks=json.dumps(checks) if checks else None)
+    device = Device(**payload.model_dump())
     db.add(device)
     db.commit()
     db.refresh(device)
@@ -86,21 +83,159 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depend
     if device.supports_snmp:
         _poll_snmp_best_effort(db, device)
 
+    # Same idea for reachability: don't leave a freshly-added device
+    # showing UNKNOWN until the next REACHABILITY_POLL_INTERVAL_SECONDS
+    # sweep picks it up.
+    try:
+        reachability_service.check_device(db, device)
+    except Exception:  # noqa: BLE001 - best-effort, same policy as the SNMP poll above
+        pass
+
     return DeviceRead.from_device(device)
 
 
 @router.get("/health-checks/catalog")
-def list_health_check_catalog(_=Depends(get_current_user)):
-    """The full set of post-deployment verification checks (health_monitor
-    .ALL_CHECKS) a device's `enabled_health_checks` can select from, so the
-    UI can render a picker instead of hardcoding check names.
-    """
-    from app.services import health_monitor
-
+def get_health_checks_catalog(_=Depends(get_current_user)):
+    """Available post-deployment verification tests (SRS 6.9)."""
     return [
-        {"name": name, "category": meta["category"], "label": meta["label"]}
-        for name, meta in health_monitor.ALL_CHECKS.items()
+        {"name": k, "description": v["label"]}
+        for k, v in ALL_CHECKS.items()
     ]
+
+
+@router.get("/eol-summary")
+def get_eol_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Fleet-wide firmware/hardware EOL rollup for the dashboard badge and
+    a dedicated audit view -- how many devices are past vendor End-of-
+    Support (the operationally meaningful date -- no more fixes/support
+    contracts) or End-of-Life, plus the actual per-device list so an
+    operator doesn't have to click through the whole inventory to build
+    that list by hand.
+    """
+    devices = db.query(Device).all()
+    eos_devices, eol_devices, unknown_hostnames = [], [], []
+    for device in devices:
+        status = eol_service.check_device_eol(
+            vendor=device.vendor.value if device.vendor else None,
+            model=device.model,
+            os_version=device.os_version,
+        )
+        if not status.matched:
+            unknown_hostnames.append(device.hostname)
+            continue
+        entry = {
+            "device_id": str(device.id),
+            "hostname": device.hostname,
+            "platform_label": status.platform_label,
+            "eos_date": status.eos_date.isoformat() if status.eos_date else None,
+            "eol_date": status.eol_date.isoformat() if status.eol_date else None,
+            "days_since_eos": status.days_since_eos,
+            "note": status.note,
+        }
+        if status.is_eol:
+            eol_devices.append(entry)
+        elif status.is_eos:
+            eos_devices.append(entry)
+
+    return {
+        "total_devices": len(devices),
+        "eos_count": len(eos_devices),
+        "eol_count": len(eol_devices),
+        "unknown_count": len(unknown_hostnames),
+        "eos_devices": eos_devices,
+        "eol_devices": eol_devices,
+        "unknown_hostnames": unknown_hostnames,
+    }
+
+
+@router.get("/upgrade-plan")
+def get_upgrade_plan(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Fleet-wide firmware *upgrade path* view -- distinct from
+    /eol-summary above. That endpoint answers "what's already past
+    vendor support"; this one answers the earlier, more useful question
+    for planning purposes: "what's not on the platform's recommended
+    target version yet", regardless of whether it's EOS/EOL. A device
+    can be fully supported and still show up here (it's a few releases
+    behind), and a device already past EOS is *also* included here if a
+    target is known, since it still needs somewhere to go.
+
+    Grouped by (vendor, platform_label, recommended_target_version) so
+    an operator sees "23 Catalyst 2960s need to go to 17.9" as one line
+    rather than scrolling 23 individual devices.
+    """
+    devices = db.query(Device).all()
+    groups: dict[tuple[str, str, str], dict] = {}
+    up_to_date_count = 0
+    no_target_hostnames: list[str] = []
+
+    for device in devices:
+        status = eol_service.check_device_eol(
+            vendor=device.vendor.value if device.vendor else None,
+            model=device.model,
+            os_version=device.os_version,
+        )
+        if not status.matched or not status.recommended_target_version:
+            no_target_hostnames.append(device.hostname)
+            continue
+        if not status.needs_upgrade:
+            up_to_date_count += 1
+            continue
+
+        key = (device.vendor.value if device.vendor else "unknown", status.platform_label, status.recommended_target_version)
+        group = groups.setdefault(key, {
+            "vendor": key[0],
+            "platform_label": key[1],
+            "recommended_target_version": key[2],
+            "devices": [],
+        })
+        group["devices"].append({
+            "device_id": str(device.id),
+            "hostname": device.hostname,
+            "current_os_version": device.os_version,
+            "is_eos": status.is_eos,
+            "is_eol": status.is_eol,
+        })
+
+    upgrade_groups = sorted(groups.values(), key=lambda g: len(g["devices"]), reverse=True)
+    needs_upgrade_count = sum(len(g["devices"]) for g in upgrade_groups)
+
+    return {
+        "total_devices": len(devices),
+        "needs_upgrade_count": needs_upgrade_count,
+        "up_to_date_count": up_to_date_count,
+        "no_target_count": len(no_target_hostnames),
+        "upgrade_groups": upgrade_groups,
+        "no_target_hostnames": no_target_hostnames,
+    }
+
+
+@router.post("/netbox-sync")
+def sync_from_netbox(
+    dry_run: bool = Query(False, description="Preview the sync without writing any changes"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Pull-syncs the device inventory from NetBox (see
+    app.services.netbox_service) -- devices are matched/updated by
+    netbox_id (falling back to hostname for a device that predates this
+    sync), created if new, and never deleted here (a device removed from
+    NetBox stays in NetGuard until someone explicitly removes it, since
+    it may still have deployment/drift/audit history worth keeping).
+    """
+    try:
+        result = netbox_service.sync_devices(db, dry_run=dry_run)
+    except netbox_service.NetBoxSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if not dry_run and (result["created"] or result["updated"]):
+        audit_service.record_event(
+            db, actor=current_user.email, action="NetBox Sync", result="Success",
+            detail=(
+                f"Created {len(result['created'])}, updated {len(result['updated'])}, "
+                f"skipped {len(result['skipped'])} (of {result['netbox_devices_seen']} seen)."
+            ),
+        )
+    return result
 
 
 @router.get("/{device_id}", response_model=DeviceRead)
@@ -130,12 +265,22 @@ def update_device(
 
     was_snmp_enabled = device.supports_snmp
 
-    if "enabled_health_checks" in updates:
-        checks = updates.pop("enabled_health_checks")
-        device.enabled_health_checks = json.dumps(checks) if checks else None
-
     for field, value in updates.items():
-        setattr(device, field, value)
+        if field == "enabled_health_checks":
+            # Device.enabled_health_checks is a Text column storing a
+            # JSON-encoded list (see DeviceRead.from_device / schemas/device.py).
+            # `value` here is the deserialized list[str] | None from
+            # DeviceUpdate -- it must be re-serialized before it's written,
+            # otherwise a raw list gets shoved into the Text column and the
+            # very next read (`json.loads` on a non-string) silently fails,
+            # falls back to None, and the operator's selection appears to
+            # have vanished/reverted to "run everything" the moment they
+            # navigate away and back.
+            import json as _json
+
+            setattr(device, field, _json.dumps(value) if value else None)
+        else:
+            setattr(device, field, value)
 
     try:
         db.commit()
@@ -169,27 +314,13 @@ def delete_device(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    try:
-        blocking_counts = {
-            "change_requests": db.query(func.count(ChangeRequest.id)).filter(ChangeRequest.device_id == device_id).scalar(),
-            "deployments": db.query(func.count(Deployment.id)).filter(Deployment.device_id == device_id).scalar(),
-            "config_snapshots": db.query(func.count(ConfigSnapshot.id)).filter(ConfigSnapshot.device_id == device_id).scalar(),
-            "golden_config": db.query(func.count(GoldenConfig.id)).filter(GoldenConfig.device_id == device_id).scalar(),
-        }
-        blocking_counts = {k: v for k, v in blocking_counts.items() if v}
-    except SQLAlchemyError:
-        # Same "never let this fall through unhandled" reasoning as the
-        # purge below -- an error here used to propagate raw, skip
-        # CORSMiddleware, and show up in the browser as a bare "Network
-        # Error" with no status/body at all.
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": f"Could not check '{device.hostname}' for related history due to a database error. Please try again.",
-                "counts": {},
-            },
-        )
+    blocking_counts = {
+        "change_requests": db.query(func.count(ChangeRequest.id)).filter(ChangeRequest.device_id == device_id).scalar(),
+        "deployments": db.query(func.count(Deployment.id)).filter(Deployment.device_id == device_id).scalar(),
+        "config_snapshots": db.query(func.count(ConfigSnapshot.id)).filter(ConfigSnapshot.device_id == device_id).scalar(),
+        "golden_config": db.query(func.count(GoldenConfig.id)).filter(GoldenConfig.device_id == device_id).scalar(),
+    }
+    blocking_counts = {k: v for k, v in blocking_counts.items() if v}
 
     if blocking_counts and not force:
         raise HTTPException(
@@ -210,15 +341,6 @@ def delete_device(
         db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
         db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
         db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
-        # DiscoveredNeighbor has two FKs into devices (device_id, the
-        # discovering device, and neighbor_device_id, a resolved
-        # neighbor) -- both need clearing or this device can never be
-        # deleted even with force=true (every retry hits the same
-        # IntegrityError since nothing ever purges these rows).
-        db.query(DiscoveredNeighbor).filter(DiscoveredNeighbor.device_id == device_id).delete(synchronize_session=False)
-        db.query(DiscoveredNeighbor).filter(DiscoveredNeighbor.neighbor_device_id == device_id).update(
-            {"neighbor_device_id": None}, synchronize_session=False
-        )
 
         # Compliance-relevant records (only reached when force=true or counts are 0).
         # Deletion order: children before parents.
@@ -433,6 +555,29 @@ def set_snmp_credentials(
     return DeviceRead.from_device(device)
 
 
+@router.post("/{device_id}/metrics/poll")
+def poll_device_metrics(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """On-demand SNMP poll for a device's telemetry."""
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not device.supports_snmp:
+        raise HTTPException(status_code=400, detail="SNMP monitoring is not enabled for this device")
+
+    try:
+        metrics_service.poll_device(db, device)
+    except metrics_service.credential_service.CredentialNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"On-demand poll failed: {exc}")
+    
+    return {"status": "success"}
+
+
 @router.post("/{device_id}/snmp-credentials/test", response_model=SnmpTestResult)
 def test_snmp_credentials(
     device_id: uuid.UUID,
@@ -488,9 +633,6 @@ def discover_device(
     from app.core.config import settings
 
     result = snmp_service.discover_inventory(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
-
-    _persist_discovered_neighbors(db, device, result)
-
     return DeviceDiscoveryResult(
         device_id=device.id,
         hostname=device.hostname,
@@ -502,65 +644,6 @@ def discover_device(
         inventory=result["inventory"],
         retrieved_at=datetime.datetime.utcnow(),
     )
-
-
-def _resolve_neighbor_device_id(db: Session, name: str | None) -> uuid.UUID | None:
-    """Best-effort match of a raw LLDP/CDP-reported neighbor identity
-    (usually a hostname, sometimes an IP) against the known device
-    inventory, so the Topology graph can draw a real edge instead of
-    just displaying the raw string. Matches on exact hostname (the
-    common case) or IP address; anything else is left unresolved rather
-    than guessed at (e.g. no fuzzy/partial hostname matching), since a
-    wrong topology edge is worse than a missing one.
-    """
-    if not name:
-        return None
-    candidate = name.split(".")[0]  # LLDP/CDP sysNames are sometimes FQDNs; devices are stored by short hostname
-    device = (
-        db.query(Device)
-        .filter((Device.hostname == name) | (Device.hostname == candidate) | (Device.ip_address == name))
-        .first()
-    )
-    return device.id if device else None
-
-
-def _persist_discovered_neighbors(db: Session, device: Device, result: dict) -> None:
-    """Replaces device's prior DiscoveredNeighbor rows with the fresh
-    LLDP/CDP results from this run. Best-effort: a persistence failure
-    here should never fail the discovery response itself (the operator
-    still gets to see the live discovery data even if the DB write has
-    a problem), so this is not wrapped in the same transaction/response
-    path as anything else on this endpoint.
-    """
-    try:
-        db.query(DiscoveredNeighbor).filter(DiscoveredNeighbor.device_id == device.id).delete()
-
-        for n in result.get("lldp_neighbors", []):
-            db.add(
-                DiscoveredNeighbor(
-                    device_id=device.id,
-                    protocol="lldp",
-                    local_port=n.get("local_port_index"),
-                    neighbor_name=n.get("neighbor_name"),
-                    neighbor_port=n.get("neighbor_port"),
-                    neighbor_device_id=_resolve_neighbor_device_id(db, n.get("neighbor_name")),
-                )
-            )
-        for n in result.get("cdp_neighbors", []):
-            db.add(
-                DiscoveredNeighbor(
-                    device_id=device.id,
-                    protocol="cdp",
-                    local_port=n.get("local_if_index"),
-                    neighbor_name=n.get("neighbor_id"),
-                    neighbor_port=n.get("neighbor_port"),
-                    neighbor_platform=n.get("neighbor_platform"),
-                    neighbor_device_id=_resolve_neighbor_device_id(db, n.get("neighbor_id")),
-                )
-            )
-        db.commit()
-    except SQLAlchemyError:
-        db.rollback()
 
 
 @router.post("/{device_id}/ssh-credentials", response_model=DeviceRead)

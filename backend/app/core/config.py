@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None
 
+    # NetBox pull-sync (see app.services.netbox_service). Both unset =
+    # sync endpoint returns a clear "not configured" error instead of
+    # attempting a request with no credentials.
+    NETBOX_URL: str | None = None  # e.g. "https://netbox.corp.example.com"
+    NETBOX_TOKEN: str | None = None
+    NETBOX_VERIFY_SSL: bool = True
+    NETBOX_TIMEOUT_SECONDS: float = 15.0
+
     # Email notifications (FR-11): sent via SMTP using these settings. Email
     # sending is skipped (not an error) whenever SMTP_HOST or
     # NOTIFY_EMAIL_RECIPIENTS is unset, same "optional channel" behavior as
@@ -85,55 +93,13 @@ class Settings(BaseSettings):
     # needed -- Ollama's HTTP API is unauthenticated by default, so this is
     # just where to find it. OLLAMA_BASE_URL defaults to Ollama's standard
     # local port; point it at a remote host if Ollama isn't running on the
-    # same machine as the backend (e.g. "http://ollama-host:11434").
-    # OLLAMA_MODEL must be the *exact* tag `ollama pull` used -- "llama3.1"
-    # and "llama3.1:8b" are different pulls/tags to Ollama's API; asking
-    # for a tag that was never pulled 404s the /api/chat call (caught by
-    # LLMScorer.score()'s try/except and falls back to the rule-based
-    # score, same as any other LLM-call failure, but silently -- always
-    # `ollama list` on that server first to see what's actually pulled).
+    # same machine as the backend (e.g. "http://ollama-host:11434"). Pull
+    # OLLAMA_MODEL on that server first (`ollama pull llama3.1`) -- an
+    # unpulled model errors out the same as any other LLM-call failure and
+    # falls back to the rule-based score.
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.1:8b"
-    # Ollama's default context window is 2048 tokens *regardless of what
-    # the model itself supports* -- num_ctx has to be set explicitly on
-    # every request or Ollama silently truncates the prompt from the
-    # front, which for this app means the beginning of the device config
-    # (and sometimes the whole prompt preamble) gets cut off before the
-    # model ever sees it. A full running-config + baseline + unified diff
-    # for even a modest device routinely exceeds 2048 tokens, so this was
-    # producing garbled/incomplete JSON back (or JSON that quoted raw
-    # config fragments instead of summarizing them) that looked like a bad
-    # model rather than a truncated prompt. 8192 covers a normal device
-    # config comfortably; raise it further via env var for very large
-    # configs if needed.
-    OLLAMA_NUM_CTX: int = 8192
-    # Was 30s -- too short for a local model actually reasoning over a full
-    # device config rather than a short chat prompt; slower/larger local
-    # models (or a host under load) routinely took longer than that, so the
-    # httpx call timed out and LLMScorer silently fell back to the
-    # rule-based-only score (base.llm_error set, but easy to miss) well
-    # before the model had a chance to finish. 180s gives real headroom.
-    OLLAMA_TIMEOUT_SECONDS: float = 900.0
-    # Used specifically for the *interactive* change-request submission
-    # path (POST /change-requests), which a person is synchronously
-    # waiting on in their browser -- 180s there means every submission
-    # against a slow/overloaded/unreachable local model hangs for 3
-    # minutes before falling back to the rule-based score (confirmed via
-    # a real ollama server log: "POST /api/chat | 500 | 3m0s", i.e. this
-    # is exactly what OLLAMA_TIMEOUT_SECONDS was doing). The fallback
-    # itself is fine and safe either way (see LLMScorer.score) -- this
-    # only controls how long someone has to stare at a spinner before
-    # getting it. POST /change-requests/{id}/rescore and the drift-scan
-    # paths are explicit "I'm choosing to wait for a deeper pass" actions
-    # (or run off nightly Celery beat, no one watching) and keep using
-    # the full OLLAMA_TIMEOUT_SECONDS/ANTHROPIC_TIMEOUT_SECONDS budget
-    # above.
-    RISK_ENGINE_INTERACTIVE_TIMEOUT_SECONDS: float = 900.0
-    # Anthropic path previously passed no explicit timeout at all (SDK
-    # default), which is more of a mismatch for a large config prompt on a
-    # loaded API than a real fix -- set explicitly so both LLM providers are
-    # tuned the same deliberate way instead of one being an unstated default.
-    ANTHROPIC_TIMEOUT_SECONDS: float = 900.0
+    OLLAMA_MODEL: str = "llama3.1"
+    OLLAMA_TIMEOUT_SECONDS: float = 30.0
 
     # Critical Risk changes (score > RISK_MEDIUM_MAX) require a second,
     # distinct Network Administrator approval before deployment is
@@ -191,6 +157,13 @@ class Settings(BaseSettings):
     # DeviceMetric history is retained for the historical charts.
     SNMP_POLL_INTERVAL_SECONDS: int = 60
     SNMP_TIMEOUT_SECONDS: float = 3.0
+    # Device reachability (ping) sweep -- separate from and independent of
+    # SNMP polling, since Device.status previously only ever got set to
+    # ONLINE by the GNS3 lab-import path and was never otherwise touched,
+    # leaving every manually-added ("non-lab") device stuck at UNKNOWN
+    # forever regardless of whether it was actually reachable.
+    REACHABILITY_POLL_INTERVAL_SECONDS: int = 60
+    REACHABILITY_PING_TIMEOUT_SECONDS: float = 1.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
 
     # When true, the FastAPI process itself runs a lightweight asyncio loop

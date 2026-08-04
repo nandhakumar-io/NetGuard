@@ -13,6 +13,8 @@ import AlertCenter from "./pages/AlertCenter";
 import DeviceConfiguration from "./pages/DeviceConfiguration";
 import Lab from "./pages/Lab";
 import Topology from "./pages/Topology";
+import ConfigSearchPage from "./pages/ConfigSearch";
+import TemplatesPage from "./pages/Templates";
 
 export default function App() {
   return (
@@ -25,6 +27,8 @@ export default function App() {
           <Route path="/deployments" element={<Deployments />} />
           <Route path="/devices" element={<Devices />} />
           <Route path="/devices/config" element={<DeviceConfiguration />} />
+          <Route path="/config-search" element={<ConfigSearchPage />} />
+          <Route path="/templates" element={<TemplatesPage />} />
           <Route path="/topology" element={<Topology />} />
           <Route path="/drift" element={<DriftPage />} />
           <Route path="/alerts" element={<AlertCenter />} />

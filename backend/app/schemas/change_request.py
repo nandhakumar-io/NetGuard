@@ -1,7 +1,8 @@
 import uuid
 import datetime
+import json
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.models.change_request import ChangeStatus, ChangePriority
 
@@ -61,7 +62,36 @@ class ChangeRequestRead(ChangeRequestBase):
     dual_approval_reason: str | None = None
     first_approved_by: uuid.UUID | None = None
     canary_enabled: bool = False
+    # Parsed from the model's JSON-encoded Text column (see
+    # app.models.change_request.ChangeRequest.additional_device_ids) --
+    # the extra devices this CR fans out to alongside device_id (SRS 6.6
+    # bulk/multi-device deploy). Was write-only before: the create schema
+    # accepted it but ChangeRequestRead never gave it back, so the UI had
+    # no way to show "this CR targets N devices" or which ones after
+    # submission -- see the field_validator below for the JSON parse.
+    additional_device_ids: list[uuid.UUID] = []
+    # 1 + len(additional_device_ids), computed rather than stored, purely
+    # so the frontend list/detail views don't have to reimplement that
+    # arithmetic themselves.
+    target_device_count: int = 1
     created_at: datetime.datetime
+
+    @field_validator("additional_device_ids", mode="before")
+    @classmethod
+    def _parse_additional_device_ids(cls, v: object) -> list:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (ValueError, TypeError):
+                return []
+        return v
+
+    @model_validator(mode="after")
+    def _compute_target_device_count(self) -> "ChangeRequestRead":
+        self.target_device_count = 1 + len(self.additional_device_ids)
+        return self
 
 
 class RiskAnalysisResult(BaseModel):

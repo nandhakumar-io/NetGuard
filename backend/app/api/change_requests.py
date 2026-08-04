@@ -1,5 +1,3 @@
-import json
-import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -14,20 +12,10 @@ from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
-from app.services import (
-    audit_service,
-    config_format_service,
-    diff_engine,
-    event_bus,
-    protocol_manager,
-    risk_engine,
-    snapshot_service,
-    validation_engine,
-)
+from app.services import diff_engine, event_bus, protocol_manager, risk_engine, snapshot_service, validation_engine, audit_service
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
-logger = logging.getLogger(__name__)
 
 # Roles permitted to approve/reject change requests (FR-1 RBAC)
 APPROVER_ROLES = (UserRole.NETWORK_ADMIN,)
@@ -90,56 +78,27 @@ def _resolve_current_config(db: Session, device: Device, current_user: User) -> 
 
 
 def _score_change(
-    db: Session, device: Device, proposed_config: str, current_user: User, interactive: bool = True,
+    db: Session, device: Device, proposed_config: str, current_user: User,
 ) -> dict:
     """Shared by create_change_request and rescore_change_request: resolves
     current_config (live, falling back to the last snapshot), runs
     validation + risk_engine.analyze, and returns every field derived from
     that -- so both endpoints stay in sync with exactly one implementation
     instead of the retry/rescore action drifting from what submission does.
-
-    `interactive` caps the LLM call at
-    settings.RISK_ENGINE_INTERACTIVE_TIMEOUT_SECONDS instead of the full
-    OLLAMA_TIMEOUT_SECONDS/ANTHROPIC_TIMEOUT_SECONDS budget -- submission
-    (create_change_request) is a person waiting in their browser and
-    should never hang for minutes on a slow model; rescore is an explicit
-    "run the deeper pass" action where the longer wait is expected.
     """
     current_config, config_source = _resolve_current_config(db, device, current_user)
     fleet_configs = _fleet_configs(db, device.id)
     diff_text = diff_engine.generate_diff(current_config, proposed_config)
-    # Structural (path-based) diff -- only meaningful when both sides are
-    # XML (a live/backed-up NETCONF config vs. another full XML config).
-    # A CLI-snippet proposed_config (e.g. "no cdp run") diffed against an
-    # XML current_config isn't a case this can translate -- that's still
-    # a real, valid change request, it just won't get a CLI/summary
-    # rendering and the frontend falls back to the raw diff for it.
-    structural_changes = config_format_service.xml_structural_diff(current_config, proposed_config)
-    config_diff_cli = (
-        "\n".join(config_format_service.to_cli_commands(structural_changes)) if structural_changes else None
-    )
-    config_diff_summary = (
-        "\n".join(config_format_service.humanize_structural_diff(structural_changes))
-        if structural_changes
-        else None
-    )
     validation = validation_engine.validate_syntax(
         proposed_config,
         vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
         current_config=current_config,
     )
-    risk: RiskAnalysisResult = risk_engine.analyze(
-        proposed_config,
-        current_config,
-        fleet_configs,
-        llm_timeout=settings.RISK_ENGINE_INTERACTIVE_TIMEOUT_SECONDS if interactive else None,
-    )
+    risk: RiskAnalysisResult = risk_engine.analyze(proposed_config, current_config, fleet_configs)
     return {
         "current_config": current_config,
         "config_source": config_source,
         "config_diff": diff_text,
-        "config_diff_cli": config_diff_cli,
-        "config_diff_summary": config_diff_summary,
         "validation": validation,
         "risk": risk,
     }
@@ -191,19 +150,10 @@ def create_change_request(
         for extra_id in payload.additional_device_ids:
             if not db.get(Device, extra_id):
                 raise HTTPException(status_code=404, detail=f"Device {extra_id} not found")
+        import json
         additional_device_ids_json = json.dumps([str(i) for i in payload.additional_device_ids])
 
-    try:
-        result = _score_change(db, device, payload.proposed_config, current_user)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Change request scoring failed for device %s", device.hostname)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Risk analysis failed while scoring this change: {exc}. "
-            "The change was not submitted -- fix the underlying issue (e.g. an "
-            "unreachable/misconfigured LLM provider, or a malformed proposed "
-            "config) and try again.",
-        )
+    result = _score_change(db, device, payload.proposed_config, current_user)
     current_config, config_source = result["current_config"], result["config_source"]
     diff_text, validation, risk = result["config_diff"], result["validation"], result["risk"]
 
@@ -223,8 +173,6 @@ def create_change_request(
         config_source=config_source,
         proposed_config=payload.proposed_config,
         config_diff=diff_text,
-        config_diff_cli=result["config_diff_cli"],
-        config_diff_summary=result["config_diff_summary"],
         validation_passed="true" if validation.passed else "false",
         validation_errors=json.dumps(validation.errors) if validation.errors else None,
         validation_warnings=json.dumps(validation.warnings) if validation.warnings else None,
@@ -239,19 +187,9 @@ def create_change_request(
         canary_enabled=payload.canary_enabled,
         status=ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT,
     )
-    try:
-        db.add(cr)
-        db.commit()
-        db.refresh(cr)
-    except Exception as exc:  # noqa: BLE001
-        db.rollback()
-        logger.exception("Change request DB commit failed for device %s", device.hostname)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Change request was scored successfully but failed to save: {exc}. "
-            "This usually means the database schema is out of date -- run "
-            "`alembic upgrade head` in backend/ and try again.",
-        )
+    db.add(cr)
+    db.commit()
+    db.refresh(cr)
 
     audit_service.record_event(
         db,
@@ -321,15 +259,7 @@ def rescore_change_request(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    try:
-        result = _score_change(db, device, cr.proposed_config, current_user, interactive=False)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Rescore failed for change request %s (device %s)", cr_id, device.hostname)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Risk analysis failed while rescoring this change: {exc}. "
-            "The existing change request was not modified.",
-        )
+    result = _score_change(db, device, cr.proposed_config, current_user)
     validation, risk = result["validation"], result["risk"]
 
     import json
@@ -339,8 +269,6 @@ def rescore_change_request(
     cr.current_config = result["current_config"]
     cr.config_source = result["config_source"]
     cr.config_diff = result["config_diff"]
-    cr.config_diff_cli = result["config_diff_cli"]
-    cr.config_diff_summary = result["config_diff_summary"]
     cr.validation_passed = "true" if validation.passed else "false"
     cr.validation_errors = json.dumps(validation.errors) if validation.errors else None
     cr.validation_warnings = json.dumps(validation.warnings) if validation.warnings else None
@@ -443,6 +371,56 @@ def approve_change_request(
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
+
+    # Maintenance window enforcement (SRS change-freeze / compliance
+    # requirement): maintenance_window_start/end have been captured on the
+    # change request since submission but, until now, were never actually
+    # checked -- approving a change enqueued its deployment immediately
+    # regardless of the declared window, so nothing stopped a change from
+    # firing outside a scheduled freeze/maintenance period.
+    #
+    # A change with no window declared deploys immediately, same as
+    # before (not every shop declares one). One with a window:
+    #   - already within it right now -> deploy immediately, as before.
+    #   - starts in the future -> APPROVED now, but the deployment task is
+    #     scheduled via Celery's `eta` for the window's actual start
+    #     instead of firing right away -- pre-approving ahead of a
+    #     maintenance window is a normal workflow, deploying outside it
+    #     is not.
+    #   - has already ended -> approval is refused outright (422); the
+    #     change must be resubmitted with a current window rather than
+    #     silently deploying late outside its declared freeze period.
+    now = datetime.now(timezone.utc)
+    window_start = cr.maintenance_window_start
+    window_end = cr.maintenance_window_end
+
+    if window_end is not None and now > window_end:
+        cr.status = ChangeStatus.APPROVED  # leave the approval on record...
+        db.commit()
+        audit_service.record_event(
+            db, actor=current_user.email, action="Deployment Blocked — Maintenance Window Expired",
+            result="Blocked", device_hostname=device.hostname if device else None, change_request_id=cr.id,
+            detail=f"Window was {window_start} - {window_end}; approval happened at {now}.",
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This change's maintenance window ({window_start} - {window_end}) has already passed. "
+                "It has been recorded as approved, but deployment was not scheduled -- resubmit with a "
+                "current maintenance window to deploy it."
+            ),
+        )
+
+    if window_start is not None and now < window_start:
+        run_deployment_pipeline_task.apply_async(
+            args=[str(cr.id), current_user.email], eta=window_start
+        )
+        audit_service.record_event(
+            db, actor=current_user.email, action="Deployment Scheduled For Maintenance Window", result="Scheduled",
+            device_hostname=device.hostname if device else None, change_request_id=cr.id,
+            detail=f"Scheduled for {window_start} (window ends {window_end}).",
+        )
+        return cr
 
     run_deployment_pipeline_task.delay(str(cr.id), current_user.email)
     return cr

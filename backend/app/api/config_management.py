@@ -141,6 +141,16 @@ def view_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depen
     # the common case for lab/SSH-only devices -- and silently return no
     # interfaces. select_protocol() is the real, unambiguous choice.
     protocol = select_protocol(device)
+    parse_protocol = protocol
+    if protocol == "netconf" and (
+        (device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor)).lower() == "juniper"
+    ):
+        # ProtocolManager.get_interfaces() fetches Junos operational state
+        # (get-interface-information) rather than get-config for this
+        # vendor -- see the note there -- so it needs the matching parser,
+        # not the generic ietf-interfaces one "netconf" would otherwise
+        # select.
+        parse_protocol = "netconf-junos-opstate"
 
     if not result.success:
         return InterfacesResponse(
@@ -152,7 +162,7 @@ def view_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depen
             error=result.error or "Failed to read interface status",
         )
 
-    parsed = config_format_service.parse_interfaces(result.output, protocol)
+    parsed = config_format_service.parse_interfaces(result.output, parse_protocol)
     return InterfacesResponse(
         device_id=device.id,
         hostname=device.hostname,

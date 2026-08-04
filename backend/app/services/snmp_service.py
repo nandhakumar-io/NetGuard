@@ -522,11 +522,21 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
     into fleet-level totals: summed error counters (for the Errors panel)
     and summed HC octets + max link speed (for utilization, computed later
     as a delta against the previous poll -- see metrics_service.compute_interface_utilization).
+
+    Also returns ``per_interface``: the same walk, kept as individual
+    per-interface rows (index, descr, octets, speed, errors) rather than
+    only the fleet-rolled-up totals above. metrics_service persists these
+    as InterfaceMetric rows so the Bandwidth Top-N panel can rank
+    individual *links* fleet-wide, not just whole devices -- the rollup
+    above collapses exactly that per-link detail, which is fine for the
+    device-level health score but not enough for a "top 10 congested
+    links" view.
     """
     oper_status = _walk(ip_address, auth, IFTABLE_OIDS["ifOperStatus"], timeout)
     if not oper_status:
-        return {"errors": None, "octets_total": None, "speed_bps": None, "interface_count": None}
+        return {"errors": None, "octets_total": None, "speed_bps": None, "interface_count": None, "per_interface": []}
 
+    descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
     in_errors = _walk(ip_address, auth, IFTABLE_OIDS["ifInErrors"], timeout)
     out_errors = _walk(ip_address, auth, IFTABLE_OIDS["ifOutErrors"], timeout)
     in_octets = _walk(ip_address, auth, IFTABLE_OIDS["ifHCInOctets"], timeout)
@@ -537,21 +547,37 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
     total_octets = 0
     total_speed_bps = 0
     up_count = 0
+    per_interface: list[dict] = []
 
     for index, status in oper_status.items():
         if _parse_snmp_enum_int(status) != 1:  # not operationally up -- exclude from utilization/error rollup
             continue
         up_count += 1
-        total_errors += int(in_errors.get(index, 0) or 0) + int(out_errors.get(index, 0) or 0)
-        total_octets += int(in_octets.get(index, 0) or 0) + int(out_octets.get(index, 0) or 0)
-        # ifHighSpeed is in Mbps per RFC 2863
-        total_speed_bps += int(float(speed.get(index, 0) or 0) * 1_000_000)
+        if_errors = int(in_errors.get(index, 0) or 0) + int(out_errors.get(index, 0) or 0)
+        if_octets = int(in_octets.get(index, 0) or 0) + int(out_octets.get(index, 0) or 0)
+        if_speed_bps = int(float(speed.get(index, 0) or 0) * 1_000_000)  # ifHighSpeed is Mbps per RFC 2863
+
+        total_errors += if_errors
+        total_octets += if_octets
+        total_speed_bps += if_speed_bps
+
+        if len(per_interface) < MAX_INTERFACES_WALKED:
+            per_interface.append(
+                {
+                    "if_index": index,
+                    "if_descr": (descr.get(index) or f"if{index}").strip(),
+                    "octets_total": if_octets,
+                    "speed_bps": if_speed_bps or None,
+                    "errors": if_errors,
+                }
+            )
 
     return {
         "errors": total_errors,
         "octets_total": total_octets,
         "speed_bps": total_speed_bps or None,
         "interface_count": up_count,
+        "per_interface": per_interface,
     }
 
 
@@ -783,7 +809,78 @@ def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float =
     }
 
 
-def poll_health(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> SnmpMetrics:
+def _get_first_table_value_matching_any(
+    ip_address: str, auth: "SnmpAuthConfig", descr_oid: str, value_oid: str, keywords: list[str], timeout: float
+) -> str | None:
+    """Same as _get_first_table_value_matching, but tries several keywords
+    in order and returns the first row that matches any of them -- used
+    where a single vendor MIB is worded differently across product
+    lines. In particular, Juniper's jnxOperatingDescr text for the power
+    module is platform-dependent: MX/SRX-class routers commonly say
+    "Power Supply 0", but the EX-series switch line (EX3300/EX3400
+    included) instead labels it "PEM 0"/"PEM 1" (Power Entry Module).
+    Matching on "Power Supply" alone never finds a row on EX hardware,
+    so power_supply_status came back "unknown" on every poll for that
+    entire product line -- not a connectivity/reachability problem, the
+    device answered every SNMP GET correctly, the keyword just never
+    matched anything in the table. One shared walk of the description
+    column, reused for every keyword tried, keeps this to the same
+    number of SNMP round trips as the single-keyword version.
+    """
+    descr_rows = _walk(ip_address, auth, descr_oid, timeout)
+    if not descr_rows:
+        return None
+    for keyword in keywords:
+        match_index = next((idx for idx, descr in descr_rows.items() if keyword.lower() in (descr or "").lower()), None)
+        if match_index is not None:
+            value_rows = _walk(ip_address, auth, value_oid, timeout)
+            return value_rows.get(match_index)
+    return None
+
+
+def _get_first_table_value_matching(
+    ip_address: str, auth: "SnmpAuthConfig", descr_oid: str, value_oid: str, keyword: str, timeout: float
+) -> str | None:
+    """For tables where the row that matters isn't identifiable by index
+    alone (e.g. Juniper's jnxOperatingTable holds every hardware
+    component -- Routing Engine, PSUs, Fan Trays, PICs -- as rows in the
+    *same* table, distinguished only by their jnxOperatingDescr text).
+    Walks the description column, finds the first row whose description
+    contains `keyword` (case-insensitive), then reads the value column at
+    that same row index. Returns None if nothing matches -- e.g. a
+    fixed-config Junos box that reports no separate "Fan Tray" component
+    correctly reports "no fan telemetry" rather than a wrong value from
+    an unrelated row.
+    """
+    descr_rows = _walk(ip_address, auth, descr_oid, timeout)
+    if not descr_rows:
+        return None
+    match_index = next((idx for idx, descr in descr_rows.items() if keyword.lower() in (descr or "").lower()), None)
+    if match_index is None:
+        return None
+    value_rows = _walk(ip_address, auth, value_oid, timeout)
+    return value_rows.get(match_index)
+
+
+# JUNIPER-MIB jnxOperatingTable (1.3.6.1.4.1.2636.3.1.13.1) -- one row per
+# hardware component (Routing Engine, FPCs, PICs, PSUs, Fan Trays), unlike
+# Cisco's separate per-purpose tables. jnxOperatingCPU/Buffer/Temp are
+# walked and take the first row (typically the Routing Engine, which is
+# what "device health" means for CPU/memory/temp); fan/power are matched
+# by description text since their state lives in the same jnxOperatingState
+# column as every other component.
+JUNIPER_OIDS = {
+    "descr": "1.3.6.1.4.1.2636.3.1.13.1.5",     # jnxOperatingDescr
+    "state": "1.3.6.1.4.1.2636.3.1.13.1.6",     # jnxOperatingState (2=running/ok, 6=down, etc.)
+    "temperature": "1.3.6.1.4.1.2636.3.1.13.1.7",  # jnxOperatingTemp (Celsius)
+    "cpu": "1.3.6.1.4.1.2636.3.1.13.1.8",       # jnxOperatingCPU (%)
+    "buffer": "1.3.6.1.4.1.2636.3.1.13.1.11",   # jnxOperatingBuffer (% -- used as the memory-utilization proxy)
+}
+
+
+def poll_health(
+    ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0, vendor: str | None = None
+) -> SnmpMetrics:
     """Polls the OIDs in OIDS and returns whatever resolved. Individual
     OID failures don't fail the whole poll (see _get_via_pysnmp); a
     completely unreachable device comes back with reachable=False and an
@@ -798,33 +895,89 @@ def poll_health(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -
     # are all table columns, not scalars -- resolved via
     # _get_first_table_value (walk + take whichever row index the agent
     # actually has), not a hardcoded ".1" GET. See OIDS dict comment.
-    cpu_raw = _get_first_table_value(ip_address, auth, OIDS["cpu_5min"], timeout)
-    # Fallback: try older/vendor-neutral CPU OIDs if the primary one
-    # (CISCO-PROCESS-MIB cpmCPUTotal5minRev) wasn't implemented. These
-    # fallbacks are true scalars (OLD-CISCO-CPU-MIB avgBusy5) or already
-    # walked with the same row-agnostic helper (legacy cpmCPUTotal5min /
-    # HOST-RESOURCES-MIB hrProcessorLoad), so a plain GET is only correct
-    # for the genuine scalar; use the table helper for the two row-indexed
-    # ones instead of re-adding a hardcoded ".1".
-    if cpu_raw is None:
-        for fallback_oid in CPU_FALLBACK_OIDS:
-            if fallback_oid.endswith(".0"):  # genuine scalar (OLD-CISCO-CPU-MIB avgBusy5)
-                cpu_raw = _get_via_pysnmp(ip_address, auth, fallback_oid, timeout)
-            else:  # row-indexed table column -- strip the ".1" and walk instead of assuming index 1
-                base = fallback_oid.rsplit(".", 1)[0] if fallback_oid.endswith(".1") else fallback_oid
-                cpu_raw = _get_first_table_value(ip_address, auth, base, timeout)
-            if cpu_raw is not None:
-                logger.debug("CPU fallback OID %s returned %s for %s", fallback_oid, cpu_raw, ip_address)
-                break
-    mem_used_raw = _get_first_table_value(ip_address, auth, OIDS["mem_used"], timeout)
-    mem_free_raw = _get_first_table_value(ip_address, auth, OIDS["mem_free"], timeout)
-    temp_raw = _get_first_table_value(ip_address, auth, OIDS["temperature"], timeout)
-    fan_state_raw = _get_first_table_value(ip_address, auth, OIDS["fan_state"], timeout)
-    power_state_raw = _get_first_table_value(ip_address, auth, OIDS["power_supply_state"], timeout)
+    is_juniper = (vendor or "").lower() == "juniper"
+
+    if is_juniper:
+        # jnxOperatingTable (JUNIPER-MIB) holds ONE ROW PER HARDWARE
+        # COMPONENT -- chassis, power supplies, fan trays, FPCs/PICs, AND
+        # the Routing Engine all share this single table, distinguished
+        # only by jnxOperatingDescr. fan_state/power_state below always
+        # matched the right row by description text ("Fan" / "Power
+        # Supply") -- but cpu/mem/temp used to call
+        # _get_first_table_value(), which just walks the column and
+        # takes whichever row has the LOWEST numeric index, with no
+        # regard for which component that row actually is. On real
+        # Juniper hardware (EX3300/EX3400 included) that lowest-indexed
+        # row is virtually never the Routing Engine -- it's typically
+        # the chassis/backplane or a PSU/fan-tray row, which correctly
+        # report 0 for CPU%/buffer%/temperature because those readings
+        # don't apply to that component. That's why CPU, memory, and
+        # temperature all read 0% together: all three were silently
+        # reading the same wrong, non-RE row every poll. Matched by
+        # description now, same pattern as fan/power, with a fallback to
+        # the old lowest-index behavior only if no row's description
+        # actually contains "Routing Engine" (covers oddly-labeled or
+        # single-RE-without-that-exact-string platforms rather than
+        # coming back with nothing).
+        cpu_raw = _get_first_table_value_matching(
+            ip_address, auth, JUNIPER_OIDS["descr"], JUNIPER_OIDS["cpu"], "Routing Engine", timeout
+        )
+        if cpu_raw is None:
+            cpu_raw = _get_first_table_value(ip_address, auth, JUNIPER_OIDS["cpu"], timeout)
+        # jnxOperatingBuffer is a direct percentage already (unlike Cisco's
+        # used/free pool pair) -- no used/free math needed for Juniper.
+        mem_used_raw = _get_first_table_value_matching(
+            ip_address, auth, JUNIPER_OIDS["descr"], JUNIPER_OIDS["buffer"], "Routing Engine", timeout
+        )
+        if mem_used_raw is None:
+            mem_used_raw = _get_first_table_value(ip_address, auth, JUNIPER_OIDS["buffer"], timeout)
+        mem_free_raw = None
+        temp_raw = _get_first_table_value_matching(
+            ip_address, auth, JUNIPER_OIDS["descr"], JUNIPER_OIDS["temperature"], "Routing Engine", timeout
+        )
+        if temp_raw is None:
+            temp_raw = _get_first_table_value(ip_address, auth, JUNIPER_OIDS["temperature"], timeout)
+        fan_state_raw = _get_first_table_value_matching(
+            ip_address, auth, JUNIPER_OIDS["descr"], JUNIPER_OIDS["state"], "Fan", timeout
+        )
+        power_state_raw = _get_first_table_value_matching_any(
+            ip_address, auth, JUNIPER_OIDS["descr"], JUNIPER_OIDS["state"],
+            ["Power Supply", "PEM", "PSU"], timeout,
+        )
+    else:
+        # cpu_5min/mem_used/mem_free/temperature/fan_state/power_supply_state
+        # are all table columns, not scalars -- resolved via
+        # _get_first_table_value (walk + take whichever row index the agent
+        # actually has), not a hardcoded ".1" GET. See OIDS dict comment.
+        cpu_raw = _get_first_table_value(ip_address, auth, OIDS["cpu_5min"], timeout)
+        # Fallback: try older/vendor-neutral CPU OIDs if the primary one
+        # (CISCO-PROCESS-MIB cpmCPUTotal5minRev) wasn't implemented. These
+        # fallbacks are true scalars (OLD-CISCO-CPU-MIB avgBusy5) or already
+        # walked with the same row-agnostic helper (legacy cpmCPUTotal5min /
+        # HOST-RESOURCES-MIB hrProcessorLoad), so a plain GET is only correct
+        # for the genuine scalar; use the table helper for the two row-indexed
+        # ones instead of re-adding a hardcoded ".1".
+        if cpu_raw is None:
+            for fallback_oid in CPU_FALLBACK_OIDS:
+                if fallback_oid.endswith(".0"):  # genuine scalar (OLD-CISCO-CPU-MIB avgBusy5)
+                    cpu_raw = _get_via_pysnmp(ip_address, auth, fallback_oid, timeout)
+                else:  # row-indexed table column -- strip the ".1" and walk instead of assuming index 1
+                    base = fallback_oid.rsplit(".", 1)[0] if fallback_oid.endswith(".1") else fallback_oid
+                    cpu_raw = _get_first_table_value(ip_address, auth, base, timeout)
+                if cpu_raw is not None:
+                    logger.debug("CPU fallback OID %s returned %s for %s", fallback_oid, cpu_raw, ip_address)
+                    break
+        mem_used_raw = _get_first_table_value(ip_address, auth, OIDS["mem_used"], timeout)
+        mem_free_raw = _get_first_table_value(ip_address, auth, OIDS["mem_free"], timeout)
+        temp_raw = _get_first_table_value(ip_address, auth, OIDS["temperature"], timeout)
+        fan_state_raw = _get_first_table_value(ip_address, auth, OIDS["fan_state"], timeout)
+        power_state_raw = _get_first_table_value(ip_address, auth, OIDS["power_supply_state"], timeout)
     interface_stats = walk_interface_stats(ip_address, auth, timeout)
 
     mem_pct = None
-    if mem_used_raw is not None and mem_free_raw is not None:
+    if is_juniper:
+        mem_pct = _safe_float(mem_used_raw)  # jnxOperatingBuffer is already a percentage
+    elif mem_used_raw is not None and mem_free_raw is not None:
         try:
             used, free = float(mem_used_raw), float(mem_free_raw)
             mem_pct = round((used / (used + free)) * 100, 1) if (used + free) > 0 else None
@@ -841,8 +994,8 @@ def poll_health(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -
         memory_utilization_pct=mem_pct,
         temperature_celsius=_safe_float(temp_raw),
         uptime_seconds=uptime_seconds,
-        fan_status=_envmon_status(fan_state_raw),
-        power_supply_status=_envmon_status(power_state_raw),
+        fan_status=_juniper_envmon_status(fan_state_raw) if is_juniper else _envmon_status(fan_state_raw),
+        power_supply_status=_juniper_envmon_status(power_state_raw) if is_juniper else _envmon_status(power_state_raw),
         reachable=True,
         interface_errors=interface_stats["errors"],
         interface_octets_total=interface_stats["octets_total"],
@@ -932,6 +1085,25 @@ def _envmon_status(raw: str | None) -> str:
     if code in ENVMON_STATE_WARNING:
         return "warning"
     if code in ENVMON_STATE_FAILED:
+        return "failed"
+    return "unknown"
+
+
+# JUNIPER-MIB jnxOperatingState enum (jnxOperatingTable, applies to every
+# hardware component type -- not fan/PSU-specific like Cisco's separate
+# tables): 1=unknown, 2=running, 3=ready, 4=reset, 5=runningAtFullSpeed,
+# 6=down, 7=standby.
+_JUNIPER_STATE_OK = {2, 3, 5, 7}
+_JUNIPER_STATE_FAILED = {6}
+
+
+def _juniper_envmon_status(raw: str | None) -> str:
+    code = _parse_snmp_enum_int(raw)
+    if code is None:
+        return "unknown"
+    if code in _JUNIPER_STATE_OK:
+        return "ok"
+    if code in _JUNIPER_STATE_FAILED:
         return "failed"
     return "unknown"
 

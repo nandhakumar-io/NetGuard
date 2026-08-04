@@ -11,6 +11,8 @@ class TopologyNodeRead(BaseModel):
     status: str
     flagged_unstable: bool = False
     has_config_on_file: bool = False
+    health_color: str | None = None
+    health_score: int | None = None
 
 
 class TopologyEdgeRead(BaseModel):

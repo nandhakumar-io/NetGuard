@@ -10,6 +10,10 @@ from app.core.database import Base
 class DriftBaseline(str, enum.Enum):
     GOLDEN_CONFIG = "golden_config"
     PREVIOUS_BACKUP = "previous_backup"
+    # Compares against the shared ComplianceBaseline template for this
+    # device's role (Device.device_role) instead of a per-device
+    # GoldenConfig -- see drift_service._resolve_baseline_config.
+    ROLE_BASELINE = "role_baseline"
 
 
 class DriftSeverity(str, enum.Enum):

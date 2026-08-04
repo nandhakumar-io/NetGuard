@@ -129,12 +129,26 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
 
       {/* RIGHT PANE: Live Logs Terminal */}
       <div className="w-full md:w-2/3 flex flex-col">
-        <h4 className="text-xs uppercase font-bold text-slate-500 mb-2 tracking-wider flex justify-between">
+        <h4 className="text-xs uppercase font-bold text-slate-500 mb-2 tracking-wider flex justify-between items-center">
           <span>Live Logs</span>
           {(deployment.status === "queued" || deployment.status === "in_progress") && (
             <span className="text-brandblue flex items-center gap-1.5 normal-case font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-brandblue animate-pulse" /> Tailing...
             </span>
+          )}
+          {(deployment.status === "failed" || deployment.status === "rolled_back") && (
+            <button
+              onClick={async () => {
+                try {
+                  await api.post(`/deployments/${deployment.id}/retry`);
+                } catch (err: any) {
+                  alert(err?.response?.data?.detail || "Failed to trigger retry");
+                }
+              }}
+              className="bg-amber-500 text-white rounded px-3 py-1 text-[10px] hover:bg-amber-600 font-bold uppercase transition-colors shadow-sm"
+            >
+              ↻ Retry Pipeline
+            </button>
           )}
         </h4>
         <div className="bg-[#1e1e1e] border-4 border-slate-800 rounded-lg h-72 overflow-y-auto p-4 font-mono text-[11px] text-slate-300 relative shadow-inner leading-relaxed">

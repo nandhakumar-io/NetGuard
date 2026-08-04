@@ -27,7 +27,6 @@ export interface Device {
   snmp_credentials_configured?: boolean;
   supports_netconf?: boolean;
   netconf_port?: number | null;
-  netconf_use_lock?: boolean;
   supports_restconf?: boolean;
   restconf_url?: string | null;
   platform?: string | null;
@@ -35,6 +34,41 @@ export interface Device {
   serial_number?: string | null;
   os_version?: string | null;
   capabilities?: string | null;
+  device_role?: string | null;
+  enabled_health_checks?: string[] | null;
+  // Derived (not stored) -- see backend eol_service / DeviceRead.from_device.
+  eol_matched?: boolean;
+  eol_platform_label?: string | null;
+  is_eos?: boolean;
+  is_eol?: boolean;
+  eos_date?: string | null;
+  eol_date?: string | null;
+  eol_note?: string | null;
+}
+
+export interface HealthCheckCatalogEntry {
+  name: string;
+  description: string;
+}
+
+export interface TemplateVariable {
+  name: string;
+  label?: string | null;
+  default?: string | null;
+  required?: boolean;
+}
+
+export interface ConfigTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  device_role?: string | null;
+  vendor?: string | null;
+  body: string;
+  variables: TemplateVariable[];
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export type ChangePriority = "low" | "medium" | "high" | "emergency";
@@ -61,8 +95,6 @@ export interface ChangeRequest {
   current_config?: string | null;
   proposed_config: string;
   config_diff?: string | null;
-  config_diff_cli?: string | null;
-  config_diff_summary?: string | null;
   risk_score?: number | null;
   risk_findings?: string | null;
   risk_classification?: string | null;
@@ -76,6 +108,11 @@ export interface ChangeRequest {
   status: ChangeStatus;
   is_rollback: "true" | "false";
   rollback_snapshot_id?: string | null;
+  canary_enabled?: boolean;
+  additional_device_ids?: string[];
+  target_device_count?: number;
+  config_diff_cli?: string | null;
+  config_diff_summary?: string | null;
   created_at: string;
 }
 
@@ -129,6 +166,52 @@ export interface GoldenConfig {
   set_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ArpEntry {
+  if_index: string;
+  ip_address: string;
+  mac_address: string;
+}
+
+export interface RouteEntry {
+  destination: string;
+  mask: string | null;
+  next_hop: string;
+  if_index: string | null;
+}
+
+export interface LldpNeighbor {
+  local_port_index: string;
+  neighbor_name: string | null;
+  neighbor_port: string | null;
+}
+
+export interface CdpNeighbor {
+  local_if_index: string;
+  neighbor_id: string | null;
+  neighbor_port: string | null;
+  neighbor_platform: string | null;
+}
+
+export interface InventoryItem {
+  index: string;
+  name: string | null;
+  description: string | null;
+  model: string | null;
+  serial_number: string | null;
+}
+
+export interface DeviceDiscoveryResult {
+  device_id: string;
+  hostname: string | null;
+  reported_hostname: string | null;
+  arp_table: ArpEntry[];
+  routing_table: RouteEntry[];
+  lldp_neighbors: LldpNeighbor[];
+  cdp_neighbors: CdpNeighbor[];
+  inventory: InventoryItem[];
+  retrieved_at: string;
 }
 
 export interface InterfaceStatus {
@@ -211,6 +294,28 @@ export interface DriftDetail extends Drift {
   cli_diff?: string | null;
 }
 
+export interface ComplianceBaselineSummary {
+  device_role: string;
+  checksum: string;
+  description?: string | null;
+  set_by: string;
+  device_count: number;
+  updated_at: string;
+}
+
+export interface ComplianceBaselineDetail {
+  device_role: string;
+  config: string;
+  config_pretty?: string | null;
+  is_xml: boolean;
+  checksum: string;
+  description?: string | null;
+  set_by: string;
+  device_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RollbackRecommendation {
   recommended: boolean;
   reason: string;
@@ -270,11 +375,13 @@ export interface DashboardSummary {
   warning_alerts: number;
   open_drifts: number;
   flagged_unstable_count: number;
+  eos_device_count: number;
   flagged_unstable_devices: { id: string; hostname: string; ip_address: string; unstable_since: string | null }[];
   global_health_score: number;
   deployment_success_rate: number;
-  top_cpu_devices: { hostname: string; ip_address: string; cpu: number }[];
-  top_memory_devices: { hostname: string; ip_address: string; memory: number }[];
+  top_cpu_devices: { hostname: string; ip_address: string; cpu: number; cpu_history: number[] }[];
+  top_memory_devices: { hostname: string; ip_address: string; memory: number; memory_history: number[] }[];
+  top_bandwidth_devices: { hostname: string; ip_address: string; bandwidth: number; bandwidth_history: number[] }[];
   recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
   recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
 }
@@ -425,6 +532,11 @@ export interface TopologyNode {
   status: DeviceStatus;
   flagged_unstable: boolean;
   has_config_on_file: boolean;
+  // Latest SNMP health reading for this device (null if never polled /
+  // not SNMP-monitored) -- lets the topology map color nodes by live
+  // health instead of just online/offline/degraded status.
+  health_color: HealthColor | null;
+  health_score: number | null;
 }
 
 export interface TopologyEdge {
@@ -438,54 +550,6 @@ export interface TopologyEdge {
   neighbor_port: string | null;
 }
 
-// --- SNMP Discovery (per-device Discovery tab) ---
-
-export interface ArpEntry {
-  if_index: string;
-  ip_address: string;
-  mac_address: string;
-}
-
-export interface RouteEntry {
-  destination: string;
-  mask: string | null;
-  next_hop: string;
-  if_index: string | null;
-}
-
-export interface LldpNeighbor {
-  local_port_index: string;
-  neighbor_name: string | null;
-  neighbor_port: string | null;
-}
-
-export interface CdpNeighbor {
-  local_if_index: string;
-  neighbor_id: string | null;
-  neighbor_port: string | null;
-  neighbor_platform: string | null;
-}
-
-export interface InventoryItem {
-  index: string;
-  name: string | null;
-  description: string | null;
-  model: string | null;
-  serial_number: string | null;
-}
-
-export interface DeviceDiscoveryResult {
-  device_id: string;
-  hostname: string | null;
-  reported_hostname: string | null;
-  arp_table: ArpEntry[];
-  routing_table: RouteEntry[];
-  lldp_neighbors: LldpNeighbor[];
-  cdp_neighbors: CdpNeighbor[];
-  inventory: InventoryItem[];
-  retrieved_at: string;
-}
-
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
@@ -493,7 +557,7 @@ export interface TopologyResponse {
 
 // --- SNMP Health / Metrics (per-device Health & Interfaces tabs) ---
 
-export type HealthColor = "green" | "yellow" | "red";
+export type HealthColor = "green" | "yellow" | "red" | "gray";
 
 export interface DeviceMetric {
   id: string;
@@ -511,6 +575,15 @@ export interface DeviceMetric {
   polled_at: string;
 }
 
+export interface MetricFreshness {
+  cpu: string | null;
+  memory: string | null;
+  interface: string | null;
+  temperature: string | null;
+  fan: string | null;
+  power: string | null;
+}
+
 export interface DeviceHealthSummary {
   device_id: string;
   hostname: string;
@@ -518,4 +591,16 @@ export interface DeviceHealthSummary {
   health_color: string;
   reachable: boolean;
   latest_metric: DeviceMetric | null;
+  metric_freshness: MetricFreshness | null;
+  stale_metrics: string[];
+}
+
+export interface FleetHealthSummary {
+  devices_monitored: number;
+  green: number;
+  yellow: number;
+  red: number;
+  unknown: number;
+  average_health_score: number | null;
+  devices_with_stale_metrics: number;
 }

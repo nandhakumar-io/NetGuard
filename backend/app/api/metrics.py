@@ -39,32 +39,37 @@ def _get_device(db: Session, device_id: uuid.UUID) -> Device:
 
 
 @router.get("/metrics/health-summary", response_model=FleetHealthSummary)
-def get_fleet_health_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_fleet_health_summary(
+    vendor: str | None = Query(None, description="Scope the rollup to one vendor, e.g. 'juniper'"),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
     """Top-of-dashboard rollup: how many SNMP-monitored devices are
-    currently green/yellow/red."""
-    return metrics_service.fleet_health_summary(db)
+    currently green/yellow/red. Optionally scoped to a single vendor
+    (e.g. ?vendor=juniper) so the UI's vendor fleet tabs can reuse this
+    endpoint instead of a separate one."""
+    return metrics_service.fleet_health_summary(db, vendor=vendor)
 
 
 @router.get("/metrics/health", response_model=list[DeviceHealthSummary])
-def list_all_device_health(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """One card per SNMP-enabled device for the Health Dashboard grid."""
-    devices = db.query(Device).filter(Device.supports_snmp.is_(True)).all()
-    return [metrics_service.device_health(db, d) for d in devices]
+def list_all_device_health(
+    vendor: str | None = Query(None, description="Only include devices of this vendor, e.g. 'juniper'"),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """One card per SNMP-enabled device for the Health Dashboard grid.
+    ?vendor=juniper (etc.) narrows the grid to that vendor's fleet --
+    handy for spot-checking a vendor that's had OID/parsing issues
+    without hunting for its devices in the full mixed-vendor grid."""
+    query = db.query(Device).filter(Device.supports_snmp.is_(True))
+    if vendor:
+        from app.models.device import DeviceVendor
 
-
-# NOTE: this router previously also defined `GET /alerts` and
-# `POST /alerts/{alert_id}/acknowledge` here. Because app.api.router
-# registers this router *before* app.api.alerts, FastAPI's order-of-
-# registration route matching meant every call to GET /alerts was being
-# silently intercepted by this router's stripped-down handler (missing
-# resolved/resolved_at/resolved_by/occurrence_count on its response
-# model, and no support for the status/source filters the Alert Center UI
-# sends) instead of the full-featured, actually-current implementation in
-# app.api.alerts. That's why Alert Center filtering and resolve/clear
-# state looked broken. Removed here -- app.api.alerts is the canonical
-# alerts surface; this module stays focused on health/metrics.
-
-# --- Per-device ---
+        try:
+            query = query.filter(Device.vendor == DeviceVendor(vendor.lower()))
+        except ValueError:
+            return []
+    return [metrics_service.device_health(db, d) for d in query.all()]
 
 
 @router.get("/devices/{device_id}/health", response_model=DeviceHealthSummary)

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import datetime
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
@@ -20,6 +21,31 @@ from app.models.change_request import ChangeRequest, ChangeStatus
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 HEARTBEAT_INTERVAL_SECONDS = 30
+
+
+SPARKLINE_LOOKBACK_HOURS = 1
+SPARKLINE_MAX_POINTS = 20
+
+
+def _metric_sparkline(db: Session, device_id, column_name: str) -> list[float]:
+    """Last-hour trend (oldest-first) for one device/metric column, for
+    the Top CPU/Memory widget sparklines -- distinct from the full
+    metrics_service.metric_history used by the per-device detail chart,
+    since this only needs a handful of points per Top-N row, not a
+    complete history payload, and runs once per row on every dashboard
+    summary refresh.
+    """
+    column = getattr(DeviceMetric, column_name)
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=SPARKLINE_LOOKBACK_HOURS)
+    rows = (
+        db.query(column, DeviceMetric.polled_at)
+        .filter(DeviceMetric.device_id == device_id, DeviceMetric.polled_at >= since)
+        .order_by(DeviceMetric.polled_at.desc())
+        .limit(SPARKLINE_MAX_POINTS)
+        .all()
+    )
+    values = [r[0] for r in reversed(rows) if r[0] is not None]
+    return values
 
 
 def _compute_summary(db: Session) -> dict:
@@ -75,12 +101,44 @@ def _compute_summary(db: Session) -> dict:
     
     top_cpu = sorted(latest_metrics_query, key=lambda x: (x[0].cpu_utilization_pct or 0), reverse=True)[:5]
     top_memory = sorted(latest_metrics_query, key=lambda x: (x[0].memory_utilization_pct or 0), reverse=True)[:5]
+    top_bandwidth = sorted(latest_metrics_query, key=lambda x: (x[0].interface_utilization_pct or 0), reverse=True)[:5]
     
     health_scores = [x[0].health_score for x in latest_metrics_query if x[0].health_score is not None]
     global_health_score = int(sum(health_scores) / len(health_scores)) if health_scores else 100
 
-    top_cpu_devices = [{"hostname": r[1], "ip_address": r[2], "cpu": r[0].cpu_utilization_pct or 0} for r in top_cpu]
-    top_memory_devices = [{"hostname": r[1], "ip_address": r[2], "memory": r[0].memory_utilization_pct or 0} for r in top_memory]
+    # Sparkline history: last-hour CPU/memory trend for just the Top-N
+    # devices (not the whole fleet), so the widget shows shape-of-trend
+    # alongside the current value instead of only a static snapshot.
+    # Scoped to the handful of top device_ids rather than fetching full
+    # metric_history per device, since this runs on every dashboard
+    # summary poll/websocket push.
+    top_cpu_devices = [
+        {
+            "hostname": r[1],
+            "ip_address": r[2],
+            "cpu": r[0].cpu_utilization_pct or 0,
+            "cpu_history": _metric_sparkline(db, r[0].device_id, "cpu_utilization_pct"),
+        }
+        for r in top_cpu
+    ]
+    top_memory_devices = [
+        {
+            "hostname": r[1],
+            "ip_address": r[2],
+            "memory": r[0].memory_utilization_pct or 0,
+            "memory_history": _metric_sparkline(db, r[0].device_id, "memory_utilization_pct"),
+        }
+        for r in top_memory
+    ]
+    top_bandwidth_devices = [
+        {
+            "hostname": r[1],
+            "ip_address": r[2],
+            "bandwidth": r[0].interface_utilization_pct or 0,
+            "bandwidth_history": _metric_sparkline(db, r[0].device_id, "interface_utilization_pct"),
+        }
+        for r in top_bandwidth
+    ]
 
     # 2. Deployment Success Rate
     deployments_successful = db.query(Deployment).filter(Deployment.status == DeploymentStatus.SUCCEEDED).count()
@@ -121,6 +179,21 @@ def _compute_summary(db: Session) -> dict:
         "device_hostname": r[1] or "Unknown"
     } for r in recent_ops_query]
 
+    # 5. EOL/EOS fleet rollup -- "how many devices are running software
+    # past its vendor-published support date", the dashboard-badge
+    # version of GET /devices/eol-summary (which has the full per-device
+    # breakdown; this just needs the count for the badge, so it doesn't
+    # duplicate the per-device detail work here).
+    from app.services import eol_service
+
+    eos_count = 0
+    for d in db.query(Device.vendor, Device.model, Device.os_version).all():
+        status = eol_service.check_device_eol(
+            vendor=d.vendor.value if d.vendor else None, model=d.model, os_version=d.os_version,
+        )
+        if status.is_eos:
+            eos_count += 1
+
     return {
         "devices_online": devices_online,
         "devices_total": devices_total,
@@ -133,11 +206,13 @@ def _compute_summary(db: Session) -> dict:
         "open_drifts": open_drifts,
         "flagged_unstable_count": flagged_unstable_count,
         "flagged_unstable_devices": flagged_unstable_devices,
-        
+        "eos_device_count": eos_count,
+
         "global_health_score": global_health_score,
         "deployment_success_rate": success_rate,
         "top_cpu_devices": top_cpu_devices,
         "top_memory_devices": top_memory_devices,
+        "top_bandwidth_devices": top_bandwidth_devices,
         "recent_backups": recent_backups,
         "recent_protocol_operations": recent_protocol_operations,
     }

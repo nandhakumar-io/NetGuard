@@ -12,6 +12,13 @@ class DeviceBase(BaseModel):
     vendor: DeviceVendor = DeviceVendor.CISCO
     site: str | None = None
     device_type: str | None = None
+    # Compliance/topology role (e.g. "core", "distribution", "access",
+    # "edge-firewall") -- selects which ComplianceBaseline a
+    # DriftBaseline.ROLE_BASELINE scan compares this device against.
+    # Distinct from device_type: two devices can share a device_type
+    # ("switch") but need different baselines because they're different
+    # device_roles ("core" vs "access").
+    device_role: str | None = None
     ssh_username: str | None = None
     ssh_credential_ref: str | None = None
 
@@ -73,6 +80,7 @@ class DeviceUpdate(BaseModel):
     vendor: DeviceVendor | None = None
     site: str | None = None
     device_type: str | None = None
+    device_role: str | None = None
     ssh_username: str | None = None
     ssh_credential_ref: str | None = None
     supports_snmp: bool | None = None
@@ -127,6 +135,23 @@ class DeviceRead(DeviceBase):
     # metrics_service.poll_device. None until the first poll ever runs.
     last_snmp_poll_at: datetime.datetime | None = None
     last_snmp_poll_error: str | None = None
+    # Derived from eol_service.check_device_eol against device.vendor/
+    # model/os_version -- never stored, always computed fresh so it stays
+    # correct if EOL_DATABASE gets updated without touching this device
+    # row. None fields mean "not in the EOL database" (unknown), not
+    # "confirmed supported" -- see eol_service module docstring.
+    eol_matched: bool = False
+    eol_platform_label: str | None = None
+    is_eos: bool = False
+    is_eol: bool = False
+    eos_date: datetime.date | None = None
+    eol_date: datetime.date | None = None
+    eol_note: str | None = None
+    # Independent of the EOS/EOL fields above -- a device can be fully
+    # supported today and still be behind the platform's recommended
+    # build. None means no target has been curated for this platform.
+    recommended_target_version: str | None = None
+    needs_upgrade: bool = False
 
     @classmethod
     def from_device(cls, device) -> "DeviceRead":
@@ -154,6 +179,23 @@ class DeviceRead(DeviceBase):
             device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted
         )
         obj.ssh_credentials_configured = bool(device.ssh_password_encrypted)
+
+        from app.services import eol_service
+
+        eol = eol_service.check_device_eol(
+            vendor=getattr(device, "vendor", None).value if getattr(device, "vendor", None) else None,
+            model=getattr(device, "model", None),
+            os_version=getattr(device, "os_version", None),
+        )
+        obj.eol_matched = eol.matched
+        obj.eol_platform_label = eol.platform_label
+        obj.is_eos = eol.is_eos
+        obj.is_eol = eol.is_eol
+        obj.eos_date = eol.eos_date
+        obj.eol_date = eol.eol_date
+        obj.eol_note = eol.note
+        obj.recommended_target_version = eol.recommended_target_version
+        obj.needs_upgrade = eol.needs_upgrade
         return obj
 
 

@@ -15,6 +15,8 @@ import {
   DeploymentRecord,
   InterfacesResponse,
   DeviceDiscoveryResult,
+  HealthCheckCatalogEntry,
+  FleetHealthSummary,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
@@ -27,6 +29,11 @@ const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: strin
   green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800" },
   yellow: { dot: "bg-riskmed", text: "text-riskmed", bg: "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800" },
   red: { dot: "bg-riskcrit", text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800" },
+  // Reachable, but the poll resolved none of the actual health OIDs --
+  // see snmp_service.compute_health_score. Distinct from "unknown"
+  // (never polled at all / device.status unknown) even though they
+  // render the same today, so a future pass can tell them apart.
+  gray: { dot: "bg-slate-300 dark:bg-slate-600", text: "text-slate-400 dark:text-slate-500", bg: "bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700" },
   unknown: { dot: "bg-slate-300 dark:bg-slate-600", text: "text-slate-400 dark:text-slate-500", bg: "bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700" },
 };
 
@@ -69,6 +76,7 @@ const emptyForm = {
   ip_address: "",
   vendor: "cisco",
   site: "",
+  device_role: "",
   ssh_username: "",
   ssh_credential_ref: "",
   supports_snmp: false,
@@ -188,6 +196,99 @@ function DeviceInlineDetails({
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
+
+  // Post-deployment verification check selection
+  const [checkCatalog, setCheckCatalog] = useState<HealthCheckCatalogEntry[]>([]);
+  const [checkCatalogLoading, setCheckCatalogLoading] = useState(false);
+  // device.enabled_health_checks === null/empty means "run the full suite"
+  // (see pipeline_service.py), NOT "nothing selected" -- but at mount time
+  // the catalog hasn't loaded yet, so there's no "full suite" to point at.
+  // Left empty here and reconciled in the effect below once the catalog
+  // is available; this used to just render `[]` in the null case, which
+  // made a device configured to run everything look like every checkbox
+  // had been silently unchecked after navigating away and back.
+  const [selectedChecks, setSelectedChecks] = useState<Set<string>>(
+    new Set(device.enabled_health_checks && device.enabled_health_checks.length > 0 ? device.enabled_health_checks : [])
+  );
+  const [checksDirty, setChecksDirty] = useState(false);
+  const [checksSaving, setChecksSaving] = useState(false);
+  const [checksNotice, setChecksNotice] = useState<string | null>(null);
+
+  // Device Role (compliance baseline template selector -- see Drift page)
+  const [editingRole, setEditingRole] = useState(false);
+  const [roleValue, setRoleValue] = useState(device.device_role || "");
+  const [roleSaving, setRoleSaving] = useState(false);
+
+  const saveDeviceRole = async () => {
+    setRoleSaving(true);
+    try {
+      const res = await api.patch<Device>(`/devices/${device.id}`, { device_role: roleValue || null });
+      onDeviceUpdated(res.data);
+      setEditingRole(false);
+    } catch {
+      // best-effort UI; leave the field open on failure so the user can retry
+    } finally {
+      setRoleSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab !== "Health" || checkCatalog.length > 0 || checkCatalogLoading) return;
+    setCheckCatalogLoading(true);
+    api
+      .get<HealthCheckCatalogEntry[]>("/devices/health-checks/catalog")
+      .then((res) => setCheckCatalog(res.data))
+      .catch(() => setCheckCatalog([]))
+      .finally(() => setCheckCatalogLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Now that the catalog is known, resolve the "null means everything"
+  // case into an actual set of names so the checkboxes render as checked
+  // instead of unchecked. Only when the device doesn't have an explicit
+  // subset saved and the operator hasn't started editing (checksDirty) --
+  // otherwise this would clobber in-progress unsaved changes every time
+  // checkCatalog's array identity changes.
+  useEffect(() => {
+    if (checkCatalog.length === 0 || checksDirty) return;
+    if (device.enabled_health_checks && device.enabled_health_checks.length > 0) return;
+    setSelectedChecks(new Set(checkCatalog.map((c) => c.name)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkCatalog, device.enabled_health_checks]);
+
+  const toggleCheck = (name: string) => {
+    setSelectedChecks((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+    setChecksDirty(true);
+    setChecksNotice(null);
+  };
+
+  const selectAllChecks = () => {
+    setSelectedChecks(new Set(checkCatalog.map((c) => c.name)));
+    setChecksDirty(true);
+    setChecksNotice(null);
+  };
+
+  const saveEnabledChecks = async () => {
+    setChecksSaving(true);
+    setChecksNotice(null);
+    try {
+      const allSelected = checkCatalog.length > 0 && selectedChecks.size === checkCatalog.length;
+      const payload = allSelected ? null : Array.from(selectedChecks);
+      const res = await api.patch<Device>(`/devices/${device.id}`, { enabled_health_checks: payload });
+      onDeviceUpdated(res.data);
+      setChecksDirty(false);
+      setChecksNotice("Saved. Future deployments to this device will only run the selected checks.");
+    } catch (err: any) {
+      setChecksNotice(err?.response?.data?.detail || "Failed to save.");
+    } finally {
+      setChecksSaving(false);
+    }
+  };
 
   // Interfaces tab: real per-interface admin/oper status + IPs, read live
   // from the device via GET /devices/{id}/config/interfaces (NETCONF/
@@ -474,6 +575,22 @@ function DeviceInlineDetails({
       <div className="p-5 flex-1">
         {activeTab === "Overview" && (
           <div className="grid grid-cols-2 gap-4 max-w-lg">
+            {(device.is_eos || device.is_eol) && (
+              <div className="col-span-2 flex items-start gap-2 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2">
+                <span className="text-lg leading-none">🕰️</span>
+                <div className="text-xs text-red-700 dark:text-red-300">
+                  <p className="font-bold uppercase tracking-wide">
+                    {device.is_eol ? "End-of-Life" : "End-of-Support"} firmware/hardware
+                    {device.eol_platform_label ? ` -- ${device.eol_platform_label}` : ""}
+                  </p>
+                  <p className="mt-0.5">
+                    {device.is_eos && device.eos_date && `EOS since ${device.eos_date}. `}
+                    {device.is_eol && device.eol_date && `EOL since ${device.eol_date}. `}
+                    {device.eol_note}
+                  </p>
+                </div>
+              </div>
+            )}
             <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">Hostname</p>
               <p className="font-medium text-navy dark:text-white">{device.hostname}</p>
@@ -489,6 +606,58 @@ function DeviceInlineDetails({
             <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">Site / Location</p>
               <p className="font-medium text-navy dark:text-white">{device.site || "Unknown"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Device Role <span className="normal-case font-normal">(compliance baseline)</span>
+              </p>
+              {editingRole ? (
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    autoFocus
+                    list="device-role-options-detail"
+                    className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1 text-sm w-32 bg-white dark:bg-slate-800"
+                    value={roleValue}
+                    onChange={(e) => setRoleValue(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && saveDeviceRole()}
+                  />
+                  <datalist id="device-role-options-detail">
+                    <option value="core" />
+                    <option value="distribution" />
+                    <option value="access" />
+                    <option value="edge-firewall" />
+                    <option value="wan-edge" />
+                  </datalist>
+                  <button
+                    onClick={saveDeviceRole}
+                    disabled={roleSaving}
+                    className="text-xs font-bold uppercase text-brandblue disabled:opacity-50"
+                  >
+                    {roleSaving ? "…" : "Save"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setRoleValue(device.device_role || "");
+                      setEditingRole(false);
+                    }}
+                    className="text-xs font-bold uppercase text-slate-400"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <p className="font-medium text-navy dark:text-white flex items-center gap-2">
+                  {device.device_role || "Not set"}
+                  {canManage && (
+                    <button
+                      onClick={() => setEditingRole(true)}
+                      className="text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-brandblue"
+                    >
+                      Edit
+                    </button>
+                  )}
+                </p>
+              )}
             </div>
             <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">Authentication</p>
@@ -590,11 +759,11 @@ function DeviceInlineDetails({
         )}
 
         {activeTab === "Health" && (
-          <div>
+          <div className="flex flex-col gap-5">
             {healthLoading && !health ? (
               <p className="text-xs text-slate-400 dark:text-slate-500">Loading telemetry…</p>
             ) : healthError && !health ? (
-              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-70">
+              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-32 opacity-70">
                 <div className="text-3xl mb-2">🩺</div>
                 <p className="text-sm font-medium">{healthError}</p>
                 {!device.supports_snmp && (
@@ -604,7 +773,7 @@ function DeviceInlineDetails({
                 )}
               </div>
             ) : (
-              <div className="flex flex-col gap-5">
+              <>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span
@@ -650,26 +819,57 @@ function DeviceInlineDetails({
                 {health?.latest_metric ? (
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {[
-                      { label: "CPU", value: health.latest_metric.cpu_utilization_pct, suffix: "%" },
-                      { label: "Memory", value: health.latest_metric.memory_utilization_pct, suffix: "%" },
-                      { label: "Temperature", value: health.latest_metric.temperature_celsius, suffix: "°C" },
-                      { label: "Uptime", value: formatUptime(health.latest_metric.uptime_seconds), suffix: "" },
-                      { label: "Fan Status", value: health.latest_metric.fan_status || "unknown", suffix: "" },
-                      { label: "Power Supply", value: health.latest_metric.power_supply_status || "unknown", suffix: "" },
-                      { label: "Interface Util.", value: health.latest_metric.interface_utilization_pct, suffix: "%" },
-                      { label: "Interface Errors", value: health.latest_metric.interface_errors, suffix: "" },
-                    ].map((m) => (
-                      <div key={m.label} className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-3 shadow-sm">
-                        <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider">{m.label}</p>
-                        <p className="text-lg font-bold text-navy dark:text-white capitalize">
-                          {m.value === null || m.value === undefined
-                            ? "—"
-                            : typeof m.value === "number"
-                            ? `${Math.round(m.value * 10) / 10}${m.suffix}`
-                            : m.value}
-                        </p>
-                      </div>
-                    ))}
+                      { label: "CPU", value: health.latest_metric.cpu_utilization_pct, suffix: "%", metric: "cpu" as const },
+                      { label: "Memory", value: health.latest_metric.memory_utilization_pct, suffix: "%", metric: "memory" as const },
+                      { label: "Temperature", value: health.latest_metric.temperature_celsius, suffix: "°C", metric: "temperature" as const },
+                      { label: "Uptime", value: formatUptime(health.latest_metric.uptime_seconds), suffix: "", metric: null },
+                      { label: "Fan Status", value: health.latest_metric.fan_status || "unknown", suffix: "", metric: "fan" as const },
+                      { label: "Power Supply", value: health.latest_metric.power_supply_status || "unknown", suffix: "", metric: "power" as const },
+                      { label: "Interface Util.", value: health.latest_metric.interface_utilization_pct, suffix: "%", metric: "interface" as const },
+                      { label: "Interface Errors", value: health.latest_metric.interface_errors, suffix: "", metric: "interface" as const },
+                    ].map((m) => {
+                      const isStale = m.metric != null && health?.stale_metrics?.includes(m.metric);
+                      const lastRead = m.metric ? health?.metric_freshness?.[m.metric] ?? null : null;
+                      return (
+                        <div
+                          key={m.label}
+                          className={`bg-white dark:bg-slate-800 border rounded-lg p-3 shadow-sm ${
+                            isStale ? "border-amber-300 dark:border-amber-700" : "border-slate-200 dark:border-slate-700"
+                          }`}
+                        >
+                          <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider flex items-center gap-1">
+                            {m.label}
+                            {isStale && (
+                              <span
+                                title={
+                                  lastRead
+                                    ? `Last successful read: ${new Date(lastRead).toLocaleString()} (${timeAgo(lastRead)}). Other metrics on this device are more current.`
+                                    : "This reading hasn't successfully resolved in a while, even though other metrics on this device are current."
+                                }
+                                className="text-amber-500 normal-case font-bold"
+                              >
+                                ⚠ stale
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-lg font-bold text-navy dark:text-white capitalize">
+                            {m.value === null || m.value === undefined
+                              ? "—"
+                              : typeof m.value === "number"
+                              ? `${Math.round(m.value * 10) / 10}${m.suffix}`
+                              : m.value}
+                          </p>
+                          {lastRead && (
+                            <p
+                              className={`text-[10px] mt-0.5 ${isStale ? "text-amber-600 dark:text-amber-400 font-semibold" : "text-slate-400 dark:text-slate-500"}`}
+                              title={new Date(lastRead).toLocaleString()}
+                            >
+                              last read {timeAgo(lastRead)}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="text-xs text-slate-400 dark:text-slate-500 italic">No poll recorded yet.</p>
@@ -706,8 +906,54 @@ function DeviceInlineDetails({
                     </div>
                   </div>
                 )}
-              </div>
+              </>
             )}
+
+            {/* Deployment Health Checks catalog -- deliberately OUTSIDE the
+                telemetry loading/error/success branches above. This picker
+                selects which *post-deployment verification* checks to run
+                (health_monitor.ALL_CHECKS) and has nothing to do with SNMP
+                telemetry, but it used to live inside the "telemetry loaded
+                successfully" branch only -- so any device that hadn't been
+                polled yet, or had SNMP failing/unconfigured (e.g. a
+                manually-added device before its SNMP credentials are set
+                up), fell into the healthError-and-no-health branch above
+                and lost access to this picker entirely, even though it's
+                independent of whether SNMP telemetry is working. */}
+            <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-5">
+              <h4 className="text-sm font-bold text-navy dark:text-white mb-1">Deployment Health Checks</h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+                Select which tests to run during post-deployment verification for this device.
+              </p>
+              {checkCatalogLoading ? (
+                <p className="text-xs text-slate-400">Loading catalog...</p>
+              ) : checkCatalog.length === 0 ? (
+                <p className="text-xs text-slate-400">No health checks available.</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-2">
+                    {checkCatalog.map((c) => (
+                      <label key={c.name} className="flex items-start gap-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-3 cursor-pointer hover:border-brandblue/50 w-full md:w-[calc(50%-0.5rem)]">
+                        <input type="checkbox" checked={selectedChecks.has(c.name)} onChange={() => toggleCheck(c.name)} className="mt-0.5" />
+                        <div>
+                          <span className="block text-xs font-bold text-navy dark:text-white capitalize">{c.name.replace(/_/g, ' ')}</span>
+                          <span className="block text-[10px] text-slate-500 dark:text-slate-400 mt-1">{c.description}</span>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button onClick={saveEnabledChecks} disabled={!checksDirty || checksSaving} className="bg-brandblue text-white px-4 py-2 rounded text-xs font-bold disabled:opacity-50 hover:bg-navy transition-colors shadow-sm">
+                      {checksSaving ? 'Saving...' : 'Save Configuration'}
+                    </button>
+                    <button onClick={selectAllChecks} disabled={selectedChecks.size === checkCatalog.length} className="text-brandblue text-xs font-bold hover:underline disabled:opacity-50">
+                      Select All
+                    </button>
+                    {checksNotice && <span className="text-xs text-risklow font-medium">{checksNotice}</span>}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1368,6 +1614,12 @@ export default function Devices() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [vendorFilter, setVendorFilter] = useState<string>("all");
+  // Fleet Health strip -- scoped to whatever vendorFilter is currently
+  // selected, so picking "juniper" in the existing vendor dropdown also
+  // narrows this to a "Juniper fleet" health view instead of needing a
+  // separate page. Refetches whenever the filter changes.
+  const [fleetHealth, setFleetHealth] = useState<FleetHealthSummary | null>(null);
+  const [fleetHealthLoading, setFleetHealthLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [clearingUnstableId, setClearingUnstableId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -1571,6 +1823,17 @@ export default function Devices() {
 
   useEffect(load, []);
 
+  useEffect(() => {
+    setFleetHealthLoading(true);
+    api
+      .get<FleetHealthSummary>("/metrics/health-summary", {
+        params: vendorFilter !== "all" ? { vendor: vendorFilter } : undefined,
+      })
+      .then((res) => setFleetHealth(res.data))
+      .catch(() => setFleetHealth(null))
+      .finally(() => setFleetHealthLoading(false));
+  }, [vendorFilter]);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -1723,6 +1986,21 @@ export default function Devices() {
               value={form.site}
               onChange={(e) => setForm({ ...form, site: e.target.value })}
             />
+            <input
+              list="device-role-options"
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              placeholder="Device Role (e.g. core, access — optional)"
+              title="Selects which compliance baseline template (Drift page) this device is checked against, so a core switch and an access switch aren't judged against the same expected config."
+              value={form.device_role}
+              onChange={(e) => setForm({ ...form, device_role: e.target.value })}
+            />
+            <datalist id="device-role-options">
+              <option value="core" />
+              <option value="distribution" />
+              <option value="access" />
+              <option value="edge-firewall" />
+              <option value="wan-edge" />
+            </datalist>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
@@ -1923,6 +2201,43 @@ export default function Devices() {
           ))}
         </select>
       </div>
+
+      {/* Fleet Health strip -- scoped to vendorFilter above, so switching
+          the dropdown to e.g. "juniper" turns this into a Juniper-only
+          fleet health rollup (GET /metrics/health-summary?vendor=juniper)
+          without a separate page. */}
+      {fleetHealth && fleetHealth.devices_monitored > 0 && (
+        <div className="flex flex-wrap items-center gap-4 text-xs font-medium bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5">
+          <span className="font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
+            {vendorFilter === "all" ? "Fleet health" : `${vendorFilter} fleet health`}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-risklow" /> {fleetHealth.green} green
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-riskmed" /> {fleetHealth.yellow} yellow
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-riskcrit" /> {fleetHealth.red} red
+          </span>
+          <span className="flex items-center gap-1.5 text-slate-400 dark:text-slate-500">
+            <span className="w-2 h-2 rounded-full bg-slate-400" /> {fleetHealth.unknown} unknown
+          </span>
+          {fleetHealth.average_health_score != null && (
+            <span className="text-slate-500 dark:text-slate-400">
+              avg score {fleetHealth.average_health_score}/100
+            </span>
+          )}
+          {fleetHealth.devices_with_stale_metrics > 0 && (
+            <span className="ml-auto flex items-center gap-1.5 text-amber-600 dark:text-amber-400" title="These devices have at least one metric (CPU/memory/interface/temperature/fan/power) that hasn't successfully resolved in a while, even if their overall color is green.">
+              ⚠ {fleetHealth.devices_with_stale_metrics} device{fleetHealth.devices_with_stale_metrics === 1 ? "" : "s"} with stale metrics
+            </span>
+          )}
+        </div>
+      )}
+      {fleetHealthLoading && !fleetHealth && (
+        <p className="text-xs text-slate-400">Loading fleet health…</p>
+      )}
 
       {bulkNotice && (
         <p className="text-[13px] font-medium text-risklow bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 shadow-sm rounded-lg px-4 py-2.5">

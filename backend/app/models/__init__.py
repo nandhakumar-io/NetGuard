@@ -13,3 +13,5 @@ from app.models.protocol_operation import ProtocolOperation, ProtocolName  # noq
 from app.models.notification import Notification, NotificationSeverity, NotificationEventType  # noqa: F401
 from app.models.golden_config import GoldenConfig  # noqa: F401
 from app.models.discovered_neighbor import DiscoveredNeighbor  # noqa: F401
+from app.models.compliance_baseline import ComplianceBaseline  # noqa: F401
+from app.models.config_template import ConfigTemplate, ConfigTemplateVersion  # noqa: F401

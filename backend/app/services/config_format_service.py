@@ -23,11 +23,14 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 import xml.dom.minidom
 from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
+
+logger = logging.getLogger("netguard.config_format")
 
 
 def looks_like_xml(raw: str | None) -> bool:
@@ -171,6 +174,27 @@ def _local(tag: str) -> str:
     return _NS_STRIP.sub("", tag)
 
 
+def _safe_int(raw: str | None) -> int | None:
+    """Best-effort int parse for fields that are *usually* numeric but not
+    always -- MTU in particular. Junos reports `<mtu>Unlimited</mtu>` on
+    loopback (lo0) and some tunnel interfaces instead of a number, which
+    is completely normal, expected output on every real Juniper device
+    (not an edge case -- lo0 is always present). A bare `int(...)` on
+    that value raises ValueError; previously that exception propagated
+    out of the per-interface loop and was caught by parse_interfaces()'s
+    top-level `except Exception: return []`, which discarded *every*
+    interface on the device (not just lo0) the moment the walk reached
+    the one with a non-numeric MTU. Returns None (rendered as "--" by
+    the UI) for anything that isn't a clean integer, instead of raising.
+    """
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _text(elem: ET.Element | None) -> str | None:
     return elem.text.strip() if elem is not None and elem.text else None
 
@@ -204,32 +228,39 @@ def _parse_interfaces_xml(raw: str) -> list[InterfaceStatus]:
         if _local(interfaces_container.tag) != "interfaces":
             continue
         for iface in _findall_local(interfaces_container, "interface"):
-            name = _text(_find_local(iface, "name"))
-            if not name:
-                continue
-            enabled_elem = _find_local(iface, "enabled")
-            oper_elem = _find_local(iface, "oper-status")
-            status = InterfaceStatus(
-                name=name,
-                description=_text(_find_local(iface, "description")),
-                admin_status=(
-                    {"true": "up", "false": "down"}.get(_text(enabled_elem) or "")
-                    if enabled_elem is not None
-                    else None
-                ),
-                oper_status=_text(oper_elem),
-                mtu=int(_text(_find_local(iface, "mtu")) or 0) or None,
-            )
-            for proto_name in ("ipv4", "ipv6"):
-                proto_elem = _find_local(iface, proto_name)
-                if proto_elem is None:
+            # Each interface is parsed independently -- one row with an
+            # unexpected field (e.g. a non-numeric MTU) should be skipped,
+            # not blow up parsing for every other interface on the device.
+            try:
+                name = _text(_find_local(iface, "name"))
+                if not name:
                     continue
-                for addr in _findall_local(proto_elem, "address"):
-                    ip = _text(_find_local(addr, "ip"))
-                    prefix = _text(_find_local(addr, "prefix-length"))
-                    if ip:
-                        status.ip_addresses.append(f"{ip}/{prefix}" if prefix else ip)
-            results.append(status)
+                enabled_elem = _find_local(iface, "enabled")
+                oper_elem = _find_local(iface, "oper-status")
+                status = InterfaceStatus(
+                    name=name,
+                    description=_text(_find_local(iface, "description")),
+                    admin_status=(
+                        {"true": "up", "false": "down"}.get(_text(enabled_elem) or "")
+                        if enabled_elem is not None
+                        else None
+                    ),
+                    oper_status=_text(oper_elem),
+                    mtu=_safe_int(_text(_find_local(iface, "mtu"))),
+                )
+                for proto_name in ("ipv4", "ipv6"):
+                    proto_elem = _find_local(iface, proto_name)
+                    if proto_elem is None:
+                        continue
+                    for addr in _findall_local(proto_elem, "address"):
+                        ip = _text(_find_local(addr, "ip"))
+                        prefix = _text(_find_local(addr, "prefix-length"))
+                        if ip:
+                            status.ip_addresses.append(f"{ip}/{prefix}" if prefix else ip)
+                results.append(status)
+            except Exception:  # noqa: BLE001 - one bad row shouldn't drop the rest
+                logger.debug("Skipping one unparsable ietf-interfaces row", exc_info=True)
+                continue
         if results:
             return results
 
@@ -262,6 +293,71 @@ def _parse_interfaces_xml(raw: str) -> list[InterfaceStatus]:
                         status.ip_addresses.append(f"{ip}/{mask}" if mask else ip)
                 results.append(status)
 
+    return results
+
+
+def _parse_interfaces_junos_opstate_xml(raw: str) -> list[InterfaceStatus]:
+    """Parses <get-interface-information> operational XML from a real
+    Junos device (see netconf_service.get_junos_interface_information).
+
+    Junos's operational schema is physical-interface/logical-interface
+    (not the config-shaped ietf-interfaces one): each <physical-interface>
+    has <name>, <admin-status>, <oper-status>, <mtu>, <speed>,
+    <hardware-physical-address>, and nested <logical-interface> entries
+    that carry the actual IPv4/IPv6 addresses under
+    address-family/interface-address/ifa-local. Physical- and
+    logical-level status/IPs are merged into one InterfaceStatus per
+    physical port (matching how the rest of the app treats one row per
+    port), with the logical interface's addresses attached to it.
+    """
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        try:
+            root = ET.fromstring(f"<data>{raw}</data>")
+        except ET.ParseError:
+            return []
+
+    results: list[InterfaceStatus] = []
+    for phys in root.iter():
+        if _local(phys.tag) != "physical-interface":
+            continue
+        # Each physical interface is parsed independently. This matters a
+        # lot here specifically: Junos's own loopback interface (lo0) --
+        # which is present in *every* get-interface-information reply --
+        # reports "<mtu>Unlimited</mtu>" instead of a number. That used
+        # to raise inside int(...), which propagated out of this loop and
+        # was swallowed by parse_interfaces()'s top-level `except
+        # Exception: return []`, silently discarding every interface on
+        # the device (not just lo0) -- i.e. every real Juniper switch hit
+        # this on every poll. See _safe_int().
+        try:
+            name = _text(_find_local(phys, "name"))
+            if not name:
+                continue
+            status = InterfaceStatus(
+                name=name,
+                description=_text(_find_local(phys, "description")),
+                admin_status=_text(_find_local(phys, "admin-status")),
+                oper_status=_text(_find_local(phys, "oper-status")),
+                mtu=_safe_int(_text(_find_local(phys, "mtu"))),
+                speed=_text(_find_local(phys, "speed")),
+                mac_address=_text(_find_local(phys, "hardware-physical-address")),
+            )
+            for logical in _findall_local(phys, "logical-interface"):
+                for af in logical.iter():
+                    if _local(af.tag) != "address-family":
+                        continue
+                    for iface_addr in af.iter():
+                        if _local(iface_addr.tag) != "interface-address":
+                            continue
+                        ip = _text(_find_local(iface_addr, "ifa-local"))
+                        if ip:
+                            status.ip_addresses.append(ip)
+            results.append(status)
+        except Exception:  # noqa: BLE001 - one bad row shouldn't drop the rest
+            logger.debug("Skipping one unparsable physical-interface row", exc_info=True)
+            continue
     return results
 
 
@@ -319,6 +415,8 @@ def parse_interfaces(raw: str | None, protocol: str) -> list[InterfaceStatus]:
     if not raw:
         return []
     try:
+        if protocol == "netconf-junos-opstate":
+            return _parse_interfaces_junos_opstate_xml(raw)
         if protocol == "netconf":
             return _parse_interfaces_xml(raw)
         if protocol == "restconf":

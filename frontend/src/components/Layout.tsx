@@ -8,6 +8,8 @@ const links = [
   { to: "/change-requests", label: "Change Requests" },
   { to: "/deployments", label: "Deployments" },
   { to: "/devices", label: "Devices" },
+  { to: "/config-search", label: "Config Search" },
+  { to: "/templates", label: "Templates" },
   { to: "/topology", label: "Topology" },
   { to: "/drift", label: "Drift" },
   { to: "/alerts", label: "Alerts" },

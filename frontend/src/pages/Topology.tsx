@@ -10,6 +10,17 @@ const STATUS_COLOR: Record<string, string> = {
   unknown: "#cbd5e1",
 };
 
+// Mirrors app.models.device_metric.HealthColor (green/yellow/red/gray) --
+// gray specifically means "device answered SNMP but resolved none of the
+// health OIDs" (see that enum's docstring), distinct from "never polled"
+// (null), which falls back to the plain unselected-node ring below.
+const HEALTH_COLOR: Record<string, string> = {
+  green: "#16a34a",
+  yellow: "#d97706",
+  red: "#dc2626",
+  gray: "#94a3b8",
+};
+
 const VENDOR_META: Record<string, { label: string; accent: string }> = {
   cisco: { label: "Cisco", accent: "#049fd9" },
   juniper: { label: "Juniper", accent: "#84b135" },
@@ -470,8 +481,8 @@ export default function Topology() {
                         <circle
                           r={17}
                           fill="white"
-                          stroke={isSelected ? "#2563eb" : "#e2e8f0"}
-                          strokeWidth={isSelected ? 2.5 : 1}
+                          stroke={isSelected ? "#2563eb" : node.health_color ? HEALTH_COLOR[node.health_color] : "#e2e8f0"}
+                          strokeWidth={isSelected ? 2.5 : node.health_color ? 2.5 : 1}
                           opacity={isIsolated ? 0.6 : 1}
                         />
                         <DeviceGlyph vendor={node.vendor} size={13} />
@@ -522,10 +533,19 @@ export default function Topology() {
             </svg>
 
             <div className="flex flex-wrap gap-4 items-center px-5 py-3 border-t border-slate-100 text-xs text-slate-500">
+              <span className="font-bold text-slate-400 uppercase tracking-wide text-[10px]">Status</span>
               {Object.entries(STATUS_COLOR).map(([status, color]) => (
                 <span key={status} className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: color }} />
                   <span className="capitalize">{status}</span>
+                </span>
+              ))}
+              <span className="w-px h-3 bg-slate-200 mx-1" />
+              <span className="font-bold text-slate-400 uppercase tracking-wide text-[10px]">Health ring</span>
+              {Object.entries(HEALTH_COLOR).map(([health, color]) => (
+                <span key={health} className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full inline-block border-2" style={{ borderColor: color, backgroundColor: "white" }} />
+                  <span className="capitalize">{health}</span>
                 </span>
               ))}
               <span className="flex items-center gap-1.5">
@@ -568,6 +588,14 @@ export default function Topology() {
                   <div className="flex justify-between">
                     <dt className="text-slate-500">Status</dt>
                     <dd className="capitalize text-slate-700">{selection.node.status}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-500">Health</dt>
+                    <dd className="capitalize text-slate-700">
+                      {selection.node.health_score !== null
+                        ? `${selection.node.health_score}/100 (${selection.node.health_color})`
+                        : "Not SNMP-polled"}
+                    </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-slate-500">Config on file</dt>

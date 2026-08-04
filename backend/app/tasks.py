@@ -64,7 +64,7 @@ def deploy_device_task(self, cr_id: str, device_id: str, actor_email: str) -> st
     retry_kwargs={"max_retries": 2},
 )
 def retry_deployment_task(self, cr_id: str, device_id: str, actor_email: str) -> str:
-    """Re-runs the full snapshot -> deploy -> verify -> (rollback) pipeline
+    """Dispatched by POST /deployments/{id}/retry. Runs the pipeline again
     for ONE device that previously failed/rolled back, without touching
     the other devices on the same change request. Unlike
     run_deployment_pipeline_task (which fans out every target device via
@@ -314,6 +314,47 @@ def snmp_poll_task(self, device_id: str) -> str:
             return "credential_missing"
     finally:
         db.close()
+
+
+@celery_app.task(
+    name="app.tasks.reachability_task",
+    bind=True,
+    # Infra retries only -- reachability_service.ping_host already treats
+    # an unreachable device as a normal (False) result, not an exception.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def reachability_task(self, device_id: str) -> str:
+    from app.services import reachability_service
+
+    db = SessionLocal()
+    try:
+        device = db.get(Device, uuid.UUID(device_id))
+        if device is None:
+            return "device_missing"
+        status = reachability_service.check_device(db, device)
+        return status.value
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_reachability_sweep_task")
+def run_reachability_sweep_task() -> int:
+    """Celery beat entry point: pings every device (SNMP-enabled or not --
+    unlike the SNMP poll sweep, reachability isn't conditional on SNMP
+    being configured) so Device.status reflects reality instead of
+    sitting at UNKNOWN forever. Returns the number of devices checked.
+    """
+    db = SessionLocal()
+    try:
+        device_ids = [str(d.id) for d in db.query(Device.id).all()]
+    finally:
+        db.close()
+
+    for device_id in device_ids:
+        reachability_task.delay(device_id)
+    return len(device_ids)
 
 
 @celery_app.task(name="app.tasks.run_snmp_poll_sweep_task")

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus } from "../lib/types";
+import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus } from "../lib/types";
 import ConfigDiff from "../components/ConfigDiff";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
@@ -50,6 +50,73 @@ export default function DriftPage() {
 
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+
+  // Compliance Baselines by role -- shared golden-config-style template
+  // per device_role (core/access/edge/...) rather than one-per-device, so
+  // scanning with baseline="role_baseline" above has something to compare
+  // against. See DriftBaseline.ROLE_BASELINE / ComplianceBaseline.
+  const [roleBaselines, setRoleBaselines] = useState<ComplianceBaselineSummary[]>([]);
+  const [rolesInUse, setRolesInUse] = useState<string[]>([]);
+  const [baselinesLoading, setBaselinesLoading] = useState(false);
+  const [editingRole, setEditingRole] = useState<string | null>(null);
+  const [roleForm, setRoleForm] = useState({ device_role: "", config: "", description: "" });
+  const [roleFormSaving, setRoleFormSaving] = useState(false);
+  const [roleFormError, setRoleFormError] = useState<string | null>(null);
+
+  const loadRoleBaselines = () => {
+    setBaselinesLoading(true);
+    Promise.all([
+      api.get<ComplianceBaselineSummary[]>("/compliance-baselines"),
+      api.get<string[]>("/compliance-baselines/device-roles"),
+    ])
+      .then(([baselinesRes, rolesRes]) => {
+        setRoleBaselines(baselinesRes.data);
+        setRolesInUse(rolesRes.data);
+      })
+      .finally(() => setBaselinesLoading(false));
+  };
+
+  useEffect(loadRoleBaselines, []);
+
+  const startEditRole = async (role: string) => {
+    setRoleFormError(null);
+    if (role) {
+      try {
+        const res = await api.get<ComplianceBaselineDetail>(`/compliance-baselines/${encodeURIComponent(role)}`);
+        setRoleForm({ device_role: role, config: res.data.config, description: res.data.description || "" });
+      } catch {
+        setRoleForm({ device_role: role, config: "", description: "" });
+      }
+    } else {
+      setRoleForm({ device_role: "", config: "", description: "" });
+    }
+    setEditingRole(role || "__new__");
+  };
+
+  const saveRoleBaseline = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!roleForm.device_role.trim() || !roleForm.config.trim()) return;
+    setRoleFormSaving(true);
+    setRoleFormError(null);
+    try {
+      await api.put(`/compliance-baselines/${encodeURIComponent(roleForm.device_role.trim())}`, {
+        config: roleForm.config,
+        description: roleForm.description || null,
+      });
+      setEditingRole(null);
+      loadRoleBaselines();
+    } catch (err: any) {
+      setRoleFormError(err?.response?.data?.detail || "Failed to save compliance baseline.");
+    } finally {
+      setRoleFormSaving(false);
+    }
+  };
+
+  const deleteRoleBaseline = async (role: string) => {
+    if (!confirm(`Delete the compliance baseline for role "${role}"? Devices with this role will fall back to golden config / previous backup for drift scans.`)) return;
+    await api.delete(`/compliance-baselines/${encodeURIComponent(role)}`);
+    loadRoleBaselines();
+  };
 
   const load = () => {
     Promise.all([
@@ -177,6 +244,7 @@ export default function DriftPage() {
           >
             <option value="previous_backup">Previous backup</option>
             <option value="golden_config">Golden config</option>
+            <option value="role_baseline">Role baseline (by device_role)</option>
           </select>
         </div>
         <button
@@ -188,6 +256,127 @@ export default function DriftPage() {
         </button>
         {scanError && <p className="text-riskcrit text-sm w-full">{scanError}</p>}
       </form>
+
+      <div className="mt-6 bg-white border border-slate-200 rounded-xl p-5">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 className="text-sm font-bold text-navy">Compliance Baselines by Role</h2>
+            <p className="text-xs text-slate-500 mt-1">
+              One shared baseline template per device_role (e.g. "core", "access") -- so a core switch and an
+              access switch are judged against different expected configs instead of sharing one golden config,
+              or having no baseline at all. Set a device's role via Devices → Edit, then scan with
+              baseline "Role baseline" above.
+            </p>
+          </div>
+          {canReview && (
+            <button
+              onClick={() => startEditRole("")}
+              className="text-xs font-bold uppercase tracking-wider text-brandblue border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 shrink-0"
+            >
+              + Add Baseline
+            </button>
+          )}
+        </div>
+
+        {editingRole && (
+          <form onSubmit={saveRoleBaseline} className="mt-4 border border-slate-200 rounded-lg p-4 bg-slate-50 flex flex-col gap-3">
+            <div className="flex flex-wrap gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Device Role</label>
+                {editingRole === "__new__" ? (
+                  <input
+                    list="roles-in-use"
+                    className="border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    placeholder="e.g. core, access, edge-firewall"
+                    value={roleForm.device_role}
+                    onChange={(e) => setRoleForm({ ...roleForm, device_role: e.target.value })}
+                    required
+                  />
+                ) : (
+                  <input className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-slate-100" value={roleForm.device_role} disabled />
+                )}
+                <datalist id="roles-in-use">
+                  {rolesInUse.map((r) => (
+                    <option key={r} value={r} />
+                  ))}
+                </datalist>
+              </div>
+              <div className="flex-1 min-w-[220px]">
+                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Description (optional)</label>
+                <input
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  placeholder="e.g. Standard core switch baseline (BGP + OSPF uplinks)"
+                  value={roleForm.description}
+                  onChange={(e) => setRoleForm({ ...roleForm, description: e.target.value })}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Baseline Config</label>
+              <textarea
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono h-40"
+                placeholder="Paste the approved config template for this role..."
+                value={roleForm.config}
+                onChange={(e) => setRoleForm({ ...roleForm, config: e.target.value })}
+                required
+              />
+            </div>
+            {roleFormError && <p className="text-riskcrit text-sm">{roleFormError}</p>}
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={roleFormSaving}
+                className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
+              >
+                {roleFormSaving ? "Saving…" : "Save Baseline"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingRole(null)}
+                className="border border-slate-300 rounded-lg px-4 py-2 text-sm font-semibold hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+
+        {baselinesLoading ? (
+          <p className="text-xs text-slate-400 mt-4">Loading…</p>
+        ) : roleBaselines.length === 0 ? (
+          <p className="text-xs text-slate-400 italic mt-4">No role baselines set yet.</p>
+        ) : (
+          <div className="mt-4 divide-y divide-slate-100">
+            {roleBaselines.map((b) => (
+              <div key={b.device_role} className="py-3 flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <span className="text-sm font-bold text-navy">{b.device_role}</span>
+                  <span className="ml-2 text-xs text-slate-400">
+                    {b.device_count} device{b.device_count === 1 ? "" : "s"} · checksum {b.checksum.slice(0, 10)}
+                  </span>
+                  {b.description && <p className="text-xs text-slate-500 mt-0.5">{b.description}</p>}
+                </div>
+                {canReview && (
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => startEditRole(b.device_role)}
+                      className="text-xs font-bold uppercase tracking-wider text-slate-600 border border-slate-200 bg-white px-2.5 py-1 rounded-lg hover:bg-slate-100"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => deleteRoleBaseline(b.device_role)}
+                      className="text-xs font-bold uppercase tracking-wider text-riskcrit border border-red-200 bg-white px-2.5 py-1 rounded-lg hover:bg-red-50"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="flex flex-wrap gap-2 mt-6 mb-3">
         {SEVERITY_FILTERS.map((f) => (

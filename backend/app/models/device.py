@@ -59,6 +59,14 @@ class Device(Base):
     vendor = Column(Enum(DeviceVendor), nullable=False, default=DeviceVendor.CISCO)
     site = Column(String, nullable=True)
     device_type = Column(String, nullable=True)  # e.g. router, switch, firewall
+    # Compliance/topology role -- e.g. "core", "distribution", "access",
+    # "edge-firewall", "wan-edge". Free-text (not an enum) like device_type,
+    # since orgs name roles differently, but distinct from device_type: a
+    # "switch" (device_type) can be a "core" or "access" switch (device_role)
+    # -- those need different compliance baselines even though they're the
+    # same device_type. See app.models.compliance_baseline.ComplianceBaseline
+    # and drift_service's DriftBaseline.ROLE_BASELINE.
+    device_role = Column(String, nullable=True)
     status = Column(Enum(DeviceStatus), nullable=False, default=DeviceStatus.UNKNOWN)
     ssh_username = Column(String, nullable=True)
     ssh_credential_ref = Column(String, nullable=True)  # legacy: pointer to secret store, not raw secret
@@ -88,6 +96,35 @@ class Device(Base):
     # credentials incomplete) instead of just an empty Health tab.
     last_snmp_poll_at = Column(DateTime(timezone=True), nullable=True)
     last_snmp_poll_error = Column(Text, nullable=True)
+
+    # --- Per-metric "last successful read" timestamps ---
+    # last_snmp_poll_at above only tells you when a poll *attempt* last
+    # ran, not which individual OIDs in that attempt actually resolved.
+    # A device can have a perfectly healthy, fresh CPU/memory reading
+    # while its interface table has been failing to walk (ACL change,
+    # agent restart mid-table, etc.) for days -- previously that showed
+    # up nowhere: the device still looked fully green because CPU/mem
+    # alone are enough to compute a health_score. Each column here is
+    # stamped independently in metrics_service.poll_device, one per poll,
+    # only when that specific reading resolved to a non-None value on
+    # that poll -- so a metric that stops resolving simply stops
+    # advancing its timestamp while the others keep moving, and the API/
+    # UI can flag it as stale instead of silently folding it into an
+    # overall "green" score derived from whatever did come back.
+    last_cpu_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_memory_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_interface_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_temperature_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_fan_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_power_success_at = Column(DateTime(timezone=True), nullable=True)
+
+    # NetBox device object ID (see app.services.netbox_service), if this
+    # device was created or is kept in sync by a NetBox pull-sync. NULL
+    # for manually-added/GNS3-discovered devices. Used as the match key
+    # on re-sync instead of hostname, so a hostname rename in NetBox
+    # updates the existing device instead of creating a duplicate.
+    netbox_id = Column(Integer, nullable=True, unique=True, index=True)
+    netbox_last_synced_at = Column(DateTime(timezone=True), nullable=True)
 
     # JSON-encoded list of health_monitor check_name values (e.g.
     # ["ping","packet_loss_latency","http"]) that the post-deployment

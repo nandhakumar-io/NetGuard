@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { DashboardSummary, DriftFleetSummary, Alert } from "../lib/types";
 import StatCard from "../components/StatCard";
+import Sparkline from "../components/Sparkline";
 import { useAuth } from "../lib/auth";
 
 const SEVERITY_ICON: Record<string, string> = { critical: "🚨", warning: "⚠️", info: "ℹ️" };
@@ -205,8 +206,8 @@ export default function Dashboard() {
           {/* Main Column */}
           <div className="space-y-6 lg:col-span-2">
              
-             {/* Dual Metric View: CPU and Memory Top N */}
-             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+             {/* Top-N Metric Widgets: CPU, Memory, Bandwidth */}
+             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                  {/* Top CPU Widget */}
                  <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                      <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
@@ -218,9 +219,12 @@ export default function Dashboard() {
                          <div className="space-y-4">
                              {summary?.top_cpu_devices?.map((dev, i) => (
                                  <div key={i}>
-                                     <div className="flex justify-between text-[13px] font-bold text-navy dark:text-white mb-1.5">
-                                         <span>{dev.hostname} <span className="text-slate-400 dark:text-slate-500 font-medium ml-1">({dev.ip_address})</span></span>
-                                         <span>{dev.cpu.toFixed(1)}%</span>
+                                     <div className="flex justify-between items-center gap-2 text-[13px] font-bold text-navy dark:text-white mb-1.5">
+                                         <span className="truncate">{dev.hostname} <span className="text-slate-400 dark:text-slate-500 font-medium ml-1">({dev.ip_address})</span></span>
+                                         <span className="flex items-center gap-2 shrink-0">
+                                             <Sparkline values={dev.cpu_history} color={dev.cpu >= 85 ? "#dc2626" : dev.cpu >= 65 ? "#d97706" : "#2563eb"} />
+                                             {dev.cpu.toFixed(1)}%
+                                         </span>
                                      </div>
                                      <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
                                          <div className={`h-full ${getUtilColor(dev.cpu)}`} style={{ width: `${Math.min(dev.cpu, 100)}%` }} />
@@ -242,12 +246,43 @@ export default function Dashboard() {
                          <div className="space-y-4">
                              {summary?.top_memory_devices?.map((dev, i) => (
                                  <div key={i}>
-                                     <div className="flex justify-between text-[13px] font-bold text-navy dark:text-white mb-1.5">
-                                         <span>{dev.hostname} <span className="text-slate-400 dark:text-slate-500 font-medium ml-1">({dev.ip_address})</span></span>
-                                         <span>{dev.memory.toFixed(1)}%</span>
+                                     <div className="flex justify-between items-center gap-2 text-[13px] font-bold text-navy dark:text-white mb-1.5">
+                                         <span className="truncate">{dev.hostname} <span className="text-slate-400 dark:text-slate-500 font-medium ml-1">({dev.ip_address})</span></span>
+                                         <span className="flex items-center gap-2 shrink-0">
+                                             <Sparkline values={dev.memory_history} color={dev.memory >= 85 ? "#dc2626" : dev.memory >= 65 ? "#d97706" : "#2563eb"} />
+                                             {dev.memory.toFixed(1)}%
+                                         </span>
                                      </div>
                                      <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
                                          <div className={`h-full ${getUtilColor(dev.memory)}`} style={{ width: `${Math.min(dev.memory, 100)}%` }} />
+                                     </div>
+                                 </div>
+                             ))}
+                         </div>
+                     )}
+                 </div>
+
+                 {/* Top Bandwidth Widget -- fleet-wide highest interface_utilization_pct,
+                     same shape/data source as Top CPU/Memory (see dashboard.py top_bandwidth_devices) */}
+                 <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                     <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                         <span className="bg-slate-100 dark:bg-slate-700 p-1.5 rounded-lg text-lg">📶</span> Top Bandwidth Utilization
+                     </h3>
+                     {summary?.top_bandwidth_devices?.length === 0 ? (
+                         <p className="text-xs text-slate-400 dark:text-slate-500 italic">No telemetry data available.</p>
+                     ) : (
+                         <div className="space-y-4">
+                             {summary?.top_bandwidth_devices?.map((dev, i) => (
+                                 <div key={i}>
+                                     <div className="flex justify-between items-center gap-2 text-[13px] font-bold text-navy dark:text-white mb-1.5">
+                                         <span className="truncate">{dev.hostname} <span className="text-slate-400 dark:text-slate-500 font-medium ml-1">({dev.ip_address})</span></span>
+                                         <span className="flex items-center gap-2 shrink-0">
+                                             <Sparkline values={dev.bandwidth_history} color={dev.bandwidth >= 85 ? "#dc2626" : dev.bandwidth >= 65 ? "#d97706" : "#2563eb"} />
+                                             {dev.bandwidth.toFixed(1)}%
+                                         </span>
+                                     </div>
+                                     <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
+                                         <div className={`h-full ${getUtilColor(dev.bandwidth)}`} style={{ width: `${Math.min(dev.bandwidth, 100)}%` }} />
                                      </div>
                                  </div>
                              ))}
@@ -286,9 +321,9 @@ export default function Dashboard() {
                                      <td className="py-2.5 font-semibold text-brandblue text-xs">{op.device_hostname}</td>
                                      <td className="py-2.5">
                                          {op.success ? (
-                                             <span className="text-[10px] uppercase font-bold text- рискlow bg-green-50 text-green-700 px-2 py-0.5 rounded shadow-sm">Success</span>
+                                             <span className="text-[10px] uppercase font-bold text-risklow bg-green-50 text-green-700 px-2 py-0.5 rounded shadow-sm">Success</span>
                                          ) : (
-                                             <span className="text-[10px] uppercase font-bold text- рискcrit bg-red-50 text-red-700 px-2 py-0.5 rounded shadow-sm">Failed</span>
+                                             <span className="text-[10px] uppercase font-bold text-riskcrit bg-red-50 text-red-700 px-2 py-0.5 rounded shadow-sm">Failed</span>
                                          )}
                                      </td>
                                      <td className="py-2.5 text-right font-medium text-slate-400 dark:text-slate-500 text-xs">{timeAgo(op.created_at)}</td>
@@ -319,6 +354,29 @@ export default function Dashboard() {
                      className="bg-brandblue text-white rounded-full px-5 py-2 text-xs font-bold tracking-widest shadow-md hover:bg-navy dark:bg-slate-950 transition-colors shrink-0 uppercase"
                      >
                      Review Drift
+                     </Link>
+                 </div>
+                 </div>
+             )}
+
+             {/* EOL/EOS Firmware Widget */}
+             {summary && summary.eos_device_count > 0 && (
+                 <div className="bg-white dark:bg-slate-800 border-2 border-riskcrit/20 rounded-xl p-5 shadow-sm transform transition hover:-translate-y-1">
+                 <div className="flex items-start justify-between gap-4 flex-wrap">
+                     <div>
+                     <h2 className="text-xs font-bold text-riskcrit uppercase tracking-wider mb-2 flex items-center gap-2">
+                         <span className="text-lg">🕰️</span> End-of-Support Firmware Detected
+                     </h2>
+                     <p className="text-sm font-medium text-slate-600 dark:text-slate-300 leading-relaxed">
+                         <strong className="text-navy dark:text-white">{summary.eos_device_count} device(s)</strong> are running
+                         hardware/software past its vendor End-of-Support date -- no more fixes or support contracts available.
+                     </p>
+                     </div>
+                     <Link
+                     to="/devices"
+                     className="bg-riskcrit text-white rounded-full px-5 py-2 text-xs font-bold tracking-widest shadow-md hover:bg-red-700 transition-colors shrink-0 uppercase"
+                     >
+                     Review Devices
                      </Link>
                  </div>
                  </div>

@@ -26,9 +26,11 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass, field
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
+from app.models.device_metric import DeviceMetric
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
 from app.services import gns3_service, risk_engine, snapshot_service
@@ -45,6 +47,8 @@ class TopologyNode:
     status: str
     flagged_unstable: bool
     has_config_on_file: bool
+    health_color: str | None = None
+    health_score: int | None = None
 
 
 @dataclass
@@ -96,6 +100,34 @@ def _interface_networks(config_text: str) -> list[ipaddress.IPv4Network]:
     return networks
 
 
+def _latest_health_by_device(db: Session) -> dict[str, tuple[str, int | None]]:
+    """device_id -> (health_color, health_score) from each device's most
+    recent DeviceMetric row, for coloring topology nodes by live SNMP
+    health. Same "latest row per device" subquery shape as
+    app.api.dashboard._compute_summary's Top CPU/Memory widget, so a
+    device the map has never polled simply isn't in the returned dict
+    (caller treats that as unknown/gray, not an error).
+    """
+    latest_subq = (
+        db.query(DeviceMetric.device_id, func.max(DeviceMetric.polled_at).label("latest_polled_at"))
+        .group_by(DeviceMetric.device_id)
+        .subquery()
+    )
+    rows = (
+        db.query(DeviceMetric)
+        .join(
+            latest_subq,
+            (DeviceMetric.device_id == latest_subq.c.device_id)
+            & (DeviceMetric.polled_at == latest_subq.c.latest_polled_at),
+        )
+        .all()
+    )
+    return {
+        str(row.device_id): (row.health_color.value if row.health_color else "unknown", row.health_score)
+        for row in rows
+    }
+
+
 def build_topology(db: Session) -> TopologyGraph:
     """Builds the fleet-wide topology graph: one node per device, edges
     inferred from shared interface subnets across each device's latest
@@ -103,6 +135,7 @@ def build_topology(db: Session) -> TopologyGraph:
     sizes; revisit (e.g. index by subnet first) if this becomes hot.
     """
     devices = db.query(Device).order_by(Device.hostname).all()
+    health_by_device = _latest_health_by_device(db)
 
     nodes: list[TopologyNode] = []
     # device_id -> list of (network, original_ip) so edges can report which
@@ -111,6 +144,7 @@ def build_topology(db: Session) -> TopologyGraph:
 
     for device in devices:
         config_text = _latest_config(db, device.id)
+        health_color, health_score = health_by_device.get(str(device.id), (None, None))
         nodes.append(
             TopologyNode(
                 id=str(device.id),
@@ -122,6 +156,8 @@ def build_topology(db: Session) -> TopologyGraph:
                 status=device.status.value if hasattr(device.status, "value") else str(device.status),
                 flagged_unstable=bool(device.flagged_unstable),
                 has_config_on_file=config_text is not None,
+                health_color=health_color,
+                health_score=health_score,
             )
         )
         if config_text:

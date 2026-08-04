@@ -54,6 +54,14 @@ celery_app.conf.update(
             "task": "app.tasks.run_snmp_poll_sweep_task",
             "schedule": float(settings.SNMP_POLL_INTERVAL_SECONDS),
         },
+        # Device reachability (ping) sweep: keeps Device.status accurate
+        # for every device, not just SNMP-enabled ones -- see
+        # app.services.reachability_service for why this exists (status
+        # was previously only ever set for GNS3-imported lab devices).
+        "reachability-sweep": {
+            "task": "app.tasks.run_reachability_sweep_task",
+            "schedule": float(settings.REACHABILITY_POLL_INTERVAL_SECONDS),
+        },
         # Compliance report scheduling: turns GET /reports/compliance from
         # something someone has to remember to pull into a recurring
         # artifact emailed to NOTIFY_EMAIL_RECIPIENTS (see

@@ -16,7 +16,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import AlertSource
-from app.models.device import Device
+from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
 from app.services import alert_service, credential_service, notification_service, snmp_service
 from app.services.snmp_service import SnmpMetrics
@@ -151,6 +151,101 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             )
 
 
+# Metric family -> (SnmpMetrics attribute, Device freshness-column attribute).
+# Interface utilization deliberately uses the *computed* pct (metrics.
+# interface_utilization_pct, set just above this dict's call site) rather
+# than the raw octet counters, since a device needs two consecutive good
+# polls before that pct exists at all -- stamping on the raw counters
+# would mark the metric "fresh" one poll before it's actually usable.
+_FRESHNESS_FIELDS = (
+    ("cpu_utilization_pct", "last_cpu_success_at"),
+    ("memory_utilization_pct", "last_memory_success_at"),
+    ("interface_utilization_pct", "last_interface_success_at"),
+    ("temperature_celsius", "last_temperature_success_at"),
+    ("fan_status", "last_fan_success_at"),
+    ("power_supply_status", "last_power_success_at"),
+)
+
+
+def _stamp_metric_freshness(device: Device, metrics: SnmpMetrics) -> None:
+    """Data Completeness: updates each per-metric last-successful-read
+    column on `device` for whichever readings actually came back non-None
+    on this poll -- a metric that failed to resolve this time just keeps
+    its previous timestamp (so it visibly falls behind) instead of being
+    cleared or stamped with "now" like a good reading would be.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for metrics_attr, device_attr in _FRESHNESS_FIELDS:
+        if getattr(metrics, metrics_attr, None) is not None:
+            setattr(device, device_attr, now)
+
+
+def metric_freshness(device: Device) -> dict:
+    """Per-metric last-successful-read timestamps for one device, as ISO
+    strings (None if that metric has never once resolved) -- what the
+    Health Dashboard card/detail view uses to show a per-metric "stale"
+    badge instead of relying solely on the device-level health color."""
+    return {
+        "cpu": device.last_cpu_success_at.isoformat() if device.last_cpu_success_at else None,
+        "memory": device.last_memory_success_at.isoformat() if device.last_memory_success_at else None,
+        "interface": device.last_interface_success_at.isoformat() if device.last_interface_success_at else None,
+        "temperature": device.last_temperature_success_at.isoformat() if device.last_temperature_success_at else None,
+        "fan": device.last_fan_success_at.isoformat() if device.last_fan_success_at else None,
+        "power": device.last_power_success_at.isoformat() if device.last_power_success_at else None,
+    }
+
+
+# A metric is flagged "stale" for the fleet-health rollup once its last
+# successful read is older than this, even if the device's overall
+# health_color is still green from whatever readings *did* come back.
+# Matched to the default SNMP poll cadence (see settings.SNMP_POLL_INTERVAL_
+# SECONDS) with generous headroom -- a couple of missed polls in a row is
+# noise (one bad walk), several in a row is a real gap worth surfacing.
+STALE_METRIC_THRESHOLD = datetime.timedelta(hours=1)
+
+
+# Short metric-family name (matches metric_freshness()'s keys, and what
+# the frontend badges on) -> Device freshness-column attribute.
+_STALE_CHECK_FIELDS = (
+    ("cpu", "last_cpu_success_at"),
+    ("memory", "last_memory_success_at"),
+    ("interface", "last_interface_success_at"),
+    ("temperature", "last_temperature_success_at"),
+    ("fan", "last_fan_success_at"),
+    ("power", "last_power_success_at"),
+)
+
+
+def stale_metric_names(device: Device) -> list[str]:
+    """Names (matching MetricFreshness's fields, e.g. "interface") of
+    metric families that have resolved at least once for this device but
+    are now lagging significantly behind its own most recent poll -- e.g.
+    CPU/mem keep advancing every poll while the interface table has
+    quietly stopped resolving. A metric that has *never* resolved (still
+    None) is not included: for hardware without a given sensor (e.g. a
+    lab image with no fan/power MIBs) that's expected and permanent, not
+    a regression. Devices never polled at all return [] too (pre-existing
+    empty-Health-tab case, not a "gone stale" case).
+    """
+    if device.last_snmp_poll_at is None:
+        return []
+    stale: list[str] = []
+    for family, device_attr in _STALE_CHECK_FIELDS:
+        stamped = getattr(device, device_attr, None)
+        if stamped is not None and (device.last_snmp_poll_at - stamped) > STALE_METRIC_THRESHOLD:
+            stale.append(family)
+    return stale
+
+
+def has_stale_metric(device: Device) -> bool:
+    """True if this SNMP-monitored device has at least one metric family
+    that used to resolve successfully but has fallen behind the device's
+    own recent polls -- the Data Completeness signal the fleet health
+    strip's "N devices with stale metrics" badge is built from.
+    """
+    return bool(stale_metric_names(device))
+
+
 def poll_device(db: Session, device: Device) -> DeviceMetric:
     """Runs one SNMP health poll for `device`, persists the result as a new
     DeviceMetric row, raises any threshold-breach Alerts, and returns the
@@ -200,6 +295,7 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
         device.ip_address,
         auth,
         timeout=settings.SNMP_TIMEOUT_SECONDS,
+        vendor=device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor),
     )
     metrics.interface_utilization_pct = _compute_interface_utilization(metrics, previous, interval_seconds)
 
@@ -215,6 +311,23 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     device.last_snmp_poll_error = (
         None if metrics.uptime_seconds is not None else "Device did not respond to SNMP GET (sysUpTime)"
     )
+
+    # Keep Device.status in sync with reality the moment we have direct
+    # evidence, rather than making the operator wait for the next
+    # independent reachability_service ping sweep (REACHABILITY_POLL_
+    # INTERVAL_SECONDS) to catch up. A device that just answered dozens
+    # of SNMP GETs is unambiguously online -- there's no reason its
+    # status badge should still say UNKNOWN/OFFLINE until a separate
+    # subsystem gets around to pinging it. We only ever upgrade status
+    # here, never downgrade to OFFLINE on a failed SNMP poll: SNMP not
+    # responding (bad community string, ACL, agent disabled) is weak
+    # evidence of the device being down, and that call is left to the
+    # ping-based reachability sweep, which is a more direct signal for
+    # "is it actually offline."
+    if metrics.uptime_seconds is not None:
+        device.status = DeviceStatus.DEGRADED if color in ("yellow", "red") else DeviceStatus.ONLINE
+
+    _stamp_metric_freshness(device, metrics)
 
     row = DeviceMetric(
         device_id=device.id,
@@ -256,6 +369,8 @@ def device_health(db: Session, device: Device) -> dict:
             "health_color": "unknown",
             "reachable": False,
             "latest_metric": None,
+            "metric_freshness": metric_freshness(device),
+            "stale_metrics": stale_metric_names(device),
         }
     return {
         "device_id": device.id,
@@ -264,18 +379,37 @@ def device_health(db: Session, device: Device) -> dict:
         "health_color": latest.health_color.value if latest.health_color else "unknown",
         "reachable": latest.health_score is not None and latest.health_score > 0,
         "latest_metric": latest,
+        "metric_freshness": metric_freshness(device),
+        "stale_metrics": stale_metric_names(device),
     }
 
 
-def fleet_health_summary(db: Session) -> dict:
+def fleet_health_summary(db: Session, vendor: str | None = None) -> dict:
     """Fleet-wide rollup for the top of the Health Dashboard: how many
     devices are green/yellow/red right now, based on each device's most
     recent DeviceMetric row (one row per device, not one per poll).
+
+    ``vendor`` optionally scopes the rollup to a single vendor (e.g.
+    "juniper") so the Device Inventory page's vendor filter can turn this
+    into a one-vendor fleet-health strip without a separate endpoint --
+    see GET /metrics/health-summary?vendor=. Devices with at least one
+    metric family that's fallen behind (see has_stale_metric) are counted
+    separately so a fleet that's green-on-paper doesn't hide a data-
+    completeness gap.
     """
-    snmp_devices = db.query(Device).filter(Device.supports_snmp.is_(True)).all()
+    query = db.query(Device).filter(Device.supports_snmp.is_(True))
+    if vendor:
+        from app.models.device import DeviceVendor
+
+        try:
+            query = query.filter(Device.vendor == DeviceVendor(vendor.lower()))
+        except ValueError:
+            pass  # unknown vendor string -- fall through to an empty summary below
+    snmp_devices = query.all()
 
     counts = {"green": 0, "yellow": 0, "red": 0, "unknown": 0}
     scores: list[int] = []
+    stale_count = 0
     for device in snmp_devices:
         latest = (
             db.query(DeviceMetric)
@@ -283,6 +417,8 @@ def fleet_health_summary(db: Session) -> dict:
             .order_by(DeviceMetric.polled_at.desc())
             .first()
         )
+        if has_stale_metric(device):
+            stale_count += 1
         if latest is None or latest.health_color is None:
             counts["unknown"] += 1
             continue
@@ -297,6 +433,7 @@ def fleet_health_summary(db: Session) -> dict:
         "red": counts["red"],
         "unknown": counts["unknown"],
         "average_health_score": round(sum(scores) / len(scores)) if scores else None,
+        "devices_with_stale_metrics": stale_count,
     }
 
 

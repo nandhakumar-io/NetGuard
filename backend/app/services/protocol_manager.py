@@ -321,6 +321,22 @@ class ProtocolManager:
         (unsupported platform, device rejects it, no startup datastore)
         is swallowed here -- it's a best-effort addition to the backup,
         never a reason to fail the backup itself.
+
+        Juniper/Junos is a special case, not just "another vendor that
+        might fail": Junos has no separate startup datastore reachable
+        over NETCONF at all -- <get-config><source><startup/></source>
+        is only valid for `running`/`candidate` on Junos, so this call
+        unconditionally came back as an rpc-error ("startup" isn't a
+        recognized <source> child) on every single Juniper device, every
+        single backup, and the Configuration tab's "Startup Config"
+        panel showed "unavailable" forever, not just on a bad poll. This
+        isn't actually a gap, though: Junos commits apply straight to
+        the active configuration and *are* what the box boots from next
+        (there's no separate "write mem" step the way IOS has one), so
+        the running/committed config already fetched above -- widely
+        documented as Junos's own answer to "what's my startup config"
+        -- is used as the startup-config equivalent for Juniper instead
+        of attempting the unsupported NETCONF call.
         """
         result = self.get_running_config()
         result.operation = "backup_config"
@@ -329,6 +345,16 @@ class ProtocolManager:
             return result
 
         protocol = select_protocol(self.device)
+        vendor = self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor)
+        is_juniper = (vendor or "").lower() == "juniper"
+
+        if is_juniper:
+            # No credential/network round trip needed -- see docstring:
+            # Junos's committed config (already in `result.output`) *is*
+            # its startup config, there's no separate datastore to read.
+            result.startup_config = result.output
+            return result
+
         creds = self._safe_credentials(protocol=protocol, operation="backup_config")
         if isinstance(creds, ProtocolResult):
             return result
@@ -337,7 +363,7 @@ class ProtocolManager:
         if protocol == "netconf":
             startup_result = netconf_service.get_config(
                 self.device.ip_address, self.device.netconf_port, username, password,
-                source="startup", vendor=self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor),
+                source="startup", vendor=vendor,
             )
             if startup_result.success and startup_result.response_xml:
                 result.startup_config = startup_result.response_xml
@@ -362,7 +388,18 @@ class ProtocolManager:
         username, password = creds
 
         if protocol == "netconf":
-            result = netconf_service.get_config(self.device.ip_address, self.device.netconf_port, username, password, source="running")
+            is_juniper = (
+                self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor)
+            ).lower() == "juniper"
+            if is_juniper:
+                # <get-config> never carries operational (up/down) state on
+                # Junos -- see netconf_service.get_junos_interface_information
+                # for the full story. Use the real operational RPC instead.
+                result = netconf_service.get_junos_interface_information(
+                    self.device.ip_address, self.device.netconf_port, username, password
+                )
+            else:
+                result = netconf_service.get_config(self.device.ip_address, self.device.netconf_port, username, password, source="running")
             return self._record(
                 protocol="netconf", operation="get_interfaces", success=result.success,
                 request=result.request_xml, response=result.response_xml, http_status=None,

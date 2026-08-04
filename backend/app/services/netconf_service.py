@@ -108,6 +108,48 @@ def _connect(
     )
 
 
+def get_junos_interface_information(
+    ip_address: str,
+    port: int,
+    username: str,
+    password: str,
+) -> NetconfResult:
+    """Junos-specific operational interface state via the vendor RPC
+    <get-interface-information>, NOT <get-config>.
+
+    Why this exists: get_interfaces() used to call plain get_config(source
+    ="running") for every vendor, then hand the result to
+    config_format_service.parse_interfaces(). That's correct-ish for
+    Cisco IOS-XE (its config-get response happens to carry admin state,
+    and the generic ietf-interfaces parser can find enough to show
+    *something*), but it's fundamentally wrong for Junos: <get-config>
+    only ever returns *configuration* (what's provisioned), never
+    *operational* state (what's actually up/down right now) -- Junos
+    keeps those completely separate, unlike some IOS-XE YANG models. So
+    every real Juniper device came back with admin_status/oper_status
+    both None ("Unknown" in the UI) no matter what was actually
+    configured, because the field the parser was looking for
+    (oper-status) simply doesn't exist anywhere in a Junos config-get
+    response -- it's not a parsing bug, it's asking the wrong RPC.
+
+    ncclient's junos device_params handler exposes vendor ops as normal
+    method calls (conn.get_interface_information(...)) instead of raw
+    dispatch, which is what makes this a few lines instead of hand-built
+    RPC XML.
+    """
+    start = time.perf_counter()
+    request_xml = "<get-interface-information/>"
+    try:
+        with _connect(ip_address, port, username, password, vendor="juniper") as conn:
+            reply = conn.get_interface_information()
+            elapsed = (time.perf_counter() - start) * 1000
+            content = strip_rpc_envelope(str(reply)) or str(reply)
+            return NetconfResult(True, request_xml, _pretty_xml(content), elapsed)
+    except Exception as exc:  # noqa: BLE001
+        elapsed = (time.perf_counter() - start) * 1000
+        return NetconfResult(False, request_xml, "", elapsed, error=str(exc))
+
+
 def get_config(
     ip_address: str,
     port: int,

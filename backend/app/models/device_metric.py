@@ -11,6 +11,14 @@ class HealthColor(str, enum.Enum):
     GREEN = "green"
     YELLOW = "yellow"
     RED = "red"
+    # A poll that got a response (sysUpTime answered -- device is genuinely
+    # reachable) but resolved *zero* of the actual health OIDs (CPU/mem/
+    # temp/fan/power/interface-util all None) -- e.g. a lab/virtual image
+    # that doesn't implement the hardware-sensor MIBs at all. Previously
+    # this fell through to the "no readings -> 100/green" default, which
+    # rendered as a confident, fully-green "100/100" for a device we
+    # actually know nothing about -- worse than not showing a score.
+    GRAY = "gray"
 
 
 class DeviceMetric(Base):

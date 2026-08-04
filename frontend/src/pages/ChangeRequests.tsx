@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { ChangePriority, ChangeRequest, ChangeStatus, Device } from "../lib/types";
+import { ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
 import { useAuth } from "../lib/auth";
@@ -31,6 +31,8 @@ const emptyForm = {
   business_justification: "",
   priority: "medium" as ChangePriority,
   proposed_config: "",
+  additional_device_ids: [] as string[],
+  canary_enabled: false,
 };
 
 const STATUS_FILTERS: { value: ChangeStatus | "all"; label: string }[] = [
@@ -57,6 +59,16 @@ export default function ChangeRequests() {
   const [statusFilter, setStatusFilter] = useState<ChangeStatus | "all">("all");
   const [showForm, setShowForm] = useState(false);
 
+  // Config template picker (Jinja2 provisioning templates -- see
+  // /templates page and app/services/template_service.py). Filtered by
+  // the selected primary device's device_role so the operator only sees
+  // templates that actually apply, instead of the full library.
+  const [availableTemplates, setAvailableTemplates] = useState<ConfigTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
+  const [templateRendering, setTemplateRendering] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+
   const load = () => {
     Promise.all([api.get<ChangeRequest[]>("/change-requests"), api.get<Device[]>("/devices")])
       .then(([reqRes, devRes]) => {
@@ -68,6 +80,55 @@ export default function ChangeRequests() {
   };
 
   useEffect(load, []);
+
+  // Reload the applicable template list whenever the form is open and
+  // the primary device (-> device_role) changes -- a template tied to
+  // "access" role shouldn't show up when a "core" device is selected.
+  useEffect(() => {
+    if (!showForm) return;
+    const device = devices.find((d) => d.id === form.device_id);
+    const params: Record<string, string> = {};
+    if (device?.device_role) params.device_role = device.device_role;
+    if (device?.vendor) params.vendor = device.vendor;
+    api
+      .get<ConfigTemplate[]>("/config-templates", { params })
+      .then((res) => setAvailableTemplates(res.data))
+      .catch(() => setAvailableTemplates([]));
+    setSelectedTemplateId("");
+    setTemplateValues({});
+    setTemplateError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showForm, form.device_id]);
+
+  const selectedTemplate = availableTemplates.find((t) => t.id === selectedTemplateId) || null;
+
+  const selectTemplate = (id: string) => {
+    setSelectedTemplateId(id);
+    setTemplateError(null);
+    const t = availableTemplates.find((tpl) => tpl.id === id);
+    const initial: Record<string, string> = {};
+    t?.variables.forEach((v) => {
+      initial[v.name] = v.default || "";
+    });
+    setTemplateValues(initial);
+  };
+
+  const applyTemplate = async () => {
+    if (!selectedTemplate) return;
+    setTemplateRendering(true);
+    setTemplateError(null);
+    try {
+      const res = await api.post<{ rendered_config: string }>(
+        `/config-templates/${selectedTemplate.id}/render`,
+        { variables: templateValues }
+      );
+      setForm((f) => ({ ...f, proposed_config: res.data.rendered_config }));
+    } catch (err: any) {
+      setTemplateError(err?.response?.data?.detail || "Failed to render template.");
+    } finally {
+      setTemplateRendering(false);
+    }
+  };
 
   // Keep the detail panel fresh while a pipeline is running.
   useEffect(() => {
@@ -107,6 +168,33 @@ export default function ChangeRequests() {
   };
 
   const hostnameFor = (deviceId: string) => devices.find((d) => d.id === deviceId)?.hostname || deviceId.slice(0, 8);
+
+  // Distinct device_roles present among devices, for the "add all devices
+  // with this role" bulk-select shortcut below (ties into per-device-role
+  // compliance baselines on the Drift page: e.g. roll a change out to
+  // every "access" switch at once).
+  const rolesAvailable = useMemo(
+    () => Array.from(new Set(devices.map((d) => d.device_role).filter((r): r is string => !!r))).sort(),
+    [devices]
+  );
+
+  const toggleAdditionalDevice = (id: string) => {
+    setForm((f) => ({
+      ...f,
+      additional_device_ids: f.additional_device_ids.includes(id)
+        ? f.additional_device_ids.filter((x) => x !== id)
+        : [...f.additional_device_ids, id],
+    }));
+  };
+
+  const addAllWithRole = (role: string) => {
+    if (!role) return;
+    const matchIds = devices.filter((d) => d.device_role === role && d.id !== form.device_id).map((d) => d.id);
+    setForm((f) => ({
+      ...f,
+      additional_device_ids: Array.from(new Set([...f.additional_device_ids, ...matchIds])),
+    }));
+  };
 
   const filtered = useMemo(
     () => (statusFilter === "all" ? requests : requests.filter((r) => r.status === statusFilter)),
@@ -171,12 +259,130 @@ export default function ChangeRequests() {
               <option value="emergency">Emergency</option>
             </select>
           </div>
+
+          {/* Bulk / multi-device deploy (SRS 6.6) -- the same
+              proposed_config below also gets sent to every device checked
+              here, alongside the primary device selected above. Backend
+              already fully supports this (ChangeRequestCreate.
+              additional_device_ids + canary_enabled / canary_gate_task);
+              this panel is what was missing to actually reach it. */}
+          {devices.length > 1 && (
+            <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-50 dark:bg-slate-900">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  Also deploy to ({form.additional_device_ids.length} selected)
+                </p>
+                {rolesAvailable.length > 0 && (
+                  <select
+                    className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1 text-xs bg-white dark:bg-slate-800"
+                    value=""
+                    onChange={(e) => addAllWithRole(e.target.value)}
+                  >
+                    <option value="">+ Add all devices with role…</option>
+                    {rolesAvailable.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+                {devices
+                  .filter((d) => d.id !== form.device_id)
+                  .map((d) => (
+                    <label
+                      key={d.id}
+                      className={`flex items-center gap-1.5 text-xs border rounded-full px-2.5 py-1 cursor-pointer ${
+                        form.additional_device_ids.includes(d.id)
+                          ? "bg-blue-50 border-brandblue text-brandblue dark:bg-blue-950/40"
+                          : "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={form.additional_device_ids.includes(d.id)}
+                        onChange={() => toggleAdditionalDevice(d.id)}
+                      />
+                      {d.hostname}
+                      {d.device_role && <span className="opacity-60">· {d.device_role}</span>}
+                    </label>
+                  ))}
+              </div>
+              {form.additional_device_ids.length > 0 && (
+                <label className="flex items-center gap-2 mt-3 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.canary_enabled}
+                    onChange={(e) => setForm({ ...form, canary_enabled: e.target.checked })}
+                  />
+                  <span>
+                    <span className="font-semibold">Staged rollout (canary)</span> — deploy to the primary device
+                    first, wait for its health check to pass, then roll out to the rest. If the canary fails, the
+                    remaining {form.additional_device_ids.length} device{form.additional_device_ids.length === 1 ? "" : "s"} are skipped automatically.
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
           <input
             className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
             placeholder="Business justification (optional)"
             value={form.business_justification}
             onChange={(e) => setForm({ ...form, business_justification: e.target.value })}
           />
+          {availableTemplates.length > 0 && (
+            <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-50 dark:bg-slate-900">
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">
+                Use a Template
+              </p>
+              <select
+                className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-slate-800"
+                value={selectedTemplateId}
+                onChange={(e) => selectTemplate(e.target.value)}
+              >
+                <option value="">Write config from scratch…</option>
+                {availableTemplates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                    {t.device_role ? ` (${t.device_role})` : ""}
+                  </option>
+                ))}
+              </select>
+              {selectedTemplate && (
+                <div className="mt-3 flex flex-col gap-2">
+                  {selectedTemplate.variables.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {selectedTemplate.variables.map((v) => (
+                        <div key={v.name}>
+                          <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1">
+                            {v.label || v.name}
+                            {v.required && <span className="text-riskcrit ml-1">*</span>}
+                          </label>
+                          <input
+                            className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-1.5 text-sm bg-white dark:bg-slate-800"
+                            placeholder={v.default || v.name}
+                            value={templateValues[v.name] ?? ""}
+                            onChange={(e) => setTemplateValues((p) => ({ ...p, [v.name]: e.target.value }))}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={applyTemplate}
+                    disabled={templateRendering}
+                    className="self-start bg-brandblue text-white rounded-lg px-4 py-1.5 text-xs font-bold uppercase tracking-wider hover:bg-navy disabled:opacity-50"
+                  >
+                    {templateRendering ? "Rendering…" : "Fill Proposed Config"}
+                  </button>
+                  {templateError && <p className="text-riskcrit text-xs">{templateError}</p>}
+                </div>
+              )}
+            </div>
+          )}
           <textarea
             className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm font-mono"
             rows={5}
@@ -251,6 +457,14 @@ export default function ChangeRequests() {
                 >
                   <td className="px-4 py-3 font-medium text-navy dark:text-white">
                     {hostnameFor(r.device_id)}
+                    {(r.target_device_count || 1) > 1 && (
+                      <span
+                        className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-600 align-middle"
+                        title={r.canary_enabled ? "Staged (canary) rollout" : "Bulk deploy"}
+                      >
+                        +{(r.target_device_count || 1) - 1} {r.canary_enabled ? "🐤" : ""}
+                      </span>
+                    )}
                     {r.is_rollback === "true" && (
                       <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700 align-middle">
                         ↺ rollback
@@ -302,6 +516,16 @@ export default function ChangeRequests() {
                     Device: {hostnameFor(selected.device_id)} · Submitted{" "}
                     {new Date(selected.created_at).toLocaleString()}
                   </p>
+                  {(selected.target_device_count || 1) > 1 && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                      Also targets: {(selected.additional_device_ids || []).map(hostnameFor).join(", ")}
+                      {selected.canary_enabled && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700">
+                          🐤 staged rollout
+                        </span>
+                      )}
+                    </p>
+                  )}
                   {selected.business_justification && (
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 italic">"{selected.business_justification}"</p>
                   )}
