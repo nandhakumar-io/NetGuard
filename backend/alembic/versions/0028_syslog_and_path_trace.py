@@ -38,13 +38,26 @@ def upgrade() -> None:
     bind = op.get_bind()
     exists = bind.execute(sa.text("SELECT 1 FROM pg_type WHERE typname = 'alertsource'")).scalar()
     if exists:
+        op.execute("COMMIT")
         op.execute("ALTER TYPE alertsource ADD VALUE IF NOT EXISTS 'syslog'")
+        op.execute("BEGIN")
 
+    def _create_enum_if_not_exists(bind, *values, name):
+        bind.execute(sa.text("SAVEPOINT _ceq"))
+        try:
+            vals = ", ".join(f"'{v}'" for v in values)
+            bind.execute(sa.text(f"CREATE TYPE {name} AS ENUM ({vals})"))
+            bind.execute(sa.text("RELEASE SAVEPOINT _ceq"))
+        except Exception:
+            bind.execute(sa.text("ROLLBACK TO SAVEPOINT _ceq"))
+            bind.execute(sa.text("RELEASE SAVEPOINT _ceq"))
+
+    _create_enum_if_not_exists(bind, "EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARNING", "NOTICE", "INFORMATIONAL", "DEBUG", name="syslogseverity")
     syslog_severity = postgresql.ENUM(
         "EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARNING", "NOTICE", "INFORMATIONAL", "DEBUG",
         name="syslogseverity",
+        create_type=False
     )
-    syslog_severity.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "syslog_messages",
@@ -68,10 +81,11 @@ def upgrade() -> None:
     op.create_index("ix_syslog_messages_received_at", "syslog_messages", ["received_at"])
     op.create_index("ix_syslog_messages_correlated_category", "syslog_messages", ["correlated_category"])
 
-    path_trace_status = postgresql.ENUM("COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus")
-    path_trace_status.create(op.get_bind(), checkfirst=True)
-    hop_status = postgresql.ENUM("OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus")
-    hop_status.create(op.get_bind(), checkfirst=True)
+    _create_enum_if_not_exists(bind, "COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus")
+    path_trace_status = postgresql.ENUM("COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus", create_type=False)
+    
+    _create_enum_if_not_exists(bind, "OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus")
+    hop_status = postgresql.ENUM("OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus", create_type=False)
 
     op.create_table(
         "path_traces",

@@ -75,6 +75,16 @@ class Alert(Base):
     root_cause_alert_id = Column(UUID(as_uuid=True), ForeignKey("alerts.id"), nullable=True, index=True)
     suppressed = Column(Boolean, nullable=False, default=False, server_default="false")
 
+    # Maintenance-window suppression (app.services.alert_service +
+    # app.models.maintenance_window): set when this alert was raised/
+    # updated while an active maintenance window covered its device.
+    # Distinct from `suppressed` above (that's topology-correlation
+    # "consequence of another alert"); this one is "expected noise during
+    # planned work". Still stored and independently resolvable -- just
+    # excluded from the default Active Alerts view and from notification
+    # fan-out.
+    suppressed_by_window_id = Column(UUID(as_uuid=True), ForeignKey("maintenance_windows.id"), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     root_cause = relationship("Alert", remote_side=[id], foreign_keys=[root_cause_alert_id])

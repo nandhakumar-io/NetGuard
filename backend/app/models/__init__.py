@@ -17,5 +17,5 @@ from app.models.compliance_baseline import ComplianceBaseline  # noqa: F401
 from app.models.config_template import ConfigTemplate, ConfigTemplateVersion  # noqa: F401
 from app.models.syslog_message import SyslogMessage, SyslogSeverity  # noqa: F401
 from app.models.path_trace import PathTrace, PathHop, PathTraceStatus, HopStatus  # noqa: F401
-from app.models.flow_record import FlowRecord, FlowProtocolVersion  # noqa: F401
-from app.models.topology_snapshot import TopologySnapshot  # noqa: F401
+from app.models.maintenance_window import MaintenanceWindow, MaintenanceScope  # noqa: F401
+from app.models.firmware_upgrade import FirmwareUpgrade, FirmwareUpgradeStatus  # noqa: F401

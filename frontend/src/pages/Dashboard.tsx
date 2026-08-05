@@ -1,10 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { api } from "../lib/api";
 import { DashboardSummary, DriftFleetSummary, Alert } from "../lib/types";
 import StatCard from "../components/StatCard";
 import Sparkline from "../components/Sparkline";
 import { useAuth } from "../lib/auth";
+
+function formatBps(bps: number | null): string {
+  if (bps === null || Number.isNaN(bps)) return "—";
+  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`;
+  if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} Mbps`;
+  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} Kbps`;
+  return `${bps.toFixed(0)} bps`;
+}
 
 const SEVERITY_ICON: Record<string, string> = { critical: "🚨", warning: "⚠️", info: "ℹ️" };
 const SEVERITY_COLOR: Record<string, string> = { critical: "text-riskcrit", warning: "text-riskmed", info: "text-brandblue" };
@@ -202,10 +220,115 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Fleet Health Trend -- 24h fleet-wide avg CPU / memory / bandwidth,
+          the graph the dashboard was missing: everything above is a
+          point-in-time snapshot, this is the actual trend over time. */}
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3">
+          Fleet Health Trend (24h)
+        </p>
+        {(summary?.fleet_health_history?.length ?? 0) === 0 ? (
+          <p className="text-sm text-slate-400 py-10 text-center">Not enough polling history yet.</p>
+        ) : (
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={summary?.fleet_health_history}>
+                <defs>
+                  <linearGradient id="cpuFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#2563eb" stopOpacity={0.02} />
+                  </linearGradient>
+                  <linearGradient id="memFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#7c3aed" stopOpacity={0.02} />
+                  </linearGradient>
+                  <linearGradient id="bwFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#d97706" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#d97706" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis
+                  dataKey="timestamp"
+                  tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")}
+                  tick={{ fontSize: 11 }}
+                  minTickGap={40}
+                />
+                <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11 }} width={40} domain={[0, 100]} />
+                <Tooltip
+                  formatter={(v: number, name: string) => [`${v?.toFixed?.(1) ?? v}%`, name]}
+                  labelFormatter={(v) => (v ? new Date(v).toLocaleString() : "")}
+                />
+                <Legend wrapperStyle={{ fontSize: 12, fontWeight: 600 }} />
+                <Area type="monotone" dataKey="avg_cpu" name="CPU" stroke="#2563eb" fill="url(#cpuFill)" strokeWidth={2} connectNulls />
+                <Area type="monotone" dataKey="avg_memory" name="Memory" stroke="#7c3aed" fill="url(#memFill)" strokeWidth={2} connectNulls />
+                <Area type="monotone" dataKey="avg_bandwidth" name="Bandwidth" stroke="#d97706" fill="url(#bwFill)" strokeWidth={2} connectNulls />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Column */}
           <div className="space-y-6 lg:col-span-2">
-             
+
+             {/* Uplinks / WAN Links */}
+             <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                 <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                     <span className="bg-slate-100 dark:bg-slate-700 p-1.5 rounded-lg text-lg">🌐</span> Uplinks &amp; WAN Links
+                 </h3>
+                 {(summary?.uplinks?.length ?? 0) === 0 ? (
+                     <p className="text-xs text-slate-400 dark:text-slate-500 italic">
+                         No devices tagged as WAN/uplink/core/edge yet. Set a device's Role (e.g. "wan-edge", "core",
+                         "uplink") to surface it here.
+                     </p>
+                 ) : (
+                     <div className="space-y-4">
+                         {summary?.uplinks?.map((link, i) => (
+                             <div key={i} className="flex flex-col gap-1.5">
+                                 <div className="flex justify-between items-center gap-2 text-[13px]">
+                                     <span className="flex items-center gap-2 font-bold text-navy dark:text-white truncate">
+                                         <span
+                                             className={`w-2 h-2 rounded-full shrink-0 ${
+                                                 link.status === "online"
+                                                     ? "bg-risklow"
+                                                     : link.status === "offline"
+                                                     ? "bg-riskcrit"
+                                                     : "bg-slate-300 dark:bg-slate-600"
+                                             }`}
+                                         />
+                                         {link.hostname}
+                                         <span className="text-slate-400 dark:text-slate-500 font-medium">({link.ip_address})</span>
+                                         {link.role && (
+                                             <span className="text-[10px] uppercase font-bold text-brandblue bg-blue-50 dark:bg-slate-700 px-1.5 py-0.5 rounded">
+                                                 {link.role}
+                                             </span>
+                                         )}
+                                     </span>
+                                     <span className="flex items-center gap-2 shrink-0 font-bold text-navy dark:text-white">
+                                         <Sparkline
+                                             values={link.history}
+                                             color={link.utilization_pct >= 85 ? "#dc2626" : link.utilization_pct >= 65 ? "#d97706" : "#2563eb"}
+                                         />
+                                         {formatBps(link.throughput_bps)}
+                                         <span className="text-slate-400 dark:text-slate-500 font-medium">
+                                             ({link.utilization_pct.toFixed(1)}%)
+                                         </span>
+                                     </span>
+                                 </div>
+                                 <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
+                                     <div className={`h-full ${getUtilColor(link.utilization_pct)}`} style={{ width: `${Math.min(link.utilization_pct, 100)}%` }} />
+                                 </div>
+                                 {(link.errors ?? 0) > 0 && (
+                                     <p className="text-[11px] font-semibold text-riskmed">{link.errors} interface error(s) since last poll</p>
+                                 )}
+                             </div>
+                         ))}
+                     </div>
+                 )}
+             </div>
+
              {/* Top-N Metric Widgets: CPU, Memory, Bandwidth */}
              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                  {/* Top CPU Widget */}

@@ -382,6 +382,23 @@ export interface DashboardSummary {
   top_cpu_devices: { hostname: string; ip_address: string; cpu: number; cpu_history: number[] }[];
   top_memory_devices: { hostname: string; ip_address: string; memory: number; memory_history: number[] }[];
   top_bandwidth_devices: { hostname: string; ip_address: string; bandwidth: number; bandwidth_history: number[] }[];
+  uplinks: {
+    hostname: string;
+    ip_address: string;
+    role: string | null;
+    status: string;
+    utilization_pct: number;
+    throughput_bps: number | null;
+    link_speed_bps: number | null;
+    errors: number | null;
+    history: number[];
+  }[];
+  fleet_health_history: {
+    timestamp: string | null;
+    avg_cpu: number | null;
+    avg_memory: number | null;
+    avg_bandwidth: number | null;
+  }[];
   recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
   recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
 }
@@ -407,6 +424,7 @@ export interface Alert {
   occurrence_count?: number;
   root_cause_alert_id: string | null;
   suppressed: boolean;
+  suppressed_by_window_id?: string | null;
   created_at: string;
 }
 
@@ -416,6 +434,63 @@ export interface AlertSummary {
   info: number;
   active_total: number;
   resolved: number;
+}
+
+// --- Maintenance Windows ---
+
+export type MaintenanceScope = "device" | "site" | "fleet";
+
+export interface MaintenanceWindow {
+  id: string;
+  name: string;
+  reason: string | null;
+  scope: MaintenanceScope;
+  device_id: string | null;
+  site: string | null;
+  starts_at: string;
+  ends_at: string;
+  cancelled: boolean;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  created_by: string;
+  created_at: string;
+  is_active: boolean;
+}
+
+// --- Firmware / OS Upgrade Orchestration ---
+
+export type FirmwareUpgradeStatus =
+  | "pending"
+  | "scheduled"
+  | "downloading"
+  | "installing"
+  | "rebooting"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "rolled_back"
+  | "cancelled";
+
+export interface FirmwareUpgrade {
+  id: string;
+  batch_id: string | null;
+  device_id: string;
+  from_version: string | null;
+  target_version: string;
+  image_filename: string;
+  image_sha256: string | null;
+  status: FirmwareUpgradeStatus;
+  current_step_detail: string | null;
+  error_message: string | null;
+  maintenance_window_id: string | null;
+  scheduled_at: string | null;
+  pre_upgrade_snapshot_id: string | null;
+  reboot_wait_seconds: number;
+  attempts: number;
+  initiated_by: string;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
 }
 
 export interface HealthCheck {
@@ -674,6 +749,7 @@ export interface PathTrace {
   created_at: string;
   hops: PathHop[];
 }
+
 // --- Traffic Analysis (NetFlow / IPFIX / sFlow) ---------------------------
 
 export interface TopTalker {
@@ -716,38 +792,4 @@ export interface TrafficSummary {
   protocol_breakdown: ProtocolShare[];
   bandwidth_timeseries: BandwidthPoint[];
   exporters: FlowExporter[];
-}
-
-// --- Topology snapshots / diffing -----------------------------------------
-
-export interface TopologySnapshotSummary {
-  id: string;
-  node_count: number;
-  edge_count: number;
-  captured_at: string | null;
-}
-
-export interface TopologyDiffNode {
-  id: string;
-  hostname: string;
-  ip_address: string;
-}
-
-export interface TopologyDiffEdge {
-  source: string;
-  target: string;
-  link_source: string;
-}
-
-export interface TopologyDiff {
-  older_snapshot_id: string;
-  newer_snapshot_id: string;
-  older_captured_at: string | null;
-  newer_captured_at: string | null;
-  added_nodes: TopologyDiffNode[];
-  removed_nodes: TopologyDiffNode[];
-  added_edges: TopologyDiffEdge[];
-  removed_edges: TopologyDiffEdge[];
-  unchanged_node_count: number;
-  unchanged_edge_count: number;
 }

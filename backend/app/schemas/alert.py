@@ -21,6 +21,7 @@ class AlertRead(BaseModel):
     occurrence_count: int = 1
     root_cause_alert_id: uuid.UUID | None = None
     suppressed: bool = False
+    suppressed_by_window_id: uuid.UUID | None = None
     created_at: datetime
 
     class Config:

@@ -176,9 +176,10 @@ class DeviceRead(DeviceBase):
             enabled_health_checks=checks,
         )
         obj.snmp_credentials_configured = bool(
-            device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted
+            device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted or
+            device.snmp_community_ref or device.snmp_auth_credential_ref or device.snmp_privacy_credential_ref
         )
-        obj.ssh_credentials_configured = bool(device.ssh_password_encrypted)
+        obj.ssh_credentials_configured = bool(device.ssh_password_encrypted or device.ssh_credential_ref)
 
         from app.services import eol_service
 

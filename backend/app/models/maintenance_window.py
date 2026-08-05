@@ -1,0 +1,64 @@
+import enum
+import uuid
+
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from app.core.database import Base
+
+
+class MaintenanceScope(str, enum.Enum):
+    """What a window applies to. DEVICE targets a single device (typical
+    "reloading this box for a planned change"); SITE targets every device
+    sharing a `site` value (Device.site) for work that touches a whole
+    location at once (e.g. a WAN circuit migration); FLEET silences
+    alerting across every device -- used sparingly, e.g. a monitoring
+    platform migration where alert noise is expected fleet-wide.
+    """
+
+    DEVICE = "device"
+    SITE = "site"
+    FLEET = "fleet"
+
+
+class MaintenanceWindow(Base):
+    """A scheduled window during which alerts for the covered device(s)
+    are suppressed instead of paging/showing up as active.
+
+    This does NOT stop polling or alert *evaluation* -- SNMP polls, health
+    checks, and threshold breaches all still run and are still recorded
+    (nothing about the underlying telemetry pipeline changes). What it
+    changes is only what `alert_service.raise_alert` does with the result:
+    while `now` falls inside an active, non-cancelled window whose scope
+    covers the alert's device, the alert is created/updated with
+    `suppressed=True` and does not fan out a realtime/notification event.
+    That keeps the alert queryable/auditable after the fact (nothing is
+    silently dropped) without lighting up the Alert Center or paging
+    on-call for expected noise during planned work.
+    """
+
+    __tablename__ = "maintenance_windows"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    name = Column(String, nullable=False)
+    reason = Column(Text, nullable=True)
+
+    scope = Column(Enum(MaintenanceScope, values_callable=lambda obj: [e.value for e in obj]), nullable=False, default=MaintenanceScope.DEVICE)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True, index=True)
+    site = Column(String, nullable=True, index=True)
+
+    starts_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=False)
+
+    # Manual early-exit without deleting the row (keeps history/audit
+    # trail of "this window was cancelled" instead of vanishing).
+    cancelled = Column(Boolean, nullable=False, default=False, server_default="false")
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_by = Column(String, nullable=True)
+
+    created_by = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    device = relationship("Device")

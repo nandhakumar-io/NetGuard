@@ -21,6 +21,8 @@ from app.api import (
     config_templates,
     syslog,
     path_trace,
+    maintenance_windows,
+    firmware_upgrades,
     flows,
 )
 
@@ -45,4 +47,6 @@ api_router.include_router(compliance_baselines.router)
 api_router.include_router(config_templates.router)
 api_router.include_router(syslog.router)
 api_router.include_router(path_trace.router)
+api_router.include_router(maintenance_windows.router)
+api_router.include_router(firmware_upgrades.router)
 api_router.include_router(flows.router)

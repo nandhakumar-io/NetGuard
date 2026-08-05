@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity, AlertSource
-from app.services import alert_correlation_service, event_bus
+from app.services import alert_correlation_service, event_bus, maintenance_window_service
 
 
 # ------------------------------------------------------------------
@@ -35,26 +35,34 @@ def create_alert(
     if isinstance(source, str):
         source = AlertSource(source)
 
+    window = maintenance_window_service.find_active_window(db, device_id)
+
     alert = Alert(
         device_id=device_id,
         severity=severity,
         source=source,
         category=category,
         message=message,
+        suppressed_by_window_id=window.id if window else None,
     )
     db.add(alert)
     db.commit()
     db.refresh(alert)
 
-    event_bus.publish_event(
-        "alert_created",
-        alert_id=str(alert.id),
-        severity=severity.value,
-        category=category,
-        channel=event_bus.ALERTS_CHANNEL,
-    )
-    # Also nudge dashboard so the summary stat cards refresh.
-    event_bus.publish_event("alert_created", alert_id=str(alert.id))
+    # A window-suppressed alert is still persisted (queryable/auditable
+    # after the fact) but doesn't fan out realtime/notification events --
+    # that's the whole point of scheduling planned work, so it doesn't
+    # page on-call or light up the Alert Center for expected noise.
+    if window is None:
+        event_bus.publish_event(
+            "alert_created",
+            alert_id=str(alert.id),
+            severity=severity.value,
+            category=category,
+            channel=event_bus.ALERTS_CHANNEL,
+        )
+        # Also nudge dashboard so the summary stat cards refresh.
+        event_bus.publish_event("alert_created", alert_id=str(alert.id))
 
     return alert
 
@@ -107,6 +115,7 @@ def raise_alert(
         source = AlertSource(source)
 
     now = datetime.now(timezone.utc)
+    window = maintenance_window_service.find_active_window(db, device_id, now=now)
 
     existing = (
         db.query(Alert)
@@ -125,17 +134,24 @@ def raise_alert(
         existing.occurrence_count = (existing.occurrence_count or 1) + 1
         if _SEVERITY_RANK[severity] > _SEVERITY_RANK[existing.severity]:
             existing.severity = severity
+        # Attribute suppression the moment a window opens over an
+        # already-standing alert too (don't require a brand new row to
+        # pick it up), and clear it again once the window has passed --
+        # so an alert that outlives its maintenance window naturally
+        # reappears as active instead of staying silently suppressed.
+        existing.suppressed_by_window_id = window.id if window else None
         db.commit()
         db.refresh(existing)
 
-        event_bus.publish_event(
-            "alert_updated",
-            alert_id=str(existing.id),
-            severity=existing.severity.value,
-            category=category,
-            channel=event_bus.ALERTS_CHANNEL,
-        )
-        alert_correlation_service.correlate_downstream(db, existing)
+        if window is None:
+            event_bus.publish_event(
+                "alert_updated",
+                alert_id=str(existing.id),
+                severity=existing.severity.value,
+                category=category,
+                channel=event_bus.ALERTS_CHANNEL,
+            )
+            alert_correlation_service.correlate_downstream(db, existing)
         return existing, False
 
     alert = Alert(
@@ -146,19 +162,21 @@ def raise_alert(
         message=message,
         last_seen_at=now,
         occurrence_count=1,
+        suppressed_by_window_id=window.id if window else None,
     )
     db.add(alert)
     db.commit()
     db.refresh(alert)
 
-    event_bus.publish_event(
-        "alert_created",
-        alert_id=str(alert.id),
-        severity=severity.value,
-        category=category,
-        channel=event_bus.ALERTS_CHANNEL,
-    )
-    event_bus.publish_event("alert_created", alert_id=str(alert.id))
+    if window is None:
+        event_bus.publish_event(
+            "alert_created",
+            alert_id=str(alert.id),
+            severity=severity.value,
+            category=category,
+            channel=event_bus.ALERTS_CHANNEL,
+        )
+        event_bus.publish_event("alert_created", alert_id=str(alert.id))
 
     alert_correlation_service.correlate_downstream(db, alert)
 

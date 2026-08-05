@@ -50,10 +50,15 @@ def _poll_snmp_best_effort(db: Session, device: Device) -> None:
     """
     try:
         metrics_service.poll_device(db, device)
+        db.commit()
     except metrics_service.SnmpNotConfiguredError:
         pass
     except metrics_service.credential_service.CredentialNotFoundError:
         pass
+    except SQLAlchemyError:
+        # A DB error (e.g. enum validation) aborts the transaction in Postgres.
+        # We must rollback so the caller can still db.refresh/write audit logs.
+        db.rollback()
     except Exception:  # noqa: BLE001 - best-effort only
         pass
 

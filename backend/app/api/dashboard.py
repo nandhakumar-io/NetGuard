@@ -140,6 +140,80 @@ def _compute_summary(db: Session) -> dict:
         for r in top_bandwidth
     ]
 
+    # 1b. Uplinks / WAN links -- devices whose device_role marks them as
+    # the fleet's edge/uplink/WAN-facing boxes (core, distribution,
+    # wan-edge, uplink, etc.) get their own rollup distinct from the
+    # generic Top Bandwidth widget above: this is "is my WAN link
+    # saturated/down", not "which device happens to be busiest right
+    # now". Throughput is derived the same way SNMP Health Dashboard
+    # detail views do -- interface_utilization_pct against the reported
+    # interface_speed_bps -- so it lines up with what /devices shows for
+    # the same device.
+    UPLINK_ROLE_PATTERNS = ["wan", "uplink", "edge", "core", "isp", "internet"]
+    uplink_role_filter = func.lower(Device.device_role).contains(UPLINK_ROLE_PATTERNS[0])
+    for pattern in UPLINK_ROLE_PATTERNS[1:]:
+        uplink_role_filter = uplink_role_filter | func.lower(Device.device_role).contains(pattern)
+
+    uplink_rows = (
+        db.query(DeviceMetric, Device.hostname, Device.ip_address, Device.device_role, Device.status)
+        .join(
+            latest_metrics_subq,
+            (DeviceMetric.device_id == latest_metrics_subq.c.device_id)
+            & (DeviceMetric.polled_at == latest_metrics_subq.c.latest_polled_at),
+        )
+        .join(Device, Device.id == DeviceMetric.device_id)
+        .filter(Device.device_role.isnot(None), uplink_role_filter)
+        .order_by(desc(DeviceMetric.interface_utilization_pct))
+        .limit(10)
+        .all()
+    )
+
+    uplinks = []
+    for metric, hostname, ip_address, device_role, status in uplink_rows:
+        util_pct = metric.interface_utilization_pct or 0
+        speed_bps = metric.interface_speed_bps or 0
+        throughput_bps = (util_pct / 100.0) * speed_bps if speed_bps else None
+        uplinks.append({
+            "hostname": hostname,
+            "ip_address": ip_address,
+            "role": device_role,
+            "status": status.value if hasattr(status, "value") else status,
+            "utilization_pct": round(util_pct, 1),
+            "throughput_bps": throughput_bps,
+            "link_speed_bps": speed_bps or None,
+            "errors": metric.interface_errors,
+            "history": _metric_sparkline(db, metric.device_id, "interface_utilization_pct"),
+        })
+
+    # 1c. Fleet health history -- hourly-bucketed fleet-wide average
+    # CPU/memory/bandwidth utilization over the last 24h, so the
+    # dashboard has an actual trend graph rather than only point-in-time
+    # Top-N cards. Bucketed in SQL (not per-row in Python) since this
+    # scans device_metrics across the whole fleet.
+    history_since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+    bucket = func.date_trunc("hour", DeviceMetric.polled_at)
+    history_rows = (
+        db.query(
+            bucket.label("bucket"),
+            func.avg(DeviceMetric.cpu_utilization_pct).label("avg_cpu"),
+            func.avg(DeviceMetric.memory_utilization_pct).label("avg_memory"),
+            func.avg(DeviceMetric.interface_utilization_pct).label("avg_bandwidth"),
+        )
+        .filter(DeviceMetric.polled_at >= history_since)
+        .group_by(bucket)
+        .order_by(bucket)
+        .all()
+    )
+    fleet_health_history = [
+        {
+            "timestamp": r.bucket.isoformat() if r.bucket else None,
+            "avg_cpu": round(r.avg_cpu, 1) if r.avg_cpu is not None else None,
+            "avg_memory": round(r.avg_memory, 1) if r.avg_memory is not None else None,
+            "avg_bandwidth": round(r.avg_bandwidth, 1) if r.avg_bandwidth is not None else None,
+        }
+        for r in history_rows
+    ]
+
     # 2. Deployment Success Rate
     deployments_successful = db.query(Deployment).filter(Deployment.status == DeploymentStatus.SUCCEEDED).count()
     deployments_total_finished = db.query(Deployment).filter(Deployment.status.in_([
@@ -213,6 +287,8 @@ def _compute_summary(db: Session) -> dict:
         "top_cpu_devices": top_cpu_devices,
         "top_memory_devices": top_memory_devices,
         "top_bandwidth_devices": top_bandwidth_devices,
+        "uplinks": uplinks,
+        "fleet_health_history": fleet_health_history,
         "recent_backups": recent_backups,
         "recent_protocol_operations": recent_protocol_operations,
     }

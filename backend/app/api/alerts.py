@@ -42,6 +42,11 @@ def list_alerts(
     suppressed: bool | None = Query(
         None, description="Filter by topology-correlation suppression: true=only impacted, false=only root-cause/standalone"
     ),
+    in_maintenance: bool | None = Query(
+        None,
+        description="Filter by maintenance-window suppression: true=only alerts raised during a maintenance window, "
+        "false=only alerts not covered by one. Omit to include both.",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -54,6 +59,11 @@ def list_alerts(
         q = q.filter(Alert.source == AlertSource(source))
     if suppressed is not None:
         q = q.filter(Alert.suppressed == suppressed)
+    if in_maintenance is not None:
+        if in_maintenance:
+            q = q.filter(Alert.suppressed_by_window_id.isnot(None))
+        else:
+            q = q.filter(Alert.suppressed_by_window_id.is_(None))
     if status == "active":
         q = q.filter(Alert.resolved == False)  # noqa: E712
     elif status == "acknowledged":

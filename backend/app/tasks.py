@@ -429,3 +429,26 @@ def run_monthly_compliance_report_task(self) -> bool:
         )
     finally:
         db.close()
+
+@celery_app.task(
+    name="app.tasks.run_firmware_upgrade_task",
+    bind=True,
+    # Same rationale as deploy_device_task: retries here cover infra
+    # hiccups around the task itself, not the device conversation --
+    # firmware_upgrade_service.run_upgrade already resolves a failed
+    # in-flight upgrade to ROLLED_BACK/FAILED rather than leaving it
+    # stuck, so a retried task just re-attempts a *new* job in that
+    # terminal state's wake rather than double-upgrading a device.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_firmware_upgrade_task(self, job_id: str) -> str:
+    from app.services import firmware_upgrade_service
+
+    db = SessionLocal()
+    try:
+        job = firmware_upgrade_service.run_upgrade(db, uuid.UUID(job_id))
+        return job.status.value
+    finally:
+        db.close()
