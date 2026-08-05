@@ -13,6 +13,8 @@ class TopologyNodeRead(BaseModel):
     has_config_on_file: bool = False
     health_color: str | None = None
     health_score: int | None = None
+    data_center: str | None = None
+    rack: str | None = None
 
 
 class TopologyEdgeRead(BaseModel):

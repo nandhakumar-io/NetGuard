@@ -37,10 +37,38 @@ export default function NotificationBell() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const lastNoteIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if ("Notification" in window) {
+      setPushEnabled(Notification.permission === "granted");
+    }
+  }, []);
+
+  const requestPushPermission = async () => {
+    if (!("Notification" in window)) return;
+    const permission = await Notification.requestPermission();
+    setPushEnabled(permission === "granted");
+  };
+
+  const deliverBrowserPush = useCallback((n: AppNotification) => {
+    if (Notification.permission === "granted") {
+      new Notification(`NetGuard: ${n.title}`, {
+        body: n.message,
+      });
+    }
+  }, []);
+
   const fetchNotifications = useCallback(() => {
     api
       .get<AppNotification[]>("/notifications?limit=20")
-      .then((res) => setNotifications(res.data))
+      .then((res) => {
+        setNotifications(res.data);
+        if (res.data.length > 0) {
+          lastNoteIdRef.current = res.data[0].id;
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -72,7 +100,21 @@ export default function NotificationBell() {
         if (!mounted) return;
         try {
           const data = JSON.parse(evt.data);
-          if (data.notifications) setNotifications(data.notifications);
+          if (data.notifications && data.notifications.length > 0) {
+            const newTopId = data.notifications[0].id;
+            if (lastNoteIdRef.current && lastNoteIdRef.current !== newTopId) {
+              const newNotes = [];
+              for (const n of data.notifications) {
+                if (n.id === lastNoteIdRef.current) break;
+                newNotes.push(n);
+              }
+              if (Notification.permission === "granted") {
+                newNotes.reverse().forEach((n) => deliverBrowserPush(n));
+              }
+            }
+            lastNoteIdRef.current = newTopId;
+            setNotifications(data.notifications);
+          }
           if (data.summary) setSummary(data.summary);
         } catch {
           /* ignore malformed frame, next push will correct state */
@@ -111,7 +153,7 @@ export default function NotificationBell() {
       ws?.close();
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [fetchNotifications, fetchSummary]);
+  }, [fetchNotifications, fetchSummary, deliverBrowserPush]);
 
   // Close dropdown on outside click.
   useEffect(() => {
@@ -166,6 +208,11 @@ export default function NotificationBell() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
             <p className="text-sm font-semibold text-navy">Notifications</p>
             <div className="flex items-center gap-3">
+              {!pushEnabled && "Notification" in window && (
+                <button onClick={requestPushPermission} className="text-[10px] bg-brandblue/10 hover:bg-brandblue/20 text-brandblue px-2 py-0.5 rounded font-medium" title="Enable browser push notifications for alerts">
+                  Enable Push
+                </button>
+              )}
               <span
                 className={`text-[10px] uppercase font-medium ${
                   connection === "live" ? "text-risklow" : "text-slate-400"

@@ -22,8 +22,10 @@ import subprocess
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
+from app.services import alert_service, notification_service
 
 # Ports tried, in order, for the TCP-connect reachability check -- this is
 # the *primary* signal (see is_reachable() below), not ICMP ping.
@@ -125,7 +127,37 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
                 new_status = DeviceStatus.DEGRADED
 
     if device.status != new_status:
+        was_offline = device.status == DeviceStatus.OFFLINE
         device.status = new_status
         db.commit()
+
+        # NOC-style alerting: a device dropping off the network entirely
+        # (unplugged switch, powered off, cable pulled) is the single most
+        # important event this sweep can detect -- raise it the moment
+        # status flips to OFFLINE, and clear it automatically the moment
+        # the device answers again, rather than requiring SNMP (which
+        # obviously can't reach an offline device either) to notice.
+        if new_status == DeviceStatus.OFFLINE:
+            alert, is_new = alert_service.raise_alert(
+                db,
+                device_id=device.id,
+                severity="critical",
+                source=AlertSource.HEALTH_POLL,
+                category="Device Unreachable",
+                message=f"{device.hostname} ({device.ip_address}) is not responding to ping/TCP probes",
+            )
+            if is_new:
+                notification_service.notify(
+                    event="Device Unreachable",
+                    message=f"{device.hostname} ({device.ip_address}) is down",
+                    severity="critical",
+                )
+        elif was_offline:
+            alert_service.auto_resolve(
+                db,
+                device_id=device.id,
+                category="Device Unreachable",
+                note=f"{device.hostname} ({device.ip_address}) is responding again",
+            )
 
     return new_status

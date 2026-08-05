@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None
 
+    # Telegram Bot API integration (FR-11 extension). TELEGRAM_BOT_TOKEN
+    # is the bot token from @BotFather; TELEGRAM_CHAT_ID is the chat/group
+    # ID to send notifications to. Both must be set for Telegram delivery
+    # to activate. This is the global/env-var-based Telegram fallback;
+    # user-created WebhookEndpoint rows of type "telegram" are also
+    # supported and are configured per-instance via the /webhooks CRUD API.
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
+
     # NetBox pull-sync (see app.services.netbox_service). Both unset =
     # sync endpoint returns a clear "not configured" error instead of
     # attempting a request with no credentials.

@@ -43,6 +43,7 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [driftSummary, setDriftSummary] = useState<DriftFleetSummary | null>(null);
   const [recentAlerts, setRecentAlerts] = useState<Alert[]>([]);
+  const [activeAlerts, setActiveAlerts] = useState<Alert[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"live" | "polling" | "connecting">("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -65,6 +66,14 @@ export default function Dashboard() {
       api
         .get<Alert[]>("/alerts?status=active&limit=5")
         .then((res) => mounted && setRecentAlerts(res.data))
+        .catch(() => {});
+      // Wider pull, used only to compute the NOC live-status widget below
+      // (down ports / offline devices / recent restarts) -- kept separate
+      // from the 5-item "Active Alerts" list above so that widget isn't
+      // capped at whatever happens to be in the top 5 most recent alerts.
+      api
+        .get<Alert[]>("/alerts?status=active&limit=200")
+        .then((res) => mounted && setActiveAlerts(res.data))
         .catch(() => {});
     };
     fetchSummary();
@@ -118,6 +127,15 @@ export default function Dashboard() {
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+
+  // NOC live-status widget: derived from the active-alerts pull above,
+  // bucketed by the categories metrics_service/reachability_service raise
+  // for port/device down-and-back events. Doesn't need its own endpoint --
+  // these are just ordinary Alert rows with recognizable category
+  // prefixes/names, same vocabulary the Alert Center already renders.
+  const downPortAlerts = activeAlerts.filter((a) => a.category.startsWith("Interface Down"));
+  const unreachableAlerts = activeAlerts.filter((a) => a.category === "Device Unreachable");
+  const restartAlerts = activeAlerts.filter((a) => a.category === "Device Restart");
 
   // Helpers for Health Score color
   const getScoreColor = (score: number) => {
@@ -509,6 +527,64 @@ export default function Dashboard() {
 
           {/* Sidebar Area */}
           <div className="space-y-6">
+             {/* NOC Live Status Widget -- always visible, the 3 signals
+                  a NOC operator scans for first: devices down, ports down,
+                  recent reboots. Counts from alerts, detail lists from
+                  the dashboard summary's interface_statuses query. */}
+                <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
+                    <h2 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${(unreachableAlerts.length > 0 || downPortAlerts.length > 0 || restartAlerts.length > 0) ? "bg-riskcrit animate-pulse" : "bg-risklow"}`} />
+                      NOC Live Status
+                    </h2>
+                    <Link to="/alerts" className="text-xs font-bold uppercase tracking-wider text-brandblue hover:text-navy dark:text-white transition-colors">
+                      View All
+                    </Link>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    <div className="text-center bg-red-50 dark:bg-red-950/30 border border-red-100 dark:border-red-900 rounded-lg py-2">
+                      <p className="text-lg font-black text-riskcrit leading-none">{unreachableAlerts.length}</p>
+                      <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase mt-1">Devices Down</p>
+                    </div>
+                    <div className="text-center bg-amber-50 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-900 rounded-lg py-2">
+                      <p className="text-lg font-black text-riskmed leading-none">{summary?.down_ports?.length ?? downPortAlerts.length}</p>
+                      <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase mt-1">Ports Down</p>
+                    </div>
+                    <div className="text-center bg-blue-50 dark:bg-blue-950/30 border border-blue-100 dark:border-blue-900 rounded-lg py-2">
+                      <p className="text-lg font-black text-brandblue leading-none">{summary?.recent_reboots?.length ?? restartAlerts.length}</p>
+                      <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase mt-1">Recent Reboots</p>
+                    </div>
+                  </div>
+                  {(unreachableAlerts.length > 0 || (summary?.down_ports?.length ?? 0) > 0 || (summary?.recent_reboots?.length ?? 0) > 0) ? (
+                    <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                      {unreachableAlerts.slice(0, 4).map((a) => (
+                        <li key={a.id} className="flex items-center justify-between gap-2 text-[11px] bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-900 rounded-md px-2 py-1.5">
+                          <span className="font-semibold text-riskcrit truncate">🔴 {a.category}</span>
+                          <span className="text-slate-400 shrink-0">{timeAgo(a.created_at)}</span>
+                        </li>
+                      ))}
+                      {(summary?.down_ports || []).slice(0, 6).map((p, i) => (
+                        <li key={`dp-${i}`} className="flex items-center justify-between gap-2 text-[11px] bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900 rounded-md px-2 py-1.5">
+                          <span className="font-semibold text-riskmed truncate">⚠️ {p.hostname} — {p.interface}</span>
+                          <span className="text-slate-400 shrink-0">{p.down_since ? timeAgo(p.down_since) : "—"}</span>
+                        </li>
+                      ))}
+                      {(summary?.recent_reboots || []).slice(0, 4).map((r, i) => (
+                        <li key={`rb-${i}`} className="flex items-center justify-between gap-2 text-[11px] bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900 rounded-md px-2 py-1.5">
+                          <span className="font-semibold text-brandblue truncate">🔄 {r.hostname}</span>
+                          <span className="text-slate-400 shrink-0">up {Math.floor(r.uptime_seconds / 60)}m</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-center py-4">
+                      <span className="text-3xl mb-2 inline-block filter drop-shadow-sm">✅</span>
+                      <p className="text-sm font-bold text-risklow">All Clear</p>
+                      <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">No down ports, unreachable devices, or recent reboots.</p>
+                    </div>
+                  )}
+                </div>
+
              {/* Recent Alerts Widget */}
              <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">

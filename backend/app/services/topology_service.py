@@ -49,6 +49,8 @@ class TopologyNode:
     has_config_on_file: bool
     health_color: str | None = None
     health_score: int | None = None
+    data_center: str | None = None
+    rack: str | None = None
 
 
 @dataclass
@@ -158,6 +160,8 @@ def build_topology(db: Session) -> TopologyGraph:
                 has_config_on_file=config_text is not None,
                 health_color=health_color,
                 health_score=health_score,
+                data_center=device.data_center,
+                rack=device.rack,
             )
         )
         if config_text:

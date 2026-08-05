@@ -184,6 +184,61 @@ def raise_alert(
 
 
 # ------------------------------------------------------------------
+# Auto-resolve (system-clears, not user-clears) -- the counterpart to
+# raise_alert() for conditions that recover on their own between polls
+# (an interface coming back up, a device answering ping again). Without
+# this, a standing alert for a condition that genuinely cleared just sat
+# in "Active Alerts" forever until a human clicked Resolve, which is
+# misleading on a NOC dashboard that's supposed to reflect current state.
+# ------------------------------------------------------------------
+def auto_resolve(
+    db: Session,
+    *,
+    device_id: uuid.UUID | None,
+    category: str,
+    note: str | None = None,
+) -> Alert | None:
+    """Resolves the standing unresolved alert (if any) for device_id +
+    category, attributed to "system" rather than a human user. Returns
+    the resolved Alert, or None if there was nothing active to clear.
+    """
+    existing = (
+        db.query(Alert)
+        .filter(
+            Alert.device_id == device_id,
+            Alert.category == category,
+            Alert.resolved == False,  # noqa: E712
+        )
+        .order_by(Alert.created_at.desc())
+        .first()
+    )
+    if existing is None:
+        return None
+
+    existing.resolved = True
+    existing.resolved_at = datetime.now(timezone.utc)
+    existing.resolved_by = "system"
+    if note:
+        existing.message = note
+    if not existing.acknowledged:
+        existing.acknowledged = True
+        existing.acknowledged_by = "system"
+    db.commit()
+    db.refresh(existing)
+
+    event_bus.publish_event(
+        "alert_resolved",
+        alert_id=str(existing.id),
+        channel=event_bus.ALERTS_CHANNEL,
+    )
+    event_bus.publish_event("alert_resolved", alert_id=str(existing.id))
+
+    alert_correlation_service.release_suppressed(db, existing)
+
+    return existing
+
+
+# ------------------------------------------------------------------
 # Acknowledge
 # ------------------------------------------------------------------
 def acknowledge_alert(db: Session, alert_id: uuid.UUID, user_email: str) -> Alert:
@@ -231,6 +286,45 @@ def resolve_alert(db: Session, alert_id: uuid.UUID, user_email: str) -> Alert:
     alert_correlation_service.release_suppressed(db, alert)
 
     return alert
+
+
+# ------------------------------------------------------------------
+# Purge (hard delete)
+# ------------------------------------------------------------------
+def purge_alerts(db: Session, *, device_id: uuid.UUID | None = None, only_active: bool = False) -> int:
+    """Permanently remove alert rows -- backs the 'Clear Alerts' button when
+    the operator wants them gone from the list entirely, not just marked
+    resolved. Unlike clear_alerts(), this does not preserve an audit trail
+    for the removed rows (they're deleted), so it's a distinct, explicit
+    action from acknowledge/resolve.
+
+    Returns the number of alerts deleted.
+    """
+    q = db.query(Alert)
+    if device_id is not None:
+        q = q.filter(Alert.device_id == device_id)
+    if only_active:
+        q = q.filter(Alert.resolved == False)  # noqa: E712
+
+    alert_ids = [a.id for a in q.all()]
+    if not alert_ids:
+        return 0
+
+    # Detach anything suppressed under one of the alerts being deleted so
+    # it doesn't reference a root_cause_alert_id that no longer exists.
+    db.query(Alert).filter(Alert.root_cause_alert_id.in_(alert_ids)).update(
+        {"suppressed": False, "root_cause_alert_id": None}, synchronize_session=False
+    )
+    deleted = q.delete(synchronize_session=False)
+    db.commit()
+
+    event_bus.publish_event(
+        "alerts_purged",
+        count=deleted,
+        device_id=str(device_id) if device_id else None,
+        channel=event_bus.ALERTS_CHANNEL,
+    )
+    return deleted
 
 
 # ------------------------------------------------------------------

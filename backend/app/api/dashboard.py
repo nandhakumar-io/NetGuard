@@ -4,7 +4,7 @@ import datetime
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, distinct
 
 from app.core.database import SessionLocal, get_db
 from app.models.device import Device, DeviceStatus
@@ -15,6 +15,7 @@ from app.models.device_metric import DeviceMetric
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.config_drift import ConfigDrift, DriftStatus
+from app.models.interface_status import InterfaceStatus, InterfaceOperStatus
 from app.services import event_bus
 from app.models.change_request import ChangeRequest, ChangeStatus
 
@@ -268,6 +269,68 @@ def _compute_summary(db: Session) -> dict:
         if status.is_eos:
             eos_count += 1
 
+    # --- NOC Live Status: down ports from interface_statuses table ---
+    # Get the latest status row per (device_id, if_index) and filter to
+    # status == down. This gives a real-time "ports currently down" list
+    # backed by SNMP poll data rather than relying solely on alert rows.
+    latest_if_subq = (
+        db.query(
+            InterfaceStatus.device_id,
+            InterfaceStatus.if_index,
+            func.max(InterfaceStatus.changed_at).label("latest_at"),
+        )
+        .group_by(InterfaceStatus.device_id, InterfaceStatus.if_index)
+        .subquery()
+    )
+    down_port_rows = (
+        db.query(InterfaceStatus.if_descr, InterfaceStatus.changed_at, Device.hostname)
+        .join(
+            latest_if_subq,
+            (InterfaceStatus.device_id == latest_if_subq.c.device_id)
+            & (InterfaceStatus.if_index == latest_if_subq.c.if_index)
+            & (InterfaceStatus.changed_at == latest_if_subq.c.latest_at),
+        )
+        .join(Device, Device.id == InterfaceStatus.device_id)
+        .filter(InterfaceStatus.status == 'down')
+        .order_by(InterfaceStatus.changed_at.desc())
+        .limit(20)
+        .all()
+    )
+    down_ports = [
+        {
+            "hostname": r.hostname,
+            "interface": r.if_descr,
+            "down_since": r.changed_at.isoformat() if r.changed_at else None,
+        }
+        for r in down_port_rows
+    ]
+
+    # Recent device reboots: devices whose latest uptime reading is under
+    # 1 hour (3600s), indicating a recent restart.
+    reboot_threshold = 3600
+    recent_reboot_rows = (
+        db.query(Device.hostname, Device.ip_address, DeviceMetric.uptime_seconds, DeviceMetric.polled_at)
+        .join(
+            latest_metrics_subq,
+            (DeviceMetric.device_id == latest_metrics_subq.c.device_id)
+            & (DeviceMetric.polled_at == latest_metrics_subq.c.latest_polled_at),
+        )
+        .join(Device, Device.id == DeviceMetric.device_id)
+        .filter(DeviceMetric.uptime_seconds.isnot(None), DeviceMetric.uptime_seconds < reboot_threshold)
+        .order_by(DeviceMetric.uptime_seconds)
+        .limit(10)
+        .all()
+    )
+    recent_reboots = [
+        {
+            "hostname": r.hostname,
+            "ip_address": r.ip_address,
+            "uptime_seconds": r.uptime_seconds,
+            "polled_at": r.polled_at.isoformat() if r.polled_at else None,
+        }
+        for r in recent_reboot_rows
+    ]
+
     return {
         "devices_online": devices_online,
         "devices_total": devices_total,
@@ -288,6 +351,8 @@ def _compute_summary(db: Session) -> dict:
         "top_memory_devices": top_memory_devices,
         "top_bandwidth_devices": top_bandwidth_devices,
         "uplinks": uplinks,
+        "down_ports": down_ports,
+        "recent_reboots": recent_reboots,
         "fleet_health_history": fleet_health_history,
         "recent_backups": recent_backups,
         "recent_protocol_operations": recent_protocol_operations,

@@ -19,3 +19,6 @@ from app.models.syslog_message import SyslogMessage, SyslogSeverity  # noqa: F40
 from app.models.path_trace import PathTrace, PathHop, PathTraceStatus, HopStatus  # noqa: F401
 from app.models.maintenance_window import MaintenanceWindow, MaintenanceScope  # noqa: F401
 from app.models.firmware_upgrade import FirmwareUpgrade, FirmwareUpgradeStatus  # noqa: F401
+from app.models.interface_status import InterfaceStatus, InterfaceOperStatus  # noqa: F401
+from app.models.alert_rule import AlertRule, AlertRuleMetric, AlertRuleOperator  # noqa: F401
+from app.models.webhook import WebhookEndpoint, WebhookType  # noqa: F401

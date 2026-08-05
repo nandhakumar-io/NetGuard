@@ -6,6 +6,7 @@ import Dashboard from "./pages/Dashboard";
 import ChangeRequests from "./pages/ChangeRequests";
 import Deployments from "./pages/Deployments";
 import Devices from "./pages/Devices";
+import Groups from "./pages/Groups";
 import AuditLog from "./pages/AuditLog";
 import Security from "./pages/Security";
 import DriftPage from "./pages/Drift";
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="/deployments" element={<Deployments />} />
           <Route path="/devices" element={<Devices />} />
           <Route path="/devices/config" element={<DeviceConfiguration />} />
+          <Route path="/groups" element={<Groups />} />
           <Route path="/config-search" element={<ConfigSearchPage />} />
           <Route path="/templates" element={<TemplatesPage />} />
           <Route path="/topology" element={<Topology />} />

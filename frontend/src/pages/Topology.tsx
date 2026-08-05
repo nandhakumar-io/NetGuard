@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
-import { TopologyResponse, TopologyNode, TopologyEdge, TopologySnapshotSummary, TopologyDiff } from "../lib/types";
+import {
+  TopologyResponse,
+  TopologyNode,
+  TopologyEdge,
+  TopologySnapshotSummary,
+  TopologyDiff,
+  DataCenterGroup,
+  InterfaceCurrentStatus,
+  InterfaceStatusHistoryEntry,
+  DeviceMetric,
+} from "../lib/types";
+import Sparkline from "../components/Sparkline";
 
 const STATUS_COLOR: Record<string, string> = {
   online: "#16a34a",
@@ -173,10 +184,78 @@ export default function Topology() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [siteFilter, setSiteFilter] = useState<string>("all");
+  const [nodeSearch, setNodeSearch] = useState<string>("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [showIpLabels, setShowIpLabels] = useState(true);
   const svgRef = useRef<SVGSVGElement>(null);
+
+  // --- view mode: force-directed graph vs. data center / rack grouping ---
+  const [viewMode, setViewMode] = useState<"graph" | "groups">("graph");
+  const [groups, setGroups] = useState<DataCenterGroup[] | null>(null);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+
+  const loadGroups = () => {
+    setGroupsLoading(true);
+    setGroupsError(null);
+    api
+      .get<DataCenterGroup[]>("/devices/groups/summary")
+      .then((res) => setGroups(res.data))
+      .catch(() => setGroupsError("Failed to load device groups."))
+      .finally(() => setGroupsLoading(false));
+  };
+
+  useEffect(() => {
+    if (viewMode === "groups" && groups === null && !groupsLoading) {
+      loadGroups();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
+
+  // --- selected device's per-interface (port) status + short metrics
+  // history -- fetched lazily whenever a node is selected, powers the
+  // "Interfaces" and "Recent metrics" tabs in the detail panel. ---
+  const [detailTab, setDetailTab] = useState<"overview" | "interfaces" | "metrics">("overview");
+  const [ifaces, setIfaces] = useState<InterfaceCurrentStatus[] | null>(null);
+  const [ifacesLoading, setIfacesLoading] = useState(false);
+  const [ifaceHistory, setIfaceHistory] = useState<InterfaceStatusHistoryEntry[] | null>(null);
+  const [ifaceHistoryFor, setIfaceHistoryFor] = useState<string | null>(null);
+  const [metricHistory, setMetricHistory] = useState<DeviceMetric[] | null>(null);
+  const [metricHistoryLoading, setMetricHistoryLoading] = useState(false);
+
+  useEffect(() => {
+    setDetailTab("overview");
+    setIfaces(null);
+    setIfaceHistory(null);
+    setIfaceHistoryFor(null);
+    setMetricHistory(null);
+    if (selection?.kind !== "node") return;
+    const deviceId = selection.node.id;
+
+    setIfacesLoading(true);
+    api
+      .get<InterfaceCurrentStatus[]>(`/devices/${deviceId}/interfaces`)
+      .then((res) => setIfaces(res.data))
+      .catch(() => setIfaces([]))
+      .finally(() => setIfacesLoading(false));
+
+    setMetricHistoryLoading(true);
+    api
+      .get<DeviceMetric[]>(`/devices/${deviceId}/metrics/history?hours=24&limit=200`)
+      .then((res) => setMetricHistory(res.data))
+      .catch(() => setMetricHistory([]))
+      .finally(() => setMetricHistoryLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection?.kind === "node" ? selection.node.id : null]);
+
+  const loadIfaceHistory = (deviceId: string, ifIndex: string) => {
+    setIfaceHistoryFor(ifIndex);
+    api
+      .get<InterfaceStatusHistoryEntry[]>(`/devices/${deviceId}/interfaces/history?if_index=${encodeURIComponent(ifIndex)}&limit=50`)
+      .then((res) => setIfaceHistory(res.data))
+      .catch(() => setIfaceHistory([]));
+  };
 
   // --- history / diffing ------------------------------------------------
   const [showDiff, setShowDiff] = useState(false);
@@ -315,6 +394,93 @@ export default function Topology() {
 
   const linkCountFor = (nodeId: string) => graph?.edges.filter((e) => e.source === nodeId || e.target === nodeId).length ?? 0;
 
+  // --- search / find-a-device -------------------------------------------
+  // Enterprise topology tools (SolarWinds, NetBrain, LibreNMS) all offer a
+  // quick "find" box that dims everything else and jumps the view to the
+  // match -- indispensable once a fleet grows past a screenful of nodes.
+  const matchedNodeIds = useMemo(() => {
+    const q = nodeSearch.trim().toLowerCase();
+    if (!q) return null;
+    const s = new Set<string>();
+    laidOut.forEach((n) => {
+      if (
+        n.hostname?.toLowerCase().includes(q) ||
+        n.ip_address?.toLowerCase().includes(q) ||
+        (n.site || "").toLowerCase().includes(q) ||
+        (n.vendor || "").toLowerCase().includes(q)
+      ) {
+        s.add(n.id);
+      }
+    });
+    return s;
+  }, [nodeSearch, laidOut]);
+
+  const focusOnSearch = () => {
+    if (!matchedNodeIds || matchedNodeIds.size === 0) return;
+    const first = laidOut.find((n) => matchedNodeIds.has(n.id));
+    if (!first) return;
+    setView({ x: first.x - WIDTH / 2, y: first.y - HEIGHT / 2, scale: 1.4 });
+    setSelection({ kind: "node", node: first });
+  };
+
+  // --- export the current view as a PNG ----------------------------------
+  // No server round-trip -- serialize the live SVG (already has every
+  // color as an inline attribute, no external stylesheet needed), rasterize
+  // it on an offscreen canvas, and hand back a PNG download. Useful for
+  // pasting into a change-request ticket or an incident postmortem.
+  const [exporting, setExporting] = useState(false);
+  const exportPng = () => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+    setExporting(true);
+    try {
+      const clone = svgEl.cloneNode(true) as SVGSVGElement;
+      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      clone.setAttribute("width", String(WIDTH));
+      clone.setAttribute("height", String(HEIGHT));
+      const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      bg.setAttribute("x", "0");
+      bg.setAttribute("y", "0");
+      bg.setAttribute("width", String(WIDTH));
+      bg.setAttribute("height", String(HEIGHT));
+      bg.setAttribute("fill", "#ffffff");
+      clone.insertBefore(bg, clone.firstChild);
+      const svgString = new XMLSerializer().serializeToString(clone);
+      const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new Image();
+      img.onload = () => {
+        const scale = 2; // 2x for crisp export
+        const canvas = document.createElement("canvas");
+        canvas.width = WIDTH * scale;
+        canvas.height = HEIGHT * scale;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.scale(scale, scale);
+          ctx.drawImage(img, 0, 0, WIDTH, HEIGHT);
+        }
+        URL.revokeObjectURL(url);
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            setExporting(false);
+            return;
+          }
+          const dlUrl = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = dlUrl;
+          a.download = `topology-${new Date().toISOString().slice(0, 10)}.png`;
+          a.click();
+          URL.revokeObjectURL(dlUrl);
+          setExporting(false);
+        }, "image/png");
+      };
+      img.onerror = () => setExporting(false);
+      img.src = url;
+    } catch {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="pb-16 flex flex-col gap-6 md:p-2">
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -328,6 +494,59 @@ export default function Topology() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center rounded-lg border border-slate-200 bg-white shadow-sm overflow-hidden text-xs font-bold">
+            <button
+              onClick={() => setViewMode("graph")}
+              className={`px-3 py-2 transition-colors ${viewMode === "graph" ? "bg-brandblue text-white" : "text-slate-600 hover:bg-slate-50"}`}
+            >
+              Graph
+            </button>
+            <button
+              onClick={() => setViewMode("groups")}
+              className={`px-3 py-2 transition-colors border-l border-slate-200 ${viewMode === "groups" ? "bg-brandblue text-white" : "text-slate-600 hover:bg-slate-50"}`}
+            >
+              Data Center / Rack
+            </button>
+          </div>
+          <div className="relative">
+            <input
+              value={nodeSearch}
+              onChange={(e) => setNodeSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") focusOnSearch();
+              }}
+              placeholder="Find device, IP, or site…"
+              className="border border-slate-300 rounded-lg pl-3 pr-16 py-2 text-sm bg-white shadow-sm w-48 focus:ring-2 focus:ring-brandblue focus:border-transparent outline-none"
+            />
+            {nodeSearch && (
+              <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                <span className="text-[10px] text-slate-400 font-mono">{matchedNodeIds?.size ?? 0}</span>
+                <button
+                  onClick={focusOnSearch}
+                  disabled={!matchedNodeIds || matchedNodeIds.size === 0}
+                  title="Jump to first match"
+                  className="text-[10px] font-bold text-brandblue hover:text-navy disabled:text-slate-300 px-1"
+                >
+                  ➔
+                </button>
+                <button
+                  onClick={() => setNodeSearch("")}
+                  title="Clear search"
+                  className="text-[10px] font-bold text-slate-400 hover:text-slate-600 px-1"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={exportPng}
+            disabled={exporting || viewMode !== "graph"}
+            title="Export current graph view as PNG"
+            className="flex items-center gap-1.5 text-xs font-bold rounded-lg px-2.5 py-2 shadow-sm border bg-white text-slate-600 border-slate-200 hover:bg-slate-50 disabled:opacity-40"
+          >
+            {exporting ? "Exporting…" : "⭳ Export PNG"}
+          </button>
           <button
             onClick={() => (showDiff ? setShowDiff(false) : openDiffPanel())}
             className={`flex items-center gap-1.5 text-xs font-bold rounded-lg px-2.5 py-2 shadow-sm border transition-colors ${
@@ -511,6 +730,8 @@ export default function Topology() {
       {!loading && !error && graph && graph.nodes.length > 0 && (
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
           <div className="xl:col-span-3 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden relative">
+          {viewMode === "graph" ? (
+          <>
             {/* Zoom controls -- top-right overlay, like any real network-diagram tool */}
             <div className="absolute top-3 right-3 z-10 flex flex-col gap-1 bg-white/95 backdrop-blur border border-slate-200 rounded-lg shadow-sm overflow-hidden">
               <button
@@ -559,6 +780,7 @@ export default function Topology() {
                     if (!a || !b) return null;
                     const key = edgeKey(e);
                     const active = highlightedEdgeKeys?.has(key) || selectedEdgeKey === key;
+                    const dimForSearch = matchedNodeIds ? !matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target) : false;
                     const srcLabelPos = pointAlong(a.x, a.y, b.x, b.y, 30);
                     const tgtLabelPos = pointAlong(b.x, b.y, a.x, a.y, 30);
                     const midX = (a.x + b.x) / 2;
@@ -569,7 +791,12 @@ export default function Topology() {
                         ? e.subnet || ""
                         : e.link_source.toUpperCase(); // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
                     return (
-                      <g key={key} className="cursor-pointer" onClick={() => setSelection({ kind: "edge", edge: e })}>
+                      <g
+                        key={key}
+                        className="cursor-pointer"
+                        opacity={dimForSearch ? 0.12 : 1}
+                        onClick={() => setSelection({ kind: "edge", edge: e })}
+                      >
                         {/* fat invisible hit-area so thin lines are easy to click */}
                         <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={14} />
                         <line
@@ -664,14 +891,28 @@ export default function Topology() {
                     const isIsolated = !connectedIds.has(node.id);
                     const isSelected = selectedNodeId === node.id;
                     const vendorMeta = VENDOR_META[node.vendor] || { label: node.vendor, accent: "#64748b" };
+                    const isSearchMatch = matchedNodeIds ? matchedNodeIds.has(node.id) : true;
                     return (
                       <g
                         key={node.id}
                         transform={`translate(${node.x}, ${node.y})`}
                         className="cursor-pointer"
+                        opacity={isSearchMatch ? 1 : 0.18}
                         onMouseEnter={() => setHoveredId(node.id)}
                         onClick={() => setSelection({ kind: "node", node })}
                       >
+                        {matchedNodeIds && isSearchMatch && (
+                          <circle r={24} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="2 2">
+                            <animateTransform
+                              attributeName="transform"
+                              type="rotate"
+                              from="0 0 0"
+                              to="360 0 0"
+                              dur="6s"
+                              repeatCount="indefinite"
+                            />
+                          </circle>
+                        )}
                         {node.flagged_unstable && (
                           <circle r={22} fill="none" stroke="#dc2626" strokeWidth={1.75} strokeDasharray="3 2" />
                         )}
@@ -764,6 +1005,73 @@ export default function Topology() {
                 {filteredEdges.length === 1 ? "" : "s"}
               </span>
             </div>
+          </>
+          ) : (
+            <div className="p-5 min-h-[680px]">
+              {groupsLoading && <p className="text-sm text-slate-400">Loading groups…</p>}
+              {groupsError && <p className="text-sm text-riskcrit">{groupsError}</p>}
+              {!groupsLoading && !groupsError && groups && groups.length === 0 && (
+                <p className="text-sm text-slate-400">No devices in inventory yet.</p>
+              )}
+              {!groupsLoading && !groupsError && groups && groups.length > 0 && (
+                <div className="flex flex-col gap-6">
+                  {groups.map((dc) => (
+                    <div key={dc.name} className="border border-slate-200 rounded-xl overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-200">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">🏢</span>
+                          <h3 className="text-sm font-bold text-navy">{dc.name}</h3>
+                        </div>
+                        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">
+                          {dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.racks.length} rack
+                          {dc.racks.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {dc.racks.map((rack) => (
+                          <div key={rack.name} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50/40">
+                            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white border-b border-slate-200">
+                              <span className="text-xs">🗄️</span>
+                              <span className="text-xs font-bold text-slate-600">{rack.name}</span>
+                              <span className="text-[10px] text-slate-400 ml-auto">{rack.devices.length}</span>
+                            </div>
+                            <ul className="p-2 flex flex-col gap-1">
+                              {rack.devices.map((dv) => {
+                                const fullNode = graph.nodes.find((n) => n.id === dv.id);
+                                return (
+                                  <li
+                                    key={dv.id}
+                                    onClick={() =>
+                                      fullNode &&
+                                      setSelection({ kind: "node", node: { ...fullNode, x: 0, y: 0 } as LaidOutNode })
+                                    }
+                                    className={`flex items-center gap-2 text-xs rounded-md px-2 py-1.5 cursor-pointer border transition-colors ${
+                                      selectedNodeId === dv.id
+                                        ? "border-brandblue bg-blue-50"
+                                        : "border-transparent hover:bg-white hover:border-slate-200"
+                                    }`}
+                                  >
+                                    <span
+                                      className="w-2 h-2 rounded-full shrink-0"
+                                      style={{ backgroundColor: STATUS_COLOR[dv.status] || STATUS_COLOR.unknown }}
+                                    />
+                                    <span className="font-semibold text-slate-700 truncate">{dv.hostname}</span>
+                                    {dv.device_type && (
+                                      <span className="text-[10px] text-slate-400 ml-auto shrink-0">{dv.device_type}</span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           </div>
 
           <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5 h-fit sticky top-4">
@@ -775,6 +1083,26 @@ export default function Topology() {
                     ✕
                   </button>
                 </div>
+
+                <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-[11px] font-bold">
+                  {(["overview", "interfaces", "metrics"] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setDetailTab(tab)}
+                      className={`flex-1 rounded-md px-2 py-1.5 capitalize transition-colors ${
+                        detailTab === tab ? "bg-white text-brandblue shadow-sm" : "text-slate-500 hover:text-slate-700"
+                      }`}
+                    >
+                      {tab}
+                      {tab === "interfaces" && ifaces && ifaces.some((i) => i.status === "down") && (
+                        <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-riskcrit align-middle" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+
+                {detailTab === "overview" && (
+                <>
                 <dl className="text-xs space-y-1.5">
                   <div className="flex justify-between">
                     <dt className="text-slate-500">Management IP</dt>
@@ -787,6 +1115,14 @@ export default function Topology() {
                   <div className="flex justify-between">
                     <dt className="text-slate-500">Site</dt>
                     <dd className="text-slate-700">{selection.node.site || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-500">Data center</dt>
+                    <dd className="text-slate-700">{selection.node.data_center || "Unassigned"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-500">Rack</dt>
+                    <dd className="text-slate-700">{selection.node.rack || "Unassigned"}</dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-slate-500">Status</dt>
@@ -857,6 +1193,111 @@ export default function Topology() {
                 <Link to="/devices" className="text-xs font-bold text-brandblue uppercase tracking-wide hover:underline mt-1">
                   View in Device Inventory →
                 </Link>
+                </>
+                )}
+
+                {detailTab === "interfaces" && (
+                  <div className="flex flex-col gap-3">
+                    {ifacesLoading && <p className="text-xs text-slate-400">Loading interfaces…</p>}
+                    {!ifacesLoading && ifaces && ifaces.length === 0 && (
+                      <p className="text-xs text-slate-400 italic">
+                        No interface data yet — this device hasn't completed an SNMP poll with interface details.
+                      </p>
+                    )}
+                    {!ifacesLoading && ifaces && ifaces.length > 0 && (
+                      <ul className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                        {ifaces.map((iface) => (
+                          <li
+                            key={iface.if_index}
+                            onClick={() => loadIfaceHistory(selection.node.id, iface.if_index)}
+                            className={`text-xs rounded-lg px-2.5 py-1.5 border cursor-pointer flex items-center justify-between gap-2 ${
+                              iface.status === "down"
+                                ? "bg-red-50 border-red-200"
+                                : "bg-slate-50 border-slate-200 hover:border-blue-300"
+                            } ${ifaceHistoryFor === iface.if_index ? "ring-2 ring-brandblue/40" : ""}`}
+                          >
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                  iface.status === "down" ? "bg-riskcrit" : "bg-emerald-500"
+                                }`}
+                              />
+                              <span className="font-semibold text-slate-700 truncate">{iface.if_descr}</span>
+                            </span>
+                            <span className={`font-bold uppercase text-[10px] shrink-0 ${iface.status === "down" ? "text-riskcrit" : "text-emerald-600"}`}>
+                              {iface.status}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {ifaceHistoryFor && (
+                      <div>
+                        <h4 className="text-[11px] font-bold uppercase text-slate-500 tracking-wide mb-1.5">
+                          History — {ifaces?.find((i) => i.if_index === ifaceHistoryFor)?.if_descr || ifaceHistoryFor}
+                        </h4>
+                        {ifaceHistory === null && <p className="text-xs text-slate-400">Loading…</p>}
+                        {ifaceHistory && ifaceHistory.length === 0 && (
+                          <p className="text-xs text-slate-400 italic">No transitions recorded yet.</p>
+                        )}
+                        {ifaceHistory && ifaceHistory.length > 0 && (
+                          <ul className="space-y-1 max-h-48 overflow-y-auto pr-1">
+                            {ifaceHistory.map((h) => (
+                              <li key={h.id} className="text-[11px] flex items-center justify-between border-b border-slate-100 py-1">
+                                <span className={h.status === "down" ? "text-riskcrit font-bold" : "text-emerald-600 font-bold"}>
+                                  {h.previous_status ? `${h.previous_status} → ${h.status}` : h.status}
+                                </span>
+                                <span className="text-slate-400 font-mono">
+                                  {h.changed_at ? new Date(h.changed_at).toLocaleString() : "—"}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {detailTab === "metrics" && (
+                  <div className="flex flex-col gap-3">
+                    {metricHistoryLoading && <p className="text-xs text-slate-400">Loading metrics history…</p>}
+                    {!metricHistoryLoading && metricHistory && metricHistory.length === 0 && (
+                      <p className="text-xs text-slate-400 italic">
+                        No metrics recorded yet — this device isn't SNMP-polled, or hasn't completed a poll.
+                      </p>
+                    )}
+                    {!metricHistoryLoading && metricHistory && metricHistory.length > 0 && (
+                      <>
+                        {([
+                          ["CPU", "cpu_utilization_pct", "#2563eb"],
+                          ["Memory", "memory_utilization_pct", "#7c3aed"],
+                          ["Interface util.", "interface_utilization_pct", "#0891b2"],
+                        ] as const).map(([label, field, color]) => {
+                          const values = metricHistory.map((m) => (m as any)[field]).filter((v: number | null) => v !== null) as number[];
+                          const latest = values[values.length - 1];
+                          return (
+                            <div key={field} className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                              <div>
+                                <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wide">{label}</p>
+                                <p className="text-sm font-bold text-slate-700">{latest !== undefined ? `${latest}%` : "—"}</p>
+                              </div>
+                              <Sparkline values={values} color={color} />
+                            </div>
+                          );
+                        })}
+                        <p className="text-[10px] text-slate-400">Last 24h · {metricHistory.length} poll{metricHistory.length === 1 ? "" : "s"}</p>
+                        <Link
+                          to={`/devices?device=${selection.node.id}`}
+                          className="text-xs font-bold text-brandblue uppercase tracking-wide hover:underline mt-1"
+                        >
+                          Full health history →
+                        </Link>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

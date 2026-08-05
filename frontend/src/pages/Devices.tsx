@@ -1,4 +1,5 @@
 import React, { Fragment, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import {
   Device,
@@ -77,6 +78,9 @@ const emptyForm = {
   vendor: "cisco",
   site: "",
   device_role: "",
+  data_center: "",
+  rack: "",
+  rack_position: "",
   ssh_username: "",
   ssh_credential_ref: "",
   supports_snmp: false,
@@ -402,12 +406,16 @@ function DeviceInlineDetails({
 
   const clearDeviceAlerts = async () => {
     if (activeDeviceAlertCount === 0) return;
-    if (!window.confirm(`Clear ${activeDeviceAlertCount} active alert${activeDeviceAlertCount === 1 ? "" : "s"} for ${device.hostname}?`)) {
+    if (
+      !window.confirm(
+        `Permanently delete all ${deviceAlerts.length} alert${deviceAlerts.length === 1 ? "" : "s"} for ${device.hostname}? This removes them entirely -- it cannot be undone.`
+      )
+    ) {
       return;
     }
     setClearingAlerts(true);
     try {
-      await api.post(`/alerts/clear?device_id=${device.id}`);
+      await api.delete(`/alerts/clear?device_id=${device.id}`);
       loadAlerts();
     } catch {
       // leave alerts as-is; button re-enables so the user can retry
@@ -1612,8 +1620,11 @@ export default function Devices() {
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = useState(searchParams.get("q") || "");
   const [vendorFilter, setVendorFilter] = useState<string>("all");
+  const [dcFilter, setDcFilter] = useState<string>("all");
+  const [rackFilter, setRackFilter] = useState<string>("all");
   // Fleet Health strip -- scoped to whatever vendorFilter is currently
   // selected, so picking "juniper" in the existing vendor dropdown also
   // narrows this to a "Juniper fleet" health view instead of needing a
@@ -1623,6 +1634,7 @@ export default function Devices() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [clearingUnstableId, setClearingUnstableId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
   const [activeTerminalDevice, setActiveTerminalDevice] = useState<string | null>(null);
 
@@ -1838,16 +1850,66 @@ export default function Devices() {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    const payload = {
+      ...form,
+      snmp_port: form.snmp_port ? Number(form.snmp_port) : null,
+      netconf_port: form.netconf_port ? Number(form.netconf_port) : null,
+      rack_position: form.rack_position ? Number(form.rack_position) : null,
+    };
     try {
-      await api.post("/devices", { ...form, snmp_port: form.snmp_port ? Number(form.snmp_port) : null, netconf_port: form.netconf_port ? Number(form.netconf_port) : null });
+      if (editingDeviceId) {
+        const res = await api.patch<Device>(`/devices/${editingDeviceId}`, payload);
+        setDevices((prev) => prev.map((d) => (d.id === editingDeviceId ? res.data : d)));
+      } else {
+        await api.post("/devices", payload);
+      }
       setForm(emptyForm);
       setShowForm(false);
+      setEditingDeviceId(null);
       load();
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Failed to create device.");
+      setError(err?.response?.data?.detail || `Failed to ${editingDeviceId ? "update" : "create"} device.`);
     } finally {
       setLoading(false);
     }
+  };
+
+  const startEdit = (d: Device) => {
+    setEditingDeviceId(d.id);
+    setForm({
+      hostname: d.hostname || "",
+      ip_address: d.ip_address || "",
+      vendor: d.vendor || "cisco",
+      site: d.site || "",
+      device_role: d.device_role || "",
+      data_center: d.data_center || "",
+      rack: d.rack || "",
+      rack_position: d.rack_position != null ? String(d.rack_position) : "",
+      ssh_username: d.ssh_username || "",
+      ssh_credential_ref: d.ssh_credential_ref || "",
+      supports_snmp: !!d.supports_snmp,
+      snmp_version: d.snmp_version || "v2c",
+      snmp_port: d.snmp_port != null ? String(d.snmp_port) : "161",
+      snmp_community_ref: d.snmp_community_ref || "",
+      snmp_username: d.snmp_username || "",
+      snmp_security_level: d.snmp_security_level || "authPriv",
+      snmp_auth_protocol: d.snmp_auth_protocol || "SHA",
+      snmp_priv_protocol: d.snmp_priv_protocol || "AES128",
+      supports_netconf: !!d.supports_netconf,
+      netconf_port: d.netconf_port != null ? String(d.netconf_port) : "830",
+      netconf_use_lock: true,
+      supports_restconf: !!d.supports_restconf,
+      restconf_url: d.restconf_url || "",
+    });
+    setShowForm(true);
+    setExpandedDeviceId(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const cancelForm = () => {
+    setShowForm(false);
+    setEditingDeviceId(null);
+    setForm(emptyForm);
   };
 
   const removeDevice = async (id: string, hostname: string) => {
@@ -1890,16 +1952,22 @@ export default function Devices() {
   };
 
   const vendors = useMemo(() => Array.from(new Set(devices.map((d) => d.vendor))), [devices]);
+  const dataCenters = useMemo(() => Array.from(new Set(devices.map((d) => d.data_center).filter(Boolean))), [devices]);
+  const racks = useMemo(() => Array.from(new Set(devices.map((d) => d.rack).filter(Boolean))), [devices]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return devices.filter((d) => {
       if (vendorFilter !== "all" && d.vendor !== vendorFilter) return false;
+      if (dcFilter !== "all" && d.data_center !== dcFilter) return false;
+      if (rackFilter !== "all" && d.rack !== rackFilter) return false;
       if (!q) return true;
       return (
         d.hostname.toLowerCase().includes(q) ||
         d.ip_address.toLowerCase().includes(q) ||
-        (d.site || "").toLowerCase().includes(q)
+        (d.site || "").toLowerCase().includes(q) ||
+        (d.data_center || "").toLowerCase().includes(q) ||
+        (d.rack || "").toLowerCase().includes(q)
       );
     });
   }, [devices, query, vendorFilter]);
@@ -1926,7 +1994,7 @@ export default function Devices() {
             </button>
             {canManage && (
             <button
-                onClick={() => setShowForm((s) => !s)}
+                onClick={() => (showForm ? cancelForm() : setShowForm(true))}
                 className="bg-brandblue text-white rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm hover:bg-navy transition-colors scale-100 active:scale-95"
             >
                 {showForm ? "Cancel" : "+ Add Device"}
@@ -1955,6 +2023,20 @@ export default function Devices() {
 
       {canManage && showForm && (
         <form onSubmit={submit} className="bg-white dark:bg-slate-800 border-2 border-brandblue/30 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-sm font-bold text-navy dark:text-white">
+              {editingDeviceId ? `Edit Device — ${devices.find((d) => d.id === editingDeviceId)?.hostname || ""}` : "Add Device"}
+            </h3>
+            {editingDeviceId && (
+              <button
+                type="button"
+                onClick={cancelForm}
+                className="text-[11px] uppercase tracking-wider font-bold text-slate-400 hover:text-navy dark:hover:text-white"
+              >
+                ✕ Cancel Edit
+              </button>
+            )}
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <input
               className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
@@ -2001,6 +2083,29 @@ export default function Devices() {
               <option value="edge-firewall" />
               <option value="wan-edge" />
             </datalist>
+            <input
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              placeholder="Data Center (optional)"
+              title="Top-level grouping for the Topology page's Data Center / Rack view."
+              value={form.data_center}
+              onChange={(e) => setForm({ ...form, data_center: e.target.value })}
+            />
+            <input
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              placeholder="Rack (optional)"
+              title="Rack this device is mounted in, nested under Data Center in the Topology grouping view."
+              value={form.rack}
+              onChange={(e) => setForm({ ...form, rack: e.target.value })}
+            />
+            <input
+              type="number"
+              min={1}
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              placeholder="Rack position (U, optional)"
+              title="Sort order top-to-bottom within the rack view -- cosmetic only."
+              value={form.rack_position}
+              onChange={(e) => setForm({ ...form, rack_position: e.target.value })}
+            />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
@@ -2165,7 +2270,7 @@ export default function Devices() {
               disabled={loading}
               className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold shadow hover:bg-navy transition-colors disabled:opacity-50 h-fit self-start md:col-start-4"
             >
-              {loading ? "Adding…" : "Add Device"}
+              {loading ? (editingDeviceId ? "Saving…" : "Adding…") : editingDeviceId ? "Save Changes" : "Add Device"}
             </button>
           </div>
         </form>
@@ -2200,6 +2305,30 @@ export default function Devices() {
             </option>
           ))}
         </select>
+        {(dataCenters as string[]).length > 0 && (
+          <select
+            className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 focus:ring-2 focus:ring-brandblue outline-none"
+            value={dcFilter}
+            onChange={(e) => setDcFilter(e.target.value)}
+          >
+            <option value="all">All DCs</option>
+            {(dataCenters as string[]).map((dc) => (
+              <option key={dc} value={dc}>{dc}</option>
+            ))}
+          </select>
+        )}
+        {(racks as string[]).length > 0 && (
+          <select
+            className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 focus:ring-2 focus:ring-brandblue outline-none"
+            value={rackFilter}
+            onChange={(e) => setRackFilter(e.target.value)}
+          >
+            <option value="all">All Racks</option>
+            {(racks as string[]).map((r) => (
+              <option key={r} value={r}>{r}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Fleet Health strip -- scoped to vendorFilter above, so switching
@@ -2369,6 +2498,8 @@ export default function Devices() {
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">IP Address</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Vendor</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Site</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Data Center</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Rack / Pos</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Status</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Details</th>
               {canManage && <th className="text-right px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Actions</th>}
@@ -2377,7 +2508,7 @@ export default function Devices() {
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {initialLoading && (
               <tr>
-                <td colSpan={canManage ? 8 : 6} className="text-center text-slate-500 dark:text-slate-400 py-12">
+                <td colSpan={canManage ? 10 : 8} className="text-center text-slate-500 dark:text-slate-400 py-12">
                    <div className="inline-block w-5 h-5 border-2 border-slate-200 dark:border-slate-700 border-t-brandblue rounded-full animate-spin mb-2" />
                    <p>Loading devices…</p>
                 </td>
@@ -2385,7 +2516,7 @@ export default function Devices() {
             )}
             {!initialLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={canManage ? 8 : 6} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
+                <td colSpan={canManage ? 10 : 8} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
                   {devices.length === 0 ? "No devices yet. Add one above." : "No devices match your search."}
                 </td>
               </tr>
@@ -2411,7 +2542,16 @@ export default function Devices() {
                 <td className="px-5 py-4 font-bold text-navy dark:text-white">{d.hostname}</td>
                 <td className="px-5 py-4 text-slate-500 dark:text-slate-400 font-mono text-xs font-semibold">{d.ip_address}</td>
                 <td className="px-5 py-4 text-slate-600 dark:text-slate-300 capitalize font-medium">{d.vendor}</td>
-                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">{d.site || "—"}</td>
+                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">
+                  {d.site || "—"}
+                </td>
+                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">
+                  {d.data_center || "—"}
+                </td>
+                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">
+                  {d.rack || "—"}
+                  {d.rack_position && <span className="text-[10px] text-slate-400 ml-1">U{d.rack_position}</span>}
+                </td>
                 <td className="px-5 py-4">
                   <span className="inline-flex items-center gap-1.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 px-2.5 py-1 rounded-full shadow-sm">
                     <span className={`w-2 h-2 rounded-full ${statusColor[d.status]} animate-pulse`} />
@@ -2459,6 +2599,15 @@ export default function Devices() {
                       <button
                         onClick={(e) => {
                             e.stopPropagation();
+                            startEdit(d);
+                        }}
+                        className="text-[11px] uppercase tracking-wider text-brandblue border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded shadow-sm hover:bg-blue-100 font-bold"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={(e) => {
+                            e.stopPropagation();
                             removeDevice(d.id, d.hostname);
                         }}
                         disabled={deletingId === d.id}
@@ -2472,7 +2621,7 @@ export default function Devices() {
                 </tr>
                 {expandedDeviceId === d.id && (
                   <tr>
-                    <td colSpan={canManage ? 8 : 6} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
+                    <td colSpan={canManage ? 10 : 8} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
                         <DeviceInlineDetails 
                             device={d} 
                             canManage={canManage}

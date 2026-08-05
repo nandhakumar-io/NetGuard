@@ -6,6 +6,8 @@ REST:
   GET    /alerts/{id}      — single alert
   PATCH  /alerts/{id}/acknowledge
   PATCH  /alerts/{id}/resolve
+  POST   /alerts/clear      — bulk-resolve (kept for audit trail)
+  DELETE /alerts/clear      — bulk hard-delete (removes rows entirely)
 
 WebSocket:
   WS     /alerts/ws        — pushes every alert event in realtime
@@ -117,6 +119,24 @@ def clear_alerts(
     """
     cleared = alert_service.clear_alerts(db, user.email, device_id=device_id)
     return {"cleared": cleared}
+
+
+@router.delete("/clear")
+def purge_alerts(
+    device_id: uuid.UUID | None = Query(None, description="Only delete alerts for this device; omit to delete everything"),
+    only_active: bool = Query(
+        False, description="If true, only delete unresolved alerts; if false (default), delete every matching alert including resolved history"
+    ),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Permanently remove alerts (the 'Clear Alerts' button on the Alert
+    Center / device Alerts tab) instead of just marking them resolved.
+    Rows are deleted outright, so cleared alerts no longer appear anywhere
+    -- including the 'resolved' filter -- unlike POST /alerts/clear.
+    """
+    purged = alert_service.purge_alerts(db, device_id=device_id, only_active=only_active)
+    return {"purged": purged}
 
 
 # ------------------------------------------------------------------

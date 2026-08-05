@@ -30,6 +30,7 @@ from app.schemas.device import (
     SshTestResult,
 )
 from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
+from app.schemas.interface_status import InterfaceCurrentStatus, InterfaceStatusRead
 from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service, protocol_manager, reachability_service, netbox_service, eol_service
 from app.services.health_monitor import ALL_CHECKS
 from app.tasks import run_deployment_pipeline_task
@@ -762,4 +763,140 @@ def list_device_protocol_operations(
             "created_at": op.created_at,
         }
         for op in ops
+    ]
+
+
+# ------------------------------------------------------------------
+# Device grouping (rack + data center) and interface status
+# ------------------------------------------------------------------
+
+
+@router.get("/groups/summary")
+def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Devices rolled up into a data-center -> rack -> device hierarchy,
+    for the Topology page's grouping view and any other "group by
+    location" UI. Devices with no data_center/rack set are bucketed
+    under "Unassigned" rather than dropped, so the fleet always fully
+    accounts for every device even before anyone's filled in placement.
+    """
+    devices = db.query(Device).order_by(Device.hostname).all()
+
+    data_centers: dict[str, dict] = {}
+    for d in devices:
+        dc_name = d.data_center or "Unassigned"
+        rack_name = d.rack or "Unassigned"
+        dc = data_centers.setdefault(dc_name, {"name": dc_name, "racks": {}, "device_count": 0})
+        rack = dc["racks"].setdefault(rack_name, {"name": rack_name, "devices": []})
+        rack["devices"].append(
+            {
+                "id": str(d.id),
+                "hostname": d.hostname,
+                "status": d.status.value if hasattr(d.status, "value") else str(d.status),
+                "device_type": d.device_type,
+                "rack_position": d.rack_position,
+            }
+        )
+        dc["device_count"] += 1
+
+    result = []
+    for dc in data_centers.values():
+        # Sort devices within a rack by rack_position when set (unset
+        # sorts last), then hostname -- gives a stable, sensible
+        # top-to-bottom rack-elevation order.
+        racks = []
+        for rack in dc["racks"].values():
+            rack["devices"].sort(key=lambda dv: (dv["rack_position"] is None, dv["rack_position"] or 0, dv["hostname"]))
+            racks.append(rack)
+        racks.sort(key=lambda r: r["name"])
+        result.append({"name": dc["name"], "device_count": dc["device_count"], "racks": racks})
+
+    result.sort(key=lambda dc: dc["name"])
+    return result
+
+
+@router.get("/{device_id}/interfaces", response_model=list[InterfaceCurrentStatus])
+def get_device_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Current status of every interface last seen on this device --
+    the most recent InterfaceStatus row per if_index, i.e. what the
+    device detail / topology drawer's "Interfaces" panel and the NOC
+    dashboard's down-port list draw from.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    from app.models.interface_status import InterfaceStatus
+
+    subq = (
+        db.query(
+            InterfaceStatus.if_index,
+            func.max(InterfaceStatus.changed_at).label("max_changed_at"),
+        )
+        .filter(InterfaceStatus.device_id == device_id)
+        .group_by(InterfaceStatus.if_index)
+        .subquery()
+    )
+    rows = (
+        db.query(InterfaceStatus)
+        .join(
+            subq,
+            (InterfaceStatus.if_index == subq.c.if_index) & (InterfaceStatus.changed_at == subq.c.max_changed_at),
+        )
+        .filter(InterfaceStatus.device_id == device_id)
+        .order_by(InterfaceStatus.if_descr)
+        .all()
+    )
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    out = []
+    for r in rows:
+        changed_at = r.changed_at
+        seconds_in_status = None
+        if changed_at is not None:
+            ref = changed_at if changed_at.tzinfo else changed_at.replace(tzinfo=datetime.timezone.utc)
+            seconds_in_status = (now - ref).total_seconds()
+        out.append(
+            InterfaceCurrentStatus(
+                if_index=r.if_index,
+                if_descr=r.if_descr,
+                status=r.status.value if hasattr(r.status, "value") else str(r.status),
+                changed_at=r.changed_at,
+                seconds_in_status=seconds_in_status,
+            )
+        )
+    return out
+
+
+@router.get("/{device_id}/interfaces/history", response_model=list[InterfaceStatusRead])
+def get_device_interface_history(
+    device_id: uuid.UUID,
+    if_index: str | None = Query(None, description="Scope to one interface's history by ifIndex"),
+    limit: int = Query(200, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Full up/down transition log for this device (optionally scoped to
+    one interface), newest first -- Interface Status History panel.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    from app.models.interface_status import InterfaceStatus
+
+    q = db.query(InterfaceStatus).filter(InterfaceStatus.device_id == device_id)
+    if if_index:
+        q = q.filter(InterfaceStatus.if_index == if_index)
+    rows = q.order_by(InterfaceStatus.changed_at.desc()).limit(limit).all()
+    return [
+        InterfaceStatusRead(
+            id=r.id,
+            device_id=r.device_id,
+            if_index=r.if_index,
+            if_descr=r.if_descr,
+            status=r.status.value if hasattr(r.status, "value") else str(r.status),
+            previous_status=(r.previous_status.value if r.previous_status and hasattr(r.previous_status, "value") else r.previous_status),
+            changed_at=r.changed_at,
+        )
+        for r in rows
     ]

@@ -35,6 +35,9 @@ export interface Device {
   os_version?: string | null;
   capabilities?: string | null;
   device_role?: string | null;
+  data_center?: string | null;
+  rack?: string | null;
+  rack_position?: number | null;
   enabled_health_checks?: string[] | null;
   // Derived (not stored) -- see backend eol_service / DeviceRead.from_device.
   eol_matched?: boolean;
@@ -399,6 +402,8 @@ export interface DashboardSummary {
     avg_memory: number | null;
     avg_bandwidth: number | null;
   }[];
+  down_ports: { hostname: string; interface: string; down_since: string | null }[];
+  recent_reboots: { hostname: string; ip_address: string; uptime_seconds: number; polled_at: string | null }[];
   recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
   recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
 }
@@ -406,7 +411,7 @@ export interface DashboardSummary {
 // --- Alert System ---
 
 export type AlertSeverity = "critical" | "warning" | "info";
-export type AlertSourceType = "snmp_trap" | "health_poll" | "drift" | "protocol_failure";
+export type AlertSourceType = "snmp_trap" | "health_poll" | "drift" | "protocol_failure" | "syslog";
 
 export interface Alert {
   id: string;
@@ -616,6 +621,8 @@ export interface TopologyNode {
   // health instead of just online/offline/degraded status.
   health_color: HealthColor | null;
   health_score: number | null;
+  data_center?: string | null;
+  rack?: string | null;
 }
 
 export interface TopologyEdge {
@@ -632,6 +639,47 @@ export interface TopologyEdge {
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+}
+
+// --- Device grouping (rack + data center) ---
+
+export interface RackGroup {
+  name: string;
+  devices: Array<{
+    id: string;
+    hostname: string;
+    status: DeviceStatus;
+    device_type?: string | null;
+    rack_position?: number | null;
+  }>;
+}
+
+export interface DataCenterGroup {
+  name: string;
+  device_count: number;
+  racks: RackGroup[];
+}
+
+// --- Interface (port) status: current + history (NOC dashboard, device panel) ---
+
+export type InterfaceOperStatus = "up" | "down";
+
+export interface InterfaceCurrentStatus {
+  if_index: string;
+  if_descr: string;
+  status: InterfaceOperStatus;
+  changed_at: string | null;
+  seconds_in_status: number | null;
+}
+
+export interface InterfaceStatusHistoryEntry {
+  id: string;
+  device_id: string;
+  if_index: string;
+  if_descr: string;
+  status: InterfaceOperStatus;
+  previous_status: InterfaceOperStatus | null;
+  changed_at: string | null;
 }
 
 // --- SNMP Health / Metrics (per-device Health & Interfaces tabs) ---
@@ -792,4 +840,85 @@ export interface TrafficSummary {
   protocol_breakdown: ProtocolShare[];
   bandwidth_timeseries: BandwidthPoint[];
   exporters: FlowExporter[];
+}
+
+// --- Customizable Alert Rules ---
+
+export interface AlertRule {
+  id: string;
+  name: string;
+  description: string | null;
+  metric: string;
+  operator: string;
+  threshold: number;
+  severity: string;
+  scope_vendor: string | null;
+  scope_site: string | null;
+  scope_device_role: string | null;
+  cooldown_seconds: number;
+  enabled: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+// --- Webhook Endpoints ---
+
+export type WebhookType = "generic" | "slack" | "teams" | "telegram";
+
+export interface WebhookEndpoint {
+  id: string;
+  name: string;
+  url: string;
+  webhook_type: WebhookType;
+  secret: string | null;
+  events: string[] | null;
+  telegram_chat_id: string | null;
+  enabled: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface WebhookTestResult {
+  success: boolean;
+  message: string;
+  status_code: number | null;
+}
+
+// --- Topology Snapshots & Diff ---
+
+export interface TopologySnapshotSummary {
+  id: string;
+  node_count: number;
+  edge_count: number;
+  captured_at: string;
+}
+
+export interface NodeDiff {
+  id: string;
+  hostname: string;
+  ip_address: string;
+}
+
+export interface EdgeDiff {
+  source: string;
+  target: string;
+  link_source: string;
+  subnet?: string;
+  source_ip?: string;
+  target_ip?: string;
+}
+
+export interface TopologyDiff {
+  older_snapshot_id: string;
+  newer_snapshot_id: string;
+  older_captured_at: string;
+  newer_captured_at: string;
+  unchanged_node_count: number;
+  unchanged_edge_count: number;
+  added_nodes: NodeDiff[];
+  removed_nodes: NodeDiff[];
+  added_edges: EdgeDiff[];
+  removed_edges: EdgeDiff[];
 }

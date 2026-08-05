@@ -12,7 +12,7 @@ import asyncio
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("netguard.snmp")
 
@@ -219,6 +219,14 @@ class SnmpMetrics:
     interface_octets_total: int | None = None
     interface_speed_bps: int | None = None
     interface_count: int | None = None
+    # Per-interface snapshot from this poll (index, descr, oper "up"/"down",
+    # octets/speed/errors -- octets/speed/errors are None for down
+    # interfaces, which don't factor into the fleet rollups above). Every
+    # interface the walk found, not just the operationally-up ones, so
+    # metrics_service can detect down ports and raise/clear "Interface
+    # Down" alerts. Defaults to an empty list rather than None so callers
+    # never need a null check before iterating.
+    per_interface: list[dict] = field(default_factory=list)
 
 
 _AUTH_PROTOCOL_NAMES = {
@@ -550,8 +558,28 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
     per_interface: list[dict] = []
 
     for index, status in oper_status.items():
-        if _parse_snmp_enum_int(status) != 1:  # not operationally up -- exclude from utilization/error rollup
+        is_up = _parse_snmp_enum_int(status) == 1
+        if_descr = (descr.get(index) or f"if{index}").strip()
+
+        if not is_up:
+            # Down interfaces still get a per_interface entry (so
+            # metrics_service can detect the down transition and raise an
+            # alert / write interface_statuses history), just excluded
+            # from the fleet utilization/error rollups below -- a down
+            # port has no meaningful "current" traffic rate.
+            if len(per_interface) < MAX_INTERFACES_WALKED:
+                per_interface.append(
+                    {
+                        "if_index": index,
+                        "if_descr": if_descr,
+                        "status": "down",
+                        "octets_total": None,
+                        "speed_bps": None,
+                        "errors": None,
+                    }
+                )
             continue
+
         up_count += 1
         if_errors = int(in_errors.get(index, 0) or 0) + int(out_errors.get(index, 0) or 0)
         if_octets = int(in_octets.get(index, 0) or 0) + int(out_octets.get(index, 0) or 0)
@@ -565,7 +593,8 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
             per_interface.append(
                 {
                     "if_index": index,
-                    "if_descr": (descr.get(index) or f"if{index}").strip(),
+                    "if_descr": if_descr,
+                    "status": "up",
                     "octets_total": if_octets,
                     "speed_bps": if_speed_bps or None,
                     "errors": if_errors,
@@ -1001,6 +1030,7 @@ def poll_health(
         interface_octets_total=interface_stats["octets_total"],
         interface_speed_bps=interface_stats["speed_bps"],
         interface_count=interface_stats["interface_count"],
+        per_interface=interface_stats["per_interface"],
     )
 
 

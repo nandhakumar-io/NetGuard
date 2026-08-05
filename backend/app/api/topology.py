@@ -38,6 +38,8 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
                 "has_config_on_file": n.has_config_on_file,
                 "health_color": n.health_color,
                 "health_score": n.health_score,
+                "data_center": n.data_center,
+                "rack": n.rack,
             }
             for n in graph.nodes
         ],

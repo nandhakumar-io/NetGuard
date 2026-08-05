@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
+from app.models.interface_status import InterfaceStatus, InterfaceOperStatus
 from app.services import alert_service, credential_service, notification_service, snmp_service
 from app.services.snmp_service import SnmpMetrics
 
@@ -136,6 +137,15 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
     never block the poll (notification_service already swallows its own
     errors).
     """
+    if metrics.reachable:
+        # SNMP just answered -- if a prior poll had this device flagged
+        # "Device Unreachable" via SNMP, that's over now. (The ping-based
+        # "Device Unreachable" raised by reachability_service is cleared
+        # independently there, on its own next successful ping.)
+        alert_service.auto_resolve(
+            db, device_id=device.id, category="Device Unreachable", note=f"{device.hostname}: SNMP poll succeeded again"
+        )
+
     for severity, category, message in snmp_service.evaluate_thresholds(metrics):
         alert, is_new = alert_service.raise_alert(
             db,
@@ -148,6 +158,114 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
         if severity == "critical" and is_new:
             notification_service.notify(
                 event=category, message=f"{device.hostname}: {message}", severity=severity
+            )
+
+
+def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) -> None:
+    """Diffs this poll's per-interface oper status against the latest
+    known InterfaceStatus row for each (device, ifIndex) and, on a real
+    change, writes a new history row plus raises/auto-resolves the
+    per-port "Interface Down" alert -- the NOC-dashboard-facing half of
+    port monitoring (the other half, walking the SNMP table itself, is
+    snmp_service.walk_interface_stats).
+
+    Category is scoped to the specific interface (f"Interface Down:
+    {descr}") rather than a single shared "Interface Down" category per
+    device, so multiple down ports on the same device show as distinct,
+    individually-resolvable alerts instead of one alert whose message
+    keeps getting overwritten by whichever port polled last.
+    """
+    if not metrics.per_interface:
+        return
+
+    for entry in metrics.per_interface:
+        if_index = str(entry.get("if_index"))
+        if_descr = entry.get("if_descr") or f"if{if_index}"
+        new_status = InterfaceOperStatus.DOWN if entry.get("status") == "down" else InterfaceOperStatus.UP
+
+        latest = (
+            db.query(InterfaceStatus)
+            .filter(InterfaceStatus.device_id == device.id, InterfaceStatus.if_index == if_index)
+            .order_by(InterfaceStatus.changed_at.desc())
+            .first()
+        )
+
+        if latest is not None and latest.status == new_status:
+            # No change -- don't spam a new history row every poll, just
+            # keep whatever description we last saw (ifDescr essentially
+            # never changes poll-to-poll, but stay defensive).
+            continue
+
+        db.add(
+            InterfaceStatus(
+                device_id=device.id,
+                if_index=if_index,
+                if_descr=if_descr,
+                status=new_status,
+                previous_status=latest.status if latest is not None else None,
+            )
+        )
+
+        category = f"Interface Down: {if_descr}"
+
+        if new_status == InterfaceOperStatus.DOWN:
+            # A device's very first-ever poll finding a port already down
+            # still alerts (there's nothing "newly down" to compare
+            # against, but an operationally-down port is worth surfacing
+            # regardless of whether we caught the actual transition).
+            alert, is_new = alert_service.raise_alert(
+                db,
+                device_id=device.id,
+                severity="critical",
+                source=AlertSource.HEALTH_POLL,
+                category=category,
+                message=f"{device.hostname}: interface {if_descr} is down",
+            )
+            if is_new:
+                notification_service.notify(
+                    event="Interface Down",
+                    message=f"{device.hostname}: interface {if_descr} is down",
+                    severity="critical",
+                )
+        elif latest is not None:
+            # Only auto-resolve on a genuine down->up recovery, not on the
+            # very first poll ever seeing this port (nothing to clear).
+            alert_service.auto_resolve(
+                db,
+                device_id=device.id,
+                category=category,
+                note=f"{device.hostname}: interface {if_descr} is back up",
+            )
+
+
+def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, previous: DeviceMetric | None) -> None:
+    """Detects a reboot (sysUpTime counter reset to a value lower than
+    the previous poll's) and raises a "Device Restart" alert -- the same
+    category name app.services.snmp_service.classify_trap already uses
+    for inbound coldStart/warmStart traps, so the Alert Center treats a
+    polling-detected reboot identically to a trap-reported one.
+
+    A small grace window (uptime under 5 minutes) avoids false "restart"
+    alerts firing again on every subsequent poll after the real one --
+    without it, a device that stays freshly-booted across two polls (poll
+    interval shorter than 5 minutes) would look like it rebooted twice.
+    """
+    if metrics.uptime_seconds is None or previous is None or previous.uptime_seconds is None:
+        return
+    if metrics.uptime_seconds < previous.uptime_seconds and metrics.uptime_seconds < 300:
+        alert, is_new = alert_service.raise_alert(
+            db,
+            device_id=device.id,
+            severity="warning",
+            source=AlertSource.HEALTH_POLL,
+            category="Device Restart",
+            message=f"{device.hostname}: device rebooted (uptime reset, now {metrics.uptime_seconds}s)",
+        )
+        if is_new:
+            notification_service.notify(
+                event="Device Restart",
+                message=f"{device.hostname}: device rebooted",
+                severity="warning",
             )
 
 
@@ -347,6 +465,8 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     db.add(row)
 
     _raise_alerts(db, device, metrics)
+    _check_device_restart(db, device, metrics, previous)
+    _sync_interface_status(db, device, metrics)
 
     db.commit()
     db.refresh(row)

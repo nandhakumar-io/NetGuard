@@ -12,6 +12,7 @@ from app.api import (
     drift,
     metrics,
     alerts,
+    alert_rules,
     gns3,
     notification,
     reports,
@@ -24,6 +25,7 @@ from app.api import (
     maintenance_windows,
     firmware_upgrades,
     flows,
+    webhooks,
 )
 
 api_router = APIRouter()
@@ -38,6 +40,7 @@ api_router.include_router(deployments.router)
 api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
+api_router.include_router(alert_rules.router)
 api_router.include_router(gns3.router)
 api_router.include_router(notification.router)
 api_router.include_router(reports.router)
@@ -50,3 +53,4 @@ api_router.include_router(path_trace.router)
 api_router.include_router(maintenance_windows.router)
 api_router.include_router(firmware_upgrades.router)
 api_router.include_router(flows.router)
+api_router.include_router(webhooks.router)

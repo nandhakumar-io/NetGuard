@@ -212,6 +212,73 @@ def _persist_and_broadcast(
         db.close()
 
 
+def _post_telegram(event: str, message: str, severity: str) -> None:
+    """Send a notification to the global Telegram chat configured via env vars."""
+    bot_token = settings.TELEGRAM_BOT_TOKEN
+    chat_id = settings.TELEGRAM_CHAT_ID
+    if not bot_token or not chat_id:
+        return
+    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+    text = f"{emoji} <b>NetGuard — {event}</b>\n{message}"
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.warning("Telegram notification send failed", exc_info=True)
+
+
+def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: str) -> None:
+    """Send the notification to all enabled user-configured WebhookEndpoint rows."""
+    import json as _json
+
+    from app.core.database import SessionLocal as _SessionLocal
+    from app.models.webhook import WebhookEndpoint
+
+    db = _SessionLocal()
+    try:
+        webhooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.enabled == True).all()  # noqa: E712
+        for wh in webhooks:
+            # Check event subscription filter
+            if wh.events:
+                try:
+                    subscribed = _json.loads(wh.events)
+                    if isinstance(subscribed, list) and event_type not in subscribed:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            wh_type = wh.webhook_type.value if hasattr(wh.webhook_type, "value") else wh.webhook_type
+            emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+
+            try:
+                if wh_type == "telegram":
+                    chat_id = wh.telegram_chat_id or ""
+                    text = f"{emoji} <b>NetGuard — {event}</b>\n{message}"
+                    tg_url = wh.url
+                    httpx.post(tg_url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=TIMEOUT_SECONDS)
+                elif wh_type == "slack":
+                    text = f"{emoji} *NetGuard — {event}*\n{message}"
+                    httpx.post(wh.url, json={"text": text}, timeout=TIMEOUT_SECONDS)
+                elif wh_type == "teams":
+                    text = f"{emoji} **NetGuard — {event}**\n{message}"
+                    httpx.post(wh.url, json={"text": text}, timeout=TIMEOUT_SECONDS)
+                else:
+                    payload = {
+                        "event": event,
+                        "event_type": event_type,
+                        "message": message,
+                        "severity": severity,
+                        "source": "netguard",
+                    }
+                    httpx.post(wh.url, json=payload, timeout=TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                logger.warning("User webhook post failed for %s", wh.name, exc_info=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to fan out to user webhooks", exc_info=True)
+    finally:
+        db.close()
+
+
 def notify(
     event: str,
     message: str,
@@ -221,8 +288,8 @@ def notify(
     change_request_id: uuid.UUID | None = None,
     deployment_id: uuid.UUID | None = None,
 ) -> None:
-    """Fan out a notification to Slack, Teams, Email, and the in-app
-    Notification Center.
+    """Fan out a notification to Slack, Teams, Telegram, Email, user-configured
+    webhooks, and the in-app Notification Center.
 
     severity: "info" | "warning" | "critical"
     event: short human label (e.g. "Deployment Failed") -- also used to
@@ -240,6 +307,12 @@ def notify(
     event_type = _resolve_event_type(event, severity)
 
     _send_email(event_type, event, message)
+
+    # Telegram (global env-var-based)
+    _post_telegram(event, message, severity)
+
+    # User-configured webhooks (DB-based)
+    _fan_out_user_webhooks(event, message, severity, event_type)
 
     _persist_and_broadcast(
         event_type=event_type,

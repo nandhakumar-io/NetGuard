@@ -12,6 +12,10 @@ class DeviceBase(BaseModel):
     vendor: DeviceVendor = DeviceVendor.CISCO
     site: str | None = None
     device_type: str | None = None
+    # Structured group assignment (rack/datacenter/site/custom) -- see
+    # app.models.device_group.DeviceGroup. Distinct from the free-text
+    # `site` field above.
+    group_id: uuid.UUID | None = None
     # Compliance/topology role (e.g. "core", "distribution", "access",
     # "edge-firewall") -- selects which ComplianceBaseline a
     # DriftBaseline.ROLE_BASELINE scan compares this device against.
@@ -81,6 +85,7 @@ class DeviceUpdate(BaseModel):
     site: str | None = None
     device_type: str | None = None
     device_role: str | None = None
+    group_id: uuid.UUID | None = None
     ssh_username: str | None = None
     ssh_credential_ref: str | None = None
     supports_snmp: bool | None = None
@@ -176,10 +181,9 @@ class DeviceRead(DeviceBase):
             enabled_health_checks=checks,
         )
         obj.snmp_credentials_configured = bool(
-            device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted or
-            device.snmp_community_ref or device.snmp_auth_credential_ref or device.snmp_privacy_credential_ref
+            device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted
         )
-        obj.ssh_credentials_configured = bool(device.ssh_password_encrypted or device.ssh_credential_ref)
+        obj.ssh_credentials_configured = bool(device.ssh_password_encrypted)
 
         from app.services import eol_service
 

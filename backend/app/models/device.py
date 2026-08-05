@@ -68,6 +68,21 @@ class Device(Base):
     # and drift_service's DriftBaseline.ROLE_BASELINE.
     device_role = Column(String, nullable=True)
     status = Column(Enum(DeviceStatus), nullable=False, default=DeviceStatus.UNKNOWN)
+
+    # --- Physical/logical grouping (Device Grouping: rack + data center) ---
+    # Free-text, same convention as `site`/`device_type`/`device_role` above
+    # -- orgs name data centers and racks however they already do (site
+    # codes, building names, "DC1", "Rack A12", ...) so this stays a plain
+    # string rather than a rigid enum. data_center is the top grouping
+    # level, rack is nested one level under it; a device with a rack but
+    # no data_center still groups fine (falls under an "Unassigned" DC
+    # bucket in the UI), same as devices with no site today.
+    data_center = Column(String, nullable=True, index=True)
+    rack = Column(String, nullable=True, index=True)
+    # Optional 1-based slot/U position within the rack, purely cosmetic
+    # (sorts devices top-to-bottom in the rack-elevation view) -- not
+    # validated against rack height since we don't model rack capacity.
+    rack_position = Column(Integer, nullable=True)
     ssh_username = Column(String, nullable=True)
     ssh_credential_ref = Column(String, nullable=True)  # legacy: pointer to secret store, not raw secret
     # Fernet-encrypted (app.core.crypto) SSH password, set via
