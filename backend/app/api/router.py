@@ -19,6 +19,9 @@ from app.api import (
     terminal,
     compliance_baselines,
     config_templates,
+    syslog,
+    path_trace,
+    flows,
 )
 
 api_router = APIRouter()
@@ -40,3 +43,6 @@ api_router.include_router(topology.router)
 api_router.include_router(terminal.router)
 api_router.include_router(compliance_baselines.router)
 api_router.include_router(config_templates.router)
+api_router.include_router(syslog.router)
+api_router.include_router(path_trace.router)
+api_router.include_router(flows.router)

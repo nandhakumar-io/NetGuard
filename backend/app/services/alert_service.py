@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity, AlertSource
-from app.services import event_bus
+from app.services import alert_correlation_service, event_bus
 
 
 # ------------------------------------------------------------------
@@ -135,6 +135,7 @@ def raise_alert(
             category=category,
             channel=event_bus.ALERTS_CHANNEL,
         )
+        alert_correlation_service.correlate_downstream(db, existing)
         return existing, False
 
     alert = Alert(
@@ -158,6 +159,8 @@ def raise_alert(
         channel=event_bus.ALERTS_CHANNEL,
     )
     event_bus.publish_event("alert_created", alert_id=str(alert.id))
+
+    alert_correlation_service.correlate_downstream(db, alert)
 
     return alert, True
 
@@ -205,6 +208,10 @@ def resolve_alert(db: Session, alert_id: uuid.UUID, user_email: str) -> Alert:
     )
     event_bus.publish_event("alert_resolved", alert_id=str(alert.id))
 
+    # If this was a root cause other alerts were suppressed under, they're
+    # independent conditions again now that it's resolved.
+    alert_correlation_service.release_suppressed(db, alert)
+
     return alert
 
 
@@ -238,6 +245,12 @@ def clear_alerts(db: Session, user_email: str, *, device_id: uuid.UUID | None = 
             "acknowledged_by": func.coalesce(Alert.acknowledged_by, user_email),
         },
         synchronize_session=False,
+    )
+    db.commit()
+
+    # Release anything suppressed under an alert that just got bulk-resolved.
+    db.query(Alert).filter(Alert.root_cause_alert_id.in_(alert_ids)).update(
+        {"suppressed": False, "root_cause_alert_id": None}, synchronize_session=False
     )
     db.commit()
 

@@ -194,6 +194,57 @@ class Settings(BaseSettings):
     # controller URL/credentials point at an already-running GNS3 server
     # (local gns3server process or a GNS3 VM), which this app never starts
     # or manages itself.
+    # Syslog collection (data-completeness: SNMP polling never sees auth
+    # failures, hardware fault log lines, or ACL deny hits -- those are
+    # syslog-only). Default port 1514, not the standard 514, so this binds
+    # without needing root/CAP_NET_BIND_SERVICE in a normal container --
+    # point real devices' `logging host` at 1514, or front it with a
+    # relay/port-forward to 514 if the deployment needs the standard port.
+    # See app.services.syslog_service.start_syslog_listener.
+    SYSLOG_LISTENER_ENABLED: bool = True
+    SYSLOG_UDP_HOST: str = "0.0.0.0"
+    SYSLOG_UDP_PORT: int = 1514
+    # How long syslog_messages are retained before the nightly cleanup
+    # sweep prunes them -- raw syslog volume is much higher than
+    # DeviceMetric rows, so this defaults shorter than
+    # SNMP_METRIC_RETENTION_DAYS.
+    SYSLOG_RETENTION_DAYS: int = 14
+
+    # NetFlow v5/v9 + IPFIX collection (traffic-flow visibility -- "top
+    # talkers", top conversations, protocol mix, and traffic-aware
+    # alerting, none of which SNMP polling or syslog can answer since
+    # neither carries per-flow src/dst/port/byte-count detail). Default
+    # port 2055 is the common NetFlow/IPFIX convention (Cisco default);
+    # point device `ip flow-export destination <this host> 2055` /
+    # equivalent IPFIX exporter config at it. See
+    # app.services.flow_service.start_flow_listener.
+    NETFLOW_LISTENER_ENABLED: bool = True
+    NETFLOW_UDP_HOST: str = "0.0.0.0"
+    NETFLOW_UDP_PORT: int = 2055
+    # sFlow uses a distinct well-known port (6343) and datagram format
+    # (sampled raw packet headers + interface counters, not NetFlow-style
+    # flow records) from the same vendors/devices that may *also* export
+    # NetFlow/IPFIX, so it gets its own listener/port rather than sharing
+    # NETFLOW_UDP_PORT.
+    SFLOW_LISTENER_ENABLED: bool = True
+    SFLOW_UDP_HOST: str = "0.0.0.0"
+    SFLOW_UDP_PORT: int = 6343
+    # Raw flow-record volume is far higher than DeviceMetric/syslog
+    # volume (every conversation, not every poll interval), so retention
+    # defaults short -- long enough for "what happened this week"
+    # top-talker/conversation analysis, not for long-term archival.
+    FLOW_RETENTION_DAYS: int = 7
+
+    # How often the in-process loop in app.main captures a
+    # TopologySnapshot for historical "what changed in the network graph
+    # since <period>" diffing (app.services.topology_service.
+    # diff_snapshots). Independent of SNMP_POLL_INTERVAL_SECONDS since a
+    # topology snapshot is cheap and doesn't need poll-frequency
+    # granularity -- default once/day is enough to answer "since last
+    # week" without ballooning topology_snapshots row count.
+    TOPOLOGY_SNAPSHOT_ENABLED: bool = True
+    TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS: int = 86400
+
     GNS3_ENABLED: bool = False
     GNS3_BASE_URL: str = "http://localhost:3080"
     GNS3_USERNAME: str | None = None

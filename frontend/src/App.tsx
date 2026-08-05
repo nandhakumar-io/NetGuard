@@ -15,6 +15,9 @@ import Lab from "./pages/Lab";
 import Topology from "./pages/Topology";
 import ConfigSearchPage from "./pages/ConfigSearch";
 import TemplatesPage from "./pages/Templates";
+import SyslogViewer from "./pages/SyslogViewer";
+import PathTracePage from "./pages/PathTrace";
+import TrafficAnalysis from "./pages/TrafficAnalysis";
 
 export default function App() {
   return (
@@ -30,6 +33,9 @@ export default function App() {
           <Route path="/config-search" element={<ConfigSearchPage />} />
           <Route path="/templates" element={<TemplatesPage />} />
           <Route path="/topology" element={<Topology />} />
+          <Route path="/traffic-analysis" element={<TrafficAnalysis />} />
+          <Route path="/path-trace" element={<PathTracePage />} />
+          <Route path="/syslog" element={<SyslogViewer />} />
           <Route path="/drift" element={<DriftPage />} />
           <Route path="/alerts" element={<AlertCenter />} />
           <Route path="/lab" element={<Lab />} />

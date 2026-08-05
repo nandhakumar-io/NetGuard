@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
-import { TopologyResponse, TopologyNode, TopologyEdge } from "../lib/types";
+import { TopologyResponse, TopologyNode, TopologyEdge, TopologySnapshotSummary, TopologyDiff } from "../lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
   online: "#16a34a",
@@ -178,6 +178,59 @@ export default function Topology() {
   const [showIpLabels, setShowIpLabels] = useState(true);
   const svgRef = useRef<SVGSVGElement>(null);
 
+  // --- history / diffing ------------------------------------------------
+  const [showDiff, setShowDiff] = useState(false);
+  const [snapshots, setSnapshots] = useState<TopologySnapshotSummary[]>([]);
+  const [diff, setDiff] = useState<TopologyDiff | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [olderId, setOlderId] = useState<string>("");
+  const [newerId, setNewerId] = useState<string>("");
+
+  const loadSnapshots = () => {
+    api
+      .get<TopologySnapshotSummary[]>("/topology/snapshots")
+      .then((res) => setSnapshots(res.data))
+      .catch(() => {});
+  };
+
+  const loadDiff = (params?: { older_id?: string; newer_id?: string }) => {
+    setDiffLoading(true);
+    setDiffError(null);
+    const qs = new URLSearchParams();
+    if (params?.older_id) qs.set("older_id", params.older_id);
+    if (params?.newer_id) qs.set("newer_id", params.newer_id);
+    api
+      .get<TopologyDiff>(`/topology/diff?${qs.toString()}`)
+      .then((res) => {
+        setDiff(res.data);
+        setOlderId(res.data.older_snapshot_id);
+        setNewerId(res.data.newer_snapshot_id);
+      })
+      .catch((err) =>
+        setDiffError(
+          err?.response?.data?.detail ||
+            "Not enough snapshot history yet -- a snapshot is captured automatically once a day."
+        )
+      )
+      .finally(() => setDiffLoading(false));
+  };
+
+  const captureSnapshotNow = () => {
+    api
+      .post<TopologySnapshotSummary>("/topology/snapshots")
+      .then(() => {
+        loadSnapshots();
+      })
+      .catch(() => {});
+  };
+
+  const openDiffPanel = () => {
+    setShowDiff(true);
+    loadSnapshots();
+    loadDiff();
+  };
+
   // --- pan / zoom -----------------------------------------------------
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
   const dragState = useRef<{ startX: number; startY: number; viewX: number; viewY: number } | null>(null);
@@ -275,6 +328,16 @@ export default function Topology() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => (showDiff ? setShowDiff(false) : openDiffPanel())}
+            className={`flex items-center gap-1.5 text-xs font-bold rounded-lg px-2.5 py-2 shadow-sm border transition-colors ${
+              showDiff
+                ? "bg-brandblue text-white border-brandblue"
+                : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            What changed?
+          </button>
           <label className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm">
             <input type="checkbox" checked={showIpLabels} onChange={(e) => setShowIpLabels(e.target.checked)} />
             Show interface IPs
@@ -295,6 +358,146 @@ export default function Topology() {
           )}
         </div>
       </div>
+
+      {showDiff && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col gap-4">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <p className="text-sm font-bold text-navy">What changed in the graph</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Compares two saved topology snapshots. A new snapshot is captured automatically once a day.
+              </p>
+            </div>
+            <button
+              onClick={captureSnapshotNow}
+              className="text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 shadow-sm"
+            >
+              Capture snapshot now
+            </button>
+          </div>
+
+          {snapshots.length >= 2 && (
+            <div className="flex items-center gap-2 flex-wrap text-xs">
+              <span className="font-bold text-slate-500">From</span>
+              <select
+                value={olderId}
+                onChange={(e) => setOlderId(e.target.value)}
+                className="border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
+              >
+                {snapshots.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.captured_at ? new Date(s.captured_at).toLocaleString() : s.id} ({s.node_count}n/{s.edge_count}e)
+                  </option>
+                ))}
+              </select>
+              <span className="font-bold text-slate-500">To</span>
+              <select
+                value={newerId}
+                onChange={(e) => setNewerId(e.target.value)}
+                className="border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
+              >
+                {snapshots.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.captured_at ? new Date(s.captured_at).toLocaleString() : s.id} ({s.node_count}n/{s.edge_count}e)
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => loadDiff({ older_id: olderId, newer_id: newerId })}
+                className="text-xs font-bold rounded-lg px-3 py-1.5 bg-brandblue text-white shadow-sm"
+              >
+                Compare
+              </button>
+            </div>
+          )}
+
+          {diffLoading && <p className="text-sm text-slate-400">Loading diff…</p>}
+          {diffError && !diffLoading && (
+            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              {diffError}
+            </p>
+          )}
+
+          {diff && !diffLoading && !diffError && (
+            <div>
+              <p className="text-xs text-slate-500 mb-3">
+                {diff.older_captured_at ? new Date(diff.older_captured_at).toLocaleString() : "—"} →{" "}
+                {diff.newer_captured_at ? new Date(diff.newer_captured_at).toLocaleString() : "—"} ·{" "}
+                {diff.unchanged_node_count} unchanged device{diff.unchanged_node_count === 1 ? "" : "s"},{" "}
+                {diff.unchanged_edge_count} unchanged link{diff.unchanged_edge_count === 1 ? "" : "s"}
+              </p>
+
+              {diff.added_nodes.length === 0 &&
+              diff.removed_nodes.length === 0 &&
+              diff.added_edges.length === 0 &&
+              diff.removed_edges.length === 0 ? (
+                <p className="text-sm text-slate-400">No changes between these snapshots.</p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  {diff.added_nodes.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold text-emerald-600 uppercase tracking-wide mb-1">
+                        + Devices added ({diff.added_nodes.length})
+                      </p>
+                      <ul className="flex flex-col gap-1">
+                        {diff.added_nodes.map((n) => (
+                          <li key={n.id} className="text-slate-700">
+                            {n.hostname} <span className="text-slate-400 font-mono text-xs">{n.ip_address}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {diff.removed_nodes.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold text-riskcrit uppercase tracking-wide mb-1">
+                        − Devices removed ({diff.removed_nodes.length})
+                      </p>
+                      <ul className="flex flex-col gap-1">
+                        {diff.removed_nodes.map((n) => (
+                          <li key={n.id} className="text-slate-700">
+                            {n.hostname} <span className="text-slate-400 font-mono text-xs">{n.ip_address}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {diff.added_edges.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold text-emerald-600 uppercase tracking-wide mb-1">
+                        + Links added ({diff.added_edges.length})
+                      </p>
+                      <ul className="flex flex-col gap-1">
+                        {diff.added_edges.map((e, i) => (
+                          <li key={i} className="text-slate-700 font-mono text-xs">
+                            {e.source} ↔ {e.target}{" "}
+                            <span className="text-slate-400 font-sans">({e.link_source})</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {diff.removed_edges.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold text-riskcrit uppercase tracking-wide mb-1">
+                        − Links removed ({diff.removed_edges.length})
+                      </p>
+                      <ul className="flex flex-col gap-1">
+                        {diff.removed_edges.map((e, i) => (
+                          <li key={i} className="text-slate-700 font-mono text-xs">
+                            {e.source} ↔ {e.target}{" "}
+                            <span className="text-slate-400 font-sans">({e.link_source})</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {loading && <p className="text-sm text-slate-400">Loading topology...</p>}
       {error && <p className="text-sm text-riskcrit">{error}</p>}

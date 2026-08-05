@@ -31,6 +31,13 @@ export default function AlertCenter() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expandedRoots, setExpandedRoots] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) =>
+    setExpandedRoots((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   // Filters
   const [severityFilter, setSeverityFilter] = useState<string>("");
@@ -253,77 +260,120 @@ export default function AlertCenter() {
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">No alerts match the current filters. Your network is looking healthy.</p>
           </div>
         ) : (
-          alerts.map((alert, idx) => {
-            const sev = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.info;
-            return (
-              <div
-                key={alert.id}
-                className={`bg-white dark:bg-slate-800 rounded-xl border ${sev.border} shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden ${
-                  alert.resolved ? "opacity-60" : ""
-                }`}
-                style={{ animationDelay: `${idx * 30}ms` }}
-              >
-                <div className="flex items-stretch">
-                  {/* Severity bar */}
-                  <div className={`w-1.5 ${sev.bg} shrink-0`} />
+          (() => {
+            const byId = new Map(alerts.map((a) => [a.id, a]));
+            const impactedByRoot = new Map<string, Alert[]>();
+            for (const a of alerts) {
+              if (a.suppressed && a.root_cause_alert_id && byId.has(a.root_cause_alert_id)) {
+                const list = impactedByRoot.get(a.root_cause_alert_id) || [];
+                list.push(a);
+                impactedByRoot.set(a.root_cause_alert_id, list);
+              }
+            }
+            // Top-level rows: everything that isn't suppressed under a root
+            // cause visible in this list. A suppressed alert whose root
+            // cause got filtered out of view still renders standalone (with
+            // an "Impacted" badge) so nothing silently disappears.
+            const topLevel = alerts.filter((a) => !(a.suppressed && a.root_cause_alert_id && byId.has(a.root_cause_alert_id)));
 
-                  <div className="flex-1 px-5 py-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-base">{sev.icon}</span>
-                          <span className={`text-[11px] font-bold uppercase tracking-wider ${sev.color} ${sev.bgLight} px-2 py-0.5 rounded-full`}>
-                            {sev.label}
-                          </span>
-                          <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded-full">
-                            {SOURCE_LABELS[alert.source] || alert.source}
-                          </span>
-                          {alert.acknowledged && !alert.resolved && (
-                            <span className="text-[11px] font-medium text-brandblue bg-blue-50 px-2 py-0.5 rounded-full">
-                              Acknowledged
-                            </span>
-                          )}
-                          {alert.resolved && (
-                            <span className="text-[11px] font-medium text-risklow bg-green-50 px-2 py-0.5 rounded-full">
-                              Resolved
-                            </span>
-                          )}
-                        </div>
-                        <h3 className="font-semibold text-navy dark:text-white mt-1.5 text-sm">{alert.category}</h3>
-                        <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{alert.message}</p>
-                        <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-400 dark:text-slate-500">
-                          <span>{timeAgo(alert.created_at)}</span>
-                          {alert.device_id && <span>Device: {alert.device_id.slice(0, 8)}…</span>}
-                          {alert.acknowledged_by && <span>Ack'd by {alert.acknowledged_by}</span>}
-                          {alert.resolved_by && <span>Resolved by {alert.resolved_by}</span>}
-                        </div>
-                      </div>
+            const renderAlert = (alert: Alert, nested: boolean) => {
+              const sev = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.info;
+              const impacted = impactedByRoot.get(alert.id) || [];
+              const isExpanded = expandedRoots.has(alert.id);
+              return (
+                <div
+                  key={alert.id}
+                  className={`bg-white dark:bg-slate-800 rounded-xl border ${sev.border} shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden ${
+                    alert.resolved ? "opacity-60" : ""
+                  } ${nested ? "ml-6 border-dashed" : ""}`}
+                >
+                  <div className="flex items-stretch">
+                    {/* Severity bar */}
+                    <div className={`w-1.5 ${sev.bg} shrink-0`} />
 
-                      {/* Actions */}
-                      {!alert.resolved && (
-                        <div className="flex items-center gap-2 shrink-0">
-                          {!alert.acknowledged && (
+                    <div className="flex-1 px-5 py-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-base">{sev.icon}</span>
+                            <span className={`text-[11px] font-bold uppercase tracking-wider ${sev.color} ${sev.bgLight} px-2 py-0.5 rounded-full`}>
+                              {sev.label}
+                            </span>
+                            <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded-full">
+                              {SOURCE_LABELS[alert.source] || alert.source}
+                            </span>
+                            {alert.acknowledged && !alert.resolved && (
+                              <span className="text-[11px] font-medium text-brandblue bg-blue-50 px-2 py-0.5 rounded-full">
+                                Acknowledged
+                              </span>
+                            )}
+                            {alert.resolved && (
+                              <span className="text-[11px] font-medium text-risklow bg-green-50 px-2 py-0.5 rounded-full">
+                                Resolved
+                              </span>
+                            )}
+                            {alert.suppressed && (
+                              <span
+                                title="Likely a downstream consequence of another active alert, per the topology graph"
+                                className="text-[11px] font-medium text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 px-2 py-0.5 rounded-full"
+                              >
+                                Impacted
+                              </span>
+                            )}
+                          </div>
+                          <h3 className="font-semibold text-navy dark:text-white mt-1.5 text-sm">{alert.category}</h3>
+                          <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{alert.message}</p>
+                          <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-400 dark:text-slate-500">
+                            <span>{timeAgo(alert.created_at)}</span>
+                            {alert.device_id && <span>Device: {alert.device_id.slice(0, 8)}…</span>}
+                            {alert.acknowledged_by && <span>Ack'd by {alert.acknowledged_by}</span>}
+                            {alert.resolved_by && <span>Resolved by {alert.resolved_by}</span>}
+                          </div>
+                          {!nested && impacted.length > 0 && (
                             <button
-                              onClick={() => handleAcknowledge(alert.id)}
-                              className="text-xs font-medium text-brandblue hover:text-navy dark:text-white bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
+                              onClick={() => toggleExpanded(alert.id)}
+                              className="mt-2 text-[11px] font-semibold text-brandblue hover:text-navy dark:text-white flex items-center gap-1"
                             >
-                              Acknowledge
+                              <span>{isExpanded ? "▾" : "▸"}</span>
+                              {impacted.length} downstream alert{impacted.length === 1 ? "" : "s"} suppressed as impacted
                             </button>
                           )}
-                          <button
-                            onClick={() => handleResolve(alert.id)}
-                            className="text-xs font-medium text-risklow hover:text-green-800 bg-green-50 hover:bg-green-100 px-3 py-1.5 rounded-lg transition-colors"
-                          >
-                            Resolve
-                          </button>
                         </div>
-                      )}
+
+                        {/* Actions */}
+                        {!alert.resolved && (
+                          <div className="flex items-center gap-2 shrink-0">
+                            {!alert.acknowledged && (
+                              <button
+                                onClick={() => handleAcknowledge(alert.id)}
+                                className="text-xs font-medium text-brandblue hover:text-navy dark:text-white bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
+                              >
+                                Acknowledge
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleResolve(alert.id)}
+                              className="text-xs font-medium text-risklow hover:text-green-800 bg-green-50 hover:bg-green-100 px-3 py-1.5 rounded-lg transition-colors"
+                            >
+                              Resolve
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
+              );
+            };
+
+            return topLevel.map((alert) => (
+              <div key={alert.id} className="space-y-2">
+                {renderAlert(alert, false)}
+                {expandedRoots.has(alert.id) &&
+                  (impactedByRoot.get(alert.id) || []).map((child) => renderAlert(child, true))}
               </div>
-            );
-          })
+            ));
+          })()
         )}
       </div>
     </div>

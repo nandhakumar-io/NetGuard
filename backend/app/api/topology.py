@@ -1,9 +1,12 @@
-from fastapi import APIRouter, Depends
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.schemas.topology import TopologyResponse
+from app.models.topology_snapshot import TopologySnapshot
+from app.schemas.topology import TopologyDiffResponse, TopologyResponse, TopologySnapshotRead
 from app.services import topology_service
 
 router = APIRouter(prefix="/topology", tags=["topology"])
@@ -49,3 +52,83 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
             for e in graph.edges
         ],
     )
+
+
+@router.get("/snapshots", response_model=list[TopologySnapshotRead])
+def list_snapshots(
+    limit: int = Query(30, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """History for the Topology page's diff picker -- newest first."""
+    rows = db.query(TopologySnapshot).order_by(TopologySnapshot.captured_at.desc()).limit(limit).all()
+    return [
+        TopologySnapshotRead(
+            id=str(s.id),
+            node_count=s.node_count,
+            edge_count=s.edge_count,
+            captured_at=s.captured_at.isoformat() if s.captured_at else None,
+        )
+        for s in rows
+    ]
+
+
+@router.post("/snapshots", response_model=TopologySnapshotRead)
+def create_snapshot(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Captures the current graph on demand -- e.g. right before a
+    maintenance window, so "since this snapshot" diffing has a clean
+    baseline instead of waiting for the next scheduled capture (see
+    settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS in app.main).
+    """
+    snapshot = topology_service.capture_snapshot(db)
+    return TopologySnapshotRead(
+        id=str(snapshot.id),
+        node_count=snapshot.node_count,
+        edge_count=snapshot.edge_count,
+        captured_at=snapshot.captured_at.isoformat() if snapshot.captured_at else None,
+    )
+
+
+@router.get("/diff", response_model=TopologyDiffResponse)
+def diff_topology(
+    older_id: str | None = Query(None, description="Snapshot id to diff from. Defaults to the oldest snapshot within `days`."),
+    newer_id: str | None = Query(None, description="Snapshot id to diff to. Defaults to the most recent snapshot."),
+    days: int = Query(7, ge=1, le=90, description="When older_id isn't given, pick the oldest snapshot at least this many days back."),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """'What changed in the network graph since <period>' -- the
+    historical counterpart to the live /topology view. With no
+    parameters, compares the most recent snapshot against the oldest
+    one still within the last `days` days (default a week), which is
+    what "since last week" means for a caller that doesn't want to look
+    up snapshot ids first.
+    """
+    import datetime
+
+    if newer_id:
+        newer = db.get(TopologySnapshot, uuid.UUID(newer_id))
+    else:
+        newer = db.query(TopologySnapshot).order_by(TopologySnapshot.captured_at.desc()).first()
+    if newer is None:
+        raise HTTPException(404, "No topology snapshots captured yet")
+
+    if older_id:
+        older = db.get(TopologySnapshot, uuid.UUID(older_id))
+    else:
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+        older = (
+            db.query(TopologySnapshot)
+            .filter(TopologySnapshot.captured_at <= cutoff)
+            .order_by(TopologySnapshot.captured_at.desc())
+            .first()
+        )
+        if older is None:
+            # Nothing old enough yet (app freshly deployed) -- fall back to
+            # the very oldest snapshot on file rather than erroring, so the
+            # diff view still shows *something* instead of a dead end.
+            older = db.query(TopologySnapshot).order_by(TopologySnapshot.captured_at.asc()).first()
+    if older is None or older.id == newer.id:
+        raise HTTPException(404, "Not enough snapshot history yet to diff -- check back after the next capture.")
+
+    return topology_service.diff_snapshots(older, newer)

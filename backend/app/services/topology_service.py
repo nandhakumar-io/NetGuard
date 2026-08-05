@@ -322,3 +322,73 @@ def _gns3_port_label(node_link_entry: dict) -> str | None:
     if adapter is not None and port is not None:
         return f"a{adapter}/{port}"
     return None
+
+# --- Historical snapshots & diffing ("what changed since <period>") ------
+#
+# build_topology() above is always a live snapshot -- it has no memory of
+# what the graph looked like yesterday or last week. capture_snapshot()
+# persists a compact copy of the current graph (app.models.
+# topology_snapshot.TopologySnapshot); diff_snapshots() compares two of
+# them and reports added/removed nodes and edges, the same "what changed"
+# framing app.services.drift_service already provides for config content.
+
+
+def capture_snapshot(db: Session) -> "TopologySnapshot":
+    import json
+
+    from app.models.topology_snapshot import TopologySnapshot
+
+    graph = build_topology(db)
+    nodes = [{"id": n.id, "hostname": n.hostname, "ip_address": n.ip_address} for n in graph.nodes]
+    edges = [
+        {"source": e.source, "target": e.target, "link_source": e.link_source}
+        for e in graph.edges
+    ]
+    snapshot = TopologySnapshot(
+        nodes_json=json.dumps(nodes),
+        edges_json=json.dumps(edges),
+        node_count=len(nodes),
+        edge_count=len(edges),
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    return snapshot
+
+
+def _edge_key(e: dict) -> tuple[str, str]:
+    # Undirected: a link discovered as A->B one day and B->A the next
+    # (order can flip depending on which side answered LLDP/CDP first)
+    # is the same physical link, not a removal + addition.
+    return tuple(sorted((e["source"], e["target"])))
+
+
+def diff_snapshots(older: "TopologySnapshot", newer: "TopologySnapshot") -> dict:
+    """Returns added/removed nodes and edges between two snapshots
+    (older -> newer). Node/edge identity is by device id, so a hostname
+    rename on the same device shows as neither an add nor a remove.
+    """
+    import json
+
+    older_nodes = {n["id"]: n for n in json.loads(older.nodes_json)}
+    newer_nodes = {n["id"]: n for n in json.loads(newer.nodes_json)}
+    older_edges = {_edge_key(e): e for e in json.loads(older.edges_json)}
+    newer_edges = {_edge_key(e): e for e in json.loads(newer.edges_json)}
+
+    added_nodes = [newer_nodes[i] for i in newer_nodes.keys() - older_nodes.keys()]
+    removed_nodes = [older_nodes[i] for i in older_nodes.keys() - newer_nodes.keys()]
+    added_edges = [newer_edges[k] for k in newer_edges.keys() - older_edges.keys()]
+    removed_edges = [older_edges[k] for k in older_edges.keys() - newer_edges.keys()]
+
+    return {
+        "older_snapshot_id": str(older.id),
+        "newer_snapshot_id": str(newer.id),
+        "older_captured_at": older.captured_at.isoformat() if older.captured_at else None,
+        "newer_captured_at": newer.captured_at.isoformat() if newer.captured_at else None,
+        "added_nodes": added_nodes,
+        "removed_nodes": removed_nodes,
+        "added_edges": added_edges,
+        "removed_edges": removed_edges,
+        "unchanged_node_count": len(newer_nodes.keys() & older_nodes.keys()),
+        "unchanged_edge_count": len(newer_edges.keys() & older_edges.keys()),
+    }

@@ -29,3 +29,23 @@ class TopologyEdgeRead(BaseModel):
 class TopologyResponse(BaseModel):
     nodes: list[TopologyNodeRead]
     edges: list[TopologyEdgeRead]
+
+
+class TopologySnapshotRead(BaseModel):
+    id: str
+    node_count: int
+    edge_count: int
+    captured_at: str | None
+
+
+class TopologyDiffResponse(BaseModel):
+    older_snapshot_id: str
+    newer_snapshot_id: str
+    older_captured_at: str | None
+    newer_captured_at: str | None
+    added_nodes: list[dict]
+    removed_nodes: list[dict]
+    added_edges: list[dict]
+    removed_edges: list[dict]
+    unchanged_node_count: int
+    unchanged_edge_count: int

@@ -403,6 +403,10 @@ export interface Alert {
   resolved: boolean;
   resolved_at: string | null;
   resolved_by: string | null;
+  last_seen_at?: string | null;
+  occurrence_count?: number;
+  root_cause_alert_id: string | null;
+  suppressed: boolean;
   created_at: string;
 }
 
@@ -603,4 +607,147 @@ export interface FleetHealthSummary {
   unknown: number;
   average_health_score: number | null;
   devices_with_stale_metrics: number;
+}
+
+// --- Syslog Collection & Correlation ---
+
+export type SyslogSeverity = "EMERGENCY" | "ALERT" | "CRITICAL" | "ERROR" | "WARNING" | "NOTICE" | "INFORMATIONAL" | "DEBUG";
+
+export interface SyslogMessage {
+  id: string;
+  device_id: string | null;
+  device_hostname: string | null;
+  source_ip: string;
+  facility: number | null;
+  severity: SyslogSeverity;
+  reported_hostname: string | null;
+  tag: string | null;
+  message: string;
+  device_reported_at: string | null;
+  received_at: string;
+  correlated_category: string | null;
+  correlated_alert_id: string | null;
+}
+
+export interface SyslogVolumePoint {
+  hour: string;
+  count: number;
+}
+
+export interface SyslogSummary {
+  total: number;
+  correlated: number;
+  by_severity: Record<string, number>;
+  volume_by_hour: SyslogVolumePoint[];
+}
+
+// --- Path/Route Tracing (NetPath-style) ---
+
+export type HopStatus = "ok" | "degraded" | "timeout" | "unknown";
+export type PathTraceStatus = "complete" | "partial" | "failed";
+
+export interface PathHop {
+  id: string;
+  hop_index: number;
+  ip_address: string | null;
+  hostname: string | null;
+  device_id: string | null;
+  rtt_ms: number | null;
+  packet_loss_pct: number | null;
+  status: HopStatus;
+}
+
+export interface PathTrace {
+  id: string;
+  source_device_id: string | null;
+  source_hostname: string | null;
+  source_ip: string;
+  target_device_id: string | null;
+  target_hostname: string | null;
+  target_input: string;
+  target_resolved_ip: string | null;
+  hop_source: "traceroute" | "topology";
+  status: PathTraceStatus;
+  total_hops: number;
+  reached_target: boolean;
+  requested_by: string | null;
+  created_at: string;
+  hops: PathHop[];
+}
+// --- Traffic Analysis (NetFlow / IPFIX / sFlow) ---------------------------
+
+export interface TopTalker {
+  ip_address: string;
+  bytes: number;
+  packets: number;
+}
+
+export interface TopConversation {
+  src_ip: string;
+  dst_ip: string;
+  protocol: string;
+  bytes: number;
+  packets: number;
+}
+
+export interface ProtocolShare {
+  protocol: string;
+  bytes: number;
+  pct: number;
+}
+
+export interface BandwidthPoint {
+  timestamp: string;
+  bytes_per_sec: number;
+}
+
+export interface FlowExporter {
+  exporter_ip: string;
+  flow_version: string;
+  hostname: string | null;
+  last_seen: string | null;
+  flow_count: number;
+}
+
+export interface TrafficSummary {
+  window_minutes: number;
+  top_talkers: TopTalker[];
+  top_conversations: TopConversation[];
+  protocol_breakdown: ProtocolShare[];
+  bandwidth_timeseries: BandwidthPoint[];
+  exporters: FlowExporter[];
+}
+
+// --- Topology snapshots / diffing -----------------------------------------
+
+export interface TopologySnapshotSummary {
+  id: string;
+  node_count: number;
+  edge_count: number;
+  captured_at: string | null;
+}
+
+export interface TopologyDiffNode {
+  id: string;
+  hostname: string;
+  ip_address: string;
+}
+
+export interface TopologyDiffEdge {
+  source: string;
+  target: string;
+  link_source: string;
+}
+
+export interface TopologyDiff {
+  older_snapshot_id: string;
+  newer_snapshot_id: string;
+  older_captured_at: string | null;
+  newer_captured_at: string | null;
+  added_nodes: TopologyDiffNode[];
+  removed_nodes: TopologyDiffNode[];
+  added_edges: TopologyDiffEdge[];
+  removed_edges: TopologyDiffEdge[];
+  unchanged_node_count: number;
+  unchanged_edge_count: number;
 }

@@ -61,6 +61,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 _snmp_poll_loop_task: asyncio.Task | None = None
+_syslog_transport = None  # asyncio.DatagramTransport | None -- see app.services.syslog_service
+_flow_transport = None  # asyncio.DatagramTransport | None -- see app.services.flow_service (NetFlow/IPFIX)
+_sflow_transport = None  # asyncio.DatagramTransport | None -- see app.services.flow_service (sFlow)
+_topology_snapshot_loop_task: asyncio.Task | None = None
 
 
 async def _snmp_inprocess_poll_loop() -> None:
@@ -117,6 +121,33 @@ async def _snmp_inprocess_poll_loop() -> None:
         await asyncio.sleep(settings.SNMP_POLL_INTERVAL_SECONDS)
 
 
+async def _topology_snapshot_loop() -> None:
+    """Periodically captures a TopologySnapshot so the Topology page can
+    diff "now" against "settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS ago"
+    -- see app.services.topology_service.capture_snapshot /
+    diff_snapshots and GET /topology/diff.
+    """
+    from app.core.database import SessionLocal
+    from app.services import topology_service
+
+    def _capture() -> None:
+        db = SessionLocal()
+        try:
+            topology_service.capture_snapshot(db)
+        finally:
+            db.close()
+
+    while True:
+        try:
+            await asyncio.to_thread(_capture)
+            logger.info("Captured topology snapshot")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - keep the loop alive across transient errors
+            logger.exception("Topology snapshot capture failed")
+        await asyncio.sleep(settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def on_startup():
     # Schema is owned by Alembic migrations (see backend/alembic/). The
@@ -162,6 +193,34 @@ async def on_startup():
             settings.SNMP_POLL_INTERVAL_SECONDS,
         )
 
+    global _syslog_transport
+    if settings.SYSLOG_LISTENER_ENABLED and _syslog_transport is None:
+        from app.services import syslog_service
+
+        _syslog_transport = await syslog_service.start_syslog_listener(
+            host=settings.SYSLOG_UDP_HOST, port=settings.SYSLOG_UDP_PORT
+        )
+
+    global _flow_transport
+    if settings.NETFLOW_LISTENER_ENABLED and _flow_transport is None:
+        from app.services import flow_service
+
+        _flow_transport = await flow_service.start_flow_listener(
+            host=settings.NETFLOW_UDP_HOST, port=settings.NETFLOW_UDP_PORT
+        )
+
+    global _sflow_transport
+    if settings.SFLOW_LISTENER_ENABLED and _sflow_transport is None:
+        from app.services import flow_service
+
+        _sflow_transport = await flow_service.start_sflow_listener(
+            host=settings.SFLOW_UDP_HOST, port=settings.SFLOW_UDP_PORT
+        )
+
+    global _topology_snapshot_loop_task
+    if settings.TOPOLOGY_SNAPSHOT_ENABLED and _topology_snapshot_loop_task is None:
+        _topology_snapshot_loop_task = asyncio.create_task(_topology_snapshot_loop())
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -169,6 +228,26 @@ async def on_shutdown():
     if _snmp_poll_loop_task is not None:
         _snmp_poll_loop_task.cancel()
         _snmp_poll_loop_task = None
+
+    global _syslog_transport
+    if _syslog_transport is not None:
+        _syslog_transport.close()
+        _syslog_transport = None
+
+    global _flow_transport
+    if _flow_transport is not None:
+        _flow_transport.close()
+        _flow_transport = None
+
+    global _sflow_transport
+    if _sflow_transport is not None:
+        _sflow_transport.close()
+        _sflow_transport = None
+
+    global _topology_snapshot_loop_task
+    if _topology_snapshot_loop_task is not None:
+        _topology_snapshot_loop_task.cancel()
+        _topology_snapshot_loop_task = None
 
 
 @app.get("/")

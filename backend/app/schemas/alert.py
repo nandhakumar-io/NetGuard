@@ -19,6 +19,8 @@ class AlertRead(BaseModel):
     resolved_by: str | None = None
     last_seen_at: datetime | None = None
     occurrence_count: int = 1
+    root_cause_alert_id: uuid.UUID | None = None
+    suppressed: bool = False
     created_at: datetime
 
     class Config:

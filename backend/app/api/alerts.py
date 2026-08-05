@@ -39,6 +39,9 @@ def list_alerts(
     source: str | None = None,
     status: str | None = Query(None, description="active | acknowledged | resolved"),
     device_id: uuid.UUID | None = None,
+    suppressed: bool | None = Query(
+        None, description="Filter by topology-correlation suppression: true=only impacted, false=only root-cause/standalone"
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -49,6 +52,8 @@ def list_alerts(
         q = q.filter(Alert.severity == AlertSeverity(severity))
     if source:
         q = q.filter(Alert.source == AlertSource(source))
+    if suppressed is not None:
+        q = q.filter(Alert.suppressed == suppressed)
     if status == "active":
         q = q.filter(Alert.resolved == False)  # noqa: E712
     elif status == "acknowledged":
@@ -126,6 +131,8 @@ def _serialize_recent(db: Session, n: int = 10) -> list[dict]:
             "resolved_by": a.resolved_by,
             "last_seen_at": a.last_seen_at.isoformat() if a.last_seen_at else None,
             "occurrence_count": a.occurrence_count,
+            "root_cause_alert_id": str(a.root_cause_alert_id) if a.root_cause_alert_id else None,
+            "suppressed": a.suppressed,
             "created_at": a.created_at.isoformat() if a.created_at else None,
         })
     return result
