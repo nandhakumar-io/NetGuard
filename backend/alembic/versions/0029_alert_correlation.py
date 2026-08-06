@@ -16,9 +16,10 @@ derived by walking app.services.topology_service's graph from the failed
 device. Suppressed alerts are still stored and independently resolvable;
 they're just flagged so the UI can collapse them under their root cause.
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0029"
 down_revision = "0028"

@@ -10,8 +10,9 @@ default when the Python type is a str-mixin enum), so no PostgreSQL native
 enum type is created here.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "0002"
 down_revision = "0001"

@@ -3,7 +3,14 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.device import DeviceVendor, DeviceStatus, SnmpVersion, SnmpSecurityLevel, SnmpAuthProtocol, SnmpPrivProtocol
+from app.models.device import (
+    DeviceStatus,
+    DeviceVendor,
+    SnmpAuthProtocol,
+    SnmpPrivProtocol,
+    SnmpSecurityLevel,
+    SnmpVersion,
+)
 
 
 class DeviceBase(BaseModel):

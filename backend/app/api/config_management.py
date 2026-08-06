@@ -20,8 +20,8 @@ from app.schemas.config_management import (
     GoldenConfigCompareResponse,
     GoldenConfigRead,
     GoldenConfigSet,
-    InterfaceStatusOut,
     InterfacesResponse,
+    InterfaceStatusOut,
     RestoreConfigRequest,
     RestoreConfigResponse,
     RetentionPolicy,
@@ -29,7 +29,12 @@ from app.schemas.config_management import (
     RunningConfigResponse,
     StartupConfigResponse,
 )
-from app.services import audit_service, config_format_service, diff_engine, snapshot_service
+from app.services import (
+    audit_service,
+    config_format_service,
+    diff_engine,
+    snapshot_service,
+)
 from app.services.protocol_manager import ProtocolManager, select_protocol
 from app.services.rollback_service import list_snapshots
 

@@ -9,9 +9,9 @@ center: one row per notification_service.notify() call (deploy
 success/fail, rollback, drift), independent of the existing `alerts` table.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 from migration_helpers import create_index_if_missing, create_table_if_missing
 
 revision = "0008"

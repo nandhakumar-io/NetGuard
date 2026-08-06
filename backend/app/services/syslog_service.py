@@ -37,10 +37,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.models.alert import AlertSeverity, AlertSource  # AlertSource.SYSLOG
 from app.models.device import Device
 from app.models.syslog_message import SyslogMessage, SyslogSeverity
 from app.services import alert_service, event_bus
-from app.models.alert import AlertSeverity, AlertSource  # AlertSource.SYSLOG
 
 logger = logging.getLogger("netguard.syslog")
 
@@ -66,7 +66,7 @@ _RFC3164_MONTHS = {
 
 
 class ParsedSyslog:
-    __slots__ = ("facility", "severity", "hostname", "tag", "message", "device_reported_at")
+    __slots__ = ("device_reported_at", "facility", "hostname", "message", "severity", "tag")
 
     def __init__(self, facility, severity, hostname, tag, message, device_reported_at):
         self.facility = facility
@@ -322,7 +322,7 @@ def _ingest_sync(source_ip: str, raw: str) -> None:
     db = SessionLocal()
     try:
         ingest_message(db, source_ip=source_ip, raw=raw)
-    except Exception:  # noqa: BLE001 - one bad/malformed message must not take down the listener
+    except Exception:
         logger.exception("Failed to ingest syslog message from %s", source_ip)
     finally:
         db.close()

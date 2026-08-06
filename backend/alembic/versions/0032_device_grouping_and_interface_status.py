@@ -18,9 +18,10 @@ Two additions for NOC-style operations:
    down-port list, and back a per-device port history view. See
    app.models.interface_status and app.services.metrics_service.
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0032"
 down_revision = "0031"

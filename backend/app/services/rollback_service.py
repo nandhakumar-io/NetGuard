@@ -18,11 +18,18 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.change_request import ChangeRequest, ChangePriority, ChangeStatus
+from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User
-from app.services import audit_service, credential_service, deployment_engine, diff_engine, event_bus, snapshot_service
+from app.services import (
+    audit_service,
+    credential_service,
+    deployment_engine,
+    diff_engine,
+    event_bus,
+    snapshot_service,
+)
 
 
 class RollbackError(Exception):

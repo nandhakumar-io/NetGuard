@@ -11,8 +11,8 @@ this migration brings the database in line so create/sync/bootstrap paths
 don't fail on missing columns.
 """
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from migration_helpers import add_column_if_missing, create_index_if_missing
 
 revision = "0007"

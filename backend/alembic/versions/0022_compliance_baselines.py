@@ -18,10 +18,14 @@ already sees these since they're part of the models by then) and on an
 existing database that's already past 0001.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-from migration_helpers import add_column_if_missing, create_index_if_missing, create_table_if_missing
+from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+)
 
 revision = "0022"
 down_revision = "0021"

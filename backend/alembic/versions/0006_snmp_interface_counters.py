@@ -11,6 +11,7 @@ needs to persist its raw cumulative octet total + link speed so the *next*
 poll has something to diff against. These two columns are that storage.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0006"

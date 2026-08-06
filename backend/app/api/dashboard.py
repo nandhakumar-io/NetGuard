@@ -3,21 +3,20 @@ import contextlib
 import datetime
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, distinct
 
 from app.core.database import SessionLocal, get_db
-from app.models.device import Device, DeviceStatus
-from app.models.deployment import Deployment, DeploymentStatus
-from app.models.change_request import ChangeRequest
 from app.models.alert import Alert, AlertSeverity
+from app.models.change_request import ChangeRequest, ChangeStatus
+from app.models.config_drift import ConfigDrift, DriftStatus
+from app.models.deployment import Deployment, DeploymentStatus
+from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric
+from app.models.interface_status import InterfaceStatus
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
-from app.models.config_drift import ConfigDrift, DriftStatus
-from app.models.interface_status import InterfaceStatus, InterfaceOperStatus
 from app.services import event_bus
-from app.models.change_request import ChangeRequest, ChangeStatus
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -62,7 +61,7 @@ def _compute_summary(db: Session) -> dict:
     ).count()
 
     # Alert counts for dashboard stat cards
-    active_alerts = db.query(Alert).filter(Alert.resolved == False)  # noqa: E712
+    active_alerts = db.query(Alert).filter(Alert.resolved == False)
     critical_alerts = active_alerts.filter(Alert.severity == AlertSeverity.CRITICAL).count()
     warning_alerts = active_alerts.filter(Alert.severity == AlertSeverity.WARNING).count()
 
@@ -71,7 +70,7 @@ def _compute_summary(db: Session) -> dict:
     # previously invisible anywhere on the dashboard.
     open_drifts = db.query(ConfigDrift).filter(ConfigDrift.status == DriftStatus.OPEN).count()
     flagged_unstable_devices_query = (
-        db.query(Device).filter(Device.flagged_unstable == True).order_by(Device.unstable_since.desc())  # noqa: E712
+        db.query(Device).filter(Device.flagged_unstable == True).order_by(Device.unstable_since.desc())
     )
     flagged_unstable_count = flagged_unstable_devices_query.count()
     flagged_unstable_devices = [
@@ -85,7 +84,7 @@ def _compute_summary(db: Session) -> dict:
     ]
 
     # --- New Dashboard Widget Data ---
-    
+
     # 1. Global Health Score & Top CPU/Memory
     # Get the single latest metric row for each device using a subquery
     latest_metrics_subq = db.query(
@@ -94,16 +93,16 @@ def _compute_summary(db: Session) -> dict:
     ).group_by(DeviceMetric.device_id).subquery()
 
     latest_metrics_query = db.query(DeviceMetric, Device.hostname, Device.ip_address)\
-        .join(latest_metrics_subq, 
-             (DeviceMetric.device_id == latest_metrics_subq.c.device_id) & 
+        .join(latest_metrics_subq,
+             (DeviceMetric.device_id == latest_metrics_subq.c.device_id) &
              (DeviceMetric.polled_at == latest_metrics_subq.c.latest_polled_at))\
         .join(Device, Device.id == DeviceMetric.device_id)\
         .all()
-    
+
     top_cpu = sorted(latest_metrics_query, key=lambda x: (x[0].cpu_utilization_pct or 0), reverse=True)[:5]
     top_memory = sorted(latest_metrics_query, key=lambda x: (x[0].memory_utilization_pct or 0), reverse=True)[:5]
     top_bandwidth = sorted(latest_metrics_query, key=lambda x: (x[0].interface_utilization_pct or 0), reverse=True)[:5]
-    
+
     health_scores = [x[0].health_score for x in latest_metrics_query if x[0].health_score is not None]
     global_health_score = int(sum(health_scores) / len(health_scores)) if health_scores else 100
 
@@ -218,11 +217,11 @@ def _compute_summary(db: Session) -> dict:
     # 2. Deployment Success Rate
     deployments_successful = db.query(Deployment).filter(Deployment.status == DeploymentStatus.SUCCEEDED).count()
     deployments_total_finished = db.query(Deployment).filter(Deployment.status.in_([
-        DeploymentStatus.SUCCEEDED, 
-        DeploymentStatus.FAILED, 
+        DeploymentStatus.SUCCEEDED,
+        DeploymentStatus.FAILED,
         DeploymentStatus.ROLLED_BACK
     ])).count()
-    
+
     success_rate = round((deployments_successful / deployments_total_finished * 100), 1) if deployments_total_finished > 0 else 100.0
 
     # 3. Recent Backups (Snapshots)
@@ -230,11 +229,11 @@ def _compute_summary(db: Session) -> dict:
         .join(Device, Device.id == ConfigSnapshot.device_id)\
         .order_by(desc(ConfigSnapshot.created_at))\
         .limit(5).all()
-        
+
     recent_backups = [{
-        "id": str(r[0].id), 
-        "version": r[0].version, 
-        "created_at": r[0].created_at.isoformat() if r[0].created_at else "", 
+        "id": str(r[0].id),
+        "version": r[0].version,
+        "created_at": r[0].created_at.isoformat() if r[0].created_at else "",
         "hostname": r[1]
     } for r in recent_backups_query]
 
@@ -243,7 +242,7 @@ def _compute_summary(db: Session) -> dict:
         .outerjoin(Device, Device.id == ProtocolOperation.device_id)\
         .order_by(desc(ProtocolOperation.created_at))\
         .limit(5).all()
-        
+
     recent_protocol_operations = [{
         "id": str(r[0].id),
         "protocol": r[0].protocol.value if hasattr(r[0].protocol, "value") else r[0].protocol,

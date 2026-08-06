@@ -22,6 +22,7 @@ import dataclasses
 import datetime
 import re
 
+
 # Each entry matches a (vendor, model-prefix) or (vendor, os-version-prefix)
 # pair against a device. `eos_date` = End of Support (vendor stops selling
 # support contracts / issuing new fixes); `eol_date` = End of Life (vendor

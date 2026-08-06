@@ -9,7 +9,17 @@ device roles/sites/vendors, and are individually toggleable from the UI.
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, Float, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    Float,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base

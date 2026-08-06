@@ -5,8 +5,8 @@ Run from backend/:
 
 Credentials: admin@netguard.io / Admin1234!
 """
-import sys
 import os
+import sys
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 

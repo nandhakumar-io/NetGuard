@@ -15,6 +15,7 @@ api/change_requests.create_change_request and read in
 pipeline_service.target_device_ids.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0003"

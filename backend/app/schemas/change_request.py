@@ -1,10 +1,10 @@
-import uuid
 import datetime
 import json
+import uuid
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from app.models.change_request import ChangeStatus, ChangePriority
+from app.models.change_request import ChangePriority, ChangeStatus
 
 
 class ChangeRequestBase(BaseModel):

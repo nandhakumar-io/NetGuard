@@ -57,7 +57,6 @@ import asyncio
 import datetime
 import ipaddress
 import logging
-import socket
 import struct
 from collections import defaultdict
 from dataclasses import dataclass
@@ -531,7 +530,7 @@ def _ingest_sync(exporter_ip: str, data: bytes) -> None:
         for flow in flows:
             _persist_flow(db, exporter_ip=exporter_ip, version=proto_version, sampling_rate=rate, flow=flow)
         db.commit()
-    except Exception:  # noqa: BLE001 - one bad packet must not take the listener down
+    except Exception:
         logger.exception("Failed to persist flow batch from %s", exporter_ip)
         db.rollback()
     finally:
@@ -549,7 +548,7 @@ def _ingest_sflow_sync(exporter_ip: str, data: bytes) -> None:
                 db, exporter_ip=exporter_ip, version=FlowProtocolVersion.SFLOW, sampling_rate=1, flow=flow
             )
         db.commit()
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("Failed to persist sFlow batch from %s", exporter_ip)
         db.rollback()
     finally:

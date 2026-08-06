@@ -52,7 +52,7 @@ def create_snooze(
     db.commit()
     db.refresh(snooze)
 
-    q = db.query(Alert).filter(Alert.resolved == False)  # noqa: E712
+    q = db.query(Alert).filter(Alert.resolved == False)
     if device_id is not None and category is not None:
         q = q.filter(Alert.device_id == device_id, Alert.category == category)
     elif device_id is not None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -34,6 +35,9 @@ from app.models.device_metric import DeviceMetric
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
 from app.services import gns3_service, risk_engine, snapshot_service
+
+if TYPE_CHECKING:
+    from app.models.topology_snapshot import TopologySnapshot
 
 
 @dataclass
@@ -367,7 +371,7 @@ def _gns3_port_label(node_link_entry: dict) -> str | None:
 # framing app.services.drift_service already provides for config content.
 
 
-def capture_snapshot(db: Session) -> "TopologySnapshot":
+def capture_snapshot(db: Session) -> TopologySnapshot:
     import json
 
     from app.models.topology_snapshot import TopologySnapshot
@@ -397,7 +401,7 @@ def _edge_key(e: dict) -> tuple[str, str]:
     return tuple(sorted((e["source"], e["target"])))
 
 
-def diff_snapshots(older: "TopologySnapshot", newer: "TopologySnapshot") -> dict:
+def diff_snapshots(older: TopologySnapshot, newer: TopologySnapshot) -> dict:
     """Returns added/removed nodes and edges between two snapshots
     (older -> newer). Node/edge identity is by device id, so a hostname
     rename on the same device shows as neither an add nor a remove.

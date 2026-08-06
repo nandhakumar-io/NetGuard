@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
 from app.models.device_group import DeviceGroup
-from app.models.user import User, UserRole
+from app.models.user import UserRole
 from app.schemas.device import DeviceRead
 from app.schemas.device_group import (
     DeviceGroupAssignRequest,

@@ -1,7 +1,8 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 # Make sure every model module is imported (registers tables on
 # Base.metadata) before Alembic looks at target_metadata, same reason

@@ -12,14 +12,18 @@ notifications for anything critical -- then exposes the read-side queries
 import datetime
 import uuid
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
-from app.models.interface_status import InterfaceStatus, InterfaceOperStatus
-from app.services import alert_service, credential_service, notification_service, snmp_service
+from app.models.interface_status import InterfaceOperStatus, InterfaceStatus
+from app.services import (
+    alert_service,
+    credential_service,
+    notification_service,
+    snmp_service,
+)
 from app.services.snmp_service import SnmpMetrics
 
 

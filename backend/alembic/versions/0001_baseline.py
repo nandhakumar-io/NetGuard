@@ -23,6 +23,7 @@ adds the specific columns known to have drifted, guarded by an inspector
 check so it never fails on a column that's already there.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0001"

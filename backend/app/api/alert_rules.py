@@ -6,7 +6,6 @@
   DELETE  /alert-rules/{id}     — delete a rule
   PATCH   /alert-rules/{id}/toggle — enable/disable a rule
 """
-import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -30,7 +29,7 @@ def list_alert_rules(
 ):
     q = db.query(AlertRule)
     if enabled_only:
-        q = q.filter(AlertRule.enabled == True)  # noqa: E712
+        q = q.filter(AlertRule.enabled == True)
     return q.order_by(AlertRule.created_at.desc()).limit(limit).all()
 
 

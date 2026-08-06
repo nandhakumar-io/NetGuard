@@ -51,7 +51,10 @@ def bootstrap_cisco_ios(
     """
     try:
         from netmiko import ConnectHandler
-        from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
+        from netmiko.exceptions import (
+            NetmikoAuthenticationException,
+            NetmikoTimeoutException,
+        )
     except ImportError as exc:  # pragma: no cover - dependency always present, defensive only
         return BootstrapResult(success=False, output="", error=f"netmiko not available: {exc}")
 

@@ -10,8 +10,8 @@ result (re-checked at both submission and approval time) is persisted and
 visible in the UI/API, instead of only affecting status transitions.
 """
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from migration_helpers import add_column_if_missing
 
 revision = "0009"

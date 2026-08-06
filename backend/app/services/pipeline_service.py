@@ -29,13 +29,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.change_request import ChangeRequest, ChangeStatus
+from app.models.deployment import (
+    Deployment,
+    DeploymentLog,
+    DeploymentStatus,
+    HealthCheckResult,
+)
 from app.models.device import Device
-from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResult
 from app.models.snapshot import ConfigSnapshot
 from app.services import (
     audit_service,
     credential_service,
-    deployment_engine,
     event_bus,
     health_monitor,
     notification_service,
@@ -43,7 +47,6 @@ from app.services import (
     snapshot_service,
     validation_engine,
 )
-from app.models.deployment import DeploymentLog
 
 DEVICE_TYPE_MAP = {
     "cisco": "cisco_ios",
@@ -143,7 +146,7 @@ def _log_deployment(db: Session, deployment_id: uuid.UUID, step: str, message: s
     db.add(log)
     db.commit()
     db.refresh(log)
-    
+
     event_bus.publish_event(
         "deployment_log",
         deployment_id=str(deployment_id),
@@ -233,7 +236,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     db.commit()
     db.refresh(deployment)
     event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
-    
+
     _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Starting deployment pipeline for CR {str(cr.id)[:8]} on {device.hostname}")
 
     # --- 1. Automatic Configuration Snapshot (FR-7) ---
@@ -334,7 +337,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     # see health_monitor.run_monitoring_window for why a single check right
     # after deploy isn't enough. Stops early on the first failing round.
     _log_deployment(db, deployment.id, "VERIFY", "Initiating health monitoring sweeps across all vectors...")
-    
+
     enabled_checks = None
     if device.enabled_health_checks:
         try:
@@ -381,11 +384,11 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     if healthy:
         deployment.status = DeploymentStatus.SUCCEEDED
         db.commit()
-        
+
         detail_msg = f"All {len(monitoring.rounds)} health sweep(s) completed cleanly."
         _log_deployment(db, deployment.id, "VERIFY", detail_msg)
         _log_deployment(db, deployment.id, "COMPLETE", "Deployment successfully finalized.")
-        
+
         audit_service.record_event(
             db, actor="system", action="Health Check", result="Passed",
             device_hostname=device.hostname, change_request_id=cr.id,
@@ -418,13 +421,13 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     _log_deployment(db, deployment.id, "ROLLBACK", "Restoring configuration from pre-flight snapshot...")
     restore_commands = (snapshot_service.decrypt_config(snapshot.running_config_encrypted)).splitlines()
     restore_text = "\n".join([line for line in restore_commands if line.strip()])
-    
+
     rollback_result = pm.restore_config(restore_text)
 
     deployment.status = DeploymentStatus.ROLLED_BACK if rollback_result.success else DeploymentStatus.FAILED
     deployment.error_message = rollback_result.error
     db.commit()
-    
+
     if rollback_result.success:
         _log_deployment(db, deployment.id, "ROLLBACK", f"Rollback succeeded via {rollback_result.protocol}. Device returned to known-good state.", "WARN")
     else:

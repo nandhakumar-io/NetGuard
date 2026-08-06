@@ -12,9 +12,10 @@ creates explicitly ("Edge Firewalls", "Q3 Migration Batch"), with optional
 nesting via parent_group_id -- distinct from the free-text
 data_center/rack columns added in 0032, which model physical placement.
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0033"
 down_revision = "0032"

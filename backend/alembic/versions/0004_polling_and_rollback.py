@@ -18,8 +18,9 @@ happens to redeploy a prior ConfigSnapshot, rather than an untracked
 side-effect.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "0004"
 down_revision = "0003"

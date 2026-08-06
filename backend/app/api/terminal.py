@@ -3,9 +3,9 @@ import uuid
 
 import asyncssh
 import telnetlib3
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from jose import JWTError
+from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import decode_access_token
@@ -231,7 +231,7 @@ async def device_terminal(
             await _try_telnet(websocket, device, username, password)
     except Exception as e:
         try:
-            await websocket.send_text(f"\r\n\x1b[31mConnection interrupted: {str(e)}\x1b[0m\r\n")
+            await websocket.send_text(f"\r\n\x1b[31mConnection interrupted: {e!s}\x1b[0m\r\n")
             await websocket.close()
         except Exception:
             pass

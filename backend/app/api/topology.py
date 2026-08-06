@@ -6,7 +6,11 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.topology_snapshot import TopologySnapshot
-from app.schemas.topology import TopologyDiffResponse, TopologyResponse, TopologySnapshotRead
+from app.schemas.topology import (
+    TopologyDiffResponse,
+    TopologyResponse,
+    TopologySnapshotRead,
+)
 from app.services import topology_service
 
 router = APIRouter(prefix="/topology", tags=["topology"])

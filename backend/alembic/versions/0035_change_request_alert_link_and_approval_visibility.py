@@ -12,9 +12,10 @@ Adds:
     don't have to infer it from updated_at (which later pipeline stages
     also touch).
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "0035"

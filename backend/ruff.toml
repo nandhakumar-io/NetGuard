@@ -1,0 +1,16 @@
+[lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+]
+
+ignore = [
+    "E501",
+    "E712",
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["F841"]
+"seed_admin.py" = ["E402"]

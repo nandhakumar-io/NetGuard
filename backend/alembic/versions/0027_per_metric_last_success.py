@@ -12,8 +12,9 @@ can stamp each independently -- a device with fresh CPU/mem but a
 table walk that's been silently failing no longer looks fully healthy
 just because the composite score still computes from what did resolve.
 """
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0027"
 down_revision = "0026"

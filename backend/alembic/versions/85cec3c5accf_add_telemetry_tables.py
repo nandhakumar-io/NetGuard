@@ -8,9 +8,10 @@ Idempotent rewrite: all table/column/enum creation is guarded so this
 migration is safe to run against databases that were previously managed by
 create_all() and may already have some or all of these objects.
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = '85cec3c5accf'

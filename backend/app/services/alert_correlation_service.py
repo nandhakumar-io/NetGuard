@@ -120,7 +120,7 @@ def correlate_downstream(db: Session, root_alert: Alert) -> list[uuid.UUID]:
         db.query(Alert)
         .filter(
             Alert.device_id.in_(impacted_device_ids),
-            Alert.resolved == False,  # noqa: E712
+            Alert.resolved == False,
             Alert.id != root_alert.id,
         )
         .all()

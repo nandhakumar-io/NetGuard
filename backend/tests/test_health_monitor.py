@@ -11,7 +11,6 @@ import pytest
 
 from app.services import health_monitor as hm
 
-
 # ---------------------------------------------------------------------
 # infrastructure: ping / packet loss / latency
 # ---------------------------------------------------------------------

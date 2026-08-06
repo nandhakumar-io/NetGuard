@@ -14,7 +14,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity, AlertSource
-from app.services import alert_correlation_service, alert_snooze_service, event_bus, maintenance_window_service
+from app.services import (
+    alert_correlation_service,
+    alert_snooze_service,
+    event_bus,
+    maintenance_window_service,
+)
 
 
 # ------------------------------------------------------------------
@@ -126,7 +131,7 @@ def raise_alert(
         .filter(
             Alert.device_id == device_id,
             Alert.category == category,
-            Alert.resolved == False,  # noqa: E712
+            Alert.resolved == False,
         )
         .order_by(Alert.created_at.desc())
         .first()
@@ -217,7 +222,7 @@ def auto_resolve(
         .filter(
             Alert.device_id == device_id,
             Alert.category == category,
-            Alert.resolved == False,  # noqa: E712
+            Alert.resolved == False,
         )
         .order_by(Alert.created_at.desc())
         .first()
@@ -314,7 +319,7 @@ def purge_alerts(db: Session, *, device_id: uuid.UUID | None = None, only_active
     if device_id is not None:
         q = q.filter(Alert.device_id == device_id)
     if only_active:
-        q = q.filter(Alert.resolved == False)  # noqa: E712
+        q = q.filter(Alert.resolved == False)
 
     alert_ids = [a.id for a in q.all()]
     if not alert_ids:
@@ -349,7 +354,7 @@ def clear_alerts(db: Session, user_email: str, *, device_id: uuid.UUID | None = 
 
     Returns the number of alerts cleared.
     """
-    q = db.query(Alert).filter(Alert.resolved == False)  # noqa: E712
+    q = db.query(Alert).filter(Alert.resolved == False)
     if device_id is not None:
         q = q.filter(Alert.device_id == device_id)
 
@@ -392,11 +397,11 @@ def clear_alerts(db: Session, user_email: str, *, device_id: uuid.UUID | None = 
 # ------------------------------------------------------------------
 def get_alert_summary(db: Session) -> dict:
     """Returns counts of active (non-resolved) alerts grouped by severity."""
-    base = db.query(Alert).filter(Alert.resolved == False)  # noqa: E712
+    base = db.query(Alert).filter(Alert.resolved == False)
     critical = base.filter(Alert.severity == AlertSeverity.CRITICAL).count()
     warning = base.filter(Alert.severity == AlertSeverity.WARNING).count()
     info = base.filter(Alert.severity == AlertSeverity.INFO).count()
-    total_resolved = db.query(Alert).filter(Alert.resolved == True).count()  # noqa: E712
+    total_resolved = db.query(Alert).filter(Alert.resolved == True).count()
 
     return {
         "critical": critical,

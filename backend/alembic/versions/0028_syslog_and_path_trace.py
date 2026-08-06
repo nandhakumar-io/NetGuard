@@ -18,9 +18,10 @@ Two data-completeness gaps flagged against Auvik/SolarWinds NetPath:
      ordered hops (RTT/loss/status) either from a real traceroute or a
      topology-graph-derived fallback (see app.services.path_trace_service).
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0028"
 down_revision = "0027"
@@ -83,7 +84,7 @@ def upgrade() -> None:
 
     _create_enum_if_not_exists(bind, "COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus")
     path_trace_status = postgresql.ENUM("COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus", create_type=False)
-    
+
     _create_enum_if_not_exists(bind, "OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus")
     hop_status = postgresql.ENUM("OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus", create_type=False)
 

@@ -15,8 +15,8 @@ silently missing on any database that was already migrated past 0001
 before this column was added.
 """
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from migration_helpers import add_column_if_missing
 
 revision = "0021"

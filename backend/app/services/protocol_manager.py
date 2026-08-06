@@ -33,7 +33,14 @@ from sqlalchemy.orm import Session
 from app.models.alert import AlertSeverity, AlertSource
 from app.models.device import Device
 from app.models.protocol_operation import ProtocolName, ProtocolOperation
-from app.services import alert_service, audit_service, credential_service, deployment_engine, netconf_service, restconf_service
+from app.services import (
+    alert_service,
+    audit_service,
+    credential_service,
+    deployment_engine,
+    netconf_service,
+    restconf_service,
+)
 from app.services.config_format_service import looks_like_json, looks_like_xml
 from app.services.credential_service import CredentialNotFoundError
 

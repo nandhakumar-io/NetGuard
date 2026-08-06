@@ -27,7 +27,12 @@ from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.config_drift import DriftBaseline
 from app.models.deployment import Deployment, DeploymentStatus
 from app.models.device import Device
-from app.services import audit_service, event_bus, notification_service, pipeline_service
+from app.services import (
+    audit_service,
+    event_bus,
+    notification_service,
+    pipeline_service,
+)
 
 
 @celery_app.task(

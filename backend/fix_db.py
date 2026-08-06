@@ -1,7 +1,6 @@
 import sqlalchemy as sa
-from app.core.database import engine
-from app import models
-from app.core.database import Base
+
+from app.core.database import Base, engine
 
 print("Starting DB fix script...")
 
@@ -17,7 +16,7 @@ try:
         try:
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.execute(sa.text(enum_stmt))
-        except Exception as e:
+        except Exception:
             pass
 
     print("Adding missing columns...")
@@ -28,7 +27,7 @@ try:
         try:
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.execute(sa.text(col_stmt))
-        except Exception as e:
+        except Exception:
             pass
 
     print("Creating tables via Base.metadata.create_all...")

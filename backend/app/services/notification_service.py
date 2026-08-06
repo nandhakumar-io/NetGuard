@@ -40,7 +40,7 @@ def _post_webhook(url: str | None, payload: dict) -> None:
         return
     try:
         httpx.post(url, json=payload, timeout=TIMEOUT_SECONDS)
-    except Exception:  # noqa: BLE001 - notifications must never break the pipeline
+    except Exception:
         logger.warning("Notification webhook post failed", exc_info=True)
 
 
@@ -124,7 +124,7 @@ def send_email_attachment(
                 smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             smtp.send_message(email_msg)
         return True
-    except Exception:  # noqa: BLE001 - email must never break the caller
+    except Exception:
         logger.warning("Compliance report email send failed", exc_info=True)
         return False
 
@@ -154,7 +154,7 @@ def _send_email(event_type: str, event: str, message: str) -> None:
             if settings.SMTP_USER and settings.SMTP_PASSWORD:
                 smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             smtp.send_message(email_msg)
-    except Exception:  # noqa: BLE001 - email must never break the pipeline
+    except Exception:
         logger.warning("Notification email send failed", exc_info=True)
 
 
@@ -205,7 +205,7 @@ def _persist_and_broadcast(
             read=notification.read,
             created_at=notification.created_at.isoformat() if notification.created_at else None,
         )
-    except Exception:  # noqa: BLE001 - in-app notification center must never break the pipeline
+    except Exception:
         logger.warning("Failed to persist/broadcast in-app notification", exc_info=True)
         db.rollback()
     finally:
@@ -223,7 +223,7 @@ def _post_telegram(event: str, message: str, severity: str) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
         httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=TIMEOUT_SECONDS)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("Telegram notification send failed", exc_info=True)
 
 
@@ -236,7 +236,7 @@ def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: 
 
     db = _SessionLocal()
     try:
-        webhooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.enabled == True).all()  # noqa: E712
+        webhooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.enabled == True).all()
         for wh in webhooks:
             # Check event subscription filter
             if wh.events:
@@ -271,9 +271,9 @@ def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: 
                         "source": "netguard",
                     }
                     httpx.post(wh.url, json=payload, timeout=TIMEOUT_SECONDS)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("User webhook post failed for %s", wh.name, exc_info=True)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("Failed to fan out to user webhooks", exc_info=True)
     finally:
         db.close()

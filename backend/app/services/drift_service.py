@@ -34,12 +34,25 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSource
-from app.models.config_drift import ConfigDrift, DriftBaseline, DriftSeverity, DriftStatus
+from app.models.compliance_baseline import ComplianceBaseline
+from app.models.config_drift import (
+    ConfigDrift,
+    DriftBaseline,
+    DriftSeverity,
+    DriftStatus,
+)
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
-from app.models.compliance_baseline import ComplianceBaseline
 from app.models.snapshot import ConfigSnapshot
-from app.services import alert_service, audit_service, diff_engine, event_bus, notification_service, risk_engine, snapshot_service
+from app.services import (
+    alert_service,
+    audit_service,
+    diff_engine,
+    event_bus,
+    notification_service,
+    risk_engine,
+    snapshot_service,
+)
 from app.services.protocol_manager import ProtocolManager
 
 # Compliance score starts at 100 (fully compliant) and is docked per

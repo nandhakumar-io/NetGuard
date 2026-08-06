@@ -20,9 +20,9 @@ safe to run against a database where some other process already created
 either table by hand while debugging.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
+from alembic import op
 from migration_helpers import create_index_if_missing, create_table_if_missing
 
 revision = "0018"

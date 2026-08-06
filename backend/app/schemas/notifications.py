@@ -23,7 +23,6 @@ class NotificationRead(BaseModel):
 
 class NotificationMarkRead(BaseModel):
     """Body is empty -- the notification id comes from the URL."""
-    pass
 
 
 class NotificationSummary(BaseModel):

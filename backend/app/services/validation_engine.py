@@ -45,6 +45,7 @@ nothing to conflict-check against yet (e.g. a brand new device).
 import ipaddress
 import re
 from dataclasses import dataclass, field
+
 from app.services.config_format_service import looks_like_xml
 
 
@@ -121,7 +122,7 @@ def _validate_ios_style(lines: list[str]) -> tuple[list[str], list[str]]:
         if token == "vlan" and len(stripped.split()) >= 2 and not stripped.split()[1].isdigit():
             errors.append(f"Malformed VLAN declaration (expected a VLAN ID): '{stripped}'")
 
-    if not any(_first_token(l.strip()) == "interface" for l in lines):
+    if not any(_first_token(line.strip()) == "interface" for line in lines):
         warnings.append("No interface block found in proposed configuration")
 
     return errors, warnings
@@ -210,17 +211,17 @@ def _split_interface_blocks(config_text: str) -> dict[str, list[str]]:
 
 
 def _defined_vlans(text: str) -> set[int]:
-    return {int(m.group(1)) for m in map(_VLAN_DEF_RE.match, (l.strip() for l in text.splitlines())) if m}
+    return {int(m.group(1)) for m in map(_VLAN_DEF_RE.match, (line.strip() for line in text.splitlines())) if m}
 
 
 def _defined_acls(text: str) -> set[str]:
     names = {m.group(1) for m in _ACL_DEF_NAMED_RE.finditer(text)}
-    numbers = {m.group(1) for m in map(_ACL_DEF_NUMBERED_RE.match, (l.strip() for l in text.splitlines())) if m}
+    numbers = {m.group(1) for m in map(_ACL_DEF_NUMBERED_RE.match, (line.strip() for line in text.splitlines())) if m}
     return names | numbers
 
 
 def _defined_interfaces(text: str) -> set[str]:
-    return {m.group(1) for m in map(_INTERFACE_BLOCK_RE.match, (l.strip() for l in text.splitlines())) if m}
+    return {m.group(1) for m in map(_INTERFACE_BLOCK_RE.match, (line.strip() for line in text.splitlines())) if m}
 
 
 def _cross_check_inventory(proposed_config: str, current_config: str | None) -> tuple[list[str], list[str]]:
@@ -271,8 +272,8 @@ def _cross_check_inventory(proposed_config: str, current_config: str | None) -> 
     proposed_blocks = _split_interface_blocks(proposed_config)
     for iface, iface_lines in proposed_blocks.items():
         has_dependent_command = any(
-            _ACL_APPLY_RE.search(l) or _VLAN_ACCESS_RE.search(l) or _VLAN_TRUNK_RE.search(l)
-            for l in iface_lines
+            _ACL_APPLY_RE.search(line) or _VLAN_ACCESS_RE.search(line) or _VLAN_TRUNK_RE.search(line)
+            for line in iface_lines
         )
         if has_dependent_command and iface not in known_interfaces and current_config is None:
             warnings.append(

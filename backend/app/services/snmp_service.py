@@ -11,7 +11,6 @@ from a poll that noticed the interface was down.
 import asyncio
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("netguard.snmp")
@@ -426,10 +425,10 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                     var_bind = m.ObjectType(m.ObjectIdentity(oid))
 
             asyncio.run(_run_v3arch())
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("v3arch walk also failed for %s OID %s", ip_address, base_oid, exc_info=True)
             return results
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("walk failed for %s OID %s", ip_address, base_oid, exc_info=True)
         return results
     return results

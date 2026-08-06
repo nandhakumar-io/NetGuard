@@ -12,8 +12,9 @@ anything audited. This adds an immutable snapshot table
 ConfigTemplate to whichever version is currently approved.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0025"
 down_revision = "0024"

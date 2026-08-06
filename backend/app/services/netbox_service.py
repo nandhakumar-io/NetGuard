@@ -120,7 +120,7 @@ def sync_devices(db: Session, dry_run: bool = False) -> dict:
     client = _client()
     try:
         raw_devices = _fetch_all_devices(client)
-    except Exception as exc:  # noqa: BLE001 - surfaced as a clear sync error, not a 500
+    except Exception as exc:
         raise NetBoxSyncError(f"Could not reach NetBox: {exc}") from exc
     finally:
         client.close()

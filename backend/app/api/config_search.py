@@ -36,7 +36,7 @@ CONTEXT_CHARS = 0  # whole matched line is already the context; kept as a knob f
 
 
 class _DeviceMatch:
-    __slots__ = ("device_id", "hostname", "ip_address", "vendor", "matches", "total_match_count")
+    __slots__ = ("device_id", "hostname", "ip_address", "matches", "total_match_count", "vendor")
 
     def __init__(self, device_id, hostname, ip_address, vendor):
         self.device_id = device_id

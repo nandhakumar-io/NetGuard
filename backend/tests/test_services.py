@@ -1,4 +1,4 @@
-from app.services import risk_engine, validation_engine, diff_engine
+from app.services import diff_engine, risk_engine, validation_engine
 
 
 def test_risk_engine_low_risk():

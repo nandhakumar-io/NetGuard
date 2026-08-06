@@ -10,8 +10,8 @@ before the rest of the fleet is dispatched at all (see
 app.tasks.run_deployment_pipeline_task / canary_gate_task).
 """
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from migration_helpers import add_column_if_missing
 
 revision = "0011"

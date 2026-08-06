@@ -11,6 +11,7 @@ poll cycle, which is what made "Clear Alerts" look broken -- the next poll
 would immediately recreate duplicates for any condition still active.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0017"

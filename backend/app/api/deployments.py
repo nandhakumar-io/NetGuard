@@ -1,6 +1,7 @@
+import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -10,7 +11,7 @@ from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResul
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User
-from app.services import audit_service
+from app.services import audit_service, event_bus
 from app.tasks import retry_deployment_task
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
@@ -138,11 +139,6 @@ def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db),
         for lg in logs
     ]
 
-
-from fastapi import WebSocket, WebSocketDisconnect
-import json
-import asyncio
-from app.services import event_bus
 
 @router.websocket("/ws")
 async def deployments_ws(websocket: WebSocket):

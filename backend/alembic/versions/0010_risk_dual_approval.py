@@ -11,9 +11,9 @@ Critical-Risk dual-approval workflow: requires_dual_approval,
 first_approved_by, first_approved_at.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 from migration_helpers import add_column_if_missing, create_foreign_key_if_missing
 
 revision = "0010"

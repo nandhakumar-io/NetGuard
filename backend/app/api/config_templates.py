@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
-from app.models.config_template import ConfigTemplate, ConfigTemplateVersion, TemplateVersionStatus
+from app.models.config_template import (
+    ConfigTemplate,
+    ConfigTemplateVersion,
+    TemplateVersionStatus,
+)
 from app.models.golden_config import GoldenConfig
 from app.models.user import User, UserRole
 from app.schemas.config_template import (
@@ -23,7 +27,12 @@ from app.schemas.config_template import (
     TemplateVersionReview,
     TemplateVersionSubmit,
 )
-from app.services import config_format_service, diff_engine, snapshot_service, template_service
+from app.services import (
+    config_format_service,
+    diff_engine,
+    snapshot_service,
+    template_service,
+)
 
 router = APIRouter(prefix="/config-templates", tags=["config-templates"])
 

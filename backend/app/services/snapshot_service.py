@@ -7,9 +7,9 @@ the source of truth for the Self-Healing Rollback Engine.
 NOTE: uses Fernet (symmetric encryption) for prototype purposes. In
 production, keys should come from a managed secret store (e.g. Vault, AWS KMS).
 """
+import base64
 import datetime
 import hashlib
-import base64
 
 from cryptography.fernet import Fernet
 from sqlalchemy import func

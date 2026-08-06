@@ -17,7 +17,10 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.maintenance_window import MaintenanceWindow
 from app.models.user import User, UserRole
-from app.schemas.maintenance_window import MaintenanceWindowCreate, MaintenanceWindowRead
+from app.schemas.maintenance_window import (
+    MaintenanceWindowCreate,
+    MaintenanceWindowRead,
+)
 from app.services import audit_service
 
 router = APIRouter(prefix="/maintenance-windows", tags=["maintenance-windows"])

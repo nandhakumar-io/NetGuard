@@ -14,8 +14,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models.change_request import ChangeRequest, ChangePriority, ChangeStatus
-from app.models.config_drift import ConfigDrift, DriftBaseline, DriftSeverity, DriftStatus
+from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
+from app.models.config_drift import (
+    ConfigDrift,
+    DriftBaseline,
+    DriftSeverity,
+    DriftStatus,
+)
 from app.models.device import Device, DeviceVendor
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole

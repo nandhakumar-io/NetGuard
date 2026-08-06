@@ -1,14 +1,13 @@
-from unittest.mock import patch
-
 import os
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
+from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
 from app.models.device import Device, DeviceVendor
-from app.models.change_request import ChangeRequest, ChangeStatus, ChangePriority
 from app.services import pipeline_service
 from app.services.deployment_engine import DeployResult
 from app.services.health_monitor import CheckOutcome, MonitoringResult, PollRound

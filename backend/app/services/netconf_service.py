@@ -258,7 +258,7 @@ def push_config(
         stripped = strip_rpc_envelope(config_xml)
         if stripped is not None and stripped != config_xml:
             config_xml = stripped
-            
+
         # We do NOT add a <config> envelope here because ncclient's
         # `conn.edit_config(..., config=config_xml)` method AUTOMATICALLY
         # wraps XML element strings in a `<config>` top-level node. Passing

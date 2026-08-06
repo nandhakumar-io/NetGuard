@@ -11,7 +11,6 @@ docstring on app.models.device.Device.netconf_use_lock). Defaults to true
 pure opt-out -- no device's behavior changes until an operator flips it.
 """
 import sqlalchemy as sa
-from alembic import op
 
 from migration_helpers import add_column_if_missing, drop_column_if_exists
 

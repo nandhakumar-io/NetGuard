@@ -8,9 +8,10 @@ Idempotent (guarded by inspector checks), matching the pattern used by
 0029/85cec3c5accf, so this is safe to run against a DB that already has
 some of these objects.
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = '0030'
 down_revision = '0029'

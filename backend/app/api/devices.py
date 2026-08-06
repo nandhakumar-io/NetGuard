@@ -29,9 +29,24 @@ from app.schemas.device import (
     SshCredentialsUpdate,
     SshTestResult,
 )
-from app.schemas.rollback import RollbackPreviewResponse, RollbackRequest, RollbackResponse, SnapshotSummary
 from app.schemas.interface_status import InterfaceCurrentStatus, InterfaceStatusRead
-from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service, protocol_manager, reachability_service, netbox_service, eol_service
+from app.schemas.rollback import (
+    RollbackPreviewResponse,
+    RollbackRequest,
+    RollbackResponse,
+    SnapshotSummary,
+)
+from app.services import (
+    audit_service,
+    credential_service,
+    eol_service,
+    metrics_service,
+    netbox_service,
+    protocol_manager,
+    reachability_service,
+    rollback_service,
+    snmp_service,
+)
 from app.services.health_monitor import ALL_CHECKS
 from app.tasks import run_deployment_pipeline_task
 
@@ -608,7 +623,7 @@ def poll_device_metrics(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"On-demand poll failed: {exc}")
-    
+
     return {"status": "success"}
 
 

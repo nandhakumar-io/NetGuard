@@ -263,7 +263,6 @@ def check_vpn(netmiko_type: str, ip_address: str, username: str, password: str) 
     be broken); platforms without the getter are marked not applicable.
     """
     try:
-        get_ipsec = None
         driver_name = NAPALM_DRIVER_MAP.get(netmiko_type)
         if driver_name is None:
             return CheckOutcome("services", "vpn", True, "Not applicable for this platform")

@@ -18,7 +18,15 @@ from app.schemas.change_request import (
     PendingApprovalItem,
     RiskAnalysisResult,
 )
-from app.services import diff_engine, event_bus, protocol_manager, risk_engine, snapshot_service, validation_engine, audit_service
+from app.services import (
+    audit_service,
+    diff_engine,
+    event_bus,
+    protocol_manager,
+    risk_engine,
+    snapshot_service,
+    validation_engine,
+)
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])

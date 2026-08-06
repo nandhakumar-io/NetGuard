@@ -12,6 +12,7 @@ fallback -- both needed by the new POST /change-requests/{id}/rescore
 retry action.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0015"

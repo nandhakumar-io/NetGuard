@@ -16,7 +16,14 @@ import asyncio
 import contextlib
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -72,11 +79,11 @@ def list_alerts(
         else:
             q = q.filter(Alert.suppressed_by_window_id.is_(None))
     if status == "active":
-        q = q.filter(Alert.resolved == False)  # noqa: E712
+        q = q.filter(Alert.resolved == False)
     elif status == "acknowledged":
-        q = q.filter(Alert.acknowledged == True, Alert.resolved == False)  # noqa: E712
+        q = q.filter(Alert.acknowledged == True, Alert.resolved == False)
     elif status == "resolved":
-        q = q.filter(Alert.resolved == True)  # noqa: E712
+        q = q.filter(Alert.resolved == True)
     if device_id:
         q = q.filter(Alert.device_id == device_id)
     results = q.order_by(desc(Alert.created_at)).offset(offset).limit(limit).all()

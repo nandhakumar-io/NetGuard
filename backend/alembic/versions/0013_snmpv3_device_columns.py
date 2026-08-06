@@ -11,6 +11,7 @@ in the schema yet -- app.services.snmp_service / metrics_service /
 credential_service all assume these columns exist.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0013"

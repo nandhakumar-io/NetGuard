@@ -1,7 +1,8 @@
-from app.core.database import SessionLocal
-from app.api.dashboard import _compute_summary
-import traceback
 import sys
+import traceback
+
+from app.api.dashboard import _compute_summary
+from app.core.database import SessionLocal
 
 db = SessionLocal()
 try:

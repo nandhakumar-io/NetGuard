@@ -15,9 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.models.webhook import WebhookEndpoint, WebhookType
 from app.models.user import User
-from app.schemas.webhook import WebhookCreate, WebhookRead, WebhookUpdate, WebhookTestResult
+from app.models.webhook import WebhookEndpoint
+from app.schemas.webhook import (
+    WebhookCreate,
+    WebhookRead,
+    WebhookTestResult,
+    WebhookUpdate,
+)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 

@@ -32,7 +32,7 @@ def find_active_window(db: Session, device_id: uuid.UUID | None, *, now: datetim
     site = device.site if device else None
 
     query = db.query(MaintenanceWindow).filter(
-        MaintenanceWindow.cancelled == False,  # noqa: E712
+        MaintenanceWindow.cancelled == False,
         MaintenanceWindow.starts_at <= now,
         MaintenanceWindow.ends_at >= now,
     )

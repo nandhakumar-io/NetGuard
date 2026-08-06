@@ -6,9 +6,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.core.config import settings
-from app.api.router import api_router
 from app import models  # noqa: F401  ensures models are registered on Base.metadata
+from app.api.router import api_router
+from app.core.config import settings
 
 logger = logging.getLogger("netguard.snmp_inprocess")
 
@@ -103,7 +103,7 @@ async def _snmp_inprocess_poll_loop() -> None:
                     pass
                 except metrics_service.credential_service.CredentialNotFoundError as exc:
                     logger.warning("SNMP poll skipped for %s: %s", device.hostname, exc)
-                except Exception:  # noqa: BLE001 - one bad device must not stop the sweep
+                except Exception:
                     logger.exception("SNMP poll failed for %s", device.hostname)
             finally:
                 db.close()
@@ -116,7 +116,7 @@ async def _snmp_inprocess_poll_loop() -> None:
                 logger.info("SNMP in-process sweep polled %d device(s)", polled)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - keep the loop alive across transient errors
+        except Exception:
             logger.exception("SNMP in-process sweep failed")
         await asyncio.sleep(settings.SNMP_POLL_INTERVAL_SECONDS)
 
@@ -143,7 +143,7 @@ async def _topology_snapshot_loop() -> None:
             logger.info("Captured topology snapshot")
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - keep the loop alive across transient errors
+        except Exception:
             logger.exception("Topology snapshot capture failed")
         await asyncio.sleep(settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS)
 
@@ -159,8 +159,9 @@ async def on_startup():
     # Apply any pending migrations here too so local/dev runs stay in sync
     # automatically. This is idempotent -- alembic no-ops if already at head.
     try:
-        from alembic import command
         from alembic.config import Config as AlembicConfig
+
+        from alembic import command
 
         backend_dir = Path(__file__).resolve().parent.parent
         alembic_cfg = AlembicConfig(str(backend_dir / "alembic.ini"))

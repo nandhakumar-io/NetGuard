@@ -34,7 +34,12 @@ from sqlalchemy.orm import Session
 from app.models.device import Device
 from app.models.firmware_upgrade import FirmwareUpgrade, FirmwareUpgradeStatus
 from app.models.snapshot import ConfigSnapshot
-from app.services import audit_service, event_bus, reachability_service, snapshot_service
+from app.services import (
+    audit_service,
+    event_bus,
+    reachability_service,
+    snapshot_service,
+)
 
 
 def _set_status(db: Session, job: FirmwareUpgrade, status: FirmwareUpgradeStatus, detail: str) -> None:

@@ -15,7 +15,6 @@ rather than hitting the network -- these are the same two seams poll_health
 itself calls through for every vendor.
 """
 
-import pytest
 
 from app.services import snmp_service
 from app.services.snmp_service import SnmpAuthConfig, poll_health

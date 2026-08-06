@@ -36,12 +36,10 @@ class AlertRead(BaseModel):
 
 class AlertAcknowledge(BaseModel):
     """Body is empty — the current user is inferred from the JWT."""
-    pass
 
 
 class AlertResolve(BaseModel):
     """Body is empty — the current user is inferred from the JWT."""
-    pass
 
 
 class AlertSummary(BaseModel):

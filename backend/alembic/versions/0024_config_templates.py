@@ -10,8 +10,9 @@ variables" instead of hand-writing/pasting CLI/XML from scratch on every
 change request. See app/services/template_service.py for rendering.
 """
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0024"
 down_revision = "0023"

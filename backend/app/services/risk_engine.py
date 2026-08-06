@@ -42,30 +42,30 @@ RISK_RULES: list[tuple[str, int, str]] = [
 # disabling an interface) from "no shutdown" (bringing one back up) -- both
 # contain the same substring. Treated separately so an interface being
 # *enabled* isn't misreported and scored as if it were being disabled.
-_SHUTDOWN_LINE_RE = re.compile(r"^\s*shutdown\s*$", re.I | re.M)
-_NO_SHUTDOWN_LINE_RE = re.compile(r"^\s*no\s+shutdown\s*$", re.I | re.M)
+_SHUTDOWN_LINE_RE = re.compile(r"^\s*shutdown\s*$", re.IGNORECASE | re.MULTILINE)
+_NO_SHUTDOWN_LINE_RE = re.compile(r"^\s*no\s+shutdown\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
 # Shared config parsing / network-aware checks
 # ---------------------------------------------------------------------------
 
-_IFACE_RE = re.compile(r"^interface\s+(\S+)", re.I | re.M)
-_IP_ADDR_RE = re.compile(r"ip\s+address\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})", re.I)
-_VLAN_DECL_RE = re.compile(r"^vlan\s+(\d+)(?:\s*\n\s*name\s+(\S+))?", re.I | re.M)
-_SWITCHPORT_ACCESS_VLAN_RE = re.compile(r"switchport\s+access\s+vlan\s+(\d+)", re.I)
-_NO_VLAN_RE = re.compile(r"\bno\s+vlan\s+(\d+)\b", re.I)
+_IFACE_RE = re.compile(r"^interface\s+(\S+)", re.IGNORECASE | re.MULTILINE)
+_IP_ADDR_RE = re.compile(r"ip\s+address\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})", re.IGNORECASE)
+_VLAN_DECL_RE = re.compile(r"^vlan\s+(\d+)(?:\s*\n\s*name\s+(\S+))?", re.IGNORECASE | re.MULTILINE)
+_SWITCHPORT_ACCESS_VLAN_RE = re.compile(r"switchport\s+access\s+vlan\s+(\d+)", re.IGNORECASE)
+_NO_VLAN_RE = re.compile(r"\bno\s+vlan\s+(\d+)\b", re.IGNORECASE)
 _ROUTE_RE = re.compile(
-    r"\bip\s+route\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\S+)", re.I
+    r"\bip\s+route\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\S+)", re.IGNORECASE
 )
 _ACL_RULE_RE = re.compile(
-    r"access-list\s+(\d+)\s+(permit|deny)\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?", re.I
+    r"access-list\s+(\d+)\s+(permit|deny)\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?", re.IGNORECASE
 )
 _OSPF_NETWORK_RE = re.compile(
-    r"network\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+area\s+(\S+)", re.I
+    r"network\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+area\s+(\S+)", re.IGNORECASE
 )
-_OSPF_PASSIVE_RE = re.compile(r"passive-interface\s+(\S+)", re.I)
-_OSPF_PROCESS_RE = re.compile(r"router\s+ospf\s+\d+", re.I)
+_OSPF_PASSIVE_RE = re.compile(r"passive-interface\s+(\S+)", re.IGNORECASE)
+_OSPF_PROCESS_RE = re.compile(r"router\s+ospf\s+\d+", re.IGNORECASE)
 
 
 @dataclass

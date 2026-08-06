@@ -17,6 +17,7 @@ ALTER TYPE ... ADD VALUE cannot run inside a transaction block on
 Postgres, so this migration is marked non-transactional.
 """
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0005"

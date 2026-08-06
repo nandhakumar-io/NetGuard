@@ -17,13 +17,24 @@ import asyncio
 import contextlib
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
 from app.core.deps import get_current_user
-from app.models.notification import Notification, NotificationEventType, NotificationSeverity
+from app.models.notification import (
+    Notification,
+    NotificationEventType,
+    NotificationSeverity,
+)
 from app.models.user import User
 from app.schemas.notifications import NotificationRead, NotificationSummary
 from app.services import event_bus
@@ -52,20 +63,20 @@ def list_notifications(
     if event_type:
         q = q.filter(Notification.event_type == NotificationEventType(event_type))
     if unread_only:
-        q = q.filter(Notification.read == False)  # noqa: E712
+        q = q.filter(Notification.read == False)
     return q.order_by(desc(Notification.created_at)).offset(offset).limit(limit).all()
 
 
 @router.get("/summary", response_model=NotificationSummary)
 def get_summary(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     total = db.query(Notification).count()
-    unread_count = db.query(Notification).filter(Notification.read == False).count()  # noqa: E712
+    unread_count = db.query(Notification).filter(Notification.read == False).count()
     return NotificationSummary(unread_count=unread_count, total=total)
 
 
 @router.patch("/read-all", response_model=NotificationSummary)
 def mark_all_read(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    db.query(Notification).filter(Notification.read == False).update({"read": True})  # noqa: E712
+    db.query(Notification).filter(Notification.read == False).update({"read": True})
     db.commit()
     total = db.query(Notification).count()
     event_bus.publish_event("notifications_read_all", channel=event_bus.NOTIFICATIONS_CHANNEL)
@@ -111,7 +122,7 @@ def _serialize_recent(db: Session, n: int = 20) -> list[dict]:
 
 def _summary(db: Session) -> dict:
     total = db.query(Notification).count()
-    unread_count = db.query(Notification).filter(Notification.read == False).count()  # noqa: E712
+    unread_count = db.query(Notification).filter(Notification.read == False).count()
     return {"unread_count": unread_count, "total": total}
 
 

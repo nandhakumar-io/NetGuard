@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, String, Enum, DateTime, func
+from sqlalchemy import Column, DateTime, Enum, String, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base

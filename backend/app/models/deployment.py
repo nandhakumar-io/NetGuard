@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, String, Enum, DateTime, Text, Integer, ForeignKey, func
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -59,9 +59,9 @@ class DeploymentLog(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     deployment_id = Column(UUID(as_uuid=True), ForeignKey("deployments.id"), index=True, nullable=False)
-    
+
     step = Column(String, nullable=False)  # e.g., 'PRE-FLIGHT', 'SNAPSHOT', 'DEPLOY', 'VERIFY', 'ROLLBACK', 'COMPLETE'
     level = Column(String, nullable=False, default="INFO")  # 'INFO', 'ERROR', 'WARN'
     message = Column(Text, nullable=False)
-    
+
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)

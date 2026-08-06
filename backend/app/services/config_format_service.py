@@ -107,7 +107,7 @@ def pretty_xml(raw: str | None) -> str | None:
             parsed = xml.dom.minidom.parseString(f"<config_data>\n{raw}\n</config_data>")
         except Exception:
             return None
-    
+
     # minidom.toprettyxml() litters blank lines between every element;
     # strip them so the output isn't twice as tall as it needs to be.
     pretty = parsed.toprettyxml(indent="  ")
@@ -214,7 +214,7 @@ def _parse_interfaces_xml(raw: str) -> list[InterfaceStatus]:
     try:
         root = ET.fromstring(raw)
     except ET.ParseError:
-        # strip_rpc_envelope() might return multiple root elements (e.g. <native> and <interfaces>) 
+        # strip_rpc_envelope() might return multiple root elements (e.g. <native> and <interfaces>)
         # which isn't valid XML as a single string. Wrap them cleanly.
         try:
             root = ET.fromstring(f"<data>{raw}</data>")
@@ -258,7 +258,7 @@ def _parse_interfaces_xml(raw: str) -> list[InterfaceStatus]:
                         if ip:
                             status.ip_addresses.append(f"{ip}/{prefix}" if prefix else ip)
                 results.append(status)
-            except Exception:  # noqa: BLE001 - one bad row shouldn't drop the rest
+            except Exception:
                 logger.debug("Skipping one unparsable ietf-interfaces row", exc_info=True)
                 continue
         if results:
@@ -355,7 +355,7 @@ def _parse_interfaces_junos_opstate_xml(raw: str) -> list[InterfaceStatus]:
                         if ip:
                             status.ip_addresses.append(ip)
             results.append(status)
-        except Exception:  # noqa: BLE001 - one bad row shouldn't drop the rest
+        except Exception:
             logger.debug("Skipping one unparsable physical-interface row", exc_info=True)
             continue
     return results

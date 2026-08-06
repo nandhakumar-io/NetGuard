@@ -317,7 +317,7 @@ def bootstrap_node(
     device_id: uuid.UUID | None = None
     cred_ref = payload.ssh_credential_ref or _slug_cred_ref(hostname)
     device = _find_linked_device(db, project_id, node_id)
-    
+
     if payload.create_device and device is None:
         device = db.query(Device).filter(Device.hostname == hostname).first()
 

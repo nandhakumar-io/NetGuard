@@ -9,9 +9,10 @@ app.models.alert_snooze.AlertSnooze docstring for how this differs from
 maintenance-window suppression and topology-based correlation, the two
 other ways an alert can already be marked "not currently urgent").
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0034"
 down_revision = "0033"
