@@ -8,8 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from app.core.database import Base
 from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
 from app.models.device import Device, DeviceVendor
+from app.models.protocol_operation import ProtocolName
 from app.services import pipeline_service
-from app.services.deployment_engine import DeployResult
+from app.services.protocol_manager import ProtocolResult
 from app.services.health_monitor import CheckOutcome, MonitoringResult, PollRound
 
 
@@ -62,9 +63,12 @@ def _make_cr(db):
 
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
-@patch("app.services.pipeline_service.deployment_engine.deploy_config")
+@patch("app.services.pipeline_service.protocol_manager.ProtocolManager.deploy_config")
 def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session):
-    mock_deploy.return_value = DeployResult(success=True, output="ok")
+    mock_deploy.return_value = ProtocolResult(
+        success=True, protocol=ProtocolName.NETCONF, operation="deploy_config",
+        output="ok", error=None, execution_time_ms=10.0, correlation_id="123"
+    )
     outcomes = [CheckOutcome("infrastructure", "ping", True, "2 packets received")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=True, rounds=3)
 
@@ -89,7 +93,7 @@ def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session
 
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
-@patch("app.services.pipeline_service.deployment_engine.deploy_config")
+@patch("app.services.pipeline_service.protocol_manager.ProtocolManager.deploy_config")
 def test_pipeline_rolls_back_on_failed_health_check(
     mock_deploy, mock_health, mock_notify, db_session
 ):
@@ -98,7 +102,10 @@ def test_pipeline_rolls_back_on_failed_health_check(
     # restore_config() -> deploy_config()) -- there's no separate
     # "rollback_config" call in this pipeline, so deploy_config is mocked
     # to succeed for *both* the initial deploy and the restore push.
-    mock_deploy.return_value = DeployResult(success=True, output="ok")
+    mock_deploy.return_value = ProtocolResult(
+        success=True, protocol=ProtocolName.NETCONF, operation="deploy_config",
+        output="ok", error=None, execution_time_ms=10.0, correlation_id="123"
+    )
     outcomes = [CheckOutcome("infrastructure", "ping", False, "timeout")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=False, rounds=1)
 
@@ -112,9 +119,12 @@ def test_pipeline_rolls_back_on_failed_health_check(
 
 
 @patch("app.services.pipeline_service.notification_service.notify")
-@patch("app.services.pipeline_service.deployment_engine.deploy_config")
+@patch("app.services.pipeline_service.protocol_manager.ProtocolManager.deploy_config")
 def test_pipeline_marks_failed_when_deploy_fails(mock_deploy, mock_notify, db_session):
-    mock_deploy.return_value = DeployResult(success=False, output="", error="auth failure")
+    mock_deploy.return_value = ProtocolResult(
+        success=False, protocol=ProtocolName.NETCONF, operation="deploy_config",
+        output="", error="auth failure", execution_time_ms=10.0, correlation_id="123"
+    )
 
     cr = _make_cr(db_session)
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")

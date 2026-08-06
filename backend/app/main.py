@@ -2,6 +2,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,54 +13,6 @@ from app.api.router import api_router
 from app.core.config import settings
 
 logger = logging.getLogger("netguard.snmp_inprocess")
-
-app = FastAPI(
-    title=settings.APP_NAME,
-    description="Intelligent Automated Network Change Management & Self-Healing Platform",
-    version="1.0.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Catch-all for anything a route/dependency raises that isn't already
-    an HTTPException.
-
-    Without this, an unhandled exception propagates past FastAPI's
-    ExceptionMiddleware (which sits *inside* CORSMiddleware in the
-    Starlette stack) all the way out to Starlette's ServerErrorMiddleware,
-    which sits *outside* CORSMiddleware and generates its own fallback 500
-    -- one with no CORS headers on it, because it never passes back
-    through CORSMiddleware's response-wrapping. The browser then can't
-    read that response at all (it fails the CORS check), so axios/fetch
-    reports it as an opaque "Network Error" with no status code or body
-    -- exactly what device delete, alert clearing, or any other endpoint
-    looks like in the UI whenever something throws that the endpoint
-    itself didn't anticipate and catch.
-
-    Registering a handler here means FastAPI's ExceptionMiddleware catches
-    the exception itself and calls this handler *before* the request ever
-    reaches ServerErrorMiddleware -- so the JSONResponse below still flows
-    back out through CORSMiddleware and gets proper headers, and the
-    frontend gets a real 500 + JSON body it can actually show the user
-    instead of a dead end.
-    """
-    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal server error: {exc}"},
-    )
-
-
-app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 _snmp_poll_loop_task: asyncio.Task | None = None
 _syslog_transport = None  # asyncio.DatagramTransport | None -- see app.services.syslog_service
@@ -148,8 +102,8 @@ async def _topology_snapshot_loop() -> None:
         await asyncio.sleep(settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS)
 
 
-@app.on_event("startup")
-async def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     # Schema is owned by Alembic migrations (see backend/alembic/). The
     # Docker image's entrypoint.sh runs `alembic upgrade head` before
     # starting uvicorn -- but when running locally with `uvicorn
@@ -165,15 +119,6 @@ async def on_startup():
 
         backend_dir = Path(__file__).resolve().parent.parent
         alembic_cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
-        # alembic.ini's script_location is the relative path "alembic",
-        # which Alembic resolves against the current working directory --
-        # NOT against the ini file's own directory. If this process wasn't
-        # started with CWD=backend/ (e.g. launched via a process manager,
-        # systemd, or `uvicorn app.main:app` from the repo root), that
-        # relative lookup silently fails to find alembic/versions/, and
-        # migrations never actually run even though this block appears to
-        # succeed. Force it to an absolute path so it's correct regardless
-        # of CWD.
         alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
         await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
         logger.info("Alembic migrations applied (upgrade head).")
@@ -222,33 +167,78 @@ async def on_startup():
     if settings.TOPOLOGY_SNAPSHOT_ENABLED and _topology_snapshot_loop_task is None:
         _topology_snapshot_loop_task = asyncio.create_task(_topology_snapshot_loop())
 
+    yield
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    global _snmp_poll_loop_task
     if _snmp_poll_loop_task is not None:
         _snmp_poll_loop_task.cancel()
         _snmp_poll_loop_task = None
 
-    global _syslog_transport
     if _syslog_transport is not None:
         _syslog_transport.close()
         _syslog_transport = None
 
-    global _flow_transport
     if _flow_transport is not None:
         _flow_transport.close()
         _flow_transport = None
 
-    global _sflow_transport
     if _sflow_transport is not None:
         _sflow_transport.close()
         _sflow_transport = None
 
-    global _topology_snapshot_loop_task
     if _topology_snapshot_loop_task is not None:
         _topology_snapshot_loop_task.cancel()
         _topology_snapshot_loop_task = None
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="Intelligent Automated Network Change Management & Self-Healing Platform",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # tighten in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all for anything a route/dependency raises that isn't already
+    an HTTPException.
+
+    Without this, an unhandled exception propagates past FastAPI's
+    ExceptionMiddleware (which sits *inside* CORSMiddleware in the
+    Starlette stack) all the way out to Starlette's ServerErrorMiddleware,
+    which sits *outside* CORSMiddleware and generates its own fallback 500
+    -- one with no CORS headers on it, because it never passes back
+    through CORSMiddleware's response-wrapping. The browser then can't
+    read that response at all (it fails the CORS check), so axios/fetch
+    reports it as an opaque "Network Error" with no status code or body
+    -- exactly what device delete, alert clearing, or any other endpoint
+    looks like in the UI whenever something throws that the endpoint
+    itself didn't anticipate and catch.
+
+    Registering a handler here means FastAPI's ExceptionMiddleware catches
+    the exception itself and calls this handler *before* the request ever
+    reaches ServerErrorMiddleware -- so the JSONResponse below still flows
+    back out through CORSMiddleware and gets proper headers, and the
+    frontend gets a real 500 + JSON body it can actually show the user
+    instead of a dead end.
+    """
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {exc}"},
+    )
+
+
+app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/")
