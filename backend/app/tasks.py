@@ -452,3 +452,28 @@ def run_firmware_upgrade_task(self, job_id: str) -> str:
         return job.status.value
     finally:
         db.close()
+
+
+@celery_app.task(
+    name="app.tasks.run_snapshot_retention_task",
+    bind=True,
+    # Infra retries only -- a DB hiccup mid-sweep is worth retrying;
+    # there's no per-device external I/O here (this is pure DB
+    # housekeeping) so nothing else about it is flaky.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_snapshot_retention_task(self) -> dict:
+    """Celery beat entry point (see celery_app "snapshot-retention-sweep"):
+    enforces the ConfigSnapshot retention policy fleet-wide every night.
+    See app.services.snapshot_service.purge_expired_snapshots for what
+    the policy actually is and why certain snapshots are always kept.
+    """
+    from app.services import snapshot_service
+
+    db = SessionLocal()
+    try:
+        return snapshot_service.purge_expired_snapshots(db)
+    finally:
+        db.close()

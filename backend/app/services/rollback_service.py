@@ -22,7 +22,7 @@ from app.models.change_request import ChangeRequest, ChangePriority, ChangeStatu
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User
-from app.services import audit_service, credential_service, deployment_engine, event_bus, snapshot_service
+from app.services import audit_service, credential_service, deployment_engine, diff_engine, event_bus, snapshot_service
 
 
 class RollbackError(Exception):
@@ -62,6 +62,105 @@ def _netmiko_type(device: Device) -> str:
     return DEVICE_TYPE_MAP.get(
         device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
     )
+
+
+def preview_rollback(db: Session, device: Device, snapshot: ConfigSnapshot) -> dict:
+    """Read-only counterpart to initiate_rollback: builds the exact same
+    "what's live right now vs. what this snapshot would restore" diff,
+    but creates no ChangeRequest and pushes nothing to the device. Used
+    by the rollback confirmation modal so the diff is shown *before* the
+    user confirms, not only afterward in the change request / audit log.
+
+    Raises RollbackError if the snapshot doesn't belong to the device --
+    same validation as initiate_rollback, so a preview can never be
+    requested for a mismatched snapshot/device pair either.
+    """
+    if snapshot.device_id != device.id:
+        raise RollbackError(f"Snapshot {snapshot.id} does not belong to device '{device.hostname}'.")
+
+    target_config = snapshot_service.decrypt_config(snapshot.running_config_encrypted)
+
+    # Best-effort live read, same fallback chain as initiate_rollback:
+    # live config -> most recent snapshot -> nothing to compare against.
+    # A failed live read is never fatal to a *preview* (there's nothing
+    # to roll back yet), it just downgrades what "current" means in the
+    # response so the caller can show that honestly instead of a diff
+    # against stale data with no indication it's stale.
+    current_config = None
+    current_source = "unavailable"
+    try:
+        ssh_password = credential_service.get_ssh_password(device)
+        current_config, _used_protocol = deployment_engine.read_running_config(
+            _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
+        )
+        current_source = "live"
+    except credential_service.CredentialNotFoundError:
+        pass
+    except Exception:
+        # Any live-read failure (unreachable device, auth failure, etc.)
+        # falls back the same way initiate_rollback does -- a preview
+        # should degrade gracefully, not 500 just because the device is
+        # down right now.
+        pass
+
+    if current_config is None:
+        latest = (
+            db.query(ConfigSnapshot)
+            .filter(ConfigSnapshot.device_id == device.id)
+            .order_by(ConfigSnapshot.created_at.desc())
+            .first()
+        )
+        if latest is not None:
+            current_config = snapshot_service.decrypt_config(latest.running_config_encrypted)
+            current_source = "last_snapshot"
+
+    warning = None
+    if current_source == "last_snapshot":
+        warning = (
+            "Could not read the device's live configuration -- this preview compares the rollback "
+            "target against the most recent snapshot on file instead, which may not reflect what's "
+            "actually running right now."
+        )
+    elif current_source == "unavailable":
+        warning = (
+            "No live configuration could be read and no prior snapshot exists to compare against -- "
+            "showing the rollback target only."
+        )
+
+    diff_text = diff_engine.generate_diff(current_config, target_config)
+    added, removed = 0, 0
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+
+    in_flight = (
+        db.query(ChangeRequest)
+        .filter(ChangeRequest.device_id == device.id, ChangeRequest.status.in_(_IN_FLIGHT_STATUSES))
+        .first()
+    )
+
+    return {
+        "device_id": device.id,
+        "snapshot_id": snapshot.id,
+        "target_version": snapshot.version,
+        "current_source": current_source,
+        "diff": diff_text,
+        "identical": current_config == target_config,
+        "added_lines": added,
+        "removed_lines": removed,
+        "warning": warning,
+        "blocked": in_flight is not None,
+        "blocked_reason": (
+            f"Device '{device.hostname}' already has change request {in_flight.id} in status "
+            f"'{in_flight.status.value}'. It must finish before this rollback can be confirmed."
+            if in_flight is not None
+            else None
+        ),
+    }
 
 
 def initiate_rollback(

@@ -339,6 +339,55 @@ export interface DriftFleetSummary {
   rollback_recommended_count: number;
 }
 
+export interface WeeklyGoldenDriftEntry extends Drift {
+  hostname: string;
+}
+
+export interface WeeklyGoldenDriftReport {
+  since: string;
+  days: number;
+  devices: WeeklyGoldenDriftEntry[];
+}
+
+// --- Snapshot Retention Policy ---
+
+export interface RetentionPolicy {
+  retention_days: number;
+  min_snapshots_per_device: number;
+  sweep_hour_utc: number;
+  description: string;
+}
+
+export interface DeviceRetentionStatus {
+  device_id: string;
+  total_snapshots: number;
+  protected_snapshots: number;
+  eligible_for_purge: number;
+  oldest_snapshot_at?: string | null;
+  newest_snapshot_at?: string | null;
+}
+
+export interface RetentionPolicyResponse {
+  policy: RetentionPolicy;
+  device?: DeviceRetentionStatus | null;
+}
+
+// --- Rollback Preview ---
+
+export interface RollbackPreviewResponse {
+  device_id: string;
+  snapshot_id: string;
+  target_version: string;
+  current_source: "live" | "last_snapshot" | "unavailable";
+  diff: string;
+  identical: boolean;
+  added_lines: number;
+  removed_lines: number;
+  warning?: string | null;
+  blocked: boolean;
+  blocked_reason?: string | null;
+}
+
 // --- Notification Center ---
 
 export type NotificationEventType =
@@ -430,6 +479,7 @@ export interface Alert {
   root_cause_alert_id: string | null;
   suppressed: boolean;
   suppressed_by_window_id?: string | null;
+  muted_until?: string | null;
   created_at: string;
 }
 
@@ -623,6 +673,9 @@ export interface TopologyNode {
   health_score: number | null;
   data_center?: string | null;
   rack?: string | null;
+  // "core" | "distribution" | "access" | ... (free-text, org-defined) --
+  // powers the Topology page's optional layered layout. null if never set.
+  device_role?: string | null;
 }
 
 export interface TopologyEdge {
@@ -631,9 +684,15 @@ export interface TopologyEdge {
   subnet: string | null;
   source_ip: string | null;
   target_ip: string | null;
-  link_source: "lldp" | "cdp" | "subnet";
+  link_source: "lldp" | "cdp" | "gns3" | "subnet";
   local_port: string | null;
   neighbor_port: string | null;
+  // Best-effort link utilization, 0-100, for the "color links by
+  // utilization" toggle -- null if neither endpoint has a recent SNMP
+  // poll. See backend TopologyEdge.utilization_pct's docstring: this is
+  // the higher of the two endpoints' whole-device interface utilization
+  // readings, not a true per-port figure.
+  utilization_pct: number | null;
 }
 
 export interface TopologyResponse {
@@ -641,7 +700,48 @@ export interface TopologyResponse {
   edges: TopologyEdge[];
 }
 
-// --- Device grouping (rack + data center) ---
+// --- Global search (Cmd+K command palette) ---
+
+export interface GlobalSearchResultItem {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  url: string;
+}
+
+export interface GlobalSearchResponse {
+  query: string;
+  devices: GlobalSearchResultItem[];
+  groups: GlobalSearchResultItem[];
+  alerts: GlobalSearchResultItem[];
+  change_requests: GlobalSearchResultItem[];
+  configs: GlobalSearchResultItem[];
+}
+
+// --- Alert snooze/mute (app.models.alert_snooze.AlertSnooze) ---
+
+export interface AlertSnooze {
+  id: string;
+  device_id: string | null;
+  device_hostname: string | null;
+  category: string | null;
+  reason: string | null;
+  expires_at: string;
+  created_by: string;
+  created_at: string | null;
+}
+
+export interface DeviceGroup {
+  id: string;
+  name: string;
+  description: string | null;
+  group_type: string;
+  parent_group_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  device_count: number;
+  child_group_count: number;
+}
 
 export interface RackGroup {
   name: string;

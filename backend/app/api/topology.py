@@ -40,6 +40,7 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
                 "health_score": n.health_score,
                 "data_center": n.data_center,
                 "rack": n.rack,
+                "device_role": n.device_role,
             }
             for n in graph.nodes
         ],
@@ -50,6 +51,15 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
                 "subnet": e.subnet,
                 "source_ip": e.source_ip,
                 "target_ip": e.target_ip,
+                # NB: link_source/local_port/neighbor_port were previously
+                # omitted here, silently collapsing every LLDP/CDP/GNS3-
+                # confirmed edge back to the "subnet" schema default --
+                # fixed alongside the utilization/device_role additions
+                # below since all three touch this same response shape.
+                "link_source": e.link_source,
+                "local_port": e.local_port,
+                "neighbor_port": e.neighbor_port,
+                "utilization_pct": e.utilization_pct,
             }
             for e in graph.edges
         ],

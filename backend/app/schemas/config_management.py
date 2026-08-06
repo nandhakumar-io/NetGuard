@@ -159,3 +159,25 @@ class GoldenConfigCompareResponse(BaseModel):
     device_id: uuid.UUID
     identical: bool
     diff: str
+
+
+# --- Snapshot retention policy (visible housekeeping, not just enforced) --
+class RetentionPolicy(BaseModel):
+    retention_days: int
+    min_snapshots_per_device: int
+    sweep_hour_utc: int
+    description: str
+
+
+class DeviceRetentionStatus(BaseModel):
+    device_id: uuid.UUID
+    total_snapshots: int
+    protected_snapshots: int
+    eligible_for_purge: int
+    oldest_snapshot_at: datetime.datetime | None = None
+    newest_snapshot_at: datetime.datetime | None = None
+
+
+class RetentionPolicyResponse(BaseModel):
+    policy: RetentionPolicy
+    device: DeviceRetentionStatus | None = None

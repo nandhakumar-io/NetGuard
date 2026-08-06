@@ -77,6 +77,15 @@ celery_app.conf.update(
             "task": "app.tasks.run_monthly_compliance_report_task",
             "schedule": crontab(day_of_month=1, hour=settings.COMPLIANCE_REPORT_HOUR_UTC, minute=0),
         },
+        # Configuration Snapshot retention sweep: enforces
+        # SNAPSHOT_RETENTION_DAYS / SNAPSHOT_RETENTION_MIN_PER_DEVICE
+        # nightly so snapshot history (taken automatically before every
+        # deployment/restore/rollback, on top of on-demand backups)
+        # doesn't grow unbounded. See app.services.snapshot_service.
+        "snapshot-retention-sweep": {
+            "task": "app.tasks.run_snapshot_retention_task",
+            "schedule": crontab(hour=settings.SNAPSHOT_RETENTION_SWEEP_HOUR_UTC, minute=0),
+        },
     },
 )
 

@@ -254,6 +254,29 @@ class Settings(BaseSettings):
     TOPOLOGY_SNAPSHOT_ENABLED: bool = True
     TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS: int = 86400
 
+    # Configuration Snapshot retention (Self-Healing Rollback Engine /
+    # SRS 10 git-style version control). Snapshots are taken automatically
+    # before every deployment/restore/rollback (see pipeline_service,
+    # config_management.restore_config, rollback_service) in addition to
+    # on-demand backups, so history grows quickly for an active fleet.
+    # Policy, enforced by snapshot_service.purge_expired_snapshots (run
+    # nightly via Celery beat -- see celery_app.beat_schedule
+    # "snapshot-retention-sweep"):
+    #   - a snapshot older than SNAPSHOT_RETENTION_DAYS is eligible for
+    #     deletion...
+    #   - ...unless it's one of the SNAPSHOT_RETENTION_MIN_PER_DEVICE most
+    #     recent snapshots for its device (age alone never drops a device
+    #     below this floor of restorable history), or it's referenced by
+    #     a ChangeRequest.rollback_snapshot_id (so a rollback's own
+    #     "what did we restore" audit trail is never invalidated out from
+    #     under it).
+    # The policy is intentionally visible, not just enforced silently --
+    # see GET /snapshots/retention-policy (app.api.config_management) and
+    # the "Snapshot Retention" panel on the Backups tab.
+    SNAPSHOT_RETENTION_DAYS: int = 90
+    SNAPSHOT_RETENTION_MIN_PER_DEVICE: int = 10
+    SNAPSHOT_RETENTION_SWEEP_HOUR_UTC: int = 3
+
     GNS3_ENABLED: bool = False
     GNS3_BASE_URL: str = "http://localhost:3080"
     GNS3_USERNAME: str | None = None

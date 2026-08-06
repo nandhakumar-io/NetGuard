@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import NotificationBell from "./NotificationBell";
+import CommandPalette from "./CommandPalette";
 
 const links = [
   { to: "/", label: "Dashboard", end: true },
@@ -95,14 +96,25 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 flex flex-col overflow-y-auto">
-        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center justify-end gap-2 px-6">
-          <ThemeToggle />
-          <NotificationBell />
+        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center justify-between gap-2 px-6">
+          <button
+            onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
+            className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors max-w-xs w-full"
+          >
+            <span>🔎</span>
+            <span className="flex-1 text-left">Search devices, alerts, configs…</span>
+            <span className="font-mono text-[10px] bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">⌘K</span>
+          </button>
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <NotificationBell />
+          </div>
         </header>
         <div className="flex-1 p-8">
           <Outlet />
         </div>
       </main>
+      <CommandPalette />
     </div>
   );
 }

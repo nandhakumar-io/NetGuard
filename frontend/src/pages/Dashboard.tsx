@@ -27,6 +27,32 @@ function formatBps(bps: number | null): string {
 const SEVERITY_ICON: Record<string, string> = { critical: "🚨", warning: "⚠️", info: "ℹ️" };
 const SEVERITY_COLOR: Record<string, string> = { critical: "text-riskcrit", warning: "text-riskmed", info: "text-brandblue" };
 
+// --- Role-based dashboard views -----------------------------------------
+// Three fixed presets rather than per-widget user customization: NOC
+// (live operational status -- uplinks, port/device down events, top
+// resource consumers), Change Management (deployment/backup/config-drift
+// audit trail), and Exec/Compliance (fleet-wide posture: health trend,
+// drift, EOL/EOS exposure, unstable-device flags -- no raw ops noise).
+// Every widget below already existed; this only changes which ones are
+// mounted for a given view, via the `views` set passed to each section.
+type DashboardView = "noc" | "change_management" | "exec";
+
+const VIEW_LABELS: Record<DashboardView, string> = {
+  noc: "NOC",
+  change_management: "Change Management",
+  exec: "Exec / Compliance",
+};
+
+// A view a given role lands on by default -- still freely switchable via
+// the segmented control, this just saves the common case a click.
+const ROLE_DEFAULT_VIEW: Record<string, DashboardView> = {
+  noc_engineer: "noc",
+  network_engineer: "noc",
+  network_admin: "change_management",
+  security: "exec",
+  auditor: "exec",
+};
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const secs = Math.floor(diff / 1000);
@@ -48,6 +74,9 @@ export default function Dashboard() {
   const [connection, setConnection] = useState<"live" | "polling" | "connecting">("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  const [view, setView] = useState<DashboardView>(() => ROLE_DEFAULT_VIEW[user?.role || ""] || "noc");
+  const showIn = (...views: DashboardView[]) => views.includes(view);
 
   useEffect(() => {
     let mounted = true;
@@ -178,6 +207,26 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Role-based dashboard view switcher -- defaults from the logged-in
+          user's role (ROLE_DEFAULT_VIEW) but any view is one click away,
+          since plenty of people cover more than one hat. */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">View:</span>
+        <div className="inline-flex rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
+          {(Object.keys(VIEW_LABELS) as DashboardView[]).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`px-4 py-1.5 text-xs font-bold transition-colors ${
+                view === v ? "bg-brandblue text-white" : "text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700"
+              }`}
+            >
+              {VIEW_LABELS[v]}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {error && !summary && (
         <div className="bg-red-50 border border-red-200 text-riskcrit text-sm font-semibold rounded-lg px-4 py-3 shadow-sm">
           {error} Make sure the backend is running at{" "}
@@ -241,6 +290,7 @@ export default function Dashboard() {
       {/* Fleet Health Trend -- 24h fleet-wide avg CPU / memory / bandwidth,
           the graph the dashboard was missing: everything above is a
           point-in-time snapshot, this is the actual trend over time. */}
+      {showIn("noc", "exec") && (
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
         <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3">
           Fleet Health Trend (24h)
@@ -286,12 +336,14 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Column */}
           <div className="space-y-6 lg:col-span-2">
 
              {/* Uplinks / WAN Links */}
+             {showIn("noc") && (
              <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                  <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
                      <span className="bg-slate-100 dark:bg-slate-700 p-1.5 rounded-lg text-lg">🌐</span> Uplinks &amp; WAN Links
@@ -346,8 +398,10 @@ export default function Dashboard() {
                      </div>
                  )}
              </div>
+             )}
 
              {/* Top-N Metric Widgets: CPU, Memory, Bandwidth */}
+             {showIn("noc") && (
              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                  {/* Top CPU Widget */}
                  <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
@@ -431,8 +485,10 @@ export default function Dashboard() {
                      )}
                  </div>
              </div>
+             )}
 
              {/* Protocol Operations Feed */}
+             {showIn("change_management") && (
              <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                  <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-100 dark:border-slate-800 pb-3 flex justify-between">
                      <span>Protocol Operations (Recent)</span>
@@ -474,9 +530,10 @@ export default function Dashboard() {
                      </table>
                  </div>
              </div>
+             )}
              
              {/* Devices with Drift Widget */}
-             {driftSummary && driftSummary.total_open_drifts > 0 && (
+             {showIn("change_management", "exec") && driftSummary && driftSummary.total_open_drifts > 0 && (
                  <div className="bg-white dark:bg-slate-800 border-2 border-brandblue/20 rounded-xl p-5 shadow-sm transform transition hover:-translate-y-1">
                  <div className="flex items-start justify-between gap-4 flex-wrap">
                      <div>
@@ -501,7 +558,7 @@ export default function Dashboard() {
              )}
 
              {/* EOL/EOS Firmware Widget */}
-             {summary && summary.eos_device_count > 0 && (
+             {showIn("change_management", "exec") && summary && summary.eos_device_count > 0 && (
                  <div className="bg-white dark:bg-slate-800 border-2 border-riskcrit/20 rounded-xl p-5 shadow-sm transform transition hover:-translate-y-1">
                  <div className="flex items-start justify-between gap-4 flex-wrap">
                      <div>
@@ -527,10 +584,11 @@ export default function Dashboard() {
 
           {/* Sidebar Area */}
           <div className="space-y-6">
-             {/* NOC Live Status Widget -- always visible, the 3 signals
-                  a NOC operator scans for first: devices down, ports down,
-                  recent reboots. Counts from alerts, detail lists from
-                  the dashboard summary's interface_statuses query. */}
+             {/* NOC Live Status Widget -- the 3 signals a NOC operator
+                  scans for first: devices down, ports down, recent
+                  reboots. Counts from alerts, detail lists from the
+                  dashboard summary's interface_statuses query. */}
+             {showIn("noc") && (
                 <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                   <div className="flex items-center justify-between mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
                     <h2 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-2">
@@ -584,8 +642,10 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
+             )}
 
              {/* Recent Alerts Widget */}
+             {showIn("noc", "exec") && (
              <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
                  <h2 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Active Alerts</h2>
@@ -624,8 +684,10 @@ export default function Dashboard() {
                  </div>
                  )}
              </div>
+             )}
 
              {/* Recent Backups Widget */}
+             {showIn("change_management") && (
              <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
                   <div className="flex items-center justify-between mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
                      <h2 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-2">
@@ -650,8 +712,10 @@ export default function Dashboard() {
                      </div>
                  )}
              </div>
+             )}
              
-             {/* Small Status Summary */}
+             {/* Small Status Summary -- shown in every view as the compact
+                 shared anchor across all three dashboards. */}
              <div className="grid grid-cols-3 gap-3">
                  <div className="bg-slate-50 dark:bg-slate-900 p-4 rounded-xl border border-slate-100 dark:border-slate-800 text-center">
                      <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Pending</p>
@@ -679,7 +743,7 @@ export default function Dashboard() {
                  </div>
              </div>
 
-             {(summary?.flagged_unstable_devices?.length ?? 0) > 0 && (
+             {showIn("noc", "exec") && (summary?.flagged_unstable_devices?.length ?? 0) > 0 && (
                  <div className="bg-white dark:bg-slate-800 p-5 rounded-xl border border-red-200 shadow-sm">
                      <h2 className="text-sm font-bold text-navy dark:text-white mb-3 flex items-center gap-2">
                          🚩 Devices Flagged Unstable — Manual Review Required

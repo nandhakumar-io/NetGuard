@@ -51,6 +51,10 @@ class TopologyNode:
     health_score: int | None = None
     data_center: str | None = None
     rack: str | None = None
+    # Compliance/topology role ("core" | "distribution" | "access" | ... or
+    # None if never assigned) -- mirrors Device.device_role, powers the
+    # Topology page's optional layered (core/distribution/access) layout.
+    device_role: str | None = None
 
 
 @dataclass
@@ -63,6 +67,16 @@ class TopologyEdge:
     link_source: str = "subnet"  # "lldp" | "cdp" | "gns3" | "subnet" -- how this edge was inferred
     local_port: str | None = None  # source device's port, if known (lldp/cdp/gns3 only)
     neighbor_port: str | None = None  # target device's port, as reported by the source device
+    # Best-effort link utilization for coloring, 0-100 or None if neither
+    # endpoint has a recent SNMP poll. This is the *device's* aggregate
+    # interface_utilization_pct (app.models.device_metric.DeviceMetric),
+    # not a true per-port figure -- NetGuard doesn't persist per-ifIndex
+    # utilization today, only the whole-device figure computed from
+    # whichever interface counters metrics_service last polled. We take
+    # the higher of the two endpoints' readings (the busier side is the
+    # one that would actually bottleneck this link), which is a reasonable
+    # stand-in until per-interface octet counters are tracked per edge.
+    utilization_pct: int | None = None
 
 
 @dataclass
@@ -102,10 +116,11 @@ def _interface_networks(config_text: str) -> list[ipaddress.IPv4Network]:
     return networks
 
 
-def _latest_health_by_device(db: Session) -> dict[str, tuple[str, int | None]]:
-    """device_id -> (health_color, health_score) from each device's most
-    recent DeviceMetric row, for coloring topology nodes by live SNMP
-    health. Same "latest row per device" subquery shape as
+def _latest_metrics_by_device(db: Session) -> dict[str, DeviceMetric]:
+    """device_id -> its most recent DeviceMetric row (full row, not just
+    health), so callers can pull health_color/health_score *and*
+    interface_utilization_pct off one query instead of two near-identical
+    ones. Same "latest row per device" subquery shape as
     app.api.dashboard._compute_summary's Top CPU/Memory widget, so a
     device the map has never polled simply isn't in the returned dict
     (caller treats that as unknown/gray, not an error).
@@ -124,10 +139,7 @@ def _latest_health_by_device(db: Session) -> dict[str, tuple[str, int | None]]:
         )
         .all()
     )
-    return {
-        str(row.device_id): (row.health_color.value if row.health_color else "unknown", row.health_score)
-        for row in rows
-    }
+    return {str(row.device_id): row for row in rows}
 
 
 def build_topology(db: Session) -> TopologyGraph:
@@ -137,7 +149,7 @@ def build_topology(db: Session) -> TopologyGraph:
     sizes; revisit (e.g. index by subnet first) if this becomes hot.
     """
     devices = db.query(Device).order_by(Device.hostname).all()
-    health_by_device = _latest_health_by_device(db)
+    metrics_by_device = _latest_metrics_by_device(db)
 
     nodes: list[TopologyNode] = []
     # device_id -> list of (network, original_ip) so edges can report which
@@ -146,7 +158,9 @@ def build_topology(db: Session) -> TopologyGraph:
 
     for device in devices:
         config_text = _latest_config(db, device.id)
-        health_color, health_score = health_by_device.get(str(device.id), (None, None))
+        metric = metrics_by_device.get(str(device.id))
+        health_color = metric.health_color.value if metric and metric.health_color else None
+        health_score = metric.health_score if metric else None
         nodes.append(
             TopologyNode(
                 id=str(device.id),
@@ -162,6 +176,7 @@ def build_topology(db: Session) -> TopologyGraph:
                 health_score=health_score,
                 data_center=device.data_center,
                 rack=device.rack,
+                device_role=device.device_role,
             )
         )
         if config_text:
@@ -252,6 +267,21 @@ def build_topology(db: Session) -> TopologyGraph:
         for e in edges
         if e.link_source != "subnet" or tuple(sorted((e.source, e.target))) not in confirmed_pairs
     ]
+
+    # Stamp every edge with a best-effort utilization figure for the
+    # Topology page's "color links by utilization" toggle -- see
+    # TopologyEdge.utilization_pct's docstring for why this is the higher
+    # of the two endpoints' whole-device figures rather than a true
+    # per-port number.
+    for edge in edges:
+        src_metric = metrics_by_device.get(edge.source)
+        tgt_metric = metrics_by_device.get(edge.target)
+        readings = [
+            m.interface_utilization_pct
+            for m in (src_metric, tgt_metric)
+            if m is not None and m.interface_utilization_pct is not None
+        ]
+        edge.utilization_pct = round(max(readings)) if readings else None
 
     return TopologyGraph(nodes=nodes, edges=edges)
 

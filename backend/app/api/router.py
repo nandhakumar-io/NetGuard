@@ -26,12 +26,19 @@ from app.api import (
     firmware_upgrades,
     flows,
     webhooks,
+    device_groups,
+    global_search,
+    alert_snoozes,
 )
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(devices.router)
+api_router.include_router(device_groups.router)
+api_router.include_router(global_search.router)
+api_router.include_router(alert_snoozes.router)
 api_router.include_router(config_management.router)
+api_router.include_router(config_management.snapshot_policy_router)
 api_router.include_router(config_search.router)
 api_router.include_router(change_requests.router)
 api_router.include_router(audit.router)

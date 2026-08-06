@@ -16,6 +16,7 @@ from app.schemas.config_management import (
     BackupHistoryEntry,
     CompareConfigRequest,
     CompareConfigResponse,
+    DeviceRetentionStatus,
     GoldenConfigCompareResponse,
     GoldenConfigRead,
     GoldenConfigSet,
@@ -23,6 +24,8 @@ from app.schemas.config_management import (
     InterfacesResponse,
     RestoreConfigRequest,
     RestoreConfigResponse,
+    RetentionPolicy,
+    RetentionPolicyResponse,
     RunningConfigResponse,
     StartupConfigResponse,
 )
@@ -31,6 +34,12 @@ from app.services.protocol_manager import ProtocolManager, select_protocol
 from app.services.rollback_service import list_snapshots
 
 router = APIRouter(prefix="/devices/{device_id}/config", tags=["configuration-management"])
+
+# Global (not per-device) snapshot retention endpoint -- the policy itself
+# applies fleet-wide, so it lives outside the /devices/{device_id}/config
+# prefix; ?device_id= optionally layers a specific device's counts on top
+# of the same policy payload (see retention_policy_endpoint below).
+snapshot_policy_router = APIRouter(prefix="/snapshots", tags=["configuration-management"])
 
 # Backups and restores are config-changing/authority-bearing operations
 # (a restore is a live config push), so they're gated the same way
@@ -547,3 +556,29 @@ def compare_golden_config(
     diff = diff_engine.generate_diff(diff_base, diff_target)
 
     return GoldenConfigCompareResponse(device_id=device.id, identical=identical, diff=diff)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot Retention (visible policy, not just background enforcement)
+# ---------------------------------------------------------------------------
+@router.get("/retention", response_model=RetentionPolicyResponse)
+def device_retention_status(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """The retention policy plus this device's current snapshot counts
+    against it (kept / protected / eligible for the next nightly purge).
+    Powers the "Snapshot Retention" note on the Backups tab.
+    """
+    device = _get_device(db, device_id)
+    status = snapshot_service.retention_status_for_device(db, device.id)
+    return RetentionPolicyResponse(
+        policy=RetentionPolicy(**snapshot_service.retention_policy()),
+        device=DeviceRetentionStatus(**status),
+    )
+
+
+@snapshot_policy_router.get("/retention-policy", response_model=RetentionPolicyResponse)
+def fleet_retention_policy(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Fleet-wide retention policy, with no device context -- the plain
+    "what's our retention policy" answer for anywhere in the app that
+    isn't already looking at one device (e.g. a settings/admin page).
+    """
+    return RetentionPolicyResponse(policy=RetentionPolicy(**snapshot_service.retention_policy()), device=None)

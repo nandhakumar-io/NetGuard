@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus } from "../lib/types";
+import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus, WeeklyGoldenDriftReport } from "../lib/types";
 import ConfigDiff from "../components/ConfigDiff";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
@@ -50,6 +50,26 @@ export default function DriftPage() {
 
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+
+  // "Who's drifted from golden config this week" one-click report -- a
+  // deduplicated (one row per device) view scoped to a time window,
+  // distinct from the raw per-scan `drifts` feed above.
+  const [weeklyReport, setWeeklyReport] = useState<WeeklyGoldenDriftReport | null>(null);
+  const [weeklyLoading, setWeeklyLoading] = useState(false);
+  const [weeklyError, setWeeklyError] = useState<string | null>(null);
+  const [weeklyOpen, setWeeklyOpen] = useState(false);
+
+  const runWeeklyReport = () => {
+    setWeeklyOpen(true);
+    setWeeklyLoading(true);
+    setWeeklyError(null);
+    api
+      .get<WeeklyGoldenDriftReport>("/drift/report/weekly-golden-config", { params: { days: 7 } })
+      .then((res) => setWeeklyReport(res.data))
+      .catch((err) => setWeeklyError(err?.response?.data?.detail || "Failed to load weekly drift report."))
+      .finally(() => setWeeklyLoading(false));
+  };
+
 
   // Compliance Baselines by role -- shared golden-config-style template
   // per device_role (core/access/edge/...) rather than one-per-device, so
@@ -217,6 +237,83 @@ export default function DriftPage() {
           <StatCard label="Rollback Recommended" value={summary.rollback_recommended_count} accent="red" />
         </div>
       )}
+
+      <div className="mt-6 bg-white border border-slate-200 rounded-xl p-5">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-navy">Drifted From Golden Config This Week</h2>
+            <p className="text-xs text-slate-500 mt-1">
+              One-click fleet view: every device whose live config has diverged from its golden config in the
+              last 7 days, one row per device (not one row per scan).
+            </p>
+          </div>
+          <button
+            onClick={runWeeklyReport}
+            disabled={weeklyLoading}
+            className="text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-4 py-2 rounded-lg shadow-sm disabled:opacity-50 shrink-0"
+          >
+            {weeklyLoading ? "Loading…" : "Show This Week's Drift"}
+          </button>
+        </div>
+
+        {weeklyOpen && (
+          <div className="mt-4">
+            {weeklyLoading ? (
+              <p className="text-xs text-slate-400">Loading…</p>
+            ) : weeklyError ? (
+              <p className="text-xs text-riskcrit">{weeklyError}</p>
+            ) : weeklyReport && weeklyReport.devices.length === 0 ? (
+              <p className="text-xs text-slate-400 italic">
+                No device has drifted from its golden config in the last {weeklyReport.days} days.
+              </p>
+            ) : weeklyReport ? (
+              <div className="overflow-hidden border border-slate-200 rounded-lg">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Device</th>
+                      <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Severity</th>
+                      <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Compliance</th>
+                      <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Lines Changed</th>
+                      <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Detected</th>
+                      <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {weeklyReport.devices.map((d, i) => (
+                      <tr
+                        key={d.id}
+                        onClick={() => setSelected(d)}
+                        className={`cursor-pointer hover:bg-blue-50 ${i % 2 ? "bg-slate-50" : "bg-white"}`}
+                      >
+                        <td className="px-4 py-2.5 font-medium text-navy">{d.hostname}</td>
+                        <td className="px-4 py-2.5">
+                          <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${severityStyle[d.severity]}`}>
+                            {d.severity}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5">{d.compliance_score}/100</td>
+                        <td className="px-4 py-2.5 font-mono text-xs">
+                          +{d.added_lines}/-{d.removed_lines}
+                        </td>
+                        <td className="px-4 py-2.5 text-slate-500 text-xs">{new Date(d.detected_at).toLocaleString()}</td>
+                        <td className="px-4 py-2.5">
+                          <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${statusStyle[d.status]}`}>
+                            {d.status.replace(/_/g, " ")}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="text-[11px] text-slate-400 px-4 py-2 bg-slate-50 border-t border-slate-200">
+                  Click a row to open that drift's full detail below.
+                </p>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
 
       <form onSubmit={runScan} className="mt-6 bg-white border border-slate-200 rounded-xl p-5 flex flex-wrap items-end gap-3">
         <div>

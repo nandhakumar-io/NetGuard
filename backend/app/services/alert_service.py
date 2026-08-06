@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity, AlertSource
-from app.services import alert_correlation_service, event_bus, maintenance_window_service
+from app.services import alert_correlation_service, alert_snooze_service, event_bus, maintenance_window_service
 
 
 # ------------------------------------------------------------------
@@ -36,6 +36,7 @@ def create_alert(
         source = AlertSource(source)
 
     window = maintenance_window_service.find_active_window(db, device_id)
+    snooze = alert_snooze_service.find_active_snooze(db, device_id, category)
 
     alert = Alert(
         device_id=device_id,
@@ -44,16 +45,18 @@ def create_alert(
         category=category,
         message=message,
         suppressed_by_window_id=window.id if window else None,
+        muted_by_snooze_id=snooze.id if snooze else None,
     )
     db.add(alert)
     db.commit()
     db.refresh(alert)
 
-    # A window-suppressed alert is still persisted (queryable/auditable
-    # after the fact) but doesn't fan out realtime/notification events --
-    # that's the whole point of scheduling planned work, so it doesn't
-    # page on-call or light up the Alert Center for expected noise.
-    if window is None:
+    # A window-suppressed or snoozed alert is still persisted
+    # (queryable/auditable after the fact) but doesn't fan out
+    # realtime/notification events -- that's the whole point of both
+    # scheduling planned work and muting a known-noisy rule, so neither
+    # pages on-call or lights up the Alert Center.
+    if window is None and snooze is None:
         event_bus.publish_event(
             "alert_created",
             alert_id=str(alert.id),
@@ -116,6 +119,7 @@ def raise_alert(
 
     now = datetime.now(timezone.utc)
     window = maintenance_window_service.find_active_window(db, device_id, now=now)
+    snooze = alert_snooze_service.find_active_snooze(db, device_id, category, now=now)
 
     existing = (
         db.query(Alert)
@@ -140,10 +144,15 @@ def raise_alert(
         # so an alert that outlives its maintenance window naturally
         # reappears as active instead of staying silently suppressed.
         existing.suppressed_by_window_id = window.id if window else None
+        # Same live-reattribution as the window check above: a snooze
+        # created *after* this alert was already standing should mute it
+        # immediately, and one that lapses should naturally stop hiding
+        # it the next time this alert is touched.
+        existing.muted_by_snooze_id = snooze.id if snooze else None
         db.commit()
         db.refresh(existing)
 
-        if window is None:
+        if window is None and snooze is None:
             event_bus.publish_event(
                 "alert_updated",
                 alert_id=str(existing.id),
@@ -163,12 +172,13 @@ def raise_alert(
         last_seen_at=now,
         occurrence_count=1,
         suppressed_by_window_id=window.id if window else None,
+        muted_by_snooze_id=snooze.id if snooze else None,
     )
     db.add(alert)
     db.commit()
     db.refresh(alert)
 
-    if window is None:
+    if window is None and snooze is None:
         event_bus.publish_event(
             "alert_created",
             alert_id=str(alert.id),

@@ -18,6 +18,8 @@ import {
   DeviceDiscoveryResult,
   HealthCheckCatalogEntry,
   FleetHealthSummary,
+  RollbackPreviewResponse,
+  RetentionPolicyResponse,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
@@ -184,6 +186,12 @@ function DeviceInlineDetails({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [backingUp, setBackingUp] = useState(false);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
+
+  // Snapshot retention: the policy that governs how long backups above
+  // stick around, shown alongside the history list so retention is
+  // visible, not just something that quietly happens overnight.
+  const [retention, setRetention] = useState<RetentionPolicyResponse | null>(null);
+  const [retentionLoading, setRetentionLoading] = useState(false);
 
   // Compare sub-state inside backups (simplified for inline view)
   const [baseId, setBaseId] = useState<string>("");
@@ -486,6 +494,9 @@ function DeviceInlineDetails({
     if (activeTab === "Backups" && history.length === 0) {
       loadBackupHistory();
     }
+    if (activeTab === "Backups" && !retention) {
+      loadRetentionPolicy();
+    }
   }, [activeTab, device.id, running, history.length]);
 
 
@@ -498,6 +509,16 @@ function DeviceInlineDetails({
       .catch(() => setHistoryError("Failed to load backup history."))
       .finally(() => setHistoryLoading(false));
   };
+
+  const loadRetentionPolicy = () => {
+    setRetentionLoading(true);
+    api
+      .get<RetentionPolicyResponse>(`/devices/${device.id}/config/retention`)
+      .then((res) => setRetention(res.data))
+      .catch(() => {})
+      .finally(() => setRetentionLoading(false));
+  };
+
 
   const runBackupNow = async () => {
     setBackingUp(true);
@@ -1332,6 +1353,22 @@ function DeviceInlineDetails({
                 </button>
               )}
             </div>
+            {retention && (
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 mb-3">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">Retention policy:</span>{" "}
+                {retention.policy.description}
+                {retention.device && (
+                  <span className="block mt-1">
+                    This device: {retention.device.total_snapshots} snapshot{retention.device.total_snapshots === 1 ? "" : "s"} on file
+                    {" "}({retention.device.protected_snapshots} protected
+                    {retention.device.eligible_for_purge > 0
+                      ? `, ${retention.device.eligible_for_purge} eligible for the next nightly purge`
+                      : ""}
+                    ).
+                  </span>
+                )}
+              </div>
+            )}
             {backupNotice && (
               <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/30 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2 mb-3">
                 {backupNotice}
@@ -1644,6 +1681,32 @@ export default function Devices() {
   const [rollbackError, setRollbackError] = useState<string | null>(null);
   const [rollbackNotice, setRollbackNotice] = useState<string | null>(null);
 
+  // Rollback preview: the diff this rollback would apply, fetched as soon
+  // as the confirmation modal opens so it's shown *before* the user
+  // confirms, not only afterward in the change request / audit log.
+  const [rollbackPreview, setRollbackPreview] = useState<RollbackPreviewResponse | null>(null);
+  const [rollbackPreviewLoading, setRollbackPreviewLoading] = useState(false);
+  const [rollbackPreviewError, setRollbackPreviewError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!rollbackTarget) {
+      setRollbackPreview(null);
+      setRollbackPreviewError(null);
+      return;
+    }
+    setRollbackPreviewLoading(true);
+    setRollbackPreviewError(null);
+    setRollbackPreview(null);
+    api
+      .get<RollbackPreviewResponse>(`/devices/${rollbackTarget.device.id}/rollback/preview`, {
+        params: { snapshot_id: rollbackTarget.snapshot.id },
+      })
+      .then((res) => setRollbackPreview(res.data))
+      .catch((err) => setRollbackPreviewError(err?.response?.data?.detail || "Failed to load rollback preview."))
+      .finally(() => setRollbackPreviewLoading(false));
+  }, [rollbackTarget?.device.id, rollbackTarget?.snapshot.id]);
+
+
   // --- Bulk edit (multi-select) ---
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -1651,6 +1714,9 @@ export default function Devices() {
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
   const [bulkSiteValue, setBulkSiteValue] = useState("");
   const [bulkVendorValue, setBulkVendorValue] = useState("cisco");
+  const [bulkDcValue, setBulkDcValue] = useState("");
+  const [bulkRackValue, setBulkRackValue] = useState("");
+  const [bulkRoleValue, setBulkRoleValue] = useState("");
 
   const toggleSelected = (id: string) => {
     setSelectedIds((prev) => {
@@ -1718,6 +1784,30 @@ export default function Devices() {
     bulkPatch({ supports_snmp: enabled }, `SNMP monitoring ${enabled ? "enabled" : "disabled"}`);
 
   const bulkTagVendor = () => bulkPatch({ vendor: bulkVendorValue }, `Vendor "${bulkVendorValue}"`);
+
+  /** Bulk move to a Data Center / Rack — same pair the Groups page's
+   * drag-and-drop writes, so a rack full of devices can be relocated in
+   * one shot instead of dragging them one at a time. Rack alone (no DC
+   * change) is a valid use too -- e.g. re-numbering racks within a site. */
+  const bulkMoveRack = () => {
+    if (!bulkDcValue.trim() && !bulkRackValue.trim()) return;
+    const fields: Record<string, unknown> = {};
+    if (bulkDcValue.trim()) fields.data_center = bulkDcValue.trim();
+    if (bulkRackValue.trim()) fields.rack = bulkRackValue.trim();
+    const label = [bulkDcValue.trim() && `DC "${bulkDcValue.trim()}"`, bulkRackValue.trim() && `Rack "${bulkRackValue.trim()}"`]
+      .filter(Boolean)
+      .join(" / ");
+    bulkPatch(fields, label);
+  };
+
+  /** Bulk-assign device_role (core/distribution/access/etc.) -- the same
+   * field the hierarchical topology layout groups devices by, so tagging
+   * a batch of newly-added switches here immediately places them in the
+   * right tier on that view. */
+  const bulkAssignRole = () => {
+    if (!bulkRoleValue.trim()) return;
+    bulkPatch({ device_role: bulkRoleValue.trim() }, `Role "${bulkRoleValue.trim()}"`);
+  };
 
   /** Deletes one device, transparently retrying with force=true (after an
    * explicit confirm listing what would be destroyed) if the backend
@@ -2454,6 +2544,57 @@ export default function Devices() {
             Disable SNMP
           </button>
 
+          <div className="w-px self-stretch bg-white/15" />
+
+          <div className="flex items-center gap-1.5">
+            <input
+              className="border border-white/20 bg-white/10 placeholder-slate-400 rounded-full px-3 py-1.5 text-xs text-white w-28 focus:ring-2 focus:ring-accent outline-none"
+              placeholder="Data center…"
+              value={bulkDcValue}
+              onChange={(e) => setBulkDcValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && bulkMoveRack()}
+              disabled={bulkBusy}
+            />
+            <input
+              className="border border-white/20 bg-white/10 placeholder-slate-400 rounded-full px-3 py-1.5 text-xs text-white w-24 focus:ring-2 focus:ring-accent outline-none"
+              placeholder="Rack…"
+              value={bulkRackValue}
+              onChange={(e) => setBulkRackValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && bulkMoveRack()}
+              disabled={bulkBusy}
+            />
+            <button
+              onClick={bulkMoveRack}
+              disabled={bulkBusy || (!bulkDcValue.trim() && !bulkRackValue.trim())}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+            >
+              Move
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <select
+              className="border border-white/20 bg-white/10 rounded-full px-3 py-1.5 text-xs text-white focus:ring-2 focus:ring-accent outline-none"
+              value={bulkRoleValue}
+              onChange={(e) => setBulkRoleValue(e.target.value)}
+              disabled={bulkBusy}
+            >
+              <option value="" className="text-navy">Role…</option>
+              <option value="core" className="text-navy">Core</option>
+              <option value="distribution" className="text-navy">Distribution</option>
+              <option value="access" className="text-navy">Access</option>
+              <option value="edge" className="text-navy">Edge</option>
+              <option value="firewall" className="text-navy">Firewall</option>
+            </select>
+            <button
+              onClick={bulkAssignRole}
+              disabled={bulkBusy || !bulkRoleValue.trim()}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+            >
+              Tag role
+            </button>
+          </div>
+
           <button
             onClick={bulkDelete}
             disabled={bulkBusy}
@@ -2644,12 +2785,57 @@ export default function Devices() {
 
       {rollbackTarget && (
         <div className="fixed inset-0 bg-navy/60 backdrop-blur-sm flex items-center justify-center z-50 px-4">
-          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full p-6 max-h-[85vh] overflow-y-auto">
             <h3 className="text-xl font-bold text-navy dark:text-white">Roll back {rollbackTarget.device.hostname}?</h3>
             <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">
               This triggers a full pipeline redeployment restoring snapshot <span className="font-mono font-bold">v{rollbackTarget.snapshot.version}</span> (
               {new Date(rollbackTarget.snapshot.created_at).toLocaleString()}). 
             </p>
+
+            <div className="mt-4">
+              <h4 className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wide mb-2">
+                Preview: What This Rollback Will Change
+              </h4>
+              {rollbackPreviewLoading ? (
+                <p className="text-xs text-slate-400">Loading preview…</p>
+              ) : rollbackPreviewError ? (
+                <p className="text-xs text-riskcrit">{rollbackPreviewError}</p>
+              ) : rollbackPreview ? (
+                <div>
+                  {rollbackPreview.warning && (
+                    <p className="text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 mb-2">
+                      {rollbackPreview.warning}
+                    </p>
+                  )}
+                  {rollbackPreview.blocked && (
+                    <p className="text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 mb-2 font-semibold">
+                      {rollbackPreview.blocked_reason}
+                    </p>
+                  )}
+                  {rollbackPreview.identical ? (
+                    <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/20 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2">
+                      No difference -- the live configuration already matches this snapshot.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 font-mono">
+                        +{rollbackPreview.added_lines}/-{rollbackPreview.removed_lines} lines · comparing{" "}
+                        {rollbackPreview.current_source === "live"
+                          ? "live configuration"
+                          : rollbackPreview.current_source === "last_snapshot"
+                          ? "most recent snapshot"
+                          : "nothing (no baseline available)"}{" "}
+                        against v{rollbackPreview.target_version}
+                      </p>
+                      <div className="max-h-64 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+                        <ConfigDiff diffText={rollbackPreview.diff} />
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </div>
+
             <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mt-5 mb-1 uppercase tracking-wide">Reason (optional)</label>
             <input
               className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue outline-none"
@@ -2668,7 +2854,7 @@ export default function Devices() {
               </button>
               <button
                 onClick={confirmRollback}
-                disabled={rollbackSubmitting}
+                disabled={rollbackSubmitting || rollbackPreviewLoading || !!rollbackPreview?.blocked}
                 className="bg-riskcrit text-white rounded-lg px-5 py-2 text-sm font-bold hover:opacity-90 disabled:opacity-50 shadow-md transform active:scale-95 transition-all"
               >
                 {rollbackSubmitting ? "Queuing Pipeline…" : "Confirm Rollback"}

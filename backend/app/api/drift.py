@@ -1,3 +1,4 @@
+import datetime
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,8 @@ from app.schemas.drift import (
     DriftScanResponse,
     DriftStatusUpdate,
     RollbackRecommendationResponse,
+    WeeklyGoldenDriftEntry,
+    WeeklyGoldenDriftReport,
 )
 from app.services import audit_service, drift_service
 
@@ -44,6 +47,34 @@ def list_all_drifts(
 
     sev = DriftSeverity(severity) if severity else None
     return drift_service.list_drifts(db, status=status, severity=sev)
+
+
+@router.get("/drift/report/weekly-golden-config", response_model=WeeklyGoldenDriftReport)
+def weekly_golden_config_drift_report(
+    days: int = 7,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """One-click fleet view: every device that has drifted from its golden
+    config in the last `days` days (default 7 -- "this week"), one row per
+    device rather than the raw per-scan drift feed. Complements GET /drift
+    (which is the full per-event feed, filterable by device/severity but
+    not deduplicated per device or scoped to a time window).
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    drifts = drift_service.weekly_golden_config_drift(db, days=days)
+
+    device_ids = {d.device_id for d in drifts}
+    hostnames = {d.id: d.hostname for d in db.query(Device).filter(Device.id.in_(device_ids)).all()} if device_ids else {}
+
+    entries = [
+        WeeklyGoldenDriftEntry(
+            **DriftRead.model_validate(d).model_dump(),
+            hostname=hostnames.get(d.device_id, str(d.device_id)),
+        )
+        for d in drifts
+    ]
+    return WeeklyGoldenDriftReport(since=since, days=days, devices=entries)
 
 
 @router.get("/drift/{drift_id}", response_model=DriftDetail)

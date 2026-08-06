@@ -29,7 +29,7 @@ from app.schemas.device import (
     SshCredentialsUpdate,
     SshTestResult,
 )
-from app.schemas.rollback import RollbackRequest, RollbackResponse, SnapshotSummary
+from app.schemas.rollback import RollbackPreviewResponse, RollbackRequest, RollbackResponse, SnapshotSummary
 from app.schemas.interface_status import InterfaceCurrentStatus, InterfaceStatusRead
 from app.services import rollback_service, audit_service, metrics_service, credential_service, snmp_service, protocol_manager, reachability_service, netbox_service, eol_service
 from app.services.health_monitor import ALL_CHECKS
@@ -439,6 +439,34 @@ def list_device_snapshots(device_id: uuid.UUID, db: Session = Depends(get_db), _
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     return rollback_service.list_snapshots(db, device_id)
+
+
+@router.get("/{device_id}/rollback/preview", response_model=RollbackPreviewResponse)
+def preview_device_rollback(
+    device_id: uuid.UUID,
+    snapshot_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(ROLLBACK_ROLES),
+):
+    """Shows the diff a rollback to `snapshot_id` would apply -- before
+    anything is confirmed. Read-only: no ChangeRequest is created, no
+    config is pushed. Pair with POST /devices/{device_id}/rollback once
+    the user has reviewed this and confirms.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    snapshot = db.get(ConfigSnapshot, snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    try:
+        preview = rollback_service.preview_rollback(db, device, snapshot)
+    except rollback_service.RollbackError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return RollbackPreviewResponse(**preview)
 
 
 @router.post("/{device_id}/rollback", response_model=RollbackResponse, status_code=202)

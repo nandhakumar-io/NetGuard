@@ -22,6 +22,12 @@ class AlertRead(BaseModel):
     root_cause_alert_id: uuid.UUID | None = None
     suppressed: bool = False
     suppressed_by_window_id: uuid.UUID | None = None
+    # Populated in app.api.alerts from the joined AlertSnooze -- present
+    # (and in the future) only while a matching snooze is still active;
+    # an alert whose snooze has expired reports None here even though
+    # muted_by_snooze_id is still set on the row (history, not a live
+    # mute -- see app.services.alert_snooze_service.active_mute_map).
+    muted_until: datetime | None = None
     created_at: datetime
 
     class Config:

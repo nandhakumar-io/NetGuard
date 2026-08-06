@@ -54,3 +54,13 @@ class DriftFleetSummary(BaseModel):
 
 class DriftStatusUpdate(BaseModel):
     status: DriftStatus
+
+
+class WeeklyGoldenDriftEntry(DriftRead):
+    hostname: str
+
+
+class WeeklyGoldenDriftReport(BaseModel):
+    since: datetime.datetime
+    days: int
+    devices: list[WeeklyGoldenDriftEntry]

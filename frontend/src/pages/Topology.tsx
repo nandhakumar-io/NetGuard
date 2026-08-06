@@ -142,6 +142,62 @@ function layoutNodes(nodes: TopologyNode[], edges: TopologyEdge[]): LaidOutNode[
   });
 }
 
+// Canonical role -> tier ordering for the layered layout (core at the top,
+// access at the bottom, mirroring how core/distribution/access is always
+// drawn on a whiteboard). Any device_role string not in this map -- or no
+// role at all -- falls into its own "Unassigned" tier below everything
+// else, so devices are never silently dropped just because nobody's
+// gotten around to tagging their role yet.
+const ROLE_TIERS = ["core", "distribution", "access"];
+
+/** Layered/hierarchical layout: one horizontal row per role tier
+ * (core -> distribution -> access -> unassigned), nodes spread evenly
+ * left-to-right within their row. Deterministic and non-iterative (unlike
+ * the force-directed layout above) -- for troubleshooting, "core is
+ * always on top" matters more than minimizing edge crossings. */
+function layoutNodesLayered(nodes: TopologyNode[]): LaidOutNode[] {
+  if (nodes.length === 0) return [];
+
+  const tiers: string[] = [...ROLE_TIERS, "__unassigned__"];
+  const byTier = new Map<string, TopologyNode[]>(tiers.map((t) => [t, []]));
+  for (const node of nodes) {
+    const role = (node.device_role || "").toLowerCase().trim();
+    const tier = ROLE_TIERS.includes(role) ? role : "__unassigned__";
+    byTier.get(tier)!.push(node);
+  }
+
+  const activeTiers = tiers.filter((t) => (byTier.get(t)?.length ?? 0) > 0);
+  const rowHeight = HEIGHT / Math.max(activeTiers.length, 1);
+
+  const out: LaidOutNode[] = [];
+  activeTiers.forEach((tier, rowIndex) => {
+    const rowNodes = byTier.get(tier)!;
+    const y = rowHeight * (rowIndex + 0.5);
+    const colWidth = WIDTH / (rowNodes.length + 1);
+    rowNodes.forEach((node, colIndex) => {
+      out.push({ ...node, x: colWidth * (colIndex + 1), y });
+    });
+  });
+  return out;
+}
+
+function roleTierLabel(tier: string): string {
+  if (tier === "__unassigned__") return "Unassigned role";
+  return tier.charAt(0).toUpperCase() + tier.slice(1);
+}
+
+/** Green -> amber -> red for a 0-100 utilization reading, matching the
+ * band thresholds already used for SNMP interface-utilization elsewhere
+ * in the app (StatCard/RiskBadge conventions: <60 ok, 60-84 warn, 85+
+ * hot). Returns null (caller falls back to the default link color) when
+ * there's no reading -- an untagged link is "unknown", not "green". */
+function utilizationColor(pct: number | null | undefined): string | null {
+  if (pct === null || pct === undefined) return null;
+  if (pct >= 85) return "#dc2626";
+  if (pct >= 60) return "#d97706";
+  return "#16a34a";
+}
+
 /** Point on the line from a->b, `offset` px in from a -- used to place the
  * IP-address chip near each device rather than floating in open space,
  * the way professional topology tools (SolarWinds/PRTG/NetBrain) label
@@ -191,7 +247,66 @@ export default function Topology() {
   const svgRef = useRef<SVGSVGElement>(null);
 
   // --- view mode: force-directed graph vs. data center / rack grouping ---
-  const [viewMode, setViewMode] = useState<"graph" | "groups">("graph");
+  const [viewMode, setViewMode] = useState<"graph" | "layered" | "groups">("graph");
+  const [colorByUtilization, setColorByUtilization] = useState(false);
+
+  // --- Path highlight: click two devices, trace the path between them ---
+  // Reuses the existing /path-trace endpoint (same one that powers the
+  // standalone Path Trace page) rather than re-deriving a route client
+  // side, so results honor whatever hop source (real traceroute vs.
+  // topology-graph BFS fallback) that service picks.
+  const [pathMode, setPathMode] = useState(false);
+  const [pathSourceId, setPathSourceId] = useState<string | null>(null);
+  const [pathTargetId, setPathTargetId] = useState<string | null>(null);
+  const [pathTraceLoading, setPathTraceLoading] = useState(false);
+  const [pathTraceError, setPathTraceError] = useState<string | null>(null);
+  const [pathTraceResult, setPathTraceResult] = useState<{ hops: { device_id: string | null; hostname: string | null; ip_address: string | null; status: string }[]; reached_target: boolean; hop_source: string } | null>(null);
+
+  const togglePathMode = () => {
+    setPathMode((v) => !v);
+    setPathSourceId(null);
+    setPathTargetId(null);
+    setPathTraceResult(null);
+    setPathTraceError(null);
+  };
+
+  const runPathTrace = (sourceId: string, targetId: string) => {
+    setPathTraceLoading(true);
+    setPathTraceError(null);
+    setPathTraceResult(null);
+    api
+      .post("/path-trace", { source_device_id: sourceId, target_device_id: targetId })
+      .then((res) => setPathTraceResult(res.data))
+      .catch((err) => setPathTraceError(err?.response?.data?.detail || "Path trace failed."))
+      .finally(() => setPathTraceLoading(false));
+  };
+
+  const handlePathClick = (nodeId: string) => {
+    if (!pathSourceId) {
+      setPathSourceId(nodeId);
+      return;
+    }
+    if (!pathTargetId && nodeId !== pathSourceId) {
+      setPathTargetId(nodeId);
+      runPathTrace(pathSourceId, nodeId);
+    }
+  };
+
+  // Device ids the traced path actually passed through (in order), used
+  // to highlight both the nodes and the edges between consecutive hops.
+  const pathDeviceIds = useMemo(() => {
+    if (!pathTraceResult) return [];
+    return pathTraceResult.hops.map((h) => h.device_id).filter((id): id is string => Boolean(id));
+  }, [pathTraceResult]);
+
+  const pathEdgeKeySet = useMemo(() => {
+    const s = new Set<string>();
+    for (let i = 0; i < pathDeviceIds.length - 1; i++) {
+      s.add(`${pathDeviceIds[i]}|${pathDeviceIds[i + 1]}`);
+      s.add(`${pathDeviceIds[i + 1]}|${pathDeviceIds[i]}`);
+    }
+    return s;
+  }, [pathDeviceIds]);
   const [groups, setGroups] = useState<DataCenterGroup[] | null>(null);
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -366,7 +481,10 @@ export default function Topology() {
     return graph.edges.filter((e) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target));
   }, [graph, filteredNodeIds]);
 
-  const laidOut = useMemo(() => layoutNodes(filteredNodes, filteredEdges), [filteredNodes, filteredEdges]);
+  const laidOut = useMemo(
+    () => (viewMode === "layered" ? layoutNodesLayered(filteredNodes) : layoutNodes(filteredNodes, filteredEdges)),
+    [filteredNodes, filteredEdges, viewMode]
+  );
   const nodeById = useMemo(() => new Map(laidOut.map((n) => [n.id, n])), [laidOut]);
 
   const connectedIds = useMemo(() => {
@@ -502,6 +620,13 @@ export default function Topology() {
               Graph
             </button>
             <button
+              onClick={() => setViewMode("layered")}
+              title="Rows by device role: core on top, then distribution, then access"
+              className={`px-3 py-2 transition-colors border-l border-slate-200 ${viewMode === "layered" ? "bg-brandblue text-white" : "text-slate-600 hover:bg-slate-50"}`}
+            >
+              Layered
+            </button>
+            <button
               onClick={() => setViewMode("groups")}
               className={`px-3 py-2 transition-colors border-l border-slate-200 ${viewMode === "groups" ? "bg-brandblue text-white" : "text-slate-600 hover:bg-slate-50"}`}
             >
@@ -561,6 +686,26 @@ export default function Topology() {
             <input type="checkbox" checked={showIpLabels} onChange={(e) => setShowIpLabels(e.target.checked)} />
             Show interface IPs
           </label>
+          <label
+            className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm"
+            title="Colors each link by the busier endpoint's SNMP interface utilization (green <60%, amber 60-84%, red 85%+). Links with no recent poll on either end keep the default gray."
+          >
+            <input
+              type="checkbox"
+              checked={colorByUtilization}
+              onChange={(e) => setColorByUtilization(e.target.checked)}
+            />
+            Color links by utilization
+          </label>
+          <button
+            onClick={togglePathMode}
+            title="Click two devices on the graph to trace the path between them"
+            className={`flex items-center gap-1.5 text-xs font-bold rounded-lg px-2.5 py-2 shadow-sm border transition-colors ${
+              pathMode ? "bg-brandblue text-white border-brandblue" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            {pathMode ? "Cancel path trace" : "Trace path"}
+          </button>
           {sites.length > 1 && (
             <select
               value={siteFilter}
@@ -718,6 +863,49 @@ export default function Topology() {
         </div>
       )}
 
+      {pathMode && (
+        <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 shadow-sm flex items-center gap-3 flex-wrap text-xs">
+          {!pathSourceId && <span className="text-slate-500">Click a device on the graph to start the trace.</span>}
+          {pathSourceId && !pathTargetId && (
+            <span className="text-slate-500">
+              From <span className="font-bold text-navy">{nodeById.get(pathSourceId)?.hostname || pathSourceId}</span> — now click the destination device.
+            </span>
+          )}
+          {pathTraceLoading && <span className="text-slate-400">Tracing…</span>}
+          {pathTraceError && <span className="text-riskcrit font-bold">{pathTraceError}</span>}
+          {pathTraceResult && (
+            <span className="text-slate-600">
+              <span className="font-bold text-navy">
+                {pathTraceResult.reached_target ? "Path found" : "Path incomplete"}
+              </span>{" "}
+              ({pathTraceResult.hop_source === "topology_graph" ? "topology graph" : "traceroute"}, {pathTraceResult.hops.length} hop
+              {pathTraceResult.hops.length === 1 ? "" : "s"}):{" "}
+              {pathTraceResult.hops.map((h, i) => (
+                <span key={i}>
+                  {i > 0 && " → "}
+                  <span className={h.status === "ok" ? "text-slate-700" : "text-riskwarn font-bold"}>
+                    {h.hostname || h.ip_address || "?"}
+                  </span>
+                </span>
+              ))}
+            </span>
+          )}
+          {(pathSourceId || pathTargetId) && (
+            <button
+              onClick={() => {
+                setPathSourceId(null);
+                setPathTargetId(null);
+                setPathTraceResult(null);
+                setPathTraceError(null);
+              }}
+              className="ml-auto text-[10px] font-bold text-slate-400 hover:text-navy"
+            >
+              Start over
+            </button>
+          )}
+        </div>
+      )}
+
       {loading && <p className="text-sm text-slate-400">Loading topology...</p>}
       {error && <p className="text-sm text-riskcrit">{error}</p>}
 
@@ -730,7 +918,7 @@ export default function Topology() {
       {!loading && !error && graph && graph.nodes.length > 0 && (
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
           <div className="xl:col-span-3 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden relative">
-          {viewMode === "graph" ? (
+          {viewMode === "graph" || viewMode === "layered" ? (
           <>
             {/* Zoom controls -- top-right overlay, like any real network-diagram tool */}
             <div className="absolute top-3 right-3 z-10 flex flex-col gap-1 bg-white/95 backdrop-blur border border-slate-200 rounded-lg shadow-sm overflow-hidden">
@@ -772,6 +960,28 @@ export default function Topology() {
                 transform={`scale(${view.scale}) translate(${-view.x}, ${-view.y})`}
                 style={{ transformOrigin: `${WIDTH / 2}px ${HEIGHT / 2}px` }}
               >
+                {/* Layered view: row labels + divider lines for each device_role tier */}
+                {viewMode === "layered" && (
+                  <g>
+                    {(() => {
+                      const tiersPresent = [...ROLE_TIERS, "__unassigned__"].filter((t) =>
+                        laidOut.some((n) => (ROLE_TIERS.includes((n.device_role || "").toLowerCase().trim()) ? (n.device_role || "").toLowerCase().trim() : "__unassigned__") === t)
+                      );
+                      const rowHeight = HEIGHT / Math.max(tiersPresent.length, 1);
+                      return tiersPresent.map((tier, i) => (
+                        <g key={tier}>
+                          {i > 0 && (
+                            <line x1={0} y1={rowHeight * i} x2={WIDTH} y2={rowHeight * i} stroke="#e2e8f0" strokeWidth={1} strokeDasharray="4 4" />
+                          )}
+                          <text x={12} y={rowHeight * i + 16} fontSize={10} fontWeight={700} fill="#94a3b8" className="pointer-events-none select-none">
+                            {roleTierLabel(tier).toUpperCase()}
+                          </text>
+                        </g>
+                      ));
+                    })()}
+                  </g>
+                )}
+
                 {/* Links */}
                 <g>
                   {filteredEdges.map((e) => {
@@ -779,8 +989,11 @@ export default function Topology() {
                     const b = nodeById.get(e.target);
                     if (!a || !b) return null;
                     const key = edgeKey(e);
-                    const active = highlightedEdgeKeys?.has(key) || selectedEdgeKey === key;
+                    const onTracedPath = pathEdgeKeySet.has(`${e.source}|${e.target}`);
+                    const active = highlightedEdgeKeys?.has(key) || selectedEdgeKey === key || onTracedPath;
                     const dimForSearch = matchedNodeIds ? !matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target) : false;
+                    const dimForPath = pathTraceResult ? !onTracedPath : false;
+                    const utilColor = colorByUtilization ? utilizationColor(e.utilization_pct) : null;
                     const srcLabelPos = pointAlong(a.x, a.y, b.x, b.y, 30);
                     const tgtLabelPos = pointAlong(b.x, b.y, a.x, a.y, 30);
                     const midX = (a.x + b.x) / 2;
@@ -794,7 +1007,7 @@ export default function Topology() {
                       <g
                         key={key}
                         className="cursor-pointer"
-                        opacity={dimForSearch ? 0.12 : 1}
+                        opacity={dimForSearch || dimForPath ? 0.12 : 1}
                         onClick={() => setSelection({ kind: "edge", edge: e })}
                       >
                         {/* fat invisible hit-area so thin lines are easy to click */}
@@ -804,9 +1017,8 @@ export default function Topology() {
                           y1={a.y}
                           x2={b.x}
                           y2={b.y}
-                          stroke={active ? "#2563eb" : "#94a3b8"}
+                          stroke={onTracedPath ? "#7c3aed" : active ? "#2563eb" : utilColor || "#94a3b8"}
                           strokeWidth={active ? 2.75 : 1.5}
-                          strokeDasharray={active ? undefined : undefined}
                         />
                         {/* subnet / link-source label at midpoint */}
                         <rect
@@ -899,8 +1111,11 @@ export default function Topology() {
                         className="cursor-pointer"
                         opacity={isSearchMatch ? 1 : 0.18}
                         onMouseEnter={() => setHoveredId(node.id)}
-                        onClick={() => setSelection({ kind: "node", node })}
+                        onClick={() => (pathMode ? handlePathClick(node.id) : setSelection({ kind: "node", node }))}
                       >
+                        {pathMode && (pathSourceId === node.id || pathTargetId === node.id || pathDeviceIds.includes(node.id)) && (
+                          <circle r={26} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="4 3" />
+                        )}
                         {matchedNodeIds && isSearchMatch && (
                           <circle r={24} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="2 2">
                             <animateTransform
@@ -1337,6 +1552,14 @@ export default function Topology() {
                       <div className="flex justify-between">
                         <dt className="text-slate-500">{e.link_source === "subnet" ? "Subnet" : "Discovered via"}</dt>
                         <dd className="font-mono text-slate-700">{e.link_source === "subnet" ? e.subnet : e.link_source.toUpperCase()}</dd>
+                        {e.utilization_pct !== null && e.utilization_pct !== undefined && (
+                          <>
+                            <dt className="text-slate-500">Utilization</dt>
+                            <dd className="font-mono font-bold" style={{ color: utilizationColor(e.utilization_pct) || "#334155" }}>
+                              {e.utilization_pct}% (busier endpoint)
+                            </dd>
+                          </>
+                        )}
                       </div>
                     </dl>
                     <p className="text-[11px] text-slate-400">

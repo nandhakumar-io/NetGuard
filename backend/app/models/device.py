@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, String, Enum, DateTime, Integer, Text, func
+from sqlalchemy import Boolean, Column, String, Enum, DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -83,6 +83,13 @@ class Device(Base):
     # (sorts devices top-to-bottom in the rack-elevation view) -- not
     # validated against rack height since we don't model rack capacity.
     rack_position = Column(Integer, nullable=True)
+
+    # --- Named/logical device group (see app.models.device_group.DeviceGroup) ---
+    # Distinct from data_center/rack above -- this is the explicit,
+    # user-managed grouping ("Edge Firewalls", "Q3 Migration Batch"), not
+    # physical placement. NULL means "not in any named group", same
+    # ON DELETE SET NULL semantics as data_center/rack going empty.
+    group_id = Column(UUID(as_uuid=True), ForeignKey("device_groups.id"), nullable=True, index=True)
     ssh_username = Column(String, nullable=True)
     ssh_credential_ref = Column(String, nullable=True)  # legacy: pointer to secret store, not raw secret
     # Fernet-encrypted (app.core.crypto) SSH password, set via

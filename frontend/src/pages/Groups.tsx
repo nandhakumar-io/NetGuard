@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { Device, DeviceGroup } from "../lib/types";
 
 interface GroupDevice {
   id: string;
@@ -94,6 +95,379 @@ function RackCard({
   );
 }
 
+/** Named/logical device groups (app.models.device_group.DeviceGroup) --
+ * distinct from the Data Center/Rack physical-placement view below.
+ * Supports create/edit/delete and nesting (a group can have a parent),
+ * plus per-group device membership management. Only Network Admins get
+ * the management controls (GROUP_MANAGER_ROLES on the backend matches),
+ * everyone else sees a read-only tree. */
+function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
+  const [groups, setGroups] = useState<DeviceGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingGroup, setEditingGroup] = useState<DeviceGroup | null>(null);
+  const [formName, setFormName] = useState("");
+  const [formDescription, setFormDescription] = useState("");
+  const [formType, setFormType] = useState("static");
+  const [formParentId, setFormParentId] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
+  const [groupDevices, setGroupDevices] = useState<Device[]>([]);
+  const [groupDevicesLoading, setGroupDevicesLoading] = useState(false);
+  const [allDevices, setAllDevices] = useState<Device[] | null>(null);
+  const [addDeviceId, setAddDeviceId] = useState("");
+
+  const load = () => {
+    setLoading(true);
+    api
+      .get<DeviceGroup[]>("/device-groups")
+      .then((res) => {
+        setGroups(res.data);
+        setError(null);
+      })
+      .catch(() => setError("Failed to load groups."))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  const byParent = useMemo(() => {
+    const map = new Map<string, DeviceGroup[]>();
+    for (const g of groups) {
+      const key = g.parent_group_id || "__root__";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(g);
+    }
+    return map;
+  }, [groups]);
+
+  const openCreate = (parentId?: string) => {
+    setEditingGroup(null);
+    setFormName("");
+    setFormDescription("");
+    setFormType("static");
+    setFormParentId(parentId || "");
+    setFormError(null);
+    setFormOpen(true);
+  };
+
+  const openEdit = (group: DeviceGroup) => {
+    setEditingGroup(group);
+    setFormName(group.name);
+    setFormDescription(group.description || "");
+    setFormType(group.group_type);
+    setFormParentId(group.parent_group_id || "");
+    setFormError(null);
+    setFormOpen(true);
+  };
+
+  const saveGroup = async () => {
+    if (!formName.trim()) {
+      setFormError("Name is required.");
+      return;
+    }
+    setSaving(true);
+    setFormError(null);
+    const payload = {
+      name: formName.trim(),
+      description: formDescription.trim() || null,
+      group_type: formType.trim() || "static",
+      parent_group_id: formParentId || null,
+    };
+    try {
+      if (editingGroup) {
+        await api.patch(`/device-groups/${editingGroup.id}`, payload);
+        setNotice(`Updated group "${formName.trim()}".`);
+      } else {
+        await api.post("/device-groups", payload);
+        setNotice(`Created group "${formName.trim()}".`);
+      }
+      setFormOpen(false);
+      load();
+      setTimeout(() => setNotice(null), 3000);
+    } catch (err: any) {
+      setFormError(err?.response?.data?.detail || "Failed to save group.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteGroup = async (group: DeviceGroup) => {
+    const hasChildren = group.child_group_count > 0;
+    const confirmMsg = hasChildren
+      ? `Delete "${group.name}"? Its ${group.child_group_count} sub-group(s) will move up to its parent, and any member devices will become ungrouped.`
+      : `Delete "${group.name}"? Member devices will become ungrouped.`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await api.delete(`/device-groups/${group.id}`);
+      setNotice(`Deleted group "${group.name}".`);
+      if (expandedGroupId === group.id) setExpandedGroupId(null);
+      load();
+      setTimeout(() => setNotice(null), 3000);
+    } catch {
+      setError("Failed to delete group.");
+    }
+  };
+
+  const toggleExpand = (group: DeviceGroup) => {
+    if (expandedGroupId === group.id) {
+      setExpandedGroupId(null);
+      return;
+    }
+    setExpandedGroupId(group.id);
+    setGroupDevicesLoading(true);
+    api
+      .get<Device[]>(`/device-groups/${group.id}/devices`)
+      .then((res) => setGroupDevices(res.data))
+      .catch(() => setGroupDevices([]))
+      .finally(() => setGroupDevicesLoading(false));
+    if (allDevices === null) {
+      api
+        .get<Device[]>("/devices")
+        .then((res) => setAllDevices(res.data))
+        .catch(() => setAllDevices([]));
+    }
+  };
+
+  const addDeviceToGroup = async (groupId: string) => {
+    if (!addDeviceId) return;
+    try {
+      await api.post(`/device-groups/${groupId}/devices`, { device_ids: [addDeviceId] });
+      setAddDeviceId("");
+      const res = await api.get<Device[]>(`/device-groups/${groupId}/devices`);
+      setGroupDevices(res.data);
+      load(); // refresh device_count on the group list
+    } catch {
+      setError("Failed to add device to group.");
+    }
+  };
+
+  const removeDeviceFromGroup = async (groupId: string, deviceId: string) => {
+    try {
+      await api.delete(`/device-groups/${groupId}/devices/${deviceId}`);
+      setGroupDevices((prev) => prev.filter((d) => d.id !== deviceId));
+      load();
+    } catch {
+      setError("Failed to remove device from group.");
+    }
+  };
+
+  const renderGroup = (group: DeviceGroup, depth: number): React.ReactNode => {
+    const children = byParent.get(group.id) || [];
+    const isExpanded = expandedGroupId === group.id;
+    const availableToAdd = allDevices?.filter((d) => !groupDevices.some((gd) => gd.id === d.id)) || [];
+
+    return (
+      <div key={group.id}>
+        <div
+          className="flex items-center gap-2 py-2 pr-2 border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-900/40"
+          style={{ paddingLeft: 12 + depth * 20 }}
+        >
+          <button
+            onClick={() => toggleExpand(group)}
+            className="flex items-center gap-2 flex-1 text-left min-w-0"
+          >
+            <span className="text-slate-400 text-xs">{isExpanded ? "▾" : "▸"}</span>
+            <span className="text-sm font-semibold text-navy dark:text-white truncate">📁 {group.name}</span>
+            <span className="text-[10px] text-slate-400 dark:text-slate-500 shrink-0">
+              {group.device_count} device{group.device_count === 1 ? "" : "s"}
+              {group.child_group_count > 0 ? ` · ${group.child_group_count} sub-group${group.child_group_count === 1 ? "" : "s"}` : ""}
+            </span>
+            {group.description && (
+              <span className="text-xs text-slate-400 dark:text-slate-500 truncate hidden sm:inline">— {group.description}</span>
+            )}
+          </button>
+          {canManage && (
+            <div className="flex items-center gap-2 shrink-0 text-xs">
+              <button onClick={() => openCreate(group.id)} className="text-slate-400 hover:text-brandblue" title="Add sub-group">
+                + sub-group
+              </button>
+              <button onClick={() => openEdit(group)} className="text-slate-400 hover:text-brandblue" title="Edit">
+                Edit
+              </button>
+              <button onClick={() => deleteGroup(group)} className="text-slate-400 hover:text-riskcrit" title="Delete">
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        {isExpanded && (
+          <div className="bg-slate-50 dark:bg-slate-900/40 py-2" style={{ paddingLeft: 12 + depth * 20 + 20 }}>
+            {groupDevicesLoading ? (
+              <p className="text-xs text-slate-400 italic">Loading devices…</p>
+            ) : groupDevices.length === 0 ? (
+              <p className="text-xs text-slate-400 italic">No devices in this group yet.</p>
+            ) : (
+              <div className="flex flex-col gap-1 mb-2">
+                {groupDevices.map((d) => (
+                  <div key={d.id} className="flex items-center gap-2 text-sm">
+                    <Link to={`/devices?q=${encodeURIComponent(d.hostname)}`} className="text-navy dark:text-white hover:text-brandblue">
+                      {d.hostname}
+                    </Link>
+                    <span className="text-[10px] text-slate-400 font-mono">{d.ip_address}</span>
+                    {canManage && (
+                      <button
+                        onClick={() => removeDeviceFromGroup(group.id, d.id)}
+                        className="text-[10px] text-slate-400 hover:text-riskcrit ml-1"
+                      >
+                        remove
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {canManage && (
+              <div className="flex items-center gap-2">
+                <select
+                  value={addDeviceId}
+                  onChange={(e) => setAddDeviceId(e.target.value)}
+                  className="border border-slate-300 dark:border-slate-600 dark:bg-slate-800 rounded-lg px-2 py-1 text-xs"
+                >
+                  <option value="">Add a device…</option>
+                  {availableToAdd.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.hostname}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => addDeviceToGroup(group.id)}
+                  disabled={!addDeviceId}
+                  className="text-xs font-bold text-brandblue disabled:text-slate-300"
+                >
+                  Add
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {children.map((child) => renderGroup(child, depth + 1))}
+      </div>
+    );
+  };
+
+  const rootGroups = byParent.get("__root__") || [];
+
+  return (
+    <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-700">
+        <div>
+          <h2 className="text-sm font-bold text-navy dark:text-white">Named Groups</h2>
+          <p className="text-xs text-slate-400 dark:text-slate-500">
+            Explicit, user-defined groups (e.g. "Edge Firewalls", "Q3 Migration Batch") — nest a group under another to build a hierarchy.
+          </p>
+        </div>
+        {canManage && (
+          <button
+            onClick={() => openCreate()}
+            className="text-xs font-bold text-white bg-brandblue hover:bg-navy px-3 py-1.5 rounded-full shadow-sm transition-colors shrink-0"
+          >
+            + New group
+          </button>
+        )}
+      </div>
+
+      {notice && (
+        <p className="mx-4 mt-3 text-[13px] font-medium text-brandblue bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-lg px-4 py-2">
+          {notice}
+        </p>
+      )}
+      {error && (
+        <p className="mx-4 mt-3 text-riskcrit font-semibold text-sm bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-slate-400 italic px-4 py-6">Loading groups…</p>
+      ) : rootGroups.length === 0 ? (
+        <p className="text-sm text-slate-400 italic px-4 py-6">
+          No named groups yet.{canManage ? " Create one to start organizing devices logically." : ""}
+        </p>
+      ) : (
+        <div>{rootGroups.map((g) => renderGroup(g, 0))}</div>
+      )}
+
+      {formOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setFormOpen(false)}>
+          <div
+            className="w-full max-w-md bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 p-5 flex flex-col gap-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-bold text-navy dark:text-white">{editingGroup ? "Edit group" : "New group"}</h3>
+            {formError && <p className="text-xs text-riskcrit font-semibold">{formError}</p>}
+            <label className="text-xs font-bold text-slate-500">
+              Name
+              <input
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+                placeholder="e.g. Edge Firewalls"
+                autoFocus
+              />
+            </label>
+            <label className="text-xs font-bold text-slate-500">
+              Description
+              <input
+                value={formDescription}
+                onChange={(e) => setFormDescription(e.target.value)}
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+                placeholder="Optional"
+              />
+            </label>
+            <label className="text-xs font-bold text-slate-500">
+              Type
+              <input
+                value={formType}
+                onChange={(e) => setFormType(e.target.value)}
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+                placeholder="static"
+              />
+            </label>
+            <label className="text-xs font-bold text-slate-500">
+              Parent group
+              <select
+                value={formParentId}
+                onChange={(e) => setFormParentId(e.target.value)}
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+              >
+                <option value="">None (top-level)</option>
+                {groups
+                  .filter((g) => g.id !== editingGroup?.id)
+                  .map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <div className="flex items-center justify-end gap-2 mt-2">
+              <button onClick={() => setFormOpen(false)} className="text-xs font-bold text-slate-500 px-3 py-1.5">
+                Cancel
+              </button>
+              <button
+                onClick={saveGroup}
+                disabled={saving}
+                className="text-xs font-bold text-white bg-brandblue hover:bg-navy disabled:opacity-50 px-4 py-1.5 rounded-full shadow-sm"
+              >
+                {saving ? "Saving…" : editingGroup ? "Save changes" : "Create group"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Groups() {
   const { user } = useAuth();
   const canManage = user?.role === "network_admin";
@@ -160,7 +534,7 @@ export default function Groups() {
         <div>
           <h1 className="text-3xl font-bold text-navy dark:text-white">Groups</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Devices organized by Data Center → Rack. {canManage ? "Drag a device onto a rack to move it." : ""}
+            Named logical groups you define, plus devices organized by physical Data Center → Rack.
           </p>
         </div>
         <button
@@ -169,6 +543,13 @@ export default function Groups() {
         >
           ↻ Refresh
         </button>
+      </div>
+
+      <NamedGroupsPanel canManage={canManage} />
+
+      <div>
+        <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Data Center / Rack</h2>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">Physical placement — {canManage ? "drag a device onto a rack to move it." : "read-only."}</p>
       </div>
 
       <div className="flex flex-wrap gap-3">

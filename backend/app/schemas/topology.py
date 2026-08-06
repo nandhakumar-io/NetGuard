@@ -15,6 +15,7 @@ class TopologyNodeRead(BaseModel):
     health_score: int | None = None
     data_center: str | None = None
     rack: str | None = None
+    device_role: str | None = None
 
 
 class TopologyEdgeRead(BaseModel):
@@ -26,6 +27,7 @@ class TopologyEdgeRead(BaseModel):
     link_source: str = "subnet"  # "lldp" | "cdp" | "gns3" | "subnet"
     local_port: str | None = None
     neighbor_port: str | None = None
+    utilization_pct: int | None = None
 
 
 class TopologyResponse(BaseModel):

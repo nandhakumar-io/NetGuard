@@ -25,7 +25,7 @@ from app.core.deps import get_current_user
 from app.models.alert import Alert, AlertSeverity, AlertSource
 from app.models.user import User
 from app.schemas.alert import AlertRead, AlertSummary
-from app.services import alert_service, event_bus
+from app.services import alert_service, alert_snooze_service, event_bus
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -48,6 +48,11 @@ def list_alerts(
         None,
         description="Filter by maintenance-window suppression: true=only alerts raised during a maintenance window, "
         "false=only alerts not covered by one. Omit to include both.",
+    ),
+    muted: bool | None = Query(
+        None,
+        description="Filter by an active (non-expired) snooze: true=only currently-muted alerts, "
+        "false=only alerts with no active mute. Omit to include both.",
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -74,7 +79,22 @@ def list_alerts(
         q = q.filter(Alert.resolved == True)  # noqa: E712
     if device_id:
         q = q.filter(Alert.device_id == device_id)
-    return q.order_by(desc(Alert.created_at)).offset(offset).limit(limit).all()
+    results = q.order_by(desc(Alert.created_at)).offset(offset).limit(limit).all()
+
+    # muted_until is computed (not trusted straight off the possibly-
+    # stale muted_by_snooze_id FK -- see AlertRead.muted_until's
+    # docstring), so it's attached here rather than left to the ORM ->
+    # Pydantic conversion, and the `muted` filter (which needs the same
+    # "is this snooze still actually active" check) is applied after.
+    mute_map = alert_snooze_service.active_mute_map(db, results)
+    read_results = []
+    for alert in results:
+        obj = AlertRead.model_validate(alert)
+        obj.muted_until = mute_map.get(alert.id)
+        if muted is not None and (obj.muted_until is not None) != muted:
+            continue
+        read_results.append(obj)
+    return read_results
 
 
 @router.get("/summary", response_model=AlertSummary)
@@ -87,7 +107,9 @@ def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depe
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    return alert
+    obj = AlertRead.model_validate(alert)
+    obj.muted_until = alert_snooze_service.active_mute_map(db, [alert]).get(alert.id)
+    return obj
 
 
 @router.patch("/{alert_id}/acknowledge", response_model=AlertRead)

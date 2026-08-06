@@ -27,6 +27,7 @@ Called by:
   - app.tasks.drift_detection_task (nightly per-device Celery task, see
     celery beat schedule in app.celery_app)
 """
+import datetime
 import uuid
 from dataclasses import dataclass, field
 
@@ -312,6 +313,52 @@ def list_drifts(
     if severity is not None:
         query = query.filter(ConfigDrift.severity == severity)
     return query.order_by(ConfigDrift.detected_at.desc()).limit(limit).all()
+
+
+_SEVERITY_RANK = {
+    DriftSeverity.CRITICAL: 3,
+    DriftSeverity.HIGH: 2,
+    DriftSeverity.MEDIUM: 1,
+    DriftSeverity.LOW: 0,
+}
+
+
+def weekly_golden_config_drift(db: Session, days: int = 7) -> list[ConfigDrift]:
+    """One-click "who's drifted from golden config this week" list: one row
+    per device (its single most recent GOLDEN_CONFIG-baseline drift record
+    detected within the last `days` days), not the raw per-scan event feed
+    list_drifts() returns -- a device scanned nightly for a week would
+    otherwise show up to 7 times for one ongoing drift.
+
+    Devices with no actual change (added_lines == removed_lines == 0 --
+    i.e. a scan that ran and found nothing) are excluded; this is a list
+    of devices that drifted, not devices that were merely checked.
+    Sorted most-severe-first, then most-recently-detected first.
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    rows = (
+        db.query(ConfigDrift)
+        .filter(
+            ConfigDrift.baseline == DriftBaseline.GOLDEN_CONFIG,
+            ConfigDrift.detected_at >= since,
+        )
+        .order_by(ConfigDrift.detected_at.desc())
+        .all()
+    )
+
+    latest_by_device: dict = {}
+    for row in rows:
+        if not (row.added_lines or row.removed_lines):
+            continue
+        # Rows are already ordered newest-first, so the first time a
+        # device_id is seen here is that device's most recent drift.
+        latest_by_device.setdefault(row.device_id, row)
+
+    return sorted(
+        latest_by_device.values(),
+        key=lambda d: (_SEVERITY_RANK[d.severity], d.detected_at),
+        reverse=True,
+    )
 
 
 def fleet_summary(db: Session) -> dict:

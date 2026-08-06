@@ -24,6 +24,24 @@ class RollbackRequest(BaseModel):
     reason: str | None = None
 
 
+class RollbackPreviewResponse(BaseModel):
+    """Read-only diff shown before a rollback is confirmed -- no
+    ChangeRequest is created and nothing is pushed to the device just by
+    requesting this."""
+
+    device_id: uuid.UUID
+    snapshot_id: uuid.UUID
+    target_version: str
+    current_source: str  # "live" | "last_snapshot" | "unavailable"
+    diff: str
+    identical: bool
+    added_lines: int
+    removed_lines: int
+    warning: str | None = None
+    blocked: bool = False
+    blocked_reason: str | None = None
+
+
 class RollbackResponse(BaseModel):
     change_request_id: uuid.UUID
     status: str

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { api } from "../lib/api";
-import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult } from "../lib/types";
+import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, AlertSnooze } from "../lib/types";
 
 const SEVERITY_CONFIG = {
   critical: { color: "text-riskcrit", bg: "bg-riskcrit", bgLight: "bg-red-50", border: "border-riskcrit/20", icon: "🚨", label: "Critical" },
@@ -154,6 +154,64 @@ export default function AlertCenter() {
 
   const handleResolve = (id: string) => {
     api.patch(`/alerts/${id}/resolve`).then(() => { fetchAlerts(); fetchSummary(); }).catch(() => {});
+  };
+
+  // --- Snooze / mute (per-device, per-rule/category, or both) ---
+  const [snoozeTarget, setSnoozeTarget] = useState<Alert | null>(null);
+  const [snoozeScope, setSnoozeScope] = useState<"device" | "category" | "both">("both");
+  const [snoozeDuration, setSnoozeDuration] = useState("4h");
+  const [snoozeReason, setSnoozeReason] = useState("");
+  const [snoozeSaving, setSnoozeSaving] = useState(false);
+  const [snoozeError, setSnoozeError] = useState<string | null>(null);
+  const [activeSnoozes, setActiveSnoozes] = useState<AlertSnooze[]>([]);
+  const [showSnoozeManager, setShowSnoozeManager] = useState(false);
+
+  const fetchActiveSnoozes = useCallback(() => {
+    api
+      .get<AlertSnooze[]>("/alert-snoozes?active_only=true")
+      .then((res) => setActiveSnoozes(res.data))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchActiveSnoozes();
+  }, [fetchActiveSnoozes]);
+
+  const DURATION_TO_MS: Record<string, number> = {
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "24h": 24 * 60 * 60 * 1000,
+    "7d": 7 * 24 * 60 * 60 * 1000,
+  };
+
+  const submitSnooze = () => {
+    if (!snoozeTarget) return;
+    setSnoozeSaving(true);
+    setSnoozeError(null);
+    const expires_at = new Date(Date.now() + DURATION_TO_MS[snoozeDuration]).toISOString();
+    const payload: Record<string, unknown> = { expires_at, reason: snoozeReason.trim() || null };
+    if (snoozeScope === "device" || snoozeScope === "both") payload.device_id = snoozeTarget.device_id;
+    if (snoozeScope === "category" || snoozeScope === "both") payload.category = snoozeTarget.category;
+    api
+      .post("/alert-snoozes", payload)
+      .then(() => {
+        setSnoozeTarget(null);
+        setSnoozeReason("");
+        fetchAlerts();
+        fetchActiveSnoozes();
+      })
+      .catch((err) => setSnoozeError(err?.response?.data?.detail || "Failed to create snooze."))
+      .finally(() => setSnoozeSaving(false));
+  };
+
+  const cancelSnooze = (id: string) => {
+    api
+      .delete(`/alert-snoozes/${id}`)
+      .then(() => {
+        fetchActiveSnoozes();
+        fetchAlerts();
+      })
+      .catch(() => {});
   };
 
   const [clearing, setClearing] = useState(false);
@@ -436,7 +494,50 @@ export default function AlertCenter() {
                 Reset
               </button>
             )}
+
+            <button
+              onClick={() => setShowSnoozeManager((v) => !v)}
+              className="ml-auto text-xs font-bold text-purple-600 hover:text-purple-800 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-950/60 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+            >
+              🔕 Snoozes{activeSnoozes.length > 0 ? ` (${activeSnoozes.length})` : ""}
+            </button>
           </div>
+
+          {/* Active Snoozes manager -- view/cancel every currently-active
+              device/rule mute, regardless of which alert (if any) is
+              currently showing under the current filters. */}
+          {showSnoozeManager && (
+            <div className="mt-3 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 px-5 py-4 shadow-sm">
+              <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Active Snoozes</h3>
+              {activeSnoozes.length === 0 ? (
+                <p className="text-xs text-slate-400 dark:text-slate-500 italic">Nothing is currently snoozed.</p>
+              ) : (
+                <div className="space-y-2">
+                  {activeSnoozes.map((s) => (
+                    <div key={s.id} className="flex items-center justify-between gap-3 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2 flex-wrap min-w-0">
+                        {s.device_hostname && (
+                          <span className="font-bold text-navy dark:text-white">{s.device_hostname}</span>
+                        )}
+                        {s.category && (
+                          <span className="font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">{s.category}</span>
+                        )}
+                        {!s.device_hostname && !s.category && <span className="text-slate-400">(unscoped)</span>}
+                        <span className="text-slate-400 dark:text-slate-500">until {new Date(s.expires_at).toLocaleString()}</span>
+                        {s.reason && <span className="text-slate-400 dark:text-slate-500 italic truncate">— {s.reason}</span>}
+                      </div>
+                      <button
+                        onClick={() => cancelSnooze(s.id)}
+                        className="shrink-0 text-[11px] font-bold text-riskcrit hover:text-red-800"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Alert Timeline */}
           <div className="mt-6 space-y-3">
@@ -497,6 +598,14 @@ export default function AlertCenter() {
                                 {alert.suppressed && (
                                   <span title="Likely a downstream consequence of another active alert" className="text-[11px] font-medium text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 px-2 py-0.5 rounded-full">Impacted</span>
                                 )}
+                                {alert.muted_until && (
+                                  <span
+                                    title={`Snoozed until ${new Date(alert.muted_until).toLocaleString()}`}
+                                    className="text-[11px] font-medium text-purple-600 bg-purple-50 dark:bg-purple-950/40 dark:text-purple-300 px-2 py-0.5 rounded-full"
+                                  >
+                                    🔕 Muted until {new Date(alert.muted_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                  </span>
+                                )}
                               </div>
                               <h3 className="font-semibold text-navy dark:text-white mt-1.5 text-sm">{alert.category}</h3>
                               <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{alert.message}</p>
@@ -532,6 +641,19 @@ export default function AlertCenter() {
                                 >
                                   Resolve
                                 </button>
+                                {!alert.muted_until && (
+                                  <button
+                                    onClick={() => {
+                                      setSnoozeTarget(alert);
+                                      setSnoozeScope(alert.device_id ? "both" : "category");
+                                      setSnoozeError(null);
+                                    }}
+                                    title="Mute this device, this rule, or both for a bounded time"
+                                    className="text-xs font-medium text-purple-600 hover:text-purple-800 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-950/60 px-3 py-1.5 rounded-lg transition-colors"
+                                  >
+                                    Snooze
+                                  </button>
+                                )}
                               </div>
                             )}
                           </div>
@@ -552,6 +674,72 @@ export default function AlertCenter() {
             )}
           </div>
         </>
+      )}
+
+      {/* Snooze creation modal */}
+      {snoozeTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setSnoozeTarget(null)}>
+          <div
+            className="w-full max-w-md bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 p-5 flex flex-col gap-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-bold text-navy dark:text-white">Snooze this alert</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {snoozeTarget.category} {snoozeTarget.device_id ? `on device ${snoozeTarget.device_id.slice(0, 8)}…` : "(no device)"}
+            </p>
+            {snoozeError && <p className="text-xs text-riskcrit font-semibold">{snoozeError}</p>}
+
+            <label className="text-xs font-bold text-slate-500">
+              Scope
+              <select
+                value={snoozeScope}
+                onChange={(e) => setSnoozeScope(e.target.value as "device" | "category" | "both")}
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+              >
+                {snoozeTarget.device_id && <option value="both">This device + this rule only</option>}
+                {snoozeTarget.device_id && <option value="device">This device — mute every alert on it</option>}
+                <option value="category">This rule — mute "{snoozeTarget.category}" fleet-wide</option>
+              </select>
+            </label>
+
+            <label className="text-xs font-bold text-slate-500">
+              For how long
+              <select
+                value={snoozeDuration}
+                onChange={(e) => setSnoozeDuration(e.target.value)}
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+              >
+                <option value="1h">1 hour</option>
+                <option value="4h">4 hours</option>
+                <option value="24h">24 hours</option>
+                <option value="7d">7 days</option>
+              </select>
+            </label>
+
+            <label className="text-xs font-bold text-slate-500">
+              Reason (optional)
+              <input
+                value={snoozeReason}
+                onChange={(e) => setSnoozeReason(e.target.value)}
+                placeholder="e.g. known flapping while vendor RMA is pending"
+                className="mt-1 w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-3 py-1.5 text-sm"
+              />
+            </label>
+
+            <div className="flex items-center justify-end gap-2 mt-2">
+              <button onClick={() => setSnoozeTarget(null)} className="text-xs font-bold text-slate-500 px-3 py-1.5">
+                Cancel
+              </button>
+              <button
+                onClick={submitSnooze}
+                disabled={snoozeSaving}
+                className="text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 px-4 py-1.5 rounded-full shadow-sm"
+              >
+                {snoozeSaving ? "Saving…" : "Snooze"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ===== ALERT RULES TAB ===== */}

@@ -22,3 +22,5 @@ from app.models.firmware_upgrade import FirmwareUpgrade, FirmwareUpgradeStatus  
 from app.models.interface_status import InterfaceStatus, InterfaceOperStatus  # noqa: F401
 from app.models.alert_rule import AlertRule, AlertRuleMetric, AlertRuleOperator  # noqa: F401
 from app.models.webhook import WebhookEndpoint, WebhookType  # noqa: F401
+from app.models.device_group import DeviceGroup  # noqa: F401
+from app.models.alert_snooze import AlertSnooze  # noqa: F401
