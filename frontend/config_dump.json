@@ -1,0 +1,5 @@
+
+> netguard-frontend@1.0.0 lint
+> eslint . --print-config src/pages/Drift.tsx
+
+The --print-config option must be used with exactly one file name.
