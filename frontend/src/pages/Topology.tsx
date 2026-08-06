@@ -90,7 +90,7 @@ function layoutNodes(nodes: TopologyNode[], edges: TopologyEdge[]): LaidOutNode[
         const b = positions.get(nodeIds[j])!;
         let dx = a.x - b.x;
         let dy = a.y - b.y;
-        let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
         const force = (k * k) / dist;
         dx = (dx / dist) * force;
         dy = (dy / dist) * force;

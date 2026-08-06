@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, AlertSnooze } from "../lib/types";
 
@@ -34,6 +35,7 @@ const METRIC_LABELS: Record<string, string> = { cpu: "CPU %", memory: "Memory %"
 type Tab = "alerts" | "rules" | "webhooks";
 
 export default function AlertCenter() {
+  const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("alerts");
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
@@ -42,7 +44,11 @@ export default function AlertCenter() {
   const toggleExpanded = (id: string) =>
     setExpandedRoots((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
       return next;
     });
 
@@ -232,6 +238,7 @@ export default function AlertCenter() {
       fetchAlerts();
       fetchSummary();
     } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
     } finally {
       setClearing(false);
     }
@@ -270,7 +277,9 @@ export default function AlertCenter() {
       }
       resetRuleForm();
       fetchRules();
-    } catch {}
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
   };
 
   const handleDeleteRule = async (id: string) => {
@@ -278,14 +287,18 @@ export default function AlertCenter() {
     try {
       await api.delete(`/alert-rules/${id}`);
       fetchRules();
-    } catch {}
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
   };
 
   const handleToggleRule = async (id: string) => {
     try {
       await api.patch(`/alert-rules/${id}/toggle`);
       fetchRules();
-    } catch {}
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
   };
 
   // Webhook CRUD
@@ -313,7 +326,9 @@ export default function AlertCenter() {
       }
       resetWebhookForm();
       fetchWebhooks();
-    } catch {}
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
   };
 
   const handleDeleteWebhook = async (id: string) => {
@@ -321,7 +336,9 @@ export default function AlertCenter() {
     try {
       await api.delete(`/webhooks/${id}`);
       fetchWebhooks();
-    } catch {}
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
   };
 
   const handleTestWebhook = async (id: string) => {
@@ -627,6 +644,22 @@ export default function AlertCenter() {
                             </div>
                             {!alert.resolved && (
                               <div className="flex items-center gap-2 shrink-0">
+                                {alert.device_id && (
+                                  <button
+                                    onClick={() => {
+                                      const params = new URLSearchParams({
+                                        alert_id: alert.id,
+                                        device_id: alert.device_id!,
+                                        category: alert.category,
+                                      });
+                                      navigate(`/change-requests?${params.toString()}`);
+                                    }}
+                                    title="Open a pre-linked change request to remediate this alert (auto-linked for postmortem)"
+                                    className="text-xs font-medium text-navy dark:text-white hover:text-brandblue bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 px-3 py-1.5 rounded-lg transition-colors"
+                                  >
+                                    Create Change Request
+                                  </button>
+                                )}
                                 {!alert.acknowledged && (
                                   <button
                                     onClick={() => handleAcknowledge(alert.id)}

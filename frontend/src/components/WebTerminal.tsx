@@ -41,9 +41,11 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
     // which only happened to work for the default local-dev setup.
     let wsHost = `${window.location.hostname}:8000`;
     if (import.meta.env.VITE_API_BASE_URL) {
-       try {
-           wsHost = new URL(import.meta.env.VITE_API_BASE_URL).host;
-       } catch (e) { }
+      try {
+          wsHost = new URL(import.meta.env.VITE_API_BASE_URL).host;
+      } catch {
+          // Malformed VITE_API_BASE_URL -- fall back to the wsHost default set above.
+      }
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token = localStorage.getItem(ACCESS_TOKEN_KEY) || '';

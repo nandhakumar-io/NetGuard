@@ -13,6 +13,8 @@ pure opt-out -- no device's behavior changes until an operator flips it.
 import sqlalchemy as sa
 from alembic import op
 
+from migration_helpers import add_column_if_missing, drop_column_if_exists
+
 revision = "0019"
 down_revision = "0018"
 branch_labels = None
@@ -20,11 +22,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "devices",
         sa.Column("netconf_use_lock", sa.Boolean(), nullable=False, server_default="true"),
     )
 
 
 def downgrade() -> None:
-    op.drop_column("devices", "netconf_use_lock")
+    drop_column_if_exists("devices", "netconf_use_lock")

@@ -87,6 +87,14 @@ export type ChangeStatus =
   | "failed"
   | "rolled_back";
 
+export interface TriggeringAlertSummary {
+  id: string;
+  severity: string;
+  category: string;
+  message: string;
+  created_at: string;
+}
+
 export interface ChangeRequest {
   id: string;
   device_id: string;
@@ -117,6 +125,23 @@ export interface ChangeRequest {
   config_diff_cli?: string | null;
   config_diff_summary?: string | null;
   created_at: string;
+  // Approval workflow visibility (who approved, when).
+  approved_at?: string | null;
+  submitted_by_name?: string | null;
+  approved_by_name?: string | null;
+  first_approved_by_name?: string | null;
+  // Alert -> CR auto-link (postmortem traceability).
+  triggering_alert_id?: string | null;
+  triggering_alert?: TriggeringAlertSummary | null;
+}
+
+export interface PendingApprovalItem {
+  change_request: ChangeRequest;
+  sla_hours: number;
+  elapsed_hours: number;
+  due_at: string;
+  is_overdue: boolean;
+  is_first_approval_needed: boolean;
 }
 
 export interface Snapshot {

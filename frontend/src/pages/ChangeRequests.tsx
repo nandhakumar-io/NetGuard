@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device } from "../lib/types";
+import { ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
+import SideBySideDiff from "../components/SideBySideDiff";
 import { useAuth } from "../lib/auth";
+import { useSearchParams } from "react-router-dom";
 
 const statusStyle: Record<string, string> = {
   draft: "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300",
@@ -33,6 +35,10 @@ const emptyForm = {
   proposed_config: "",
   additional_device_ids: [] as string[],
   canary_enabled: false,
+  // Auto-link (postmortem traceability): set when this form was opened
+  // via "Create Change Request" from an Alert Center alert (?alert_id=...
+  // on this page's URL, see the useSearchParams effect below).
+  alert_id: null as string | null,
 };
 
 const STATUS_FILTERS: { value: ChangeStatus | "all"; label: string }[] = [
@@ -58,6 +64,59 @@ export default function ChangeRequests() {
   const [acting, setActing] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ChangeStatus | "all">("all");
   const [showForm, setShowForm] = useState(false);
+  // Peer-review diff toggle on the detail panel: unified (compact, good
+  // for scanning line-level changes) vs side-by-side (easier to compare
+  // whole blocks old-vs-new before approving).
+  const [diffView, setDiffView] = useState<"unified" | "side-by-side">("unified");
+  // Approval workflow visibility: the pending-approval queue with SLA
+  // timers (GET /change-requests/pending-approvals), shown in its own tab
+  // rather than the plain list.
+  const [queueTab, setQueueTab] = useState<"all" | "queue">("all");
+  const [pendingQueue, setPendingQueue] = useState<PendingApprovalItem[]>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Deep link from Alert Center's "Create Change Request" action
+  // (?alert_id=...&device_id=...): opens the form pre-filled and
+  // pre-linked to that alert, so the resulting CR auto-links back to the
+  // incident for postmortem (see triggering_alert_id).
+  useEffect(() => {
+    const alertId = searchParams.get("alert_id");
+    if (!alertId) return;
+    const deviceId = searchParams.get("device_id") || "";
+    const category = searchParams.get("category") || "";
+    setForm((prev) => ({
+      ...prev,
+      alert_id: alertId,
+      device_id: deviceId,
+      description: category ? `Remediate: ${category}` : prev.description,
+    }));
+    setShowForm(true);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("alert_id");
+      next.delete("device_id");
+      next.delete("category");
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadQueue = () => {
+    setQueueLoading(true);
+    api
+      .get<PendingApprovalItem[]>("/change-requests/pending-approvals")
+      .then((res) => setPendingQueue(res.data))
+      .finally(() => setQueueLoading(false));
+  };
+
+  useEffect(() => {
+    if (queueTab !== "queue") return;
+    loadQueue();
+    const interval = setInterval(loadQueue, 30000);
+    return () => clearInterval(interval);
+  }, [queueTab]);
 
   // Config template picker (Jinja2 provisioning templates -- see
   // /templates page and app/services/template_service.py). Filtered by
@@ -160,6 +219,7 @@ export default function ChangeRequests() {
     try {
       await api.post(`/change-requests/${id}/${action}`);
       load();
+      if (queueTab === "queue") loadQueue();
     } catch (err: any) {
       setActionError(err?.response?.data?.detail || `Failed to ${action} the request.`);
     } finally {
@@ -402,7 +462,109 @@ export default function ChangeRequests() {
         </form>
       )}
 
-      <div className="flex flex-wrap gap-2 mt-6 mb-3">
+      <div className="flex gap-2 mt-6">
+        <button
+          onClick={() => setQueueTab("all")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+            queueTab === "all"
+              ? "bg-navy dark:bg-slate-950 text-white border-navy dark:border-slate-600"
+              : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700"
+          }`}
+        >
+          All Requests
+        </button>
+        <button
+          onClick={() => setQueueTab("queue")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+            queueTab === "queue"
+              ? "bg-navy dark:bg-slate-950 text-white border-navy dark:border-slate-600"
+              : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700"
+          }`}
+        >
+          Approval Queue
+          {pendingCount > 0 && (
+            <span className="ml-1.5 bg-amber-500 text-white rounded-full px-1.5 text-[10px]">{pendingCount}</span>
+          )}
+        </button>
+      </div>
+
+      {queueTab === "queue" && (
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mt-3 mb-3">
+          <table className="w-full text-sm">
+            <thead className="bg-navy dark:bg-slate-950 text-white">
+              <tr>
+                <th className="text-left px-4 py-3 font-semibold">Device</th>
+                <th className="text-left px-4 py-3 font-semibold">Priority</th>
+                <th className="text-left px-4 py-3 font-semibold">Submitted By</th>
+                <th className="text-left px-4 py-3 font-semibold">SLA</th>
+                <th className="text-left px-4 py-3 font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {queueLoading && (
+                <tr>
+                  <td colSpan={5} className="text-center text-slate-400 dark:text-slate-500 py-8">
+                    Loading…
+                  </td>
+                </tr>
+              )}
+              {!queueLoading && pendingQueue.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="text-center text-slate-400 dark:text-slate-500 py-8 italic">
+                    Nothing pending approval. 🎉
+                  </td>
+                </tr>
+              )}
+              {pendingQueue.map((item) => {
+                const cr = item.change_request;
+                const remainingHours = item.sla_hours - item.elapsed_hours;
+                return (
+                  <tr
+                    key={cr.id}
+                    onClick={() => setSelected(cr)}
+                    className={`cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50 border-t border-slate-100 dark:border-slate-700 ${
+                      selected?.id === cr.id ? "bg-blue-50 dark:bg-slate-700" : ""
+                    }`}
+                  >
+                    <td className="px-4 py-3">{hostnameFor(cr.device_id)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${priorityStyle[cr.priority]}`}>
+                        {cr.priority}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
+                      {cr.submitted_by_name || "—"}
+                      {item.is_first_approval_needed && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700">
+                          needs 1st approval
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {item.is_overdue ? (
+                        <span className="px-2 py-1 rounded-full text-xs font-semibold bg-red-100 text-riskcrit">
+                          Overdue by {Math.abs(remainingHours).toFixed(1)}h
+                        </span>
+                      ) : (
+                        <span className="px-2 py-1 rounded-full text-xs font-semibold bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                          {remainingHours.toFixed(1)}h left ({item.sla_hours}h SLA)
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${statusStyle[cr.status] || ""}`}>
+                        {cr.status.replace(/_/g, " ")}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 mt-3 mb-3">
         {STATUS_FILTERS.map((f) => (
           <button
             key={f.value}
@@ -421,7 +583,8 @@ export default function ChangeRequests() {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className={queueTab === "queue" ? "grid grid-cols-1 gap-6" : "grid grid-cols-1 lg:grid-cols-2 gap-6"}>
+        {queueTab === "all" && (
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden self-start">
           <table className="w-full text-sm">
             <thead className="bg-navy dark:bg-slate-950 text-white">
@@ -496,6 +659,7 @@ export default function ChangeRequests() {
             </tbody>
           </table>
         </div>
+        )}
 
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
           {!selected ? (
@@ -515,7 +679,27 @@ export default function ChangeRequests() {
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                     Device: {hostnameFor(selected.device_id)} · Submitted{" "}
                     {new Date(selected.created_at).toLocaleString()}
+                    {selected.submitted_by_name && <> by {selected.submitted_by_name}</>}
                   </p>
+                  {/* Approval workflow visibility: who approved this and when. */}
+                  {selected.approved_by_name && selected.approved_at && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                      Approved by {selected.approved_by_name} · {new Date(selected.approved_at).toLocaleString()}
+                    </p>
+                  )}
+                  {selected.first_approved_by_name && !selected.approved_by_name && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                      1st approval by {selected.first_approved_by_name} — awaiting 2nd
+                    </p>
+                  )}
+                  {/* Alert -> CR auto-link, for postmortem review. */}
+                  {selected.triggering_alert && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                      Raised from alert:{" "}
+                      <span className="font-medium text-navy dark:text-white">{selected.triggering_alert.category}</span>{" "}
+                      ({selected.triggering_alert.severity}, {new Date(selected.triggering_alert.created_at).toLocaleString()})
+                    </p>
+                  )}
                   {(selected.target_device_count || 1) > 1 && (
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                       Also targets: {(selected.additional_device_ids || []).map(hostnameFor).join(", ")}
@@ -617,12 +801,38 @@ export default function ChangeRequests() {
                     </pre>
                   </div>
                 )}
-                <details className="group">
-                  <summary className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1 cursor-pointer hover:text-brandblue select-none">
-                    {selected.config_diff_cli ? "Raw Configuration Diff ▸" : "Configuration Diff"}
+                <details className="group" open={!selected.config_diff_cli}>
+                  <summary className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1 cursor-pointer hover:text-brandblue select-none flex items-center justify-between">
+                    <span>{selected.config_diff_cli ? "Raw Configuration Diff ▸" : "Configuration Diff"}</span>
+                    <span className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden text-[10px] normal-case font-medium">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setDiffView("unified");
+                        }}
+                        className={`px-2 py-0.5 ${diffView === "unified" ? "bg-navy dark:bg-slate-950 text-white" : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400"}`}
+                      >
+                        Unified
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setDiffView("side-by-side");
+                        }}
+                        className={`px-2 py-0.5 ${diffView === "side-by-side" ? "bg-navy dark:bg-slate-950 text-white" : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400"}`}
+                      >
+                        Side-by-side
+                      </button>
+                    </span>
                   </summary>
                   <div className="mt-1">
-                    <ConfigDiff diffText={selected.config_diff} />
+                    {diffView === "unified" ? (
+                      <ConfigDiff diffText={selected.config_diff} />
+                    ) : (
+                      <SideBySideDiff currentConfig={selected.current_config} proposedConfig={selected.proposed_config} />
+                    )}
                   </div>
                 </details>
               </div>

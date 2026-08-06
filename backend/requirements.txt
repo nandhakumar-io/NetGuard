@@ -32,3 +32,4 @@ reportlab==4.2.5
 python-dotenv==1.0.1
 anthropic==0.40.0
 setuptools<70.0.0
+ruff==0.16.1

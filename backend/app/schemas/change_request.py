@@ -26,6 +26,23 @@ class ChangeRequestCreate(ChangeRequestBase):
     # wait out its health-monitoring window, and only then fan the rest of
     # the devices out. No-op when the CR targets a single device.
     canary_enabled: bool = False
+    # Auto-link (postmortem traceability): set when this CR is being
+    # submitted directly from an Alert Center alert as its remediation.
+    # See app.models.change_request.ChangeRequest.triggering_alert_id.
+    alert_id: uuid.UUID | None = None
+
+
+class TriggeringAlertSummary(BaseModel):
+    """Minimal alert info embedded on ChangeRequestRead for the postmortem
+    link (full alert detail lives on GET /alerts/{id} / Alert Center)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    severity: str
+    category: str
+    message: str
+    created_at: datetime.datetime
 
 
 class ChangeRequestRead(ChangeRequestBase):
@@ -76,6 +93,21 @@ class ChangeRequestRead(ChangeRequestBase):
     target_device_count: int = 1
     created_at: datetime.datetime
 
+    # Approval workflow visibility (who approved, SLA on pending queue):
+    # approved_at is the final approval's timestamp (see model docstring).
+    # The *_name fields are display-only conveniences resolved by
+    # app.api.change_requests._hydrate so the UI doesn't have to issue a
+    # separate /users lookup per CR just to show who submitted/approved.
+    approved_at: datetime.datetime | None = None
+    submitted_by_name: str | None = None
+    approved_by_name: str | None = None
+    first_approved_by_name: str | None = None
+
+    # Alert -> CR auto-link (postmortem traceability). None for changes
+    # not raised from a specific alert.
+    triggering_alert_id: uuid.UUID | None = None
+    triggering_alert: TriggeringAlertSummary | None = None
+
     @field_validator("additional_device_ids", mode="before")
     @classmethod
     def _parse_additional_device_ids(cls, v: object) -> list:
@@ -92,6 +124,20 @@ class ChangeRequestRead(ChangeRequestBase):
     def _compute_target_device_count(self) -> "ChangeRequestRead":
         self.target_device_count = 1 + len(self.additional_device_ids)
         return self
+
+
+class PendingApprovalItem(BaseModel):
+    """One row of GET /change-requests/pending-approvals: a CR plus its
+    SLA timer, so the approval queue can be sorted/highlighted by how
+    close (or past) each request is to breaching its priority's SLA
+    without the frontend re-deriving the threshold table itself."""
+
+    change_request: ChangeRequestRead
+    sla_hours: float
+    elapsed_hours: float
+    due_at: datetime.datetime
+    is_overdue: bool
+    is_first_approval_needed: bool
 
 
 class RiskAnalysisResult(BaseModel):

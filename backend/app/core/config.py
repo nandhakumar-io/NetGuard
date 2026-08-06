@@ -123,6 +123,17 @@ class Settings(BaseSettings):
     # looks scary. See app.api.change_requests.create_change_request.
     RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD: int = 5
 
+    # Approval workflow SLA timers, in hours, keyed by ChangePriority --
+    # how long a change request may sit in PENDING_APPROVAL before the
+    # approval queue (GET /change-requests/pending-approvals) flags it as
+    # overdue. Emergency changes get the tightest window, Low the loosest.
+    APPROVAL_SLA_HOURS: dict[str, float] = {
+        "emergency": 1.0,
+        "high": 4.0,
+        "medium": 24.0,
+        "low": 72.0,
+    }
+
     # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
     # configurable" -- these two knobs are that configuration. After a
     # deploy, the health suite is polled every POLL_INTERVAL_SECONDS for up

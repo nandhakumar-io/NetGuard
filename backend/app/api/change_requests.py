@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -7,11 +7,17 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
+from app.models.alert import Alert
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
-from app.schemas.change_request import ChangeRequestCreate, ChangeRequestRead, RiskAnalysisResult
+from app.schemas.change_request import (
+    ChangeRequestCreate,
+    ChangeRequestRead,
+    PendingApprovalItem,
+    RiskAnalysisResult,
+)
 from app.services import diff_engine, event_bus, protocol_manager, risk_engine, snapshot_service, validation_engine, audit_service
 from app.tasks import run_deployment_pipeline_task
 
@@ -19,6 +25,46 @@ router = APIRouter(prefix="/change-requests", tags=["change-requests"])
 
 # Roles permitted to approve/reject change requests (FR-1 RBAC)
 APPROVER_ROLES = (UserRole.NETWORK_ADMIN,)
+
+
+def _hydrate(db: Session, crs: list[ChangeRequest]) -> list[ChangeRequestRead]:
+    """Attach display-only extras to ChangeRequestRead that aren't plain
+    columns on the model: submitter/approver names (resolved from
+    app.models.user.User rather than making the UI issue a /users lookup
+    per row) and a summarized triggering alert, if any. Batches the User
+    and Alert lookups instead of querying per-row.
+    """
+    if not crs:
+        return []
+
+    user_ids = {c.submitted_by for c in crs}
+    user_ids |= {c.approved_by for c in crs if c.approved_by}
+    user_ids |= {c.first_approved_by for c in crs if c.first_approved_by}
+    users = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()} if user_ids else {}
+
+    alert_ids = {c.triggering_alert_id for c in crs if c.triggering_alert_id}
+    alerts = {a.id: a for a in db.query(Alert).filter(Alert.id.in_(alert_ids)).all()} if alert_ids else {}
+
+    out = []
+    for cr in crs:
+        item = ChangeRequestRead.model_validate(cr)
+        submitter = users.get(cr.submitted_by)
+        item.submitted_by_name = submitter.full_name if submitter else None
+        approver = users.get(cr.approved_by) if cr.approved_by else None
+        item.approved_by_name = approver.full_name if approver else None
+        first_approver = users.get(cr.first_approved_by) if cr.first_approved_by else None
+        item.first_approved_by_name = first_approver.full_name if first_approver else None
+        alert = alerts.get(cr.triggering_alert_id) if cr.triggering_alert_id else None
+        if alert:
+            item.triggering_alert = {
+                "id": alert.id,
+                "severity": alert.severity.value if hasattr(alert.severity, "value") else alert.severity,
+                "category": alert.category,
+                "message": alert.message,
+                "created_at": alert.created_at,
+            }
+        out.append(item)
+    return out
 
 
 def _latest_config(db: Session, device_id) -> str | None:
@@ -131,8 +177,56 @@ def _dual_approval(risk: RiskAnalysisResult, device_count: int) -> tuple[bool, s
 
 
 @router.get("", response_model=list[ChangeRequestRead])
-def list_change_requests(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    return db.query(ChangeRequest).order_by(ChangeRequest.created_at.desc()).all()
+def list_change_requests(
+    alert_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """List change requests, optionally filtered to those auto-linked to a
+    given alert (?alert_id=...) -- used by the Alert Center postmortem
+    view to show "what change(s) were raised for this incident"."""
+    query = db.query(ChangeRequest).order_by(ChangeRequest.created_at.desc())
+    if alert_id is not None:
+        query = query.filter(ChangeRequest.triggering_alert_id == alert_id)
+    return _hydrate(db, query.all())
+
+
+@router.get("/pending-approvals", response_model=list[PendingApprovalItem])
+def list_pending_approvals(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Approval workflow visibility (FR-1/FR-6): every PENDING_APPROVAL
+    change request with its SLA timer, sorted most-overdue-first so an
+    approver's queue surfaces what needs attention first rather than just
+    submission order. See settings.APPROVAL_SLA_HOURS for the thresholds.
+    """
+    crs = (
+        db.query(ChangeRequest)
+        .filter(ChangeRequest.status == ChangeStatus.PENDING_APPROVAL)
+        .order_by(ChangeRequest.created_at.asc())
+        .all()
+    )
+    hydrated = {cr.id: h for cr, h in zip(crs, _hydrate(db, crs))}
+    now = datetime.now(timezone.utc)
+
+    items: list[PendingApprovalItem] = []
+    for cr in crs:
+        priority_key = cr.priority.value if hasattr(cr.priority, "value") else cr.priority
+        sla_hours = settings.APPROVAL_SLA_HOURS.get(priority_key, 24.0)
+        created_at = cr.created_at if cr.created_at.tzinfo else cr.created_at.replace(tzinfo=timezone.utc)
+        elapsed_hours = (now - created_at).total_seconds() / 3600
+        due_at = created_at + timedelta(hours=sla_hours)
+        items.append(
+            PendingApprovalItem(
+                change_request=hydrated[cr.id],
+                sla_hours=sla_hours,
+                elapsed_hours=round(elapsed_hours, 2),
+                due_at=due_at,
+                is_overdue=now > due_at,
+                is_first_approval_needed=cr.requires_dual_approval and cr.first_approved_by is None,
+            )
+        )
+
+    items.sort(key=lambda i: i.due_at)
+    return items
 
 
 @router.post("", response_model=ChangeRequestRead, status_code=201)
@@ -144,6 +238,12 @@ def create_change_request(
     device = db.get(Device, payload.device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+
+    triggering_alert = None
+    if payload.alert_id is not None:
+        triggering_alert = db.get(Alert, payload.alert_id)
+        if not triggering_alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
 
     additional_device_ids_json = None
     if payload.additional_device_ids:
@@ -185,6 +285,7 @@ def create_change_request(
         requires_dual_approval=requires_dual_approval,
         dual_approval_reason=dual_approval_reason,
         canary_enabled=payload.canary_enabled,
+        triggering_alert_id=payload.alert_id,
         status=ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT,
     )
     db.add(cr)
@@ -198,11 +299,14 @@ def create_change_request(
         result="Success" if validation.passed else "Validation Failed",
         device_hostname=device.hostname,
         change_request_id=cr.id,
-        detail="; ".join(validation.errors) if validation.errors else None,
+        detail=(
+            ("; ".join(validation.errors) if validation.errors else "")
+            + (f" (raised from alert: {triggering_alert.category})" if triggering_alert else "")
+        ).strip() or None,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
 
-    return cr
+    return _hydrate(db, [cr])[0]
 
 
 @router.get("/{cr_id}", response_model=ChangeRequestRead)
@@ -210,7 +314,7 @@ def get_change_request(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depend
     cr = db.get(ChangeRequest, cr_id)
     if not cr:
         raise HTTPException(status_code=404, detail="Change request not found")
-    return cr
+    return _hydrate(db, [cr])[0]
 
 
 # Only DRAFT/PENDING_APPROVAL CRs can be rescored -- once a CR has been
@@ -299,7 +403,7 @@ def rescore_change_request(
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
 
-    return cr
+    return _hydrate(db, [cr])[0]
 
 
 @router.post("/{cr_id}/approve", response_model=ChangeRequestRead)
@@ -352,7 +456,7 @@ def approve_change_request(
         event_bus.publish_event(
             "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
         )
-        return cr
+        return _hydrate(db, [cr])[0]
 
     if cr.requires_dual_approval and cr.first_approved_by == current_user.id:
         raise HTTPException(
@@ -362,6 +466,7 @@ def approve_change_request(
 
     cr.status = ChangeStatus.APPROVED
     cr.approved_by = current_user.id
+    cr.approved_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(cr)
 
@@ -420,10 +525,10 @@ def approve_change_request(
             device_hostname=device.hostname if device else None, change_request_id=cr.id,
             detail=f"Scheduled for {window_start} (window ends {window_end}).",
         )
-        return cr
+        return _hydrate(db, [cr])[0]
 
     run_deployment_pipeline_task.delay(str(cr.id), current_user.email)
-    return cr
+    return _hydrate(db, [cr])[0]
 
 
 @router.post("/{cr_id}/reject", response_model=ChangeRequestRead)
@@ -449,4 +554,4 @@ def reject_change_request(
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
-    return cr
+    return _hydrate(db, [cr])[0]

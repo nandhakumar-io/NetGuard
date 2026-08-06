@@ -128,5 +128,22 @@ class ChangeRequest(Base):
     is_rollback = Column(String, nullable=False, default="false", server_default="false")
     rollback_snapshot_id = Column(UUID(as_uuid=True), ForeignKey("config_snapshots.id"), nullable=True)
 
+    # Alert -> Change Request auto-link (postmortem traceability): set when
+    # a CR is submitted directly from an Alert Center alert (see
+    # ChangeRequestCreate.alert_id / app.api.change_requests.create_change_request).
+    # Lets a reviewer jump from "what fixed this incident" on the alert
+    # straight to the CR that was raised for it, and vice versa (GET
+    # /change-requests?alert_id=...). None for changes not tied to any
+    # specific alert -- the common case.
+    triggering_alert_id = Column(UUID(as_uuid=True), ForeignKey("alerts.id"), nullable=True, index=True)
+
+    # Approval workflow visibility (who/when, SLA timers on the pending
+    # queue): approved_at is the timestamp of the *final* approval that
+    # moved this CR to APPROVED -- for a dual-approval CR that's the
+    # second approval; first_approved_at above already covers the first.
+    # updated_at isn't reliable for this since later pipeline stages
+    # (deploying/monitoring/success) also touch it.
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
