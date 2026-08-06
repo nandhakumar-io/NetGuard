@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ghrc.io/nandhakumar-io/netcontrol-backend:${BACKEND_TAG}
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     env_file:
       - .env
@@ -19,7 +19,7 @@ services:
       - "traefik.docker.network=proxy"
 
   frontend:
-    image: ghrc.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
+    image: ghcr.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
     restart: unless-stopped
     depends_on:
       - backend
