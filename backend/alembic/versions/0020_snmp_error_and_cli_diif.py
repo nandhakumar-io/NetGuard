@@ -32,8 +32,6 @@ rows simply have no value until the next poll/drift-scan/change request
 recomputes them.
 """
 import sqlalchemy as sa
-
-
 from alembic import op
 
 revision = "0020"
