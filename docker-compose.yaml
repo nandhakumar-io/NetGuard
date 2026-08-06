@@ -1,7 +1,36 @@
 services:
+  backend:
+    image: ghrc.io/nandhakumar-io/netcontrol-backend:${BACKEND_TAG}
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - proxy
+      - netguard-internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.netguard-backend.rule=Host(`netguard-api.notoriousdev.in`)"
+      - "traefik.http.services.netguard-backend.loadbalancer.server.port=7000"
+      - "traefik.docker.network=proxy"
 
+  frontend:
+    image: ghrc.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - proxy
+      - netguard-internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)"
+      - "traefik.http.services.netguard-frontend.loadbalancer.server.port=3000"
 
- 
   db:
     image: postgres:16-alpine
     restart: unless-stopped
