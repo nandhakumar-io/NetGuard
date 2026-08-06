@@ -85,6 +85,13 @@ class Alert(Base):
     # fan-out.
     suppressed_by_window_id = Column(UUID(as_uuid=True), ForeignKey("maintenance_windows.id"), nullable=True, index=True)
 
+    # Per-alert snooze/mute (app.models.alert_snooze.AlertSnooze): set when
+    # a matching active snooze covers this alert's device_id and/or category.
+    # NULL = not muted; non-NULL = muted by that snooze (checked against
+    # AlertSnooze.expires_at to determine if it's still active). Added by
+    # migration 0034.
+    muted_by_snooze_id = Column(UUID(as_uuid=True), ForeignKey("alert_snoozes.id"), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     root_cause = relationship("Alert", remote_side=[id], foreign_keys=[root_cause_alert_id])

@@ -50,6 +50,7 @@ def _patch_agent(monkeypatch, agent: _FakeAgent):
         "walk_interface_stats",
         lambda ip_address, auth, timeout=3.0: {
             "errors": None, "octets_total": None, "speed_bps": None, "interface_count": None,
+            "per_interface": [],
         },
     )
 
