@@ -10,8 +10,8 @@ from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatu
 from app.models.device import Device, DeviceVendor
 from app.models.protocol_operation import ProtocolName
 from app.services import pipeline_service
-from app.services.protocol_manager import ProtocolResult
 from app.services.health_monitor import CheckOutcome, MonitoringResult, PollRound
+from app.services.protocol_manager import ProtocolResult
 
 
 def _monitoring_result(outcomes: list[CheckOutcome], healthy: bool, rounds: int = 1) -> MonitoringResult:
