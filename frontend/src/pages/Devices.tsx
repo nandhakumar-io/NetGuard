@@ -747,7 +747,9 @@ function DeviceInlineDetails({
                       try {
                         const res = await api.patch<Device>(`/devices/${device.id}`, { supports_netconf: !device.supports_netconf, netconf_port: device.netconf_port || 830 });
                         onDeviceUpdated(res.data);
-                      } catch {}
+                      } catch {
+                        // ignore error
+                      }
                     }}
                     title={device.supports_netconf ? "Click to disable NETCONF" : "Click to enable NETCONF"}
                     className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full cursor-pointer transition-colors hover:ring-2 hover:ring-brandblue/40 ${device.supports_netconf ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}
@@ -761,7 +763,9 @@ function DeviceInlineDetails({
                       try {
                         const res = await api.patch<Device>(`/devices/${device.id}`, { supports_restconf: !device.supports_restconf });
                         onDeviceUpdated(res.data);
-                      } catch {}
+                      } catch {
+                        // ignore error
+                      }
                     }}
                     title={device.supports_restconf ? "Click to disable RESTCONF" : "Click to enable RESTCONF"}
                     className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full cursor-pointer transition-colors hover:ring-2 hover:ring-brandblue/40 ${device.supports_restconf ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400" : "bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500"}`}
