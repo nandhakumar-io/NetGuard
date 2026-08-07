@@ -22,6 +22,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0032"
 down_revision = "0031"
@@ -30,13 +37,13 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column("devices", sa.Column("data_center", sa.String(), nullable=True))
-    op.add_column("devices", sa.Column("rack", sa.String(), nullable=True))
-    op.add_column("devices", sa.Column("rack_position", sa.Integer(), nullable=True))
-    op.create_index("ix_devices_data_center", "devices", ["data_center"])
-    op.create_index("ix_devices_rack", "devices", ["rack"])
+    add_column_if_missing("devices", sa.Column("data_center", sa.String(), nullable=True))
+    add_column_if_missing("devices", sa.Column("rack", sa.String(), nullable=True))
+    add_column_if_missing("devices", sa.Column("rack_position", sa.Integer(), nullable=True))
+    create_index_if_missing("ix_devices_data_center", "devices", ["data_center"])
+    create_index_if_missing("ix_devices_rack", "devices", ["rack"])
 
-    op.create_table(
+    create_table_if_missing(
         "interface_statuses",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False),
@@ -47,12 +54,9 @@ def upgrade():
         sa.Column("is_transition", sa.Boolean(), nullable=False, server_default="true"),
         sa.Column("changed_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_interface_statuses_device_id", "interface_statuses", ["device_id"])
-    op.create_index("ix_interface_statuses_changed_at", "interface_statuses", ["changed_at"])
-    # Hot lookup path in _sync_interface_status: "give me the latest row
-    # for this device+ifIndex" runs on every single poll for every
-    # interface, so the composite index matters at any real fleet size.
-    op.create_index(
+    create_index_if_missing("ix_interface_statuses_device_id", "interface_statuses", ["device_id"])
+    create_index_if_missing("ix_interface_statuses_changed_at", "interface_statuses", ["changed_at"])
+    create_index_if_missing(
         "ix_interface_statuses_device_ifindex", "interface_statuses", ["device_id", "if_index", "changed_at"]
     )
 

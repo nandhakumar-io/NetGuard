@@ -15,6 +15,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0025"
 down_revision = "0024"
@@ -23,7 +30,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
+    create_table_if_missing(
         "config_template_versions",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("template_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("config_templates.id"), nullable=False),
@@ -38,15 +45,15 @@ def upgrade() -> None:
         sa.Column("reviewed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("review_note", sa.Text(), nullable=True),
     )
-    op.create_index("ix_config_template_versions_template_id", "config_template_versions", ["template_id"])
+    create_index_if_missing("ix_config_template_versions_template_id", "config_template_versions", ["template_id"])
 
-    op.add_column(
+    add_column_if_missing(
         "config_templates",
         sa.Column("published_version_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("config_template_versions.id"), nullable=True),
     )
 
 
 def downgrade() -> None:
-    op.drop_column("config_templates", "published_version_id")
-    op.drop_index("ix_config_template_versions_template_id", table_name="config_template_versions")
+    drop_column_if_exists("config_templates", "published_version_id")
+    drop_index_if_exists("ix_config_template_versions_template_id", "config_template_versions")
     op.drop_table("config_template_versions")

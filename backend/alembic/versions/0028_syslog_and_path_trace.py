@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import create_index_if_missing, create_table_if_missing
 
 revision = "0028"
 down_revision = "0027"
@@ -60,7 +61,7 @@ def upgrade() -> None:
         create_type=False
     )
 
-    op.create_table(
+    create_table_if_missing(
         "syslog_messages",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=True),
@@ -76,11 +77,11 @@ def upgrade() -> None:
         sa.Column("correlated_category", sa.String(), nullable=True),
         sa.Column("correlated_alert_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("alerts.id"), nullable=True),
     )
-    op.create_index("ix_syslog_messages_device_id", "syslog_messages", ["device_id"])
-    op.create_index("ix_syslog_messages_source_ip", "syslog_messages", ["source_ip"])
-    op.create_index("ix_syslog_messages_severity", "syslog_messages", ["severity"])
-    op.create_index("ix_syslog_messages_received_at", "syslog_messages", ["received_at"])
-    op.create_index("ix_syslog_messages_correlated_category", "syslog_messages", ["correlated_category"])
+    create_index_if_missing("ix_syslog_messages_device_id", "syslog_messages", ["device_id"])
+    create_index_if_missing("ix_syslog_messages_source_ip", "syslog_messages", ["source_ip"])
+    create_index_if_missing("ix_syslog_messages_severity", "syslog_messages", ["severity"])
+    create_index_if_missing("ix_syslog_messages_received_at", "syslog_messages", ["received_at"])
+    create_index_if_missing("ix_syslog_messages_correlated_category", "syslog_messages", ["correlated_category"])
 
     _create_enum_if_not_exists(bind, "COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus")
     path_trace_status = postgresql.ENUM("COMPLETE", "PARTIAL", "FAILED", name="pathtracestatus", create_type=False)
@@ -88,7 +89,7 @@ def upgrade() -> None:
     _create_enum_if_not_exists(bind, "OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus")
     hop_status = postgresql.ENUM("OK", "DEGRADED", "TIMEOUT", "UNKNOWN", name="hopstatus", create_type=False)
 
-    op.create_table(
+    create_table_if_missing(
         "path_traces",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("source_device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=True),
@@ -103,11 +104,11 @@ def upgrade() -> None:
         sa.Column("requested_by", sa.String(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_path_traces_source_device_id", "path_traces", ["source_device_id"])
-    op.create_index("ix_path_traces_target_device_id", "path_traces", ["target_device_id"])
-    op.create_index("ix_path_traces_created_at", "path_traces", ["created_at"])
+    create_index_if_missing("ix_path_traces_source_device_id", "path_traces", ["source_device_id"])
+    create_index_if_missing("ix_path_traces_target_device_id", "path_traces", ["target_device_id"])
+    create_index_if_missing("ix_path_traces_created_at", "path_traces", ["created_at"])
 
-    op.create_table(
+    create_table_if_missing(
         "path_hops",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("path_trace_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("path_traces.id"), nullable=False),
@@ -119,8 +120,8 @@ def upgrade() -> None:
         sa.Column("packet_loss_pct", sa.Float(), nullable=True),
         sa.Column("status", hop_status, nullable=False, server_default="UNKNOWN"),
     )
-    op.create_index("ix_path_hops_path_trace_id", "path_hops", ["path_trace_id"])
-    op.create_index("ix_path_hops_device_id", "path_hops", ["device_id"])
+    create_index_if_missing("ix_path_hops_path_trace_id", "path_hops", ["path_trace_id"])
+    create_index_if_missing("ix_path_hops_device_id", "path_hops", ["device_id"])
 
 
 def downgrade() -> None:

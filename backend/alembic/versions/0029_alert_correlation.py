@@ -20,6 +20,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_foreign_key_if_missing,
+    create_index_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0029"
 down_revision = "0028"
@@ -28,10 +35,10 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column("alerts", sa.Column("root_cause_alert_id", postgresql.UUID(as_uuid=True), nullable=True))
-    op.add_column("alerts", sa.Column("suppressed", sa.Boolean(), nullable=False, server_default="false"))
-    op.create_index("ix_alerts_root_cause_alert_id", "alerts", ["root_cause_alert_id"])
-    op.create_foreign_key(
+    add_column_if_missing("alerts", sa.Column("root_cause_alert_id", postgresql.UUID(as_uuid=True), nullable=True))
+    add_column_if_missing("alerts", sa.Column("suppressed", sa.Boolean(), nullable=False, server_default="false"))
+    create_index_if_missing("ix_alerts_root_cause_alert_id", "alerts", ["root_cause_alert_id"])
+    create_foreign_key_if_missing(
         "fk_alerts_root_cause_alert_id", "alerts", "alerts", ["root_cause_alert_id"], ["id"]
     )
 

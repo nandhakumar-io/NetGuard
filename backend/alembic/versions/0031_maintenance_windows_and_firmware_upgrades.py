@@ -24,6 +24,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0031"
 down_revision = "0030"
@@ -33,7 +40,7 @@ depends_on = None
 
 def upgrade():
     # --- maintenance_windows ---
-    op.create_table(
+    create_table_if_missing(
         "maintenance_windows",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("name", sa.String(), nullable=False),
@@ -54,11 +61,9 @@ def upgrade():
         sa.Column("created_by", sa.String(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_maintenance_windows_device_id", "maintenance_windows", ["device_id"])
-    op.create_index("ix_maintenance_windows_site", "maintenance_windows", ["site"])
-    # Active-window lookups (alert_service checks this on every raise_alert
-    # call) filter by time range + cancelled, so index the range columns.
-    op.create_index("ix_maintenance_windows_starts_ends", "maintenance_windows", ["starts_at", "ends_at"])
+    create_index_if_missing("ix_maintenance_windows_device_id", "maintenance_windows", ["device_id"])
+    create_index_if_missing("ix_maintenance_windows_site", "maintenance_windows", ["site"])
+    create_index_if_missing("ix_maintenance_windows_starts_ends", "maintenance_windows", ["starts_at", "ends_at"])
 
     # --- alerts.suppressed_by_window_id ---
     # Distinct from the existing `suppressed` boolean (topology-correlation
@@ -66,14 +71,14 @@ def upgrade():
     # would conflate two different reasons an alert is downranked, so this
     # is its own nullable FK: null means "not suppressed by a maintenance
     # window", set means "raised while this window was active".
-    op.add_column(
+    add_column_if_missing(
         "alerts",
         sa.Column("suppressed_by_window_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("maintenance_windows.id"), nullable=True),
     )
-    op.create_index("ix_alerts_suppressed_by_window_id", "alerts", ["suppressed_by_window_id"])
+    create_index_if_missing("ix_alerts_suppressed_by_window_id", "alerts", ["suppressed_by_window_id"])
 
     # --- firmware_upgrades ---
-    op.create_table(
+    create_table_if_missing(
         "firmware_upgrades",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("batch_id", postgresql.UUID(as_uuid=True), nullable=True),
@@ -104,9 +109,9 @@ def upgrade():
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_firmware_upgrades_batch_id", "firmware_upgrades", ["batch_id"])
-    op.create_index("ix_firmware_upgrades_device_id", "firmware_upgrades", ["device_id"])
-    op.create_index("ix_firmware_upgrades_created_at", "firmware_upgrades", ["created_at"])
+    create_index_if_missing("ix_firmware_upgrades_batch_id", "firmware_upgrades", ["batch_id"])
+    create_index_if_missing("ix_firmware_upgrades_device_id", "firmware_upgrades", ["device_id"])
+    create_index_if_missing("ix_firmware_upgrades_created_at", "firmware_upgrades", ["created_at"])
 
 
 def downgrade():

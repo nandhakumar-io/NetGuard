@@ -16,6 +16,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0033"
 down_revision = "0032"
@@ -24,7 +31,7 @@ depends_on = None
 
 
 def upgrade():
-    op.create_table(
+    create_table_if_missing(
         "device_groups",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("name", sa.String(), nullable=False),
@@ -34,11 +41,11 @@ def upgrade():
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_device_groups_name", "device_groups", ["name"])
-    op.create_index("ix_device_groups_parent_group_id", "device_groups", ["parent_group_id"])
+    create_index_if_missing("ix_device_groups_name", "device_groups", ["name"])
+    create_index_if_missing("ix_device_groups_parent_group_id", "device_groups", ["parent_group_id"])
 
-    op.add_column("devices", sa.Column("group_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("device_groups.id"), nullable=True))
-    op.create_index("ix_devices_group_id", "devices", ["group_id"])
+    add_column_if_missing("devices", sa.Column("group_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("device_groups.id"), nullable=True))
+    create_index_if_missing("ix_devices_group_id", "devices", ["group_id"])
 
 
 def downgrade():

@@ -13,6 +13,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0034"
 down_revision = "0033"
@@ -21,7 +28,7 @@ depends_on = None
 
 
 def upgrade():
-    op.create_table(
+    create_table_if_missing(
         "alert_snoozes",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=True),
@@ -31,12 +38,12 @@ def upgrade():
         sa.Column("created_by", sa.String(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_alert_snoozes_device_id", "alert_snoozes", ["device_id"])
-    op.create_index("ix_alert_snoozes_category", "alert_snoozes", ["category"])
-    op.create_index("ix_alert_snoozes_expires_at", "alert_snoozes", ["expires_at"])
+    create_index_if_missing("ix_alert_snoozes_device_id", "alert_snoozes", ["device_id"])
+    create_index_if_missing("ix_alert_snoozes_category", "alert_snoozes", ["category"])
+    create_index_if_missing("ix_alert_snoozes_expires_at", "alert_snoozes", ["expires_at"])
 
-    op.add_column("alerts", sa.Column("muted_by_snooze_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("alert_snoozes.id"), nullable=True))
-    op.create_index("ix_alerts_muted_by_snooze_id", "alerts", ["muted_by_snooze_id"])
+    add_column_if_missing("alerts", sa.Column("muted_by_snooze_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("alert_snoozes.id"), nullable=True))
+    create_index_if_missing("ix_alerts_muted_by_snooze_id", "alerts", ["muted_by_snooze_id"])
 
 
 def downgrade():
