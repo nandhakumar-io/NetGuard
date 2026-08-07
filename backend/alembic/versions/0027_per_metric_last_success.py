@@ -15,6 +15,7 @@ just because the composite score still computes from what did resolve.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing
 
 revision = "0027"
 down_revision = "0026"
@@ -33,9 +34,10 @@ _COLUMNS = [
 
 def upgrade() -> None:
     for col in _COLUMNS:
-        op.add_column("devices", sa.Column(col, sa.DateTime(timezone=True), nullable=True))
+        add_column_if_missing("devices", sa.Column(col, sa.DateTime(timezone=True), nullable=True))
 
 
 def downgrade() -> None:
     for col in _COLUMNS:
         op.drop_column("devices", col)
+
