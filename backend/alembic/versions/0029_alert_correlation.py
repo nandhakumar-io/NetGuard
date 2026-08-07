@@ -24,8 +24,6 @@ from migration_helpers import (
     add_column_if_missing,
     create_foreign_key_if_missing,
     create_index_if_missing,
-    drop_column_if_exists,
-    drop_index_if_exists,
 )
 
 revision = "0029"
