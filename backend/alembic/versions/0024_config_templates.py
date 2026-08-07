@@ -20,25 +20,32 @@ branch_labels = None
 depends_on = None
 
 
+def table_exists(table_name: str) -> bool:
+    bind = op.get_bind()
+    insp = sa.inspect(bind)
+    return insp.has_table(table_name)
+
 def upgrade() -> None:
-    op.create_table(
-        "config_templates",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("name", sa.String(), nullable=False, unique=True),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("device_role", sa.String(), nullable=True),
-        sa.Column("vendor", sa.String(), nullable=True),
-        sa.Column("body", sa.Text(), nullable=False),
-        sa.Column("variables", sa.Text(), nullable=True),
-        sa.Column("created_by", sa.String(), nullable=False, server_default="system"),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-    )
-    op.create_index("ix_config_templates_device_role", "config_templates", ["device_role"])
-    op.create_index("ix_config_templates_vendor", "config_templates", ["vendor"])
+    if not table_exists("config_templates"):
+        op.create_table(
+            "config_templates",
+            sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+            sa.Column("name", sa.String(), nullable=False, unique=True),
+            sa.Column("description", sa.Text(), nullable=True),
+            sa.Column("device_role", sa.String(), nullable=True),
+            sa.Column("vendor", sa.String(), nullable=True),
+            sa.Column("body", sa.Text(), nullable=False),
+            sa.Column("variables", sa.Text(), nullable=True),
+            sa.Column("created_by", sa.String(), nullable=False, server_default="system"),
+            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+            sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        )
+        op.create_index("ix_config_templates_device_role", "config_templates", ["device_role"])
+        op.create_index("ix_config_templates_vendor", "config_templates", ["vendor"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_config_templates_vendor", table_name="config_templates")
-    op.drop_index("ix_config_templates_device_role", table_name="config_templates")
-    op.drop_table("config_templates")
+    if table_exists("config_templates"):
+        op.drop_index("ix_config_templates_vendor", table_name="config_templates")
+        op.drop_index("ix_config_templates_device_role", table_name="config_templates")
+        op.drop_table("config_templates")
