@@ -12,6 +12,6 @@ COPY . .
 
 ENV VITE_API_BASE_URL=https://netguard-api.notoriousdev.in/api/v1
 
-EXPOSE 5173
+EXPOSE 6001
 
 CMD ["npm", "run", "dev", "--", "--host"]

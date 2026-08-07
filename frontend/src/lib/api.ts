@@ -1,6 +1,6 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:7000/api/v1";
+const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:7001/api/v1";
 
 export const ACCESS_TOKEN_KEY = "netguard_token";
 export const REFRESH_TOKEN_KEY = "netguard_refresh_token";
