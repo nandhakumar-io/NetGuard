@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e3a8a;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#60a5fa;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#bfdbfe;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background Shield (NetGuard theme) -->
+  <path d="M256,24 
+           L480,104 
+           V256 
+           C480,380 380,480 256,488 
+           C132,480 32,380 32,256 
+           V104 
+           Z" 
+        fill="url(#shieldGrad)" />
+
+  <!-- Network Edges -->
+  <path d="M256,180 L160,320 M256,180 L352,320 M160,320 L352,320" 
+        stroke="#bfdbfe" 
+        stroke-width="24" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" />
+
+  <!-- Network Nodes -->
+  <circle cx="256" cy="180" r="44" fill="#ffffff" />
+  <circle cx="160" cy="320" r="44" fill="#ffffff" />
+  <circle cx="352" cy="320" r="44" fill="#ffffff" />
+
+  <!-- Inner Nodes -->
+  <circle cx="256" cy="180" r="28" fill="url(#nodeGrad)" />
+  <circle cx="160" cy="320" r="28" fill="url(#nodeGrad)" />
+  <circle cx="352" cy="320" r="28" fill="url(#nodeGrad)" />
+</svg>
