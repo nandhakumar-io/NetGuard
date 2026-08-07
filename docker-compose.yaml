@@ -25,7 +25,6 @@ services:
       - backend
     networks:
       - proxy
-      - netguard-internal
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)"
