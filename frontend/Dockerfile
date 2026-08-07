@@ -10,6 +10,8 @@ RUN npm ci
 
 COPY . .
 
+ENV VITE_API_BASE_URL=https://netguard-api.notoriousdev.in/api/v1
+
 EXPOSE 5173
 
 CMD ["npm", "run", "dev", "--", "--host"]
