@@ -55,12 +55,12 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100">
-      <aside className="w-60 bg-navy dark:bg-slate-950 text-white flex-shrink-0 flex flex-col">
-        <div className="px-5 py-6 border-b border-white/10">
-          <p className="text-lg font-bold tracking-tight">NetGuard</p>
-          <p className="text-[11px] text-accent mt-0.5">Network Change Management</p>
+      <aside className="w-60 bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col">
+        <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border">
+          <p className="font-display text-xl font-bold tracking-widest uppercase">NetGuard</p>
+          <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider">Network Ops Console</p>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {links.map((l) => (
             <NavLink
               key={l.to}
@@ -68,7 +68,9 @@ export default function Layout() {
               end={l.end}
               className={({ isActive }) =>
                 `block px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  isActive ? "bg-brandblue text-white" : "text-slate-300 dark:text-slate-400 hover:bg-white/5 hover:text-white"
+                  isActive
+                    ? "bg-brandblue text-white dark:bg-noc-cyan/15 dark:text-noc-cyan dark:border-l-2 dark:border-noc-cyan"
+                    : "text-slate-300 dark:text-noc-muted hover:bg-white/5 hover:text-white dark:hover:text-noc-text"
                 }`
               }
             >
@@ -76,11 +78,11 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="px-5 py-4 border-t border-white/10">
+        <div className="px-5 py-4 border-t border-white/10 dark:border-noc-border">
           {user && (
             <div className="mb-3">
               <p className="text-sm font-medium truncate">{user.full_name}</p>
-              <p className="text-[11px] text-accent capitalize">{user.role.replace(/_/g, " ")}</p>
+              <p className="text-[11px] text-accent dark:text-noc-cyan capitalize">{user.role.replace(/_/g, " ")}</p>
             </div>
           )}
           <button
@@ -88,22 +90,22 @@ export default function Layout() {
               await logout();
               navigate("/login");
             }}
-            className="text-[11px] text-slate-400 dark:text-slate-500 hover:text-white transition-colors"
+            className="text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors"
           >
             Sign out
           </button>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">v1.0 · Prototype</p>
+          <p className="text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num">v1.0 · Prototype</p>
         </div>
       </aside>
-      <main className="flex-1 flex flex-col overflow-y-auto">
-        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center justify-between gap-2 px-6">
+      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg">
+        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-6">
           <button
             onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
-            className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors max-w-xs w-full"
+            className="flex items-center gap-2 text-xs text-slate-400 dark:text-noc-muted border border-slate-200 dark:border-noc-border rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-noc-panel2 transition-colors max-w-xs w-full"
           >
             <span>🔎</span>
             <span className="flex-1 text-left">Search devices, alerts, configs…</span>
-            <span className="font-mono text-[10px] bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">⌘K</span>
+            <span className="font-mono text-[10px] bg-slate-100 dark:bg-noc-panel2 dark:border dark:border-noc-border px-1.5 py-0.5 rounded">⌘K</span>
           </button>
           <div className="flex items-center gap-2">
             <ThemeToggle />

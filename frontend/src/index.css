@@ -11,15 +11,103 @@ code, pre {
 }
 
 html.dark body {
-  @apply bg-slate-900 text-slate-100;
+  background: #080B10;
+  color: #E7ECF3;
 }
 
 /* Scrollbars left to the OS/browser default in light mode; a light
    scrollbar on a dark page reads as a bug, so darken it to match. */
 html.dark ::-webkit-scrollbar-track {
-  background: #1e293b; /* slate-800 */
+  background: #121826; /* noc-panel2 */
 }
 html.dark ::-webkit-scrollbar-thumb {
-  background: #475569; /* slate-600 */
+  background: #2A3548; /* noc-borderlit */
   border-radius: 9999px;
+}
+
+/* ============================================================
+   NOC console signature system
+   Bracket-corner panels + a scrolling status marquee are the two
+   recurring devices that mark this out as an ops console rather
+   than a generic card dashboard.
+   ============================================================ */
+
+.noc-root {
+  background:
+    radial-gradient(ellipse 1200px 600px at 15% -10%, rgba(34,211,238,0.06), transparent 60%),
+    radial-gradient(ellipse 900px 500px at 100% 0%, rgba(167,139,250,0.05), transparent 55%),
+    #080B10;
+  min-height: 100%;
+}
+
+/* Bracket-corner panel: four short corner ticks instead of a full
+   rounded border, like a HUD reticle framing each instrument. */
+.noc-panel {
+  position: relative;
+  background: #0E131C;
+  border: 1px solid #1D2532;
+}
+.noc-panel::before,
+.noc-panel::after,
+.noc-panel > .corner-tl,
+.noc-panel > .corner-br {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+}
+.noc-panel::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid #2A3548;
+  border-left: 2px solid #2A3548;
+}
+.noc-panel::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 2px solid #2A3548;
+  border-right: 2px solid #2A3548;
+}
+.noc-panel.lit::before,
+.noc-panel.lit::after {
+  border-color: #22D3EE;
+}
+
+.noc-label {
+  font-family: 'Barlow Condensed', sans-serif;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+}
+
+.noc-num {
+  font-family: 'IBM Plex Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scrolling marquee ticker */
+@keyframes noc-ticker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.noc-ticker-track {
+  display: flex;
+  width: max-content;
+  animation: noc-ticker 40s linear infinite;
+}
+.noc-ticker-track:hover {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .noc-ticker-track {
+    animation: none;
+  }
+}
+
+@keyframes noc-pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52,211,153,0.5); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 4px rgba(52,211,153,0); }
+}
+.noc-live-dot {
+  animation: noc-pulse-dot 2s ease-in-out infinite;
 }
