@@ -74,7 +74,7 @@ export default function Login() {
           </div>
           <form onSubmit={submitMfa} className="space-y-3">
             <input
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm tracking-widest text-center text-lg"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm tracking-widest text-center text-lg bg-white text-slate-900 placeholder:text-slate-400"
               inputMode="numeric"
               pattern="[0-9]*"
               maxLength={6}
@@ -137,7 +137,7 @@ export default function Login() {
         <form onSubmit={submit} className="space-y-3">
           {mode === "register" && (
             <input
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-400"
               placeholder="Full name"
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
@@ -145,7 +145,7 @@ export default function Login() {
             />
           )}
           <input
-            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-400"
             type="email"
             placeholder="Email"
             value={email}
@@ -154,7 +154,7 @@ export default function Login() {
           />
           <div className="relative">
             <input
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 pr-16 text-sm"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 pr-16 text-sm bg-white text-slate-900 placeholder:text-slate-400"
               type={showPassword ? "text" : "password"}
               placeholder="Password"
               value={password}
@@ -173,7 +173,7 @@ export default function Login() {
           </div>
           {mode === "register" && (
             <select
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-400"
               value={role}
               onChange={(e) => setRole(e.target.value as UserRole)}
             >

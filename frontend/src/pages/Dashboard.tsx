@@ -1,457 +1,439 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Area,
   AreaChart,
   CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  RadialBar,
+  RadialBarChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import { api } from "../lib/api";
-import { DashboardSummary, DriftFleetSummary, Alert } from "../lib/types";
+import { DashboardSummary, Alert, DeviceGroup, Device } from "../lib/types";
 import Sparkline from "../components/Sparkline";
 import { useAuth } from "../lib/auth";
-
-function formatBps(bps: number | null): string {
-  if (bps === null || Number.isNaN(bps)) return "—";
-  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`;
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} Mbps`;
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} Kbps`;
-  return `${bps.toFixed(0)} bps`;
-}
-
-const SEV_DOT: Record<string, string> = { critical: "bg-noc-crit", warning: "bg-noc-warn", info: "bg-noc-cyan" };
-const SEV_TEXT: Record<string, string> = { critical: "text-noc-crit", warning: "text-noc-warn", info: "text-noc-cyan" };
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const secs = Math.floor(diff / 1000);
-  if (secs < 60) return `${secs}s`;
+  if (secs < 60) return `${secs}s ago`;
   const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
+  if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.floor(hrs / 24)}d`;
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
 }
 
-// Bracket-corner instrument panel -- the recurring visual unit of this
-// console. Kept as a tiny wrapper so every widget below gets identical
-// framing without repeating the corner-tick markup.
-function Panel({ children, className = "", lit = false }: { children: React.ReactNode; className?: string; lit?: boolean }) {
-  return <div className={`noc-panel ${lit ? "lit" : ""} p-5 ${className}`}>{children}</div>;
+const SEV_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
+  critical: { dot: "bg-red-500", text: "text-red-700", bg: "bg-red-50 border-red-100" },
+  warning: { dot: "bg-amber-500", text: "text-amber-700", bg: "bg-amber-50 border-amber-100" },
+  info: { dot: "bg-blue-500", text: "text-blue-700", bg: "bg-blue-50 border-blue-100" },
+};
+
+interface GroupStat {
+  id: string;
+  name: string;
+  online: number;
+  offline: number;
+  total: number;
 }
 
-function PanelHead({ title, right }: { title: string; right?: React.ReactNode }) {
+function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return <div className={`bg-white border border-slate-200 rounded-2xl shadow-sm ${className}`}>{children}</div>;
+}
+
+// Small semicircular gauge (0-100) used for CPU / Memory / Health — a
+// real progress ring, not a stylised HUD element.
+function Gauge({ label, value, color }: { label: string; value: number; color: string }) {
+  const data = [{ value: Math.max(0, Math.min(value, 100)) }];
   return (
-    <div className="flex items-center justify-between mb-4 pb-3 border-b border-noc-border">
-      <h2 className="noc-label text-[13px] text-noc-muted uppercase">{title}</h2>
-      {right}
+    <div className="flex flex-col items-center">
+      <div className="w-24 h-16 relative">
+        <ResponsiveContainer width="100%" height="100%">
+          <RadialBarChart
+            innerRadius="70%"
+            outerRadius="100%"
+            data={data}
+            startAngle={180}
+            endAngle={0}
+            barSize={9}
+          >
+            <RadialBar dataKey="value" cornerRadius={6} fill={color} background={{ fill: "#EEF2F7" }} />
+          </RadialBarChart>
+        </ResponsiveContainer>
+        <div className="absolute inset-0 flex items-end justify-center pb-1">
+          <span className="text-lg font-bold text-slate-800">{Math.round(value)}%</span>
+        </div>
+      </div>
+      <p className="text-[11px] text-slate-400 font-medium mt-0.5">{label}</p>
     </div>
+  );
+}
+
+const STAT_ICONS: Record<string, { bg: string; fg: string; icon: React.ReactNode }> = {
+  devices: { bg: "bg-indigo-50", fg: "text-indigo-500", icon: <path d="M4 6h16M4 12h16M4 18h10" strokeLinecap="round" /> },
+  online: { bg: "bg-emerald-50", fg: "text-emerald-500", icon: <path d="M5 12l4 4L19 6" strokeLinecap="round" strokeLinejoin="round" /> },
+  offline: { bg: "bg-red-50", fg: "text-red-500", icon: <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" /> },
+  cpu: { bg: "bg-cyan-50", fg: "text-cyan-500", icon: <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M7 7h10v10H7z" strokeLinecap="round" strokeLinejoin="round" /> },
+  memory: { bg: "bg-violet-50", fg: "text-violet-500", icon: <path d="M4 7h16v10H4zM8 7v10M12 7v10M16 7v10" strokeLinecap="round" /> },
+  alerts: { bg: "bg-amber-50", fg: "text-amber-500", icon: <path d="M12 3l9 16H3L12 3zM12 10v4M12 17h.01" strokeLinecap="round" strokeLinejoin="round" /> },
+};
+
+function StatCard({
+  iconKey,
+  value,
+  label,
+  sublabel,
+  valueClass = "text-slate-800",
+}: {
+  iconKey: keyof typeof STAT_ICONS;
+  value: React.ReactNode;
+  label: string;
+  sublabel?: string;
+  valueClass?: string;
+}) {
+  const cfg = STAT_ICONS[iconKey];
+  return (
+    <Card className="p-5">
+      <div className={`w-9 h-9 rounded-lg ${cfg.bg} ${cfg.fg} flex items-center justify-center mb-4`}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{cfg.icon}</svg>
+      </div>
+      <p className={`text-2xl font-bold ${valueClass}`}>{value}</p>
+      <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mt-1">{label}</p>
+      {sublabel && <p className="text-[11px] text-slate-400 mt-0.5">{sublabel}</p>}
+    </Card>
   );
 }
 
 export default function Dashboard() {
   const { user } = useAuth();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [, setDriftSummary] = useState<DriftFleetSummary | null>(null);
   const [recentAlerts, setRecentAlerts] = useState<Alert[]>([]);
-  const [activeAlerts, setActiveAlerts] = useState<Alert[]>([]);
+  const [groupStats, setGroupStats] = useState<GroupStat[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [connection, setConnection] = useState<"live" | "polling" | "connecting">("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [clock, setClock] = useState(new Date());
-  const wsRef = useRef<WebSocket | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadAll = () => {
+    api
+      .get<DashboardSummary>("/dashboard/summary")
+      .then((res) => {
+        setSummary(res.data);
+        setError(null);
+        setLastUpdated(new Date());
+      })
+      .catch(() => setError("Could not reach the NetGuard API."))
+      .finally(() => setLoading(false));
+
+    api.get<Alert[]>("/alerts?status=active&limit=6").then((res) => setRecentAlerts(res.data)).catch(() => {});
+
+    api
+      .get<DeviceGroup[]>("/device-groups")
+      .then(async (res) => {
+        const groups = res.data.slice(0, 8);
+        const withCounts = await Promise.all(
+          groups.map(async (g) => {
+            try {
+              const devRes = await api.get<Device[]>(`/device-groups/${g.id}/devices`);
+              const online = devRes.data.filter((d) => d.status === "online").length;
+              return { id: g.id, name: g.name, online, offline: devRes.data.length - online, total: devRes.data.length };
+            } catch {
+              return { id: g.id, name: g.name, online: 0, offline: g.device_count, total: g.device_count };
+            }
+          })
+        );
+        setGroupStats(withCounts);
+      })
+      .catch(() => {});
+  };
 
   useEffect(() => {
-    let mounted = true;
-    const fetchSummary = () => {
-      api
-        .get<DashboardSummary>("/dashboard/summary")
-        .then((res) => {
-          if (!mounted) return;
-          setSummary(res.data);
-          setError(null);
-          setLastUpdated(new Date());
-        })
-        .catch(() => mounted && setError("Could not reach the NetGuard API."));
-    };
-    const fetchAlerts = () => {
-      api.get<Alert[]>("/alerts?status=active&limit=8").then((res) => mounted && setRecentAlerts(res.data)).catch(() => {});
-      api.get<Alert[]>("/alerts?status=active&limit=200").then((res) => mounted && setActiveAlerts(res.data)).catch(() => {});
-    };
-    fetchSummary();
-    fetchAlerts();
-    api.get<DriftFleetSummary>("/drift/summary").then((res) => mounted && setDriftSummary(res.data)).catch(() => {});
-
-    const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
-    const wsUrl = base.replace(/^http/, "ws") + "/dashboard/ws";
-    let ws: WebSocket | null = null;
-    let pollInterval: ReturnType<typeof setInterval> | null = null;
-
-    try {
-      ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      ws.onopen = () => mounted && setConnection("live");
-      ws.onmessage = (evt) => {
-        if (!mounted) return;
-        try {
-          setSummary(JSON.parse(evt.data));
-          setError(null);
-          setLastUpdated(new Date());
-          fetchAlerts();
-        } catch {
-          /* ignore malformed frame */
-        }
-      };
-      ws.onerror = () => {
-        if (!mounted) return;
-        setConnection("polling");
-        if (!pollInterval) pollInterval = setInterval(() => { fetchSummary(); fetchAlerts(); }, 5000);
-      };
-      ws.onclose = () => {
-        if (!mounted) return;
-        setConnection((c) => (c === "live" ? "polling" : c));
-        if (!pollInterval) pollInterval = setInterval(() => { fetchSummary(); fetchAlerts(); }, 5000);
-      };
-    } catch {
-      setConnection("polling");
-      pollInterval = setInterval(() => { fetchSummary(); fetchAlerts(); }, 5000);
-    }
-
-    const clockTimer = setInterval(() => setClock(new Date()), 1000);
-
-    return () => {
-      mounted = false;
-      ws?.close();
-      if (pollInterval) clearInterval(pollInterval);
-      clearInterval(clockTimer);
-    };
+    loadAll();
+    const interval = setInterval(loadAll, 15000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
-  const downPortAlerts = activeAlerts.filter((a) => a.category.startsWith("Interface Down"));
-  const unreachableAlerts = activeAlerts.filter((a) => a.category === "Device Unreachable");
-  const restartAlerts = activeAlerts.filter((a) => a.category === "Device Restart");
-  const noIssues = downPortAlerts.length === 0 && unreachableAlerts.length === 0 && restartAlerts.length === 0
-    && (summary?.down_ports?.length ?? 0) === 0 && (summary?.recent_reboots?.length ?? 0) === 0;
-
-  const scoreColor = (score: number) => (score >= 90 ? "text-noc-good" : score >= 70 ? "text-noc-warn" : "text-noc-crit");
-  const utilBar = (val: number) => (val >= 90 ? "bg-noc-crit" : val >= 65 ? "bg-noc-warn" : "bg-noc-cyan");
-
   const online = summary?.devices_online ?? 0;
   const total = summary?.devices_total ?? 0;
-  const onlinePct = total > 0 ? (online / total) * 100 : 100;
   const offline = Math.max(total - online, 0);
+  const onlinePct = total > 0 ? (online / total) * 100 : 100;
 
-  // Ticker: live-feed of the most urgent/recent things happening on the
-  // fleet right now -- the console's signature marquee.
-  const tickerItems = [
-    ...(summary?.flagged_unstable_devices ?? []).map((d) => ({ text: `UNSTABLE — ${d.hostname} (${d.ip_address})`, tone: "text-noc-crit" })),
-    ...recentAlerts.map((a) => ({ text: `${a.category.toUpperCase()} — ${a.message}`, tone: SEV_TEXT[a.severity] || "text-noc-cyan" })),
-    ...(summary?.down_ports ?? []).slice(0, 6).map((p) => ({ text: `PORT DOWN — ${p.hostname} / ${p.interface}`, tone: "text-noc-warn" })),
-    ...(summary?.recent_reboots ?? []).slice(0, 4).map((r) => ({ text: `REBOOT — ${r.hostname} up ${Math.floor(r.uptime_seconds / 60)}m`, tone: "text-noc-cyan" })),
-  ];
-  const tickerLoop = tickerItems.length > 0 ? [...tickerItems, ...tickerItems] : [];
+  const lastHistory = summary?.fleet_health_history?.[summary.fleet_health_history.length - 1];
+  const avgCpu = lastHistory?.avg_cpu ?? 0;
+  const avgMem = lastHistory?.avg_memory ?? 0;
+  const cpuHistory = (summary?.fleet_health_history || []).map((h) => h.avg_cpu ?? 0);
+  const memHistory = (summary?.fleet_health_history || []).map((h) => h.avg_memory ?? 0);
+
+  const donutData = [
+    { name: "Online", value: online, color: "#10B981" },
+    { name: "Offline", value: offline, color: "#EF4444" },
+  ].filter((d) => d.value > 0);
+
+  const totalGroups = groupStats.length;
+
+  if (loading && !summary) {
+    return (
+      <div className="flex items-center justify-center h-96 text-slate-400 text-sm">Loading dashboard…</div>
+    );
+  }
 
   return (
-    <div className="noc-root -m-8 p-6 font-sans text-noc-text">
-      {/* ---- Console header ------------------------------------------------ */}
-      <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+    <div className="font-sans">
+      {/* ---- Header --------------------------------------------------- */}
+      <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
         <div>
-          <div className="flex items-center gap-2.5">
-            <span className={`w-2 h-2 rounded-full ${connection === "live" ? "bg-noc-good noc-live-dot" : connection === "polling" ? "bg-noc-warn" : "bg-noc-faint"}`} />
-            <h1 className="noc-label text-2xl uppercase tracking-widest text-noc-text">Fleet Operations</h1>
-          </div>
-          <p className="text-[13px] text-noc-muted mt-1">
-            {greeting}{user ? `, ${user.full_name.split(" ")[0]}` : ""} — {total} devices under management
+          <h1 className="text-2xl font-bold text-slate-800">
+            {greeting}, <span className="text-brandblue">{user ? user.full_name.split(" ")[0] : "there"}</span>
+          </h1>
+          <p className="text-sm text-slate-400 mt-1">
+            {new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+            {lastUpdated && <> · refreshed {timeAgo(lastUpdated.toISOString())}</>}
           </p>
         </div>
-        <div className="text-right noc-num text-noc-muted text-xs">
-          <div className={`uppercase font-semibold tracking-wider ${connection === "live" ? "text-noc-good" : connection === "polling" ? "text-noc-warn" : "text-noc-faint"}`}>
-            {connection === "live" ? "● LIVE" : connection === "polling" ? "● POLLING" : "○ CONNECTING"}
-          </div>
-          <div className="text-lg text-noc-text mt-0.5">{clock.toLocaleTimeString()}</div>
-          <div>{lastUpdated ? `synced ${timeAgo(lastUpdated.toISOString())} ago` : "—"}</div>
-        </div>
+        <button
+          onClick={loadAll}
+          className="w-9 h-9 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:text-brandblue hover:border-brandblue/40 transition-colors"
+          title="Refresh"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 12a9 9 0 11-3-6.7M21 4v6h-6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
       </div>
 
-      {error && !summary && (
-        <div className="noc-panel border-noc-crit/40 p-4 mb-4 text-sm text-noc-crit">
+      {error && (
+        <Card className="p-4 mb-6 border-red-200 bg-red-50 text-sm text-red-700">
           {error} Make sure the backend is running at{" "}
-          <code className="bg-noc-panel2 px-2 py-0.5 rounded border border-noc-border ml-1">{import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1"}</code>.
-        </div>
+          <code className="bg-white px-2 py-0.5 rounded border border-red-200 ml-1">{import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1"}</code>.
+        </Card>
       )}
 
-      {/* ---- Ticker marquee ------------------------------------------------ */}
-      <div className="noc-panel mb-5 overflow-hidden h-9 flex items-center">
-        <span className="noc-label text-[11px] px-3 shrink-0 text-noc-bg bg-noc-cyan h-full flex items-center uppercase">Live Feed</span>
-        {tickerLoop.length > 0 ? (
-          <div className="noc-ticker-track">
-            {tickerLoop.map((t, i) => (
-              <span key={i} className={`noc-num text-[12px] px-6 whitespace-nowrap ${t.tone}`}>{t.text}</span>
-            ))}
+      {/* ---- Stat card row ---------------------------------------------- */}
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
+        <StatCard iconKey="devices" value={total} label="Devices" sublabel={`${totalGroups} groups`} />
+        <StatCard iconKey="online" value={online} label="Online" valueClass="text-emerald-600" sublabel={`${onlinePct.toFixed(0)}% healthy`} />
+        <StatCard iconKey="offline" value={offline} label="Offline" valueClass={offline > 0 ? "text-red-600" : "text-slate-800"} sublabel={`${summary?.critical_alerts ?? 0} critical`} />
+        <Card className="p-5">
+          <div className="w-9 h-9 rounded-lg bg-cyan-50 text-cyan-500 flex items-center justify-center mb-3">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M7 7h10v10H7z" strokeLinecap="round" strokeLinejoin="round" /></svg>
           </div>
-        ) : (
-          <span className="noc-num text-[12px] px-4 text-noc-good">All systems nominal — no active incidents.</span>
-        )}
+          <div className="flex items-end justify-between">
+            <p className="text-2xl font-bold text-slate-800">{avgCpu.toFixed(1)}%</p>
+            <Sparkline values={cpuHistory} color="#06B6D4" width={56} height={20} />
+          </div>
+          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mt-1">Avg CPU</p>
+        </Card>
+        <Card className="p-5">
+          <div className="w-9 h-9 rounded-lg bg-violet-50 text-violet-500 flex items-center justify-center mb-3">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16v10H4zM8 7v10M12 7v10M16 7v10" strokeLinecap="round" /></svg>
+          </div>
+          <div className="flex items-end justify-between">
+            <p className="text-2xl font-bold text-slate-800">{avgMem.toFixed(0)}%</p>
+            <Sparkline values={memHistory} color="#8B5CF6" width={56} height={20} />
+          </div>
+          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mt-1">Avg RAM</p>
+        </Card>
+        <StatCard
+          iconKey="alerts"
+          value={(summary?.critical_alerts ?? 0) + (summary?.warning_alerts ?? 0)}
+          label="Alerts"
+          valueClass={(summary?.critical_alerts ?? 0) > 0 ? "text-amber-600" : "text-slate-800"}
+          sublabel={`${summary?.critical_alerts ?? 0} critical`}
+        />
       </div>
 
-      {/* ---- KPI strip ------------------------------------------------------ */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-5">
-        <Panel className="!p-4">
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Health Score</p>
-          <p className={`noc-num text-3xl font-bold ${scoreColor(summary?.global_health_score ?? 100)}`}>{summary?.global_health_score ?? 100}</p>
-        </Panel>
-        <Panel className="!p-4">
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Online</p>
-          <p className="noc-num text-3xl font-bold text-noc-good">{online}<span className="text-sm text-noc-faint">/{total}</span></p>
-        </Panel>
-        <Panel className="!p-4" lit={offline > 0}>
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Offline</p>
-          <p className={`noc-num text-3xl font-bold ${offline > 0 ? "text-noc-crit" : "text-noc-faint"}`}>{offline}</p>
-        </Panel>
-        <Panel className="!p-4" lit={(summary?.critical_alerts ?? 0) > 0}>
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Critical Alerts</p>
-          <p className={`noc-num text-3xl font-bold ${(summary?.critical_alerts ?? 0) > 0 ? "text-noc-crit" : "text-noc-faint"}`}>{summary?.critical_alerts ?? 0}</p>
-        </Panel>
-        <Panel className="!p-4">
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Warnings</p>
-          <p className={`noc-num text-3xl font-bold ${(summary?.warning_alerts ?? 0) > 0 ? "text-noc-warn" : "text-noc-faint"}`}>{summary?.warning_alerts ?? 0}</p>
-        </Panel>
-        <Panel className="!p-4">
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Open Drifts</p>
-          <p className="noc-num text-3xl font-bold text-noc-violet">{summary?.open_drifts ?? 0}</p>
-        </Panel>
-        <Panel className="!p-4">
-          <p className="noc-label text-[10px] text-noc-muted uppercase mb-1.5">Deploy Success</p>
-          <p className="noc-num text-3xl font-bold text-noc-cyan">{summary?.deployment_success_rate ?? 100}<span className="text-sm text-noc-faint">%</span></p>
-        </Panel>
-      </div>
-
-      {/* ---- Main grid -------------------------------------------------------- */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
-        {/* Left / main column */}
-        <div className="xl:col-span-2 space-y-5">
-
-          {/* Fleet connectivity bar + history chart */}
-          <Panel>
-            <PanelHead
-              title="Fleet Connectivity — 24h"
-              right={<span className="noc-num text-xs text-noc-muted">{online}/{total} online</span>}
-            />
-            <div className="w-full h-2.5 rounded-full bg-noc-panel2 overflow-hidden flex mb-5 border border-noc-border">
-              <div className="h-full bg-noc-good" style={{ width: `${onlinePct}%` }} />
-              <div className="h-full bg-noc-crit" style={{ width: `${100 - onlinePct}%` }} />
-            </div>
-            {(summary?.fleet_health_history?.length ?? 0) === 0 ? (
-              <p className="text-sm text-noc-faint py-10 text-center">Not enough polling history yet.</p>
-            ) : (
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={summary?.fleet_health_history}>
-                    <defs>
-                      <linearGradient id="cpuFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#22D3EE" stopOpacity={0.35} />
-                        <stop offset="95%" stopColor="#22D3EE" stopOpacity={0.02} />
-                      </linearGradient>
-                      <linearGradient id="memFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#A78BFA" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#A78BFA" stopOpacity={0.02} />
-                      </linearGradient>
-                      <linearGradient id="bwFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#FBBF24" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#FBBF24" stopOpacity={0.02} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1D2532" vertical={false} />
-                    <XAxis dataKey="timestamp" tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")} tick={{ fontSize: 10, fill: "#7C8697" }} minTickGap={40} />
-                    <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: "#7C8697" }} width={36} domain={[0, 100]} />
-                    <Tooltip
-                      contentStyle={{ background: "#0E131C", border: "1px solid #1D2532", borderRadius: 6, fontSize: 12 }}
-                      labelStyle={{ color: "#7C8697" }}
-                      formatter={(v: number, name: string) => [`${v?.toFixed?.(1) ?? v}%`, name]}
-                      labelFormatter={(v) => (v ? new Date(v).toLocaleString() : "")}
-                    />
-                    <Area type="monotone" dataKey="avg_cpu" name="CPU" stroke="#22D3EE" fill="url(#cpuFill)" strokeWidth={2} connectNulls />
-                    <Area type="monotone" dataKey="avg_memory" name="Memory" stroke="#A78BFA" fill="url(#memFill)" strokeWidth={2} connectNulls />
-                    <Area type="monotone" dataKey="avg_bandwidth" name="Bandwidth" stroke="#FBBF24" fill="url(#bwFill)" strokeWidth={2} connectNulls />
-                  </AreaChart>
-                </ResponsiveContainer>
-                <div className="flex gap-4 justify-center mt-2 text-[11px] noc-num">
-                  <span className="text-noc-cyan">■ CPU</span>
-                  <span className="text-noc-violet">■ Memory</span>
-                  <span className="text-noc-warn">■ Bandwidth</span>
-                </div>
-              </div>
-            )}
-          </Panel>
-
-          {/* Uplinks */}
-          <Panel>
-            <PanelHead title="Uplinks & WAN Links" right={<Link to="/devices" className="text-[11px] text-noc-cyan hover:underline noc-label">ALL DEVICES →</Link>} />
-            {(summary?.uplinks?.length ?? 0) === 0 ? (
-              <p className="text-xs text-noc-faint italic">No devices tagged as WAN/uplink/core/edge yet. Set a device's Role (e.g. "wan-edge", "core", "uplink") to surface it here.</p>
-            ) : (
-              <div className="space-y-4">
-                {summary?.uplinks?.map((link, i) => (
-                  <div key={i} className="flex flex-col gap-1.5">
-                    <div className="flex justify-between items-center gap-2 text-[13px]">
-                      <span className="flex items-center gap-2 font-semibold text-noc-text truncate">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${link.status === "online" ? "bg-noc-good" : link.status === "offline" ? "bg-noc-crit" : "bg-noc-faint"}`} />
-                        {link.hostname}
-                        <span className="text-noc-muted font-normal noc-num text-[11px]">{link.ip_address}</span>
-                        {link.role && <span className="text-[9px] uppercase noc-label text-noc-cyan bg-noc-panel2 px-1.5 py-0.5 rounded border border-noc-border">{link.role}</span>}
-                      </span>
-                      <span className="flex items-center gap-2 shrink-0 noc-num font-semibold text-noc-text">
-                        <Sparkline values={link.history} color={link.utilization_pct >= 85 ? "#F87171" : link.utilization_pct >= 65 ? "#FBBF24" : "#22D3EE"} />
-                        {formatBps(link.throughput_bps)}
-                        <span className="text-noc-muted font-normal">({link.utilization_pct.toFixed(1)}%)</span>
-                      </span>
-                    </div>
-                    <div className="w-full h-1.5 rounded-full bg-noc-panel2 overflow-hidden border border-noc-border">
-                      <div className={`h-full ${utilBar(link.utilization_pct)}`} style={{ width: `${Math.min(link.utilization_pct, 100)}%` }} />
-                    </div>
-                    {(link.errors ?? 0) > 0 && <p className="text-[11px] font-medium text-noc-warn">{link.errors} interface error(s) since last poll</p>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </Panel>
-
-          {/* Top-N metric widgets */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-            {[
-              { title: "Top CPU", data: summary?.top_cpu_devices, key: "cpu" as const, unit: "%" },
-              { title: "Top Memory", data: summary?.top_memory_devices, key: "memory" as const, unit: "%" },
-              { title: "Top Bandwidth", data: summary?.top_bandwidth_devices, key: "bandwidth" as const, unit: "" },
-            ].map((col) => (
-              <Panel key={col.title}>
-                <h3 className="noc-label text-[11px] text-noc-muted uppercase mb-3">{col.title}</h3>
-                {(col.data?.length ?? 0) === 0 ? (
-                  <p className="text-xs text-noc-faint italic">No telemetry yet.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {col.data?.slice(0, 5).map((dev: any, i: number) => (
-                      <div key={i}>
-                        <div className="flex justify-between items-center gap-2 text-[12px] font-medium text-noc-text mb-1">
-                          <span className="truncate">{dev.hostname}</span>
-                          <span className="noc-num text-noc-muted shrink-0">{col.unit ? `${dev[col.key].toFixed(0)}${col.unit}` : formatBps(dev[col.key])}</span>
-                        </div>
-                        <div className="w-full h-1.5 rounded-full bg-noc-panel2 overflow-hidden border border-noc-border">
-                          <div className={`h-full ${utilBar(col.unit ? dev[col.key] : Math.min((dev[col.key] / 1e9) * 100, 100))}`} style={{ width: `${col.unit ? Math.min(dev[col.key], 100) : Math.min((dev[col.key] / 1e9) * 100, 100)}%` }} />
-                        </div>
-                      </div>
+      {/* ---- Fleet health + history -------------------------------------- */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5 mb-6">
+        <Card className="p-6">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Fleet Health</p>
+          <div className="flex items-center gap-6">
+            <div className="w-32 h-32 relative shrink-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={donutData.length ? donutData : [{ name: "No data", value: 1, color: "#E2E8F0" }]} dataKey="value" innerRadius={44} outerRadius={60} startAngle={90} endAngle={-270} strokeWidth={0}>
+                    {(donutData.length ? donutData : [{ color: "#E2E8F0" }]).map((d, i) => (
+                      <Cell key={i} fill={d.color} />
                     ))}
-                  </div>
-                )}
-              </Panel>
-            ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span className={`text-2xl font-bold ${offline === 0 ? "text-emerald-600" : "text-slate-800"}`}>{onlinePct.toFixed(0)}%</span>
+                <span className="text-[10px] text-slate-400 uppercase tracking-wide">Online</span>
+              </div>
+            </div>
+            <div className="flex-1 space-y-2.5 min-w-0">
+              <div className="flex items-center justify-between text-sm">
+                <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Online</span>
+                <span className="font-semibold text-slate-800">{online}</span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-red-500" />Offline</span>
+                <span className="font-semibold text-slate-800">{offline}</span>
+              </div>
+              <div className="h-px bg-slate-100 my-1" />
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-slate-500">Deploy success</span>
+                <span className="font-semibold text-slate-800">{summary?.deployment_success_rate ?? 100}%</span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-slate-500">Open drifts</span>
+                <span className="font-semibold text-slate-800">{summary?.open_drifts ?? 0}</span>
+              </div>
+            </div>
           </div>
-        </div>
+          <div className="grid grid-cols-3 gap-2 mt-6 pt-5 border-t border-slate-100">
+            <Gauge label="CPU" value={avgCpu} color="#06B6D4" />
+            <Gauge label="RAM" value={avgMem} color="#8B5CF6" />
+            <Gauge label="HEALTH" value={summary?.global_health_score ?? 100} color="#10B981" />
+          </div>
+        </Card>
 
-        {/* Right column: live incident rail */}
-        <div className="space-y-5">
-          {/* NOC live status */}
-          <Panel lit={!noIssues}>
-            <PanelHead title="Live Status" right={<span className="noc-num text-[10px] text-noc-muted">last 200 alerts</span>} />
-            {!noIssues ? (
-              <ul className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-                {downPortAlerts.slice(0, 6).map((a) => (
-                  <li key={a.id} className="flex items-center justify-between gap-2 text-[11px] bg-noc-panel2 border border-noc-border rounded px-2 py-1.5">
-                    <span className="font-semibold text-noc-warn truncate noc-num">⚠ {a.message}</span>
-                    <span className="text-noc-faint shrink-0">{timeAgo(a.created_at)}</span>
-                  </li>
-                ))}
-                {unreachableAlerts.slice(0, 6).map((a) => (
-                  <li key={a.id} className="flex items-center justify-between gap-2 text-[11px] bg-noc-panel2 border border-noc-border rounded px-2 py-1.5">
-                    <span className="font-semibold text-noc-crit truncate noc-num">✕ {a.message}</span>
-                    <span className="text-noc-faint shrink-0">{timeAgo(a.created_at)}</span>
-                  </li>
-                ))}
-                {(summary?.down_ports || []).slice(0, 6).map((p, i) => (
-                  <li key={`dp-${i}`} className="flex items-center justify-between gap-2 text-[11px] bg-noc-panel2 border border-noc-border rounded px-2 py-1.5">
-                    <span className="font-semibold text-noc-warn truncate noc-num">⚠ {p.hostname} — {p.interface}</span>
-                    <span className="text-noc-faint shrink-0">{p.down_since ? timeAgo(p.down_since) : "—"}</span>
-                  </li>
-                ))}
-                {(summary?.recent_reboots || []).slice(0, 4).map((r, i) => (
-                  <li key={`rb-${i}`} className="flex items-center justify-between gap-2 text-[11px] bg-noc-panel2 border border-noc-border rounded px-2 py-1.5">
-                    <span className="font-semibold text-noc-cyan truncate noc-num">↻ {r.hostname}</span>
-                    <span className="text-noc-faint shrink-0">up {Math.floor(r.uptime_seconds / 60)}m</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-center py-6">
-                <p className="text-sm font-semibold text-noc-good noc-label uppercase tracking-wide">All Clear</p>
-                <p className="text-[11px] text-noc-faint mt-1">No down ports, unreachable devices, or recent reboots.</p>
-              </div>
-            )}
-          </Panel>
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet History — CPU / Memory / Bandwidth</p>
+            <Link to="/traffic-analysis" className="text-xs text-brandblue font-medium hover:underline">Details →</Link>
+          </div>
+          {(summary?.fleet_health_history?.length ?? 0) === 0 ? (
+            <div className="h-64 flex items-center justify-center text-sm text-slate-400">Not enough polling history yet.</div>
+          ) : (
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={summary?.fleet_health_history}>
+                  <defs>
+                    <linearGradient id="cpuFillL" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#06B6D4" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="#06B6D4" stopOpacity={0.01} />
+                    </linearGradient>
+                    <linearGradient id="memFillL" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.01} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                  <XAxis dataKey="timestamp" tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")} tick={{ fontSize: 10, fill: "#94A3B8" }} minTickGap={40} axisLine={false} tickLine={false} />
+                  <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: "#94A3B8" }} width={34} domain={[0, 100]} axisLine={false} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12 }}
+                    formatter={(v: number, name: string) => [`${v?.toFixed?.(1) ?? v}%`, name]}
+                    labelFormatter={(v) => (v ? new Date(v).toLocaleString() : "")}
+                  />
+                  <Area type="monotone" dataKey="avg_cpu" name="CPU" stroke="#06B6D4" fill="url(#cpuFillL)" strokeWidth={2} connectNulls />
+                  <Area type="monotone" dataKey="avg_memory" name="Memory" stroke="#8B5CF6" fill="url(#memFillL)" strokeWidth={2} connectNulls />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </Card>
+      </div>
 
-          {/* Active alerts feed */}
-          <Panel>
-            <PanelHead title="Active Alerts" right={<Link to="/alerts" className="text-[11px] text-noc-cyan hover:underline noc-label">VIEW ALL →</Link>} />
-            {recentAlerts.length === 0 ? (
-              <div className="text-center py-6">
-                <p className="text-sm font-semibold text-noc-good noc-label uppercase">No Active Alerts</p>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                {recentAlerts.map((alert) => (
-                  <div key={alert.id} className="flex gap-2.5 bg-noc-panel2 rounded px-3 py-2 border border-noc-border">
-                    <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${SEV_DOT[alert.severity] || "bg-noc-cyan"}`} />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className={`text-[10px] uppercase noc-label ${SEV_TEXT[alert.severity] || "text-noc-muted"}`}>{alert.category}</span>
-                        {alert.acknowledged && <span className="text-[9px] font-bold uppercase text-noc-cyan bg-noc-cyan/10 px-1 py-0.5 rounded">ACK</span>}
-                      </div>
-                      <p className="text-[12px] text-noc-text truncate">{alert.message}</p>
-                      <p className="text-[10px] text-noc-faint mt-0.5 noc-num">{timeAgo(alert.created_at)} ago</p>
+      {/* ---- Uplinks + alerts -------------------------------------------- */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-6">
+        <Card className="p-6 xl:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Uplinks &amp; WAN Links</p>
+            <Link to="/devices" className="text-xs text-brandblue font-medium hover:underline">All devices →</Link>
+          </div>
+          {(summary?.uplinks?.length ?? 0) === 0 ? (
+            <p className="text-sm text-slate-400 italic py-6 text-center">No devices tagged as WAN/uplink/core/edge yet.</p>
+          ) : (
+            <div className="space-y-4">
+              {summary?.uplinks?.map((link, i) => (
+                <div key={i}>
+                  <div className="flex justify-between items-center gap-2 text-sm mb-1.5">
+                    <span className="flex items-center gap-2 font-medium text-slate-700 truncate">
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${link.status === "online" ? "bg-emerald-500" : link.status === "offline" ? "bg-red-500" : "bg-slate-300"}`} />
+                      {link.hostname}
+                      <span className="text-slate-400 font-normal text-xs">{link.ip_address}</span>
+                    </span>
+                    <span className="text-slate-500 text-xs font-medium shrink-0">{link.utilization_pct.toFixed(0)}% util</span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${link.utilization_pct >= 90 ? "bg-red-500" : link.utilization_pct >= 65 ? "bg-amber-500" : "bg-brandblue"}`}
+                      style={{ width: `${Math.min(link.utilization_pct, 100)}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Active Alerts</p>
+            <Link to="/alerts" className="text-xs text-brandblue font-medium hover:underline">View all →</Link>
+          </div>
+          {recentAlerts.length === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-sm font-semibold text-emerald-600">All clear</p>
+              <p className="text-xs text-slate-400 mt-1">No active alerts right now.</p>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {recentAlerts.map((alert) => {
+                const s = SEV_STYLES[alert.severity] || SEV_STYLES.info;
+                return (
+                  <div key={alert.id} className={`flex gap-2.5 rounded-lg px-3 py-2 border ${s.bg}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${s.dot}`} />
+                    <div className="min-w-0">
+                      <p className={`text-[10px] font-semibold uppercase tracking-wide ${s.text}`}>{alert.category}</p>
+                      <p className="text-xs text-slate-700 truncate">{alert.message}</p>
+                      <p className="text-[10px] text-slate-400 mt-0.5">{timeAgo(alert.created_at)}</p>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </Panel>
-
-          {/* Unstable devices */}
-          {(summary?.flagged_unstable_devices?.length ?? 0) > 0 && (
-            <Panel lit>
-              <h2 className="noc-label text-[13px] text-noc-crit uppercase mb-3">Flagged Unstable</h2>
-              <div className="space-y-1.5">
-                {summary?.flagged_unstable_devices.map((d) => (
-                  <div key={d.id} className="flex items-center justify-between text-[11px] bg-noc-crit/10 border border-noc-crit/30 rounded px-2.5 py-1.5">
-                    <span className="font-semibold text-noc-text truncate">{d.hostname}</span>
-                    <span className="text-noc-muted noc-num shrink-0">{d.ip_address}</span>
-                    <span className="text-noc-faint shrink-0">{d.unstable_since ? timeAgo(d.unstable_since) : ""}</span>
-                  </div>
-                ))}
-              </div>
-            </Panel>
+                );
+              })}
+            </div>
           )}
-
-          {/* Compact status row */}
-          <div className="grid grid-cols-3 gap-2.5">
-            <Panel className="!p-3 text-center">
-              <p className="noc-label text-[9px] text-noc-muted uppercase">Pending</p>
-              <p className="noc-num text-lg font-bold text-noc-warn mt-0.5">{summary?.pending_change_requests ?? 0}</p>
-            </Panel>
-            <Panel className="!p-3 text-center">
-              <p className="noc-label text-[9px] text-noc-muted uppercase">Rollbacks</p>
-              <p className="noc-num text-lg font-bold text-noc-crit mt-0.5">{summary?.rollbacks ?? 0}</p>
-            </Panel>
-            <Panel className="!p-3 text-center">
-              <p className="noc-label text-[9px] text-noc-muted uppercase">EOL/EOS</p>
-              <p className="noc-num text-lg font-bold text-noc-violet mt-0.5">{summary?.eos_device_count ?? 0}</p>
-            </Panel>
-          </div>
-        </div>
+        </Card>
       </div>
+
+      {/* ---- Group availability -------------------------------------------- */}
+      <Card className="p-6">
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Group Availability <span className="text-slate-300 font-normal normal-case">· last poll per group</span></p>
+          <Link to="/groups" className="text-xs text-brandblue font-medium hover:underline">All groups →</Link>
+        </div>
+        {groupStats.length === 0 ? (
+          <p className="text-sm text-slate-400 italic py-6 text-center">No device groups yet. Create one from the Groups page.</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {groupStats.map((g) => {
+              const pct = g.total > 0 ? (g.online / g.total) * 100 : 0;
+              const tone = pct >= 90 ? "text-emerald-600" : pct >= 50 ? "text-amber-600" : "text-red-600";
+              const barTone = pct >= 90 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-500" : "bg-red-500";
+              return (
+                <div key={g.id} className="border border-slate-100 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-semibold text-slate-700 truncate">{g.name}</span>
+                    <span className={`text-sm font-bold ${tone}`}>{pct.toFixed(0)}%</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mb-2">{g.online}/{g.total} online</p>
+                  <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden mb-2">
+                    <div className={`h-full rounded-full ${barTone}`} style={{ width: `${pct}%` }} />
+                  </div>
+                  <div className="flex items-center gap-3 text-[11px] text-slate-400">
+                    <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />{g.online} online</span>
+                    <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" />{g.offline} offline</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

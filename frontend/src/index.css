@@ -12,8 +12,12 @@ code, pre {
 
 html.dark body {
   background: #080B10;
-  color: #E7ECF3;
 }
+/* NOTE: intentionally not setting a body-level text color here.
+   Dark-mode text colors are applied per-component (Layout, Dashboard,
+   etc). A blanket body color previously bled into always-light
+   surfaces like the Login card, washing out input text to near-white
+   on a white background. */
 
 /* Scrollbars left to the OS/browser default in light mode; a light
    scrollbar on a dark page reads as a bug, so darken it to match. */
