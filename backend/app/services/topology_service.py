@@ -89,6 +89,111 @@ class TopologyGraph:
     edges: list[TopologyEdge] = field(default_factory=list)
 
 
+@dataclass
+class BlastRadiusResult:
+    """Pre-deployment "blast radius" preview (touches X devices, Y of them
+    core, Z devices depend on them via topology) -- built from the same
+    graph the Topology page renders, so what a reviewer sees before
+    approving a change matches what they'd see if they went and looked at
+    the topology themselves.
+
+    `touched` = the change's direct targets (device_id + additional_device_ids).
+    `dependent` = every other device reachable from a touched device by
+    walking topology edges -- i.e. everything that could lose connectivity
+    or be otherwise affected if the touched devices misbehave after this
+    change, not just the devices being pushed to directly.
+    """
+
+    touched_device_ids: list[str] = field(default_factory=list)
+    touched_count: int = 0
+    touched_core_count: int = 0
+    touched_roles: dict[str, int] = field(default_factory=dict)
+    dependent_device_ids: list[str] = field(default_factory=list)
+    dependent_count: int = 0
+    unknown_device_ids: list[str] = field(default_factory=list)  # requested but not found in inventory
+
+
+def uplink_interfaces_for_device(db: Session, device_id) -> set[str]:
+    """The set of local interface names on `device_id` that carry a
+    confirmed (LLDP/CDP-discovered) link to another device -- i.e. its
+    "uplinks"/inter-device links, as opposed to access ports, loopbacks,
+    or unconnected interfaces. Used by validation_engine's pre-push safety
+    check to flag a proposed `shutdown` on an interface that's actually
+    carrying live topology, not just a guess based on naming convention.
+
+    Best-effort: only reflects links NetGuard has actually discovered (see
+    app.api.devices.discover_device). An interface that's a real uplink
+    but hasn't been discovered yet simply isn't flagged -- same
+    "degrade gracefully, never invent inventory we don't have" posture as
+    validation_engine's other cross-checks.
+    """
+    rows = (
+        db.query(DiscoveredNeighbor.local_port)
+        .filter(
+            DiscoveredNeighbor.device_id == device_id,
+            DiscoveredNeighbor.neighbor_device_id.isnot(None),
+            DiscoveredNeighbor.local_port.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+    return {r[0] for r in rows if r[0]}
+
+
+def compute_blast_radius(db: Session, target_device_ids: list[str]) -> BlastRadiusResult:
+    """Builds the live topology graph and walks it outward (BFS) from
+    `target_device_ids` to find every device that transitively depends on
+    them via a discovered/inferred link -- the "N devices depend on them"
+    half of the blast-radius preview. `target_device_ids` themselves are
+    reported separately as `touched`, not folded into `dependent`, so the
+    UI can show "touches 14, 3 core" and "212 more depend on them" as two
+    distinct numbers rather than one conflated count.
+    """
+    graph = build_topology(db)
+    nodes_by_id = {n.id: n for n in graph.nodes}
+
+    adjacency: dict[str, set[str]] = {n.id: set() for n in graph.nodes}
+    for edge in graph.edges:
+        if edge.source in adjacency and edge.target in adjacency:
+            adjacency[edge.source].add(edge.target)
+            adjacency[edge.target].add(edge.source)
+
+    target_ids = {str(t) for t in target_device_ids}
+    touched_ids = [t for t in target_ids if t in nodes_by_id]
+    unknown_ids = [t for t in target_ids if t not in nodes_by_id]
+
+    # BFS from every touched device simultaneously, collecting anything
+    # reachable that isn't itself one of the touched devices.
+    visited: set[str] = set(touched_ids)
+    dependent: set[str] = set()
+    frontier = list(touched_ids)
+    while frontier:
+        next_frontier = []
+        for device_id in frontier:
+            for neighbor in adjacency.get(device_id, ()):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                dependent.add(neighbor)
+                next_frontier.append(neighbor)
+        frontier = next_frontier
+
+    touched_roles: dict[str, int] = {}
+    for device_id in touched_ids:
+        role = nodes_by_id[device_id].device_role or "unassigned"
+        touched_roles[role] = touched_roles.get(role, 0) + 1
+
+    return BlastRadiusResult(
+        touched_device_ids=touched_ids,
+        touched_count=len(touched_ids),
+        touched_core_count=touched_roles.get("core", 0),
+        touched_roles=touched_roles,
+        dependent_device_ids=sorted(dependent),
+        dependent_count=len(dependent),
+        unknown_device_ids=unknown_ids,
+    )
+
+
 def _latest_config(db: Session, device_id) -> str | None:
     snap = (
         db.query(ConfigSnapshot)

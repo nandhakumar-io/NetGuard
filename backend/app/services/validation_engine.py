@@ -224,6 +224,150 @@ def _defined_interfaces(text: str) -> set[str]:
     return {m.group(1) for m in map(_INTERFACE_BLOCK_RE.match, (line.strip() for line in text.splitlines())) if m}
 
 
+_ACL_PERMIT_RE = re.compile(r"^permit\b", re.IGNORECASE)
+_ACL_DENY_RE = re.compile(r"^deny\b", re.IGNORECASE)
+_MGMT_ACCESS_PORTS = {"22", "23", "443", "80", "830"}  # ssh, telnet, https, http, netconf
+
+
+def _check_uplink_shutdown(proposed_config: str, uplink_interfaces: set[str] | None) -> list[str]:
+    """Hard gate: refuse a proposed `shutdown` on an interface that
+    topology discovery has confirmed is carrying a live link to another
+    device (see topology_service.uplink_interfaces_for_device). Shutting
+    down an uplink doesn't just affect the device being changed -- it can
+    partition or blackhole every device on the far side, which is exactly
+    the kind of change that should never sneak through unreviewed.
+    """
+    if not uplink_interfaces:
+        return []
+
+    normalized_uplinks = {u.strip().lower() for u in uplink_interfaces}
+    errors: list[str] = []
+    current_iface: str | None = None
+    for raw_line in proposed_config.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        m = _INTERFACE_BLOCK_RE.match(stripped)
+        if m:
+            current_iface = m.group(1)
+            continue
+        if stripped.lower() in ("exit", "!") or _first_token(stripped) in ("interface", "router", "line"):
+            current_iface = None
+            continue
+        if current_iface is None:
+            continue
+        if stripped.lower() == "shutdown" and current_iface.lower() in normalized_uplinks:
+            errors.append(
+                f"'shutdown' on interface '{current_iface}' would take down a confirmed uplink "
+                "(a live topology link to another device) -- remove this line or confirm the "
+                "downstream device(s) are already accounted for"
+            )
+    return errors
+
+
+def _check_mgmt_lockout(proposed_config: str, current_config: str | None, mgmt_ip: str | None) -> list[str]:
+    """Hard gate: refuse a proposed ACL applied inbound on the device's
+    management interface (the interface whose IP matches the device's
+    recorded management address) if that ACL's body -- as defined in this
+    same change -- contains no `permit` line at all. An all-deny (or
+    deny-only) ACL applied to the management path locks NetGuard, and any
+    other operator, out of the device the moment it's pushed; there's no
+    legitimate reason a management-interface inbound ACL should be
+    entirely without a permit for the ports normally used to manage a
+    device (SSH/HTTPS/NETCONF/etc.).
+
+    Best-effort: only fires when we can actually identify the management
+    interface (mgmt_ip present in `current_config` or `proposed_config`'s
+    `ip address` lines) and the ACL being applied is also *defined*
+    in-change so its body is visible to inspect. An ACL that already
+    exists on the device (not redefined here) isn't re-validated here --
+    that's the device's current, presumably-working, ACL.
+    """
+    if not mgmt_ip:
+        return []
+
+    inventory_text = (current_config or "") + "\n" + proposed_config
+    mgmt_interface = None
+    blocks = _split_interface_blocks(inventory_text)
+    for iface, lines in blocks.items():
+        for line in lines:
+            m = _IP_ADDRESS_RE.search(line)
+            if m and m.group(1) == mgmt_ip:
+                mgmt_interface = iface
+                break
+        if mgmt_interface:
+            break
+    if not mgmt_interface:
+        return []
+
+    proposed_blocks = _split_interface_blocks(proposed_config)
+    mgmt_lines = proposed_blocks.get(mgmt_interface, [])
+    applied_acl = None
+    for line in mgmt_lines:
+        m = _ACL_APPLY_RE.search(line)
+        if m and re.search(r"\bin\s*$", line.strip(), re.IGNORECASE):
+            applied_acl = m.group(1)
+            break
+    if not applied_acl:
+        return []
+
+    # Pull every line belonging to that ACL's definition, wherever in the
+    # proposed config it's declared (named or numbered).
+    acl_lines: list[str] = []
+    in_named_block = False
+    for raw_line in proposed_config.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        named_def = _ACL_DEF_NAMED_RE.match(stripped)
+        if named_def:
+            in_named_block = named_def.group(1) == applied_acl
+            continue
+        if in_named_block:
+            if _first_token(stripped) in ("interface", "router", "line", "ip") and not (
+                _ACL_PERMIT_RE.match(stripped) or _ACL_DENY_RE.match(stripped)
+            ):
+                in_named_block = False
+                continue
+            acl_lines.append(stripped)
+            continue
+        if stripped.lower().startswith(f"access-list {applied_acl} "):
+            acl_lines.append(stripped)
+
+    if not acl_lines:
+        # ACL applied to the mgmt interface but not (re)defined in this
+        # change -- nothing new to validate; the existing ACL on-device is
+        # presumably already known-good.
+        return []
+
+    has_permit = any(_ACL_PERMIT_RE.match(line) for line in acl_lines)
+    if not has_permit:
+        return [
+            f"ACL '{applied_acl}' is applied inbound on '{mgmt_interface}' (the device's management "
+            f"interface, {mgmt_ip}) but its definition in this change contains no 'permit' line -- "
+            "this would lock out SSH/HTTPS/management access to the device"
+        ]
+
+    has_mgmt_permit = any(
+        _ACL_PERMIT_RE.match(line)
+        and (
+            "any" in line.lower()
+            or "eq ssh" in line.lower()
+            or "eq telnet" in line.lower()
+            or "eq www" in line.lower()
+            or any(f"eq {p}" in line.lower() for p in _MGMT_ACCESS_PORTS)
+        )
+        for line in acl_lines
+    )
+    if not has_mgmt_permit:
+        return [
+            f"ACL '{applied_acl}' is applied inbound on '{mgmt_interface}' (management interface, "
+            f"{mgmt_ip}) and has permit rules, but none appear to permit standard management access "
+            "(SSH/HTTPS/NETCONF) -- double-check this won't lock out management access before deploying"
+        ]
+    return []
+
+
 def _cross_check_inventory(proposed_config: str, current_config: str | None) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -315,7 +459,13 @@ def _cross_check_inventory(proposed_config: str, current_config: str | None) -> 
     return errors, warnings
 
 
-def validate_syntax(config_text: str, vendor: str = "cisco", current_config: str | None = None) -> ValidationResult:
+def validate_syntax(
+    config_text: str,
+    vendor: str = "cisco",
+    current_config: str | None = None,
+    uplink_interfaces: set[str] | None = None,
+    mgmt_ip: str | None = None,
+) -> ValidationResult:
     """Validates a proposed configuration before it's allowed to proceed
     to approval/deployment (SRS 6.4 / FR-5). This is a hard gate: any
     error means `passed=False` and the caller (app.api.change_requests,
@@ -329,6 +479,15 @@ def validate_syntax(config_text: str, vendor: str = "cisco", current_config: str
         existence). Pass None if it isn't available yet -- cross-checks
         degrade to warnings instead of failing a change against inventory
         we don't actually have.
+    uplink_interfaces: interface names (from topology_service.
+        uplink_interfaces_for_device) confirmed to carry a live link to
+        another device. When set, a proposed `shutdown` on one of these
+        is a hard error (see _check_uplink_shutdown) instead of silently
+        passing.
+    mgmt_ip: the device's management IP (Device.ip_address). When set,
+        an in-change ACL applied inbound on the interface carrying this
+        IP is checked for a permit rule so a change can't silently lock
+        out management access (see _check_mgmt_lockout).
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -368,5 +527,8 @@ def validate_syntax(config_text: str, vendor: str = "cisco", current_config: str
         cross_errors, cross_warnings = _cross_check_inventory(config_text, current_config)
         errors.extend(cross_errors)
         warnings.extend(cross_warnings)
+
+        errors.extend(_check_uplink_shutdown(config_text, uplink_interfaces))
+        errors.extend(_check_mgmt_lockout(config_text, current_config, mgmt_ip))
 
     return ValidationResult(passed=len(errors) == 0, errors=errors, warnings=warnings)

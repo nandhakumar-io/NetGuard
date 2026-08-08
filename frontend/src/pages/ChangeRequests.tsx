@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem } from "../lib/types";
+import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
@@ -122,6 +122,45 @@ export default function ChangeRequests() {
   // /templates page and app/services/template_service.py). Filtered by
   // the selected primary device's device_role so the operator only sees
   // templates that actually apply, instead of the full library.
+  // Blast-radius preview (device_id + additional_device_ids -> "touches N
+  // devices, M core, K more depend on them via topology") -- refetched
+  // whenever the target device selection changes, so a risky-looking
+  // fan-out gets flagged before the change is even submitted.
+  const [blastRadius, setBlastRadius] = useState<BlastRadiusPreview | null>(null);
+  const [blastRadiusLoading, setBlastRadiusLoading] = useState(false);
+
+  useEffect(() => {
+    if (!form.device_id) {
+      setBlastRadius(null);
+      return;
+    }
+    let cancelled = false;
+    setBlastRadiusLoading(true);
+    const timer = setTimeout(() => {
+      api
+        .get("/change-requests/blast-radius", {
+          params: {
+            device_id: form.device_id,
+            additional_device_ids: form.additional_device_ids.length ? form.additional_device_ids.join(",") : undefined,
+          },
+        })
+        .then((res) => {
+          if (!cancelled) setBlastRadius(res.data);
+        })
+        .catch(() => {
+          if (!cancelled) setBlastRadius(null);
+        })
+        .finally(() => {
+          if (!cancelled) setBlastRadiusLoading(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.device_id, form.additional_device_ids.join(",")]);
+
   const [availableTemplates, setAvailableTemplates] = useState<ConfigTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
@@ -386,6 +425,56 @@ export default function ChangeRequests() {
               )}
             </div>
           )}
+
+          {/* Blast-radius preview (re-deployment safety): shows how many
+              devices this change touches directly and how many more
+              depend on them via topology, before submission. */}
+          {form.device_id && (
+            <div
+              className={`border rounded-lg p-3 text-xs ${
+                blastRadius && blastRadius.dependent_count > 0
+                  ? "border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800"
+                  : "border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900"
+              }`}
+            >
+              <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">
+                Blast Radius Preview
+              </p>
+              {blastRadiusLoading && !blastRadius ? (
+                <p className="text-slate-400">Checking topology…</p>
+              ) : blastRadius ? (
+                <p className="text-slate-700 dark:text-slate-200">
+                  This change touches <span className="font-semibold">{blastRadius.touched_count}</span> device
+                  {blastRadius.touched_count === 1 ? "" : "s"}
+                  {blastRadius.touched_core_count > 0 && (
+                    <>
+                      {" "}
+                      (<span className="font-semibold text-amber-700 dark:text-amber-400">{blastRadius.touched_core_count} core</span>)
+                    </>
+                  )}
+                  {blastRadius.dependent_count > 0 ? (
+                    <>
+                      {" — "}
+                      <span className="font-semibold">{blastRadius.dependent_count} more device{blastRadius.dependent_count === 1 ? "" : "s"}</span>{" "}
+                      depend on {blastRadius.touched_count === 1 ? "it" : "them"} via topology. Review carefully before
+                      submitting.
+                    </>
+                  ) : (
+                    <> and nothing else depends on {blastRadius.touched_count === 1 ? "it" : "them"} via known topology.</>
+                  )}
+                  {blastRadius.unknown_device_ids.length > 0 && (
+                    <span className="block mt-1 text-slate-400">
+                      ({blastRadius.unknown_device_ids.length} selected device{blastRadius.unknown_device_ids.length === 1 ? "" : "s"} not found in
+                      inventory yet)
+                    </span>
+                  )}
+                </p>
+              ) : (
+                <p className="text-slate-400">Blast radius unavailable.</p>
+              )}
+            </div>
+          )}
+
           <input
             className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
             placeholder="Business justification (optional)"

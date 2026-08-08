@@ -13,6 +13,7 @@ from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.change_request import (
+    BlastRadiusPreview,
     ChangeRequestCreate,
     ChangeRequestRead,
     PendingApprovalItem,
@@ -25,6 +26,7 @@ from app.services import (
     protocol_manager,
     risk_engine,
     snapshot_service,
+    topology_service,
     validation_engine,
 )
 from app.tasks import run_deployment_pipeline_task
@@ -143,10 +145,13 @@ def _score_change(
     current_config, config_source = _resolve_current_config(db, device, current_user)
     fleet_configs = _fleet_configs(db, device.id)
     diff_text = diff_engine.generate_diff(current_config, proposed_config)
+    uplink_interfaces = topology_service.uplink_interfaces_for_device(db, device.id)
     validation = validation_engine.validate_syntax(
         proposed_config,
         vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
         current_config=current_config,
+        uplink_interfaces=uplink_interfaces,
+        mgmt_ip=device.ip_address,
     )
     risk: RiskAnalysisResult = risk_engine.analyze(proposed_config, current_config, fleet_configs)
     return {
@@ -235,6 +240,39 @@ def list_pending_approvals(db: Session = Depends(get_db), _=Depends(get_current_
 
     items.sort(key=lambda i: i.due_at)
     return items
+
+
+@router.get("/blast-radius", response_model=BlastRadiusPreview)
+def preview_blast_radius(
+    device_id: uuid.UUID,
+    additional_device_ids: str | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Blast-radius preview for a not-yet-submitted change: "this touches
+    N devices, M are core, K devices depend on them via topology" --
+    called live from the New Change Request form as devices are
+    selected, so a risky-looking fan-out gets a second look *before*
+    submission, not just via the existing device-count dual-approval
+    threshold. `additional_device_ids` is a comma-separated list of
+    UUIDs (mirrors ChangeRequestCreate.additional_device_ids, but this
+    endpoint takes it as a query param since there's no CR yet to hang
+    it off).
+    """
+    target_ids = [str(device_id)]
+    if additional_device_ids:
+        target_ids += [part.strip() for part in additional_device_ids.split(",") if part.strip()]
+
+    result = topology_service.compute_blast_radius(db, target_ids)
+    return BlastRadiusPreview(
+        touched_count=result.touched_count,
+        touched_core_count=result.touched_core_count,
+        touched_roles=result.touched_roles,
+        touched_device_ids=result.touched_device_ids,
+        dependent_count=result.dependent_count,
+        dependent_device_ids=result.dependent_device_ids,
+        unknown_device_ids=result.unknown_device_ids,
+    )
 
 
 @router.post("", response_model=ChangeRequestRead, status_code=201)

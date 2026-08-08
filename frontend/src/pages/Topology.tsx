@@ -243,6 +243,20 @@ export default function Topology() {
   const [nodeSearch, setNodeSearch] = useState<string>("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
+  // Blast-radius highlighting: fetched on demand for the selected node
+  // (see the "Blast Radius" panel in the node detail sidebar). Reuses the
+  // same GET /change-requests/blast-radius endpoint the New Change
+  // Request form's preview calls, so "what would deploying to this
+  // device touch" is answered identically in both places.
+  const [blastRadiusFor, setBlastRadiusFor] = useState<string | null>(null);
+  const [blastRadiusLoading, setBlastRadiusLoading] = useState(false);
+  const [blastRadiusError, setBlastRadiusError] = useState<string | null>(null);
+  const [blastRadiusResult, setBlastRadiusResult] = useState<{
+    touched_count: number;
+    touched_core_count: number;
+    dependent_count: number;
+    dependent_device_ids: string[];
+  } | null>(null);
   const [showIpLabels, setShowIpLabels] = useState(true);
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -509,6 +523,39 @@ export default function Topology() {
 
   const selectedNodeId = selection?.kind === "node" ? selection.node.id : null;
   const selectedEdgeKey = selection?.kind === "edge" ? edgeKey(selection.edge) : null;
+
+  // Clear any blast-radius result whenever the selection changes so a
+  // stale highlight from a previously-inspected device doesn't linger.
+  useEffect(() => {
+    setBlastRadiusFor(null);
+    setBlastRadiusResult(null);
+    setBlastRadiusError(null);
+  }, [selectedNodeId]);
+
+  const fetchBlastRadius = (nodeId: string) => {
+    setBlastRadiusLoading(true);
+    setBlastRadiusError(null);
+    api
+      .get("/change-requests/blast-radius", { params: { device_id: nodeId } })
+      .then((res) => {
+        setBlastRadiusResult(res.data);
+        setBlastRadiusFor(nodeId);
+      })
+      .catch((err) => {
+        setBlastRadiusError(err?.response?.data?.detail || "Failed to compute blast radius.");
+        setBlastRadiusResult(null);
+      })
+      .finally(() => setBlastRadiusLoading(false));
+  };
+
+  // Node ids to highlight on the graph while a blast-radius result is
+  // showing: the touched device itself plus everything topology says
+  // depends on it. null when there's nothing to highlight (falls back to
+  // normal search-based dimming below).
+  const blastRadiusIds = useMemo(() => {
+    if (!blastRadiusResult || !blastRadiusFor) return null;
+    return new Set<string>([blastRadiusFor, ...blastRadiusResult.dependent_device_ids]);
+  }, [blastRadiusResult, blastRadiusFor]);
 
   const linkCountFor = (nodeId: string) => graph?.edges.filter((e) => e.source === nodeId || e.target === nodeId).length ?? 0;
 
@@ -991,7 +1038,11 @@ export default function Topology() {
                     const key = edgeKey(e);
                     const onTracedPath = pathEdgeKeySet.has(`${e.source}|${e.target}`);
                     const active = highlightedEdgeKeys?.has(key) || selectedEdgeKey === key || onTracedPath;
-                    const dimForSearch = matchedNodeIds ? !matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target) : false;
+                    const dimForSearch = blastRadiusIds
+                      ? !blastRadiusIds.has(e.source) && !blastRadiusIds.has(e.target)
+                      : matchedNodeIds
+                      ? !matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target)
+                      : false;
                     const dimForPath = pathTraceResult ? !onTracedPath : false;
                     const utilColor = colorByUtilization ? utilizationColor(e.utilization_pct) : null;
                     const srcLabelPos = pointAlong(a.x, a.y, b.x, b.y, 30);
@@ -1103,7 +1154,13 @@ export default function Topology() {
                     const isIsolated = !connectedIds.has(node.id);
                     const isSelected = selectedNodeId === node.id;
                     const vendorMeta = VENDOR_META[node.vendor] || { label: node.vendor, accent: "#64748b" };
-                    const isSearchMatch = matchedNodeIds ? matchedNodeIds.has(node.id) : true;
+                    const isSearchMatch = blastRadiusIds
+                      ? blastRadiusIds.has(node.id)
+                      : matchedNodeIds
+                      ? matchedNodeIds.has(node.id)
+                      : true;
+                    const isBlastDependent = blastRadiusIds ? blastRadiusIds.has(node.id) && node.id !== blastRadiusFor : false;
+                    const isBlastTouched = blastRadiusFor === node.id;
                     return (
                       <g
                         key={node.id}
@@ -1116,8 +1173,23 @@ export default function Topology() {
                         {pathMode && (pathSourceId === node.id || pathTargetId === node.id || pathDeviceIds.includes(node.id)) && (
                           <circle r={26} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="4 3" />
                         )}
-                        {matchedNodeIds && isSearchMatch && (
+                        {matchedNodeIds && !blastRadiusIds && isSearchMatch && (
                           <circle r={24} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="2 2">
+                            <animateTransform
+                              attributeName="transform"
+                              type="rotate"
+                              from="0 0 0"
+                              to="360 0 0"
+                              dur="6s"
+                              repeatCount="indefinite"
+                            />
+                          </circle>
+                        )}
+                        {isBlastTouched && (
+                          <circle r={26} fill="none" stroke="#d97706" strokeWidth={2.5} strokeDasharray="4 2" />
+                        )}
+                        {isBlastDependent && (
+                          <circle r={24} fill="none" stroke="#7c3aed" strokeWidth={2} strokeDasharray="2 2">
                             <animateTransform
                               attributeName="transform"
                               type="rotate"
@@ -1361,6 +1433,53 @@ export default function Topology() {
                     Flagged unstable — automated deploys blocked pending manual review.
                   </p>
                 )}
+
+                {/* Blast-radius preview: how many devices would be
+                    affected if a change to this device goes wrong,
+                    computed by walking the topology graph outward. */}
+                <div className="border border-slate-200 rounded-lg p-2.5 bg-slate-50">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-[11px] font-bold uppercase text-slate-500 tracking-wide">Blast Radius</h4>
+                    {blastRadiusFor === selection.node.id ? (
+                      <button
+                        onClick={() => {
+                          setBlastRadiusFor(null);
+                          setBlastRadiusResult(null);
+                        }}
+                        className="text-[10px] text-slate-400 hover:text-slate-600"
+                      >
+                        Clear
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => fetchBlastRadius(selection.node.id)}
+                        disabled={blastRadiusLoading}
+                        className="text-[10px] font-semibold text-brandblue hover:underline disabled:opacity-50"
+                      >
+                        {blastRadiusLoading ? "Computing…" : "Compute"}
+                      </button>
+                    )}
+                  </div>
+                  {blastRadiusError && <p className="text-[11px] text-riskcrit mt-1">{blastRadiusError}</p>}
+                  {blastRadiusFor === selection.node.id && blastRadiusResult && (
+                    <p className="text-[11px] text-slate-600 mt-1.5">
+                      {blastRadiusResult.dependent_count > 0 ? (
+                        <>
+                          <span className="font-semibold text-purple-700">{blastRadiusResult.dependent_count}</span> device
+                          {blastRadiusResult.dependent_count === 1 ? "" : "s"} depend on this one via topology — highlighted on
+                          the graph.
+                        </>
+                      ) : (
+                        <>No other devices depend on this one via known topology.</>
+                      )}
+                    </p>
+                  )}
+                  {!blastRadiusFor && (
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      See how many devices would be affected if a change here goes wrong.
+                    </p>
+                  )}
+                </div>
                 <div>
                   <h4 className="text-[11px] font-bold uppercase text-slate-500 tracking-wide mb-1.5">
                     Links ({linkCountFor(selection.node.id)})

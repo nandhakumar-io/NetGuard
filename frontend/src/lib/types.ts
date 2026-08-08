@@ -1047,3 +1047,12 @@ export interface TopologyDiff {
   added_edges: EdgeDiff[];
   removed_edges: EdgeDiff[];
 }
+export interface BlastRadiusPreview {
+  touched_count: number;
+  touched_core_count: number;
+  touched_roles: Record<string, number>;
+  touched_device_ids: string[];
+  dependent_count: number;
+  dependent_device_ids: string[];
+  unknown_device_ids: string[];
+}

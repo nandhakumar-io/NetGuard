@@ -32,6 +32,24 @@ class ChangeRequestCreate(ChangeRequestBase):
     alert_id: uuid.UUID | None = None
 
 
+class BlastRadiusPreview(BaseModel):
+    """Pre-deployment blast-radius preview (see
+    app.services.topology_service.compute_blast_radius): how many devices
+    this change touches directly, how many of those are core, and how
+    many *other* devices depend on the touched ones via topology -- shown
+    before a change is pushed so a risky-looking fan-out gets a second
+    look, not just a risk score on the diff content itself.
+    """
+
+    touched_count: int
+    touched_core_count: int
+    touched_roles: dict[str, int]
+    touched_device_ids: list[uuid.UUID]
+    dependent_count: int
+    dependent_device_ids: list[uuid.UUID]
+    unknown_device_ids: list[uuid.UUID] = []
+
+
 class TriggeringAlertSummary(BaseModel):
     """Minimal alert info embedded on ChangeRequestRead for the postmortem
     link (full alert detail lives on GET /alerts/{id} / Alert Center)."""
