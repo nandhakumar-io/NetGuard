@@ -21,6 +21,9 @@ import TrafficAnalysis from "./pages/TrafficAnalysis";
 import PathTracePage from "./pages/PathTrace";
 import MaintenanceWindowsPage from "./pages/MaintenanceWindows";
 import FirmwareUpgradesPage from "./pages/FirmwareUpgrades";
+import Incidents from "./pages/Incidents";
+import RbacAudit from "./pages/RbacAudit";
+import Insights from "./pages/Insights";
 
 export default function App() {
   return (
@@ -44,6 +47,9 @@ export default function App() {
           <Route path="/alerts" element={<AlertCenter />} />
           <Route path="/maintenance-windows" element={<MaintenanceWindowsPage />} />
           <Route path="/firmware-upgrades" element={<FirmwareUpgradesPage />} />
+          <Route path="/incidents" element={<Incidents />} />
+          <Route path="/insights" element={<Insights />} />
+          <Route path="/rbac-audit" element={<RbacAudit />} />
           <Route path="/lab" element={<Lab />} />
           <Route path="/audit-log" element={<AuditLog />} />
           <Route path="/security" element={<Security />} />

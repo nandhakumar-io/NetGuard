@@ -763,6 +763,15 @@ export default function AlertCenter() {
                                     Create Change Request
                                   </button>
                                 )}
+                                {!nested && impacted.length > 0 && (
+                                  <button
+                                    onClick={() => navigate(`/incidents?from_alert=${alert.id}`)}
+                                    title="Open a formal incident from this correlated alert group for postmortem tracking"
+                                    className="text-xs font-medium text-navy dark:text-white hover:text-brandblue bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 px-3 py-1.5 rounded-lg transition-colors"
+                                  >
+                                    Open Incident
+                                  </button>
+                                )}
                                 {!alert.acknowledged && (
                                   <button
                                     onClick={() => handleAcknowledge(alert.id)}

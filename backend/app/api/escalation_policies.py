@@ -6,15 +6,19 @@
   DELETE  /escalation-policies/{id}        — delete a policy
   PATCH   /escalation-policies/{id}/toggle — enable/disable a policy
   GET     /escalation-policies/log         — feed of alerts that have been escalated
+  GET     /escalation-policies/on-call-load — escalations per contact/policy over time
   POST    /escalation-policies/run-now     — trigger an out-of-cycle sweep (testing/manual)
 """
+import datetime
 import uuid
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user
+from app.models.alert import Alert
 from app.models.escalation_policy import EscalationPolicy
 from app.models.user import User
 from app.schemas.escalation_policy import (
@@ -58,6 +62,81 @@ def escalation_log(
         obj.escalation_policy_name = names.get(a.escalation_policy_id)
         results.append(obj)
     return results
+
+
+@router.get("/on-call-load")
+def on_call_load(
+    days: int = Query(30, ge=1, le=365, description="Trailing window in days"),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """On-call load: how many escalations each policy (and, within it,
+    each secondary contact) has fired over the trailing window, plus a
+    daily trend series -- "who's getting paged, how often, and is it
+    trending up".
+
+    Alert only stores the *first* escalation timestamp (`escalated_at`)
+    and the most recent one (`last_escalated_at`) plus a running
+    `escalation_count`, not a timestamped row per repeat firing (see
+    app.models.escalation_policy.EscalationPolicy's docstring on
+    repeat_minutes) -- so the daily trend below is bucketed by
+    `escalated_at` (when the alert first breached the policy), with each
+    alert's full `escalation_count` counted as load in that bucket. That
+    undercounts *which* day repeat pages landed on for long-lived
+    unacknowledged alerts, but correctly reflects total on-call load
+    attributable to each policy/contact over the window.
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    policies = {p.id: p for p in db.query(EscalationPolicy).all()}
+
+    escalated_alerts = (
+        db.query(Alert)
+        .filter(Alert.escalated == True, Alert.escalated_at >= since)
+        .order_by(Alert.escalated_at)
+        .all()
+    )
+
+    by_policy: dict[uuid.UUID, dict] = {}
+    by_contact: dict[str, dict] = defaultdict(lambda: {"escalations": 0, "alerts": 0})
+    daily: dict[str, dict] = defaultdict(lambda: {"date": None, "escalations": 0, "alerts": 0})
+
+    for alert in escalated_alerts:
+        policy = policies.get(alert.escalation_policy_id)
+        count = alert.escalation_count or 1
+        day = alert.escalated_at.date().isoformat()
+        daily[day]["date"] = day
+        daily[day]["escalations"] += count
+        daily[day]["alerts"] += 1
+
+        if policy:
+            entry = by_policy.setdefault(policy.id, {
+                "policy_id": str(policy.id),
+                "policy_name": policy.name,
+                "channel": policy.channel.value if hasattr(policy.channel, "value") else policy.channel,
+                "escalations": 0,
+                "alerts": 0,
+            })
+            entry["escalations"] += count
+            entry["alerts"] += 1
+
+            contacts = [c.strip() for c in (policy.secondary_contacts or "").split(",") if c.strip()]
+            if not contacts:
+                contacts = [f"(policy: {policy.name})"]  # webhook/slack/teams policies with no named contacts
+            for contact in contacts:
+                by_contact[contact]["escalations"] += count
+                by_contact[contact]["alerts"] += 1
+
+    return {
+        "window_days": days,
+        "total_escalations": sum(e["escalations"] for e in daily.values()),
+        "total_escalated_alerts": len(escalated_alerts),
+        "by_policy": sorted(by_policy.values(), key=lambda x: -x["escalations"]),
+        "by_contact": sorted(
+            [{"contact": c, **v} for c, v in by_contact.items()],
+            key=lambda x: -x["escalations"],
+        ),
+        "daily": sorted(daily.values(), key=lambda x: x["date"]),
+    }
 
 
 @router.post("/run-now")

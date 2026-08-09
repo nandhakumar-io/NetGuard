@@ -20,8 +20,11 @@ const links = [
   { to: "/alerts", label: "Alerts" },
   { to: "/maintenance-windows", label: "Maintenance Windows" },
   { to: "/firmware-upgrades", label: "Firmware Upgrades" },
+  { to: "/incidents", label: "Incidents" },
+  { to: "/insights", label: "Insights" },
   { to: "/lab", label: "GNS3 Lab" },
   { to: "/audit-log", label: "Audit Log" },
+  { to: "/rbac-audit", label: "RBAC Audit" },
   { to: "/security", label: "Security" },
 ];
 
