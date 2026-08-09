@@ -22,9 +22,9 @@ down_revision = "0039"
 branch_labels = None
 depends_on = None
 
-_SEVERITY_ENUM = postgresql.ENUM("critical", "major", "minor", name="incidentseverity")
+_SEVERITY_ENUM = postgresql.ENUM("critical", "major", "minor", name="incidentseverity", create_type=False)
 _STATUS_ENUM = postgresql.ENUM(
-    "open", "mitigated", "resolved", "postmortem_due", "closed", name="incidentstatus"
+    "open", "mitigated", "resolved", "postmortem_due", "closed", name="incidentstatus", create_type=False
 )
 
 
