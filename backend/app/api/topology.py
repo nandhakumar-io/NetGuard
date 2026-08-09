@@ -52,6 +52,7 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "data_center": n.data_center,
                 "rack": n.rack,
                 "device_role": n.device_role,
+                "interface_error_rate": n.interface_error_rate,
             }
             for n in graph.nodes
         ],

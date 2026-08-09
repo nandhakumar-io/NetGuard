@@ -23,6 +23,7 @@ from app.api import (
     gns3,
     health,
     incidents,
+    jit_access,
     maintenance_windows,
     metrics,
     notification,
@@ -55,6 +56,7 @@ api_router.include_router(alerts.router)
 api_router.include_router(alert_rules.router)
 api_router.include_router(escalation_policies.router)
 api_router.include_router(incidents.router)
+api_router.include_router(jit_access.router)
 api_router.include_router(gns3.router)
 api_router.include_router(notification.router)
 api_router.include_router(reports.router)

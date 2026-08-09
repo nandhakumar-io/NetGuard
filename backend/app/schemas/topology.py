@@ -16,6 +16,7 @@ class TopologyNodeRead(BaseModel):
     data_center: str | None = None
     rack: str | None = None
     device_role: str | None = None
+    interface_error_rate: int | None = None
 
 
 class TopologyEdgeRead(BaseModel):

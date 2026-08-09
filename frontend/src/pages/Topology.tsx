@@ -187,15 +187,25 @@ function roleTierLabel(tier: string): string {
 }
 
 /** Green -> amber -> red for a 0-100 utilization reading, matching the
- * band thresholds already used for SNMP interface-utilization elsewhere
- * in the app (StatCard/RiskBadge conventions: <60 ok, 60-84 warn, 85+
- * hot). Returns null (caller falls back to the default link color) when
+ * IFACE_UTIL_WARN_PCT/IFACE_UTIL_CRIT_PCT bands SNMP health-scoring uses
+ * server-side (app.services.snmp_service): <60 ok, 60-79 warn, 80+ hot --
+ * this is the heatmap the Topology page's "color links by utilization"
+ * toggle draws from, so a link glows red the moment it crosses the same
+ * 80% line that would already be flagging that device's health card.
+ * Returns null (caller falls back to the default link color) when
  * there's no reading -- an untagged link is "unknown", not "green". */
 function utilizationColor(pct: number | null | undefined): string | null {
   if (pct === null || pct === undefined) return null;
-  if (pct >= 85) return "#dc2626";
+  if (pct >= 80) return "#dc2626";
   if (pct >= 60) return "#d97706";
   return "#16a34a";
+}
+
+/** Amber -> red for a node's interface-error badge: any errors at all is
+ * worth flagging, IFACE_ERRORS_WARN (100, matching snmp_service's own
+ * "warning" finding threshold) is where it goes red-hot. */
+function interfaceErrorColor(count: number): string {
+  return count >= 100 ? "#dc2626" : "#d97706";
 }
 
 /** Point on the line from a->b, `offset` px in from a -- used to place the
@@ -271,6 +281,11 @@ export default function Topology() {
   // --- view mode: force-directed graph vs. data center / rack grouping ---
   const [viewMode, setViewMode] = useState<"graph" | "layered" | "groups">("graph");
   const [colorByUtilization, setColorByUtilization] = useState(false);
+  // Badges each node with its interface_error_rate reading (errors seen
+  // since the previous SNMP poll) directly on the map -- the node-level
+  // counterpart to colorByUtilization's link heatmap. Off by default so a
+  // healthy fleet's map isn't cluttered with "0" badges.
+  const [showErrorBadges, setShowErrorBadges] = useState(false);
 
   // --- Path highlight: click two devices, trace the path between them ---
   // Reuses the existing /path-trace endpoint (same one that powers the
@@ -832,7 +847,7 @@ export default function Topology() {
           </label>
           <label
             className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm"
-            title="Colors each link by the busier endpoint's SNMP interface utilization (green <60%, amber 60-84%, red 85%+). Links with no recent poll on either end keep the default gray."
+            title="Colors each link by the busier endpoint's SNMP interface utilization (green <60%, amber 60-79%, red 80%+). Links with no recent poll on either end keep the default gray."
           >
             <input
               type="checkbox"
@@ -840,6 +855,17 @@ export default function Topology() {
               onChange={(e) => setColorByUtilization(e.target.checked)}
             />
             Color links by utilization
+          </label>
+          <label
+            className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm"
+            title="Badges each node with its interface error count since the last SNMP poll (amber, red at 100+). Devices with zero errors or no recent poll show no badge."
+          >
+            <input
+              type="checkbox"
+              checked={showErrorBadges}
+              onChange={(e) => setShowErrorBadges(e.target.checked)}
+            />
+            Show interface errors
           </label>
           <button
             onClick={togglePathMode}
@@ -1322,6 +1348,27 @@ export default function Topology() {
                           stroke="white"
                           strokeWidth={1.5}
                         />
+                        {showErrorBadges && !!node.interface_error_rate && node.interface_error_rate > 0 && (
+                          <g transform="translate(-12, -12)">
+                            <circle
+                              r={8}
+                              fill={interfaceErrorColor(node.interface_error_rate)}
+                              stroke="white"
+                              strokeWidth={1.5}
+                            />
+                            <text
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fontSize={8.5}
+                              fontWeight={800}
+                              fill="white"
+                              className="pointer-events-none select-none"
+                            >
+                              {node.interface_error_rate > 99 ? "99+" : node.interface_error_rate}
+                            </text>
+                            <title>{`${node.interface_error_rate} interface error(s) since last poll`}</title>
+                          </g>
+                        )}
                         <text
                           y={32}
                           textAnchor="middle"
@@ -1517,6 +1564,22 @@ export default function Topology() {
                     <dd className="capitalize text-slate-700">
                       {selection.node.health_score !== null
                         ? `${selection.node.health_score}/100 (${selection.node.health_color})`
+                        : "Not SNMP-polled"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-500">Interface errors</dt>
+                    <dd
+                      className="font-mono font-bold"
+                      style={{
+                        color:
+                          selection.node.interface_error_rate != null && selection.node.interface_error_rate > 0
+                            ? interfaceErrorColor(selection.node.interface_error_rate)
+                            : "#334155",
+                      }}
+                    >
+                      {selection.node.interface_error_rate != null
+                        ? `${selection.node.interface_error_rate} since last poll`
                         : "Not SNMP-polled"}
                     </dd>
                   </div>

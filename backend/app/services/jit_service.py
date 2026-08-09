@@ -1,0 +1,182 @@
+"""Just-In-Time (JIT) role elevation: temporary, time-bound privilege
+escalation, most commonly requested by a NETWORK_ENGINEER/NOC_ENGINEER/
+SECURITY user to briefly hold NETWORK_ADMIN so they can push their own
+approved change request without a standing admin role.
+
+Lifecycle: pending -> (approve) -> active -> expires_at elapses -> treated
+as expired. There's no Celery sweep that flips the `status` column at the
+exact expiry instant -- `is_active_now` below re-checks `expires_at`
+against wall-clock time on every call, which is what app.core.deps.
+require_roles actually gates on. A background sweep
+(mark_expired_elevations) exists purely to keep the *displayed* status
+tidy for list views; it is not what enforces expiry.
+"""
+from __future__ import annotations
+
+import datetime
+import uuid
+
+from sqlalchemy.orm import Session
+
+from app.models.jit_elevation import JitElevation, JitElevationStatus
+from app.services import audit_service
+
+MAX_DURATION_MINUTES = 8 * 60  # 8 hours -- a JIT grant that "expires" next quarter isn't JIT
+
+
+def is_active_now(elevation: JitElevation, now: datetime.datetime | None = None) -> bool:
+    """True if this specific row currently grants its role -- approved
+    and within its time window. Doesn't mutate `elevation.status`; callers
+    that need the DB row's status column to reflect this should also call
+    mark_expired_elevations.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if elevation.status != JitElevationStatus.ACTIVE:
+        return False
+    if elevation.expires_at is None:
+        return False
+    expires_at = elevation.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    return expires_at > now
+
+
+def active_roles_for_user(db: Session, user_id) -> set[str]:
+    """Every role currently JIT-granted to this user, right now -- what
+    require_roles() unions with the user's base User.role. Small fleets /
+    low grant volume, so a simple per-request query is fine (no caching).
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    rows = (
+        db.query(JitElevation)
+        .filter(
+            JitElevation.user_id == user_id,
+            JitElevation.status == JitElevationStatus.ACTIVE,
+            JitElevation.expires_at.isnot(None),
+            JitElevation.expires_at > now,
+        )
+        .all()
+    )
+    return {row.elevated_role for row in rows}
+
+
+def mark_expired_elevations(db: Session) -> int:
+    """Flips any ACTIVE row whose window has lapsed to EXPIRED. Cosmetic
+    housekeeping for list/history views -- see module docstring for why
+    actual access enforcement never depends on this having run. Safe to
+    call from a Celery beat task or lazily at the top of any JIT list
+    endpoint; returns the number of rows updated.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    rows = (
+        db.query(JitElevation)
+        .filter(JitElevation.status == JitElevationStatus.ACTIVE, JitElevation.expires_at <= now)
+        .all()
+    )
+    for row in rows:
+        row.status = JitElevationStatus.EXPIRED
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def request_elevation(
+    db: Session,
+    *,
+    user_id: uuid.UUID,
+    elevated_role: str,
+    reason: str,
+    duration_minutes: int,
+    change_request_id: uuid.UUID | None,
+    requested_by_email: str,
+) -> JitElevation:
+    elevation = JitElevation(
+        user_id=user_id,
+        elevated_role=elevated_role,
+        reason=reason,
+        requested_duration_minutes=duration_minutes,
+        change_request_id=change_request_id,
+        requested_by=user_id,
+        status=JitElevationStatus.PENDING,
+    )
+    db.add(elevation)
+    db.commit()
+    db.refresh(elevation)
+
+    audit_service.record_event(
+        db,
+        actor=requested_by_email,
+        action="JIT Access Requested",
+        result="Pending",
+        change_request_id=change_request_id,
+        detail=f"Requested {elevated_role} for {duration_minutes}m: {reason}",
+    )
+    return elevation
+
+
+def approve_elevation(
+    db: Session, elevation: JitElevation, *, approver_id: uuid.UUID, approver_email: str, note: str | None
+) -> JitElevation:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    duration = min(elevation.requested_duration_minutes, MAX_DURATION_MINUTES)
+    elevation.status = JitElevationStatus.ACTIVE
+    elevation.decided_by = approver_id
+    elevation.decided_at = now
+    elevation.decision_note = note
+    elevation.activated_at = now
+    elevation.expires_at = now + datetime.timedelta(minutes=duration)
+    db.commit()
+    db.refresh(elevation)
+
+    audit_service.record_event(
+        db,
+        actor=approver_email,
+        action="JIT Access Approved",
+        result="Approved",
+        change_request_id=elevation.change_request_id,
+        detail=f"Granted {elevation.elevated_role} to user {elevation.user_id} until {elevation.expires_at.isoformat()}",
+    )
+    return elevation
+
+
+def reject_elevation(
+    db: Session, elevation: JitElevation, *, approver_id: uuid.UUID, approver_email: str, note: str | None
+) -> JitElevation:
+    elevation.status = JitElevationStatus.REJECTED
+    elevation.decided_by = approver_id
+    elevation.decided_at = datetime.datetime.now(datetime.timezone.utc)
+    elevation.decision_note = note
+    db.commit()
+    db.refresh(elevation)
+
+    audit_service.record_event(
+        db,
+        actor=approver_email,
+        action="JIT Access Rejected",
+        result="Rejected",
+        change_request_id=elevation.change_request_id,
+        detail=note or f"Denied {elevation.elevated_role} for user {elevation.user_id}",
+    )
+    return elevation
+
+
+def revoke_elevation(
+    db: Session, elevation: JitElevation, *, revoker_id: uuid.UUID, revoker_email: str, note: str | None
+) -> JitElevation:
+    elevation.status = JitElevationStatus.REVOKED
+    elevation.revoked_by = revoker_id
+    elevation.revoked_at = datetime.datetime.now(datetime.timezone.utc)
+    if note:
+        elevation.decision_note = note
+    db.commit()
+    db.refresh(elevation)
+
+    audit_service.record_event(
+        db,
+        actor=revoker_email,
+        action="JIT Access Revoked",
+        result="Revoked",
+        change_request_id=elevation.change_request_id,
+        detail=note or f"Revoked {elevation.elevated_role} early for user {elevation.user_id}",
+    )
+    return elevation

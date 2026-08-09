@@ -59,6 +59,11 @@ class TopologyNode:
     # None if never assigned) -- mirrors Device.device_role, powers the
     # Topology page's optional layered (core/distribution/access) layout.
     device_role: str | None = None
+    # Interface errors seen on the device's most recent SNMP poll (delta
+    # since the prior poll -- see DeviceMetric.interface_errors), used to
+    # badge nodes with recent error activity directly on the Topology map.
+    # None if the device has never been polled.
+    interface_error_rate: int | None = None
 
 
 @dataclass
@@ -270,6 +275,7 @@ def build_topology(db: Session) -> TopologyGraph:
         metric = metrics_by_device.get(str(device.id))
         health_color = metric.health_color.value if metric and metric.health_color else None
         health_score = metric.health_score if metric else None
+        interface_error_rate = metric.interface_errors if metric else None
         nodes.append(
             TopologyNode(
                 id=str(device.id),
@@ -286,6 +292,7 @@ def build_topology(db: Session) -> TopologyGraph:
                 data_center=device.data_center,
                 rack=device.rack,
                 device_role=device.device_role,
+                interface_error_rate=interface_error_rate,
             )
         )
         if config_text:

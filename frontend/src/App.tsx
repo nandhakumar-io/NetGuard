@@ -23,6 +23,7 @@ import MaintenanceWindowsPage from "./pages/MaintenanceWindows";
 import FirmwareUpgradesPage from "./pages/FirmwareUpgrades";
 import Incidents from "./pages/Incidents";
 import RbacAudit from "./pages/RbacAudit";
+import JitAccess from "./pages/JitAccess";
 import Insights from "./pages/Insights";
 
 export default function App() {
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="/incidents" element={<Incidents />} />
           <Route path="/insights" element={<Insights />} />
           <Route path="/rbac-audit" element={<RbacAudit />} />
+          <Route path="/jit-access" element={<JitAccess />} />
           <Route path="/lab" element={<Lab />} />
           <Route path="/audit-log" element={<AuditLog />} />
           <Route path="/security" element={<Security />} />

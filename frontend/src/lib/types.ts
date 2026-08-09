@@ -797,6 +797,10 @@ export interface TopologyNode {
   // "core" | "distribution" | "access" | ... (free-text, org-defined) --
   // powers the Topology page's optional layered layout. null if never set.
   device_role?: string | null;
+  // Interface errors seen on this device's most recent SNMP poll (delta
+  // since the prior poll), for the Topology map's error-rate badge. null
+  // if the device has never been polled.
+  interface_error_rate?: number | null;
 }
 
 export interface TopologyEdge {

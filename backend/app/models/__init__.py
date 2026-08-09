@@ -53,6 +53,7 @@ from app.models.interface_status import (  # noqa: F401
     InterfaceOperStatus,
     InterfaceStatus,
 )
+from app.models.jit_elevation import JitElevation, JitElevationStatus  # noqa: F401
 from app.models.maintenance_window import (  # noqa: F401
     MaintenanceScope,
     MaintenanceWindow,

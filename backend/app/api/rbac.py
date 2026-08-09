@@ -46,6 +46,16 @@ PERMISSION_MATRIX = [
     {"resource": "Metrics — polling config", "endpoint": "/metrics (write)", "roles": ["network_admin"]},
     {"resource": "GNS3 Lab — provision", "endpoint": "/gns3 (write)", "roles": ["network_admin"]},
     {
+        "resource": "JIT Access — approve/reject/revoke",
+        "endpoint": "/jit-access/{id}/approve|reject|revoke, /jit-access/pending",
+        "roles": ["network_admin"],
+    },
+    {
+        "resource": "JIT Access — request/view own",
+        "endpoint": "/jit-access/request, /jit-access/mine",
+        "roles": ["network_admin", "network_engineer", "noc_engineer", "security", "auditor"],
+    },
+    {
         "resource": "Maintenance Windows — create/manage",
         "endpoint": "/maintenance-windows (write)",
         "roles": ["network_admin", "network_engineer", "noc_engineer"],

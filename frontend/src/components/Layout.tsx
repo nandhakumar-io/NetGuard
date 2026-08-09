@@ -25,6 +25,7 @@ const links = [
   { to: "/lab", label: "GNS3 Lab" },
   { to: "/audit-log", label: "Audit Log" },
   { to: "/rbac-audit", label: "RBAC Audit" },
+  { to: "/jit-access", label: "JIT Access" },
   { to: "/security", label: "Security" },
 ];
 
