@@ -10,7 +10,6 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.alert import Alert
 from app.models.audit_log import AuditLog
-from app.services import audit_service
 from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
