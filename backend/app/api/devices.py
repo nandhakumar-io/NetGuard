@@ -941,7 +941,9 @@ def discover_device(
 
     from app.core.config import settings
 
-    result = snmp_service.discover_inventory(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
+    result = snmp_service.discover_inventory(
+        device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS, vendor=device.vendor.value
+    )
 
     # Backfill Device.platform/model/serial_number from discovery whenever
     # they're still blank -- these were being computed by snmp_service all

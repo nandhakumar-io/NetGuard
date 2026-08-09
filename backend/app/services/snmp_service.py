@@ -195,6 +195,22 @@ INVENTORY_OIDS = {
 PHYSICAL_CLASS_CHASSIS = "3"
 MAX_DISCOVERY_ROWS = 128  # guard against runaway walks on tables that can legitimately be huge (ARP, routes)
 
+# JUNIPER-MIB scalars (jnxBoxAnatomy) -- fallback for platform/model/serial
+# when ENTITY-MIB comes back empty. Junos *does* implement entPhysicalTable
+# on real hardware, but a lot of the virtual/lab images NetGuard gets
+# pointed at in practice (vMX, vEX, vSRX under GNS3/vagrant) either don't
+# populate it at all or only populate a handful of rows with no class 3
+# (chassis) row -- so _detect_chassis_summary's ENTITY-MIB walk comes back
+# with candidates=[] and Overview's Model/Serial Number stay blank forever
+# for exactly the vendor whose lab images are least likely to have a fully
+# populated ENTITY-MIB. jnxBoxDescr/jnxBoxSerialNo are scalars (not a
+# table), present on every Junos SNMP agent NetGuard has seen respond at
+# all, so they're a much more reliable source for this vendor specifically.
+JUNIPER_BOX_OIDS = {
+    "jnxBoxDescr": "1.3.6.1.4.1.2636.3.1.2.0",
+    "jnxBoxSerialNo": "1.3.6.1.4.1.2636.3.1.3.0",
+}
+
 # Threshold defaults for turning raw readings into alerts (SNMP Health
 # Dashboard traffic-light + Alert Engine "High CPU" / "Temperature
 # Critical" style events).
@@ -930,7 +946,9 @@ def _detect_platform_from_sysdescr(sys_descr: str | None) -> str | None:
     return None
 
 
-def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 5.0) -> dict:
+def discover_inventory(
+    ip_address: str, auth: "SnmpAuthConfig", timeout: float = 5.0, vendor: str | None = None
+) -> dict:
     """Cisco device discovery: hostname, ARP table, routing table, LLDP/CDP
     neighbors, and chassis/module inventory -- the OIDs from the
     Cisco device polling table (Hostname, ARP Table, Routing Table, LLDP,
@@ -948,7 +966,11 @@ def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float =
     per-component table like `inventory`) meant to backfill
     Device.platform/model/serial_number on the Overview page when those
     are still blank. See _detect_chassis_summary and
-    _detect_platform_from_sysdescr for how each is derived.
+    _detect_platform_from_sysdescr for how each is derived. For Juniper,
+    falls back to JUNIPER-MIB jnxBoxDescr/jnxBoxSerialNo (see
+    JUNIPER_BOX_OIDS) whenever ENTITY-MIB didn't yield a chassis row --
+    common on virtual/lab Junos images, which is why this previously came
+    back blank for Juniper specifically while working fine for Cisco.
     """
     # Discovery is on-demand (not the frequent health poll), so it can
     # afford a longer per-request timeout than callers may pass in --
@@ -959,6 +981,16 @@ def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float =
     sys_descr = _get_via_pysnmp(ip_address, auth, OIDS["sysDescr"], timeout)
     inventory = _discover_physical_inventory(ip_address, auth, timeout)
     detected_model, detected_serial_number = _detect_chassis_summary(inventory)
+    detected_platform = _detect_platform_from_sysdescr(sys_descr)
+
+    if (vendor or "").lower() == "juniper" and (not detected_model or not detected_serial_number):
+        box_descr = _get_via_pysnmp(ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxDescr"], timeout)
+        box_serial = _get_via_pysnmp(ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxSerialNo"], timeout)
+        detected_model = detected_model or box_descr
+        detected_serial_number = detected_serial_number or box_serial
+        if not detected_platform and box_descr:
+            detected_platform = "Junos"
+
     return {
         "hostname": hostname,
         "arp_table": _discover_arp_table(ip_address, auth, timeout),
@@ -966,7 +998,7 @@ def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float =
         "lldp_neighbors": _discover_lldp_neighbors(ip_address, auth, timeout),
         "cdp_neighbors": _discover_cdp_neighbors(ip_address, auth, timeout),
         "inventory": inventory,
-        "detected_platform": _detect_platform_from_sysdescr(sys_descr),
+        "detected_platform": detected_platform,
         "detected_model": detected_model,
         "detected_serial_number": detected_serial_number,
     }
