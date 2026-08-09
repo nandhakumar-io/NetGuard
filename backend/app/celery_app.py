@@ -38,11 +38,39 @@ celery_app.conf.update(
     task_time_limit=360,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
-    # Nightly configuration drift sweep (SRS: automated drift detection).
-    # Runs off business hours, fanning out one drift_detection_task per
-    # device (see app.tasks). On-demand scans via
-    # POST /devices/{id}/drift/scan are unaffected by this schedule.
+    # --- Beat HA ---------------------------------------------------------
+    # Default Celery beat keeps its schedule + "last run" state in a local
+    # file (celerybeat-schedule) and assumes exactly one beat process ever
+    # runs. That's a SPOF: if that one container dies, nightly drift
+    # sweeps / SNMP polling / reachability polling / compliance reports
+    # all silently stop firing until someone notices and restarts it. And
+    # you can't just run two file-backed beat replicas as a workaround --
+    # each has its own file and its own idea of "last run", so both fire
+    # every schedule independently and every polled device gets double
+    # SNMP/ICMP traffic and duplicate deployments get queued twice.
+    #
+    # RedBeat moves the schedule into the same Redis broker this app
+    # already depends on, and gates ticking behind a Redis lock
+    # (`redbeat::lock`) rather than "am I the only beat process". Any
+    # number of `celery beat -S redbeat.RedBeatScheduler` replicas can run
+    # at once (see the `beat` service's `deploy.replicas` in
+    # docker-compose.yaml); only the one holding the lock ticks. If it
+    # dies, the lock's TTL expires and the next replica to check acquires
+    # it and takes over -- typically within one lock-renewal interval, no
+    # manual failover step.
+    beat_scheduler="redbeat.RedBeatScheduler",
+    redbeat_redis_url=settings.CELERY_BROKER_URL,
+    # How long a held lock is valid without renewal before another beat
+    # replica is allowed to grab it -- i.e. worst-case gap in scheduling
+    # coverage if the active replica dies mid-tick. Kept short relative to
+    # the tightest schedule below (SNMP/reachability polling) so a failover
+    # doesn't itself become a visible monitoring gap.
+    redbeat_lock_timeout=90,
     beat_schedule={
+        # Nightly configuration drift sweep (SRS: automated drift detection).
+        # Runs off business hours, fanning out one drift_detection_task per
+        # device (see app.tasks). On-demand scans via
+        # POST /devices/{id}/drift/scan are unaffected by this schedule.
         "nightly-drift-sweep": {
             "task": "app.tasks.run_nightly_drift_sweep_task",
             "schedule": crontab(hour=settings.DRIFT_SWEEP_HOUR_UTC, minute=0),

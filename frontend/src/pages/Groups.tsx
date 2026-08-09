@@ -552,7 +552,11 @@ export default function Groups() {
   const toggleSelect = (deviceId: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(deviceId) ? next.delete(deviceId) : next.add(deviceId);
+      if (next.has(deviceId)) {
+        next.delete(deviceId);
+      } else {
+        next.add(deviceId);
+      }
       return next;
     });
   };

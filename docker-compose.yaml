@@ -21,6 +21,60 @@ services:
       - "traefik.http.services.netguard-backend.loadbalancer.server.port=7001"
       - "traefik.docker.network=proxy"
 
+  # Runs the actual polling/deployment/report tasks that beat (below)
+  # schedules, plus anything enqueued directly from API requests (e.g.
+  # deployment pipelines -- see app/celery_app.py's module docstring).
+  # Stateless and safe to run at any replica count: `docker compose up -d
+  # --scale worker=3` (or more, per NOC size) to add capacity, since work
+  # is pulled from the shared Redis queue and each task only ever runs
+  # once regardless of how many workers are listening.
+  worker:
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - netguard-internal
+
+  # Schedules the recurring tasks in app/celery_app.py's beat_schedule
+  # (SNMP/reachability polling, nightly drift sweep, compliance reports,
+  # snapshot retention). Uses RedBeat (see app/celery_app.py) so the
+  # schedule and the "who's active" lock both live in Redis instead of a
+  # local file -- that's what makes it safe to run more than one replica
+  # here. A single file-backed beat process is a SPOF: kill that one
+  # container and nothing fires again until a human restarts it. With
+  # RedBeat, run this at replica count 2+ (`docker compose up -d --scale
+  # beat=2`) and losing any one replica just means the Redis lock expires
+  # (redbeat_lock_timeout, currently 90s) and the next replica picks up
+  # scheduling automatically -- no manual failover, no duplicated tasks.
+  beat:
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "beat", "--loglevel=info", "-S", "redbeat.RedBeatScheduler"]
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - netguard-internal
+    deploy:
+      # Only honored under `docker stack deploy` (Swarm mode). Under plain
+      # `docker compose up`, scale beat explicitly instead:
+      #   docker compose up -d --scale beat=2
+      replicas: 2
+
   frontend:
     image: ghcr.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
     restart: unless-stopped
