@@ -258,6 +258,14 @@ export default function Topology() {
     dependent_device_ids: string[];
   } | null>(null);
   const [showIpLabels, setShowIpLabels] = useState(true);
+  // Live NOC wall-display feed (GET /topology/ws) -- pushes the graph the
+  // instant a device status changes, moves rack/DC, or gets added/removed,
+  // instead of requiring a manual refresh. Defaults on; a user actively
+  // dragging/inspecting nodes can pause it so the layout doesn't jump
+  // under their cursor mid-interaction.
+  const [liveMode, setLiveMode] = useState(true);
+  const [liveStatus, setLiveStatus] = useState<"connecting" | "live" | "offline">("connecting");
+  const [lastLiveUpdate, setLastLiveUpdate] = useState<Date | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
   // --- view mode: force-directed graph vs. data center / rack grouping ---
@@ -477,6 +485,67 @@ export default function Topology() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Live push feed. Reconnects with backoff on drop (network blip, API
+  // restart) rather than giving up silently -- a wall display left
+  // running overnight should recover on its own. REST fetch above still
+  // owns first paint (and remains the fallback if websockets are blocked
+  // by a proxy); this effect only takes over afterward.
+  useEffect(() => {
+    if (!liveMode) {
+      setLiveStatus("offline");
+      return;
+    }
+
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    const connect = () => {
+      if (cancelled) return;
+      setLiveStatus("connecting");
+      const httpBase = api.defaults.baseURL || window.location.origin;
+      const wsUrl = httpBase.replace(/^http/, "ws").replace(/\/$/, "") + "/topology/ws";
+      const ws = new WebSocket(wsUrl);
+      socket = ws;
+
+      ws.onopen = () => {
+        attempt = 0;
+        setLiveStatus("live");
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "topology_snapshot" && msg.data) {
+            setGraph(msg.data);
+            setError(null);
+            setLastLiveUpdate(new Date());
+          }
+        } catch {
+          // ignore malformed frame
+        }
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        setLiveStatus("offline");
+        attempt += 1;
+        const delay = Math.min(15000, 1000 * 2 ** attempt);
+        reconnectTimer = setTimeout(connect, delay);
+      };
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [liveMode]);
+
   const sites = useMemo(() => {
     if (!graph) return [];
     return Array.from(new Set(graph.nodes.map((n) => n.site || "Unassigned"))).sort();
@@ -680,6 +749,34 @@ export default function Topology() {
               Data Center / Rack
             </button>
           </div>
+
+          <button
+            onClick={() => setLiveMode((v) => !v)}
+            title={
+              liveMode
+                ? `Pause live updates${lastLiveUpdate ? ` (last update ${lastLiveUpdate.toLocaleTimeString()})` : ""}`
+                : "Resume live updates"
+            }
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${
+              liveMode
+                ? liveStatus === "live"
+                  ? "bg-green-50 border-green-300 text-green-700"
+                  : "bg-amber-50 border-amber-300 text-amber-700"
+                : "bg-slate-100 border-slate-300 text-slate-500"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                liveMode
+                  ? liveStatus === "live"
+                    ? "bg-green-500 animate-pulse"
+                    : "bg-amber-500 animate-pulse"
+                  : "bg-slate-400"
+              }`}
+            />
+            {liveMode ? (liveStatus === "live" ? "Live" : liveStatus === "connecting" ? "Connecting…" : "Reconnecting…") : "Paused"}
+          </button>
+
           <div className="relative">
             <input
               value={nodeSearch}

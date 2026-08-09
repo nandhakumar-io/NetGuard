@@ -47,6 +47,7 @@ from app.services import (
     credential_service,
     device_csv_service,
     eol_service,
+    event_bus,
     metrics_service,
     netbox_service,
     protocol_manager,
@@ -121,6 +122,15 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depend
         reachability_service.check_device(db, device)
     except Exception:  # noqa: BLE001 - best-effort, same policy as the SNMP poll above
         pass
+
+    # New node for every open Topology tab -- reachability_service already
+    # pushes a status event if it changed device.status, but a brand new
+    # device needs its node to appear at all, which that event alone
+    # wouldn't trigger (nothing "changed" from Topology's point of view
+    # until this fires).
+    event_bus.publish_event(
+        "device_added", channel=event_bus.TOPOLOGY_CHANNEL, device_id=str(device.id), hostname=device.hostname
+    )
 
     return DeviceRead.from_device(device)
 
@@ -554,6 +564,11 @@ def update_device(
             detail=f"Fields changed: {changed_fields}",
         )
 
+    if updates:
+        event_bus.publish_event(
+            "device_updated", channel=event_bus.TOPOLOGY_CHANNEL, device_id=str(device.id), fields=sorted(updates.keys())
+        )
+
     return DeviceRead.from_device(device)
 
 
@@ -648,8 +663,12 @@ def delete_device(
                 detail=f"Purged history: {blocking_counts}",
             )
 
+        deleted_hostname = device.hostname
         db.delete(device)
         db.commit()
+        event_bus.publish_event(
+            "device_deleted", channel=event_bus.TOPOLOGY_CHANNEL, device_id=str(device_id), hostname=deleted_hostname
+        )
     except IntegrityError:
         db.rollback()
         raise HTTPException(

@@ -1,9 +1,18 @@
+import asyncio
+import contextlib
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.core.deps import get_current_user
 from app.models.topology_snapshot import TopologySnapshot
 from app.schemas.topology import (
@@ -11,22 +20,20 @@ from app.schemas.topology import (
     TopologyResponse,
     TopologySnapshotRead,
 )
-from app.services import topology_service
+from app.services import event_bus, topology_service
 
 router = APIRouter(prefix="/topology", tags=["topology"])
 
+# How often the websocket re-sends the full graph even with no pub/sub
+# event -- catches anything an event publisher might have missed (e.g. a
+# manual DB edit, a Celery worker restart mid-task) so a NOC wall display
+# left open for hours never drifts far from reality even in the worst case.
+HEARTBEAT_INTERVAL_SECONDS = 60
 
-@router.get("", response_model=TopologyResponse)
-def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Fleet-wide network topology: one node per device, edges inferred
-    from shared interface subnets found in each device's latest config
-    snapshot (see app.services.topology_service for how links are
-    derived -- there's no CDP/LLDP discovery in NetGuard, so this is the
-    data-grounded substitute).
 
-    Available to any authenticated user (read-only), consistent with the
-    other dashboard/summary endpoints in this API.
-    """
+def _build_topology_payload(db: Session) -> TopologyResponse:
+    """Shared by GET /topology and the /topology/ws push feed, so the two
+    can never drift out of sync with each other."""
     graph = topology_service.build_topology(db)
     return TopologyResponse(
         nodes=[
@@ -55,11 +62,6 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
                 "subnet": e.subnet,
                 "source_ip": e.source_ip,
                 "target_ip": e.target_ip,
-                # NB: link_source/local_port/neighbor_port were previously
-                # omitted here, silently collapsing every LLDP/CDP/GNS3-
-                # confirmed edge back to the "subnet" schema default --
-                # fixed alongside the utilization/device_role additions
-                # below since all three touch this same response shape.
                 "link_source": e.link_source,
                 "local_port": e.local_port,
                 "neighbor_port": e.neighbor_port,
@@ -68,6 +70,79 @@ def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
             for e in graph.edges
         ],
     )
+
+
+@router.get("", response_model=TopologyResponse)
+def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Fleet-wide network topology: one node per device, edges inferred
+    from shared interface subnets found in each device's latest config
+    snapshot (see app.services.topology_service for how links are
+    derived -- there's no CDP/LLDP discovery in NetGuard, so this is the
+    data-grounded substitute).
+
+    Available to any authenticated user (read-only), consistent with the
+    other dashboard/summary endpoints in this API.
+    """
+    return _build_topology_payload(db)
+
+
+async def _topology_heartbeat_loop(websocket: WebSocket):
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        db = SessionLocal()
+        try:
+            await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db).model_dump()})
+        finally:
+            db.close()
+
+
+@router.websocket("/ws")
+async def topology_ws(websocket: WebSocket):
+    """Live feed for the Topology page's NOC-wall-display mode: pushes the
+    full graph on connect, then again every time a device is added,
+    removed, updated (incl. moved to a new data center/rack), or changes
+    status -- see app.services.event_bus.TOPOLOGY_CHANNEL publishers --
+    plus a HEARTBEAT_INTERVAL_SECONDS fallback re-send as a safety net.
+
+    Sends the whole graph rather than a diff on every push: fleet sizes
+    here are small (tens, not thousands of devices, per layoutNodes'
+    docstring in Topology.tsx) so this is cheap, and it keeps the client
+    trivially simple -- no incremental-patch state machine to get out of
+    sync.
+    """
+    await websocket.accept()
+
+    db = SessionLocal()
+    try:
+        await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db).model_dump()})
+    finally:
+        db.close()
+
+    redis_client = event_bus.get_async_client()
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(event_bus.TOPOLOGY_CHANNEL)
+
+    heartbeat_task = asyncio.create_task(_topology_heartbeat_loop(websocket))
+
+    try:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=None)
+            if message is None:
+                continue
+            db = SessionLocal()
+            try:
+                await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db).model_dump()})
+            finally:
+                db.close()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
+        await pubsub.unsubscribe(event_bus.TOPOLOGY_CHANNEL)
+        await pubsub.close()
+        await redis_client.close()
 
 
 @router.get("/snapshots", response_model=list[TopologySnapshotRead])

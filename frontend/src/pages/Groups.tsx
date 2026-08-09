@@ -58,6 +58,7 @@ function RackCard({
   dcName,
   canManage,
   onMove,
+  onAddDevice,
   selected,
   onToggleSelect,
 }: {
@@ -65,6 +66,7 @@ function RackCard({
   dcName: string;
   canManage: boolean;
   onMove: (deviceId: string, dataCenter: string, rack: string) => void;
+  onAddDevice: (dc: string, rack: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
 }) {
@@ -95,10 +97,23 @@ function RackCard({
         </p>
         <HealthBadge devices={rack.devices} />
         <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0 ml-auto">{rack.devices.length} device{rack.devices.length === 1 ? "" : "s"}</span>
+        {canManage && (
+          <button
+            onClick={() => onAddDevice(dcName, rack.name)}
+            title="Add a device to this rack"
+            className="text-[11px] font-bold text-brandblue hover:text-navy dark:hover:text-white shrink-0"
+          >
+            + Add
+          </button>
+        )}
       </div>
       <div className="divide-y divide-slate-100 dark:divide-slate-800">
         {rack.devices.length === 0 && (
-          <p className="text-xs text-slate-400 dark:text-slate-500 italic px-4 py-3">Empty rack — drag a device here.</p>
+          <div className="px-4 py-3 flex items-center justify-between gap-2">
+            <p className="text-xs text-slate-400 dark:text-slate-500 italic">
+              {canManage ? "Empty rack — drag a device here, or use \"+ Add\" above." : "Empty rack."}
+            </p>
+          </div>
         )}
         {rack.devices.map((d) => (
           <div
@@ -685,6 +700,42 @@ export default function Groups() {
   const [bulkTarget, setBulkTarget] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
 
+  // Explicit "Add device to rack" flow -- primary path for placing a
+  // device now (drag-and-drop below is a secondary convenience, and
+  // doesn't work on touch devices). Prefilled dc/rack when launched
+  // from a specific rack's "+ Add device" button.
+  const [addOpen, setAddOpen] = useState(false);
+  const [addDeviceId, setAddDeviceId] = useState("");
+  const [addDeviceQuery, setAddDeviceQuery] = useState("");
+  const [addDc, setAddDc] = useState("");
+  const [addDcNew, setAddDcNew] = useState("");
+  const [addRack, setAddRack] = useState("");
+  const [addRackNew, setAddRackNew] = useState("");
+  const [addPosition, setAddPosition] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+  const [addFormError, setAddFormError] = useState<string | null>(null);
+  const [allDevices, setAllDevices] = useState<Device[] | null>(null);
+
+  const loadAllDevices = () => {
+    api
+      .get<Device[]>("/devices")
+      .then((res) => setAllDevices(res.data))
+      .catch(() => setAllDevices([]));
+  };
+
+  const openAddDevice = (prefillDc?: string, prefillRack?: string) => {
+    if (allDevices === null) loadAllDevices();
+    setAddDeviceId("");
+    setAddDeviceQuery("");
+    setAddDc(prefillDc && prefillDc !== "Unassigned" ? prefillDc : "");
+    setAddDcNew("");
+    setAddRack(prefillRack && prefillRack !== "Unassigned" ? prefillRack : "");
+    setAddRackNew("");
+    setAddPosition("");
+    setAddFormError(null);
+    setAddOpen(true);
+  };
+
   const load = () => {
     setLoading(true);
     api
@@ -713,6 +764,43 @@ export default function Groups() {
     }
   };
 
+  const assignDevice = async () => {
+    const dc = (addDc === "__new__" ? addDcNew : addDc).trim();
+    const rack = (addRack === "__new__" ? addRackNew : addRack).trim();
+    if (!addDeviceId) {
+      setAddFormError("Pick a device.");
+      return;
+    }
+    if (!dc || !rack) {
+      setAddFormError("A data center and rack are both required.");
+      return;
+    }
+    const position = addPosition.trim() ? Number(addPosition) : null;
+    if (addPosition.trim() && (!Number.isInteger(position) || (position as number) < 1)) {
+      setAddFormError("Rack position must be a positive whole number (U slot), or left blank.");
+      return;
+    }
+    setAddBusy(true);
+    setAddFormError(null);
+    try {
+      await api.patch(`/devices/${addDeviceId}`, {
+        data_center: dc,
+        rack: rack,
+        rack_position: position,
+      });
+      const deviceLabel = allDevices?.find((d) => d.id === addDeviceId)?.hostname || "Device";
+      setMoveNotice(`Added ${deviceLabel} to ${dc} / ${rack}.`);
+      setAddOpen(false);
+      loadAllDevices();
+      load();
+      setTimeout(() => setMoveNotice(null), 3000);
+    } catch (e: any) {
+      setAddFormError(e?.response?.data?.detail || "Failed to add device to rack.");
+    } finally {
+      setAddBusy(false);
+    }
+  };
+
   const toggleSelect = (deviceId: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -735,6 +823,30 @@ export default function Groups() {
     }
     return opts;
   }, [groups]);
+
+  // Existing data-center names (for the "Add device" picker's dropdown,
+  // separate from rackOptions above which pairs dc+rack together).
+  const dcOptions = useMemo(() => groups.map((dc) => dc.name).filter((n) => n !== "Unassigned"), [groups]);
+
+  const racksForAddDc = useMemo(() => {
+    const dcName = addDc === "__new__" ? null : addDc;
+    if (!dcName) return [];
+    const dc = groups.find((g) => g.name === dcName);
+    return dc ? dc.racks.map((r) => r.name).filter((n) => n !== "Unassigned") : [];
+  }, [groups, addDc]);
+
+  const addDeviceOptions = useMemo(() => {
+    const q = addDeviceQuery.trim().toLowerCase();
+    const list = allDevices || [];
+    const filtered = q ? list.filter((d) => d.hostname.toLowerCase().includes(q)) : list;
+    return filtered.slice(0, 50);
+  }, [allDevices, addDeviceQuery]);
+
+  useEffect(() => {
+    if (addDc !== "__new__" && addRack !== "__new__" && addRack && !racksForAddDc.includes(addRack)) {
+      setAddRack("");
+    }
+  }, [addDc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const runBulkMove = async () => {
     if (!bulkTarget || selected.size === 0) return;
@@ -795,12 +907,22 @@ export default function Groups() {
             Named logical groups you define, plus devices organized by physical Data Center → Rack.
           </p>
         </div>
-        <button
-          onClick={load}
-          className="text-brandblue font-medium hover:text-navy dark:hover:text-white bg-white dark:bg-slate-800 border border-brandblue hover:bg-slate-50 dark:hover:bg-slate-700 px-3 py-1.5 rounded-full transition shadow-sm text-xs"
-        >
-          ↻ Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {canManage && (
+            <button
+              onClick={() => openAddDevice()}
+              className="bg-brandblue hover:bg-blue-600 text-white font-bold px-3 py-1.5 rounded-full transition shadow-sm text-xs"
+            >
+              + Add Device to Rack
+            </button>
+          )}
+          <button
+            onClick={load}
+            className="text-brandblue font-medium hover:text-navy dark:hover:text-white bg-white dark:bg-slate-800 border border-brandblue hover:bg-slate-50 dark:hover:bg-slate-700 px-3 py-1.5 rounded-full transition shadow-sm text-xs"
+          >
+            ↻ Refresh
+          </button>
+        </div>
       </div>
 
       <NamedGroupsPanel canManage={canManage} />
@@ -871,7 +993,19 @@ export default function Groups() {
       {loading ? (
         <p className="text-sm text-slate-400 dark:text-slate-500 italic">Loading groups…</p>
       ) : filteredGroups.length === 0 ? (
-        <p className="text-sm text-slate-400 dark:text-slate-500 italic">No devices match.</p>
+        <div className="text-center py-10 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl">
+          <p className="text-sm text-slate-400 dark:text-slate-500 italic mb-3">
+            {query.trim() ? "No devices match." : "No devices are placed in a data center or rack yet."}
+          </p>
+          {canManage && !query.trim() && (
+            <button
+              onClick={() => openAddDevice()}
+              className="bg-brandblue hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-full transition shadow-sm text-sm"
+            >
+              + Add Device to Rack
+            </button>
+          )}
+        </div>
       ) : (
         <div className="flex flex-col gap-6">
           {filteredGroups.map((dc) => (
@@ -882,6 +1016,14 @@ export default function Groups() {
                 </h2>
                 <HealthBadge devices={dc.racks.flatMap((r) => r.devices)} />
                 <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.racks.length} rack{dc.racks.length === 1 ? "" : "s"}</span>
+                {canManage && (
+                  <button
+                    onClick={() => openAddDevice(dc.name)}
+                    className="text-[11px] font-bold text-brandblue border border-brandblue rounded-full px-2.5 py-1 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition shrink-0"
+                  >
+                    + Add device
+                  </button>
+                )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {dc.racks.map((rack) => (
@@ -891,6 +1033,7 @@ export default function Groups() {
                     dcName={dc.name}
                     canManage={canManage}
                     onMove={handleMove}
+                    onAddDevice={openAddDevice}
                     selected={selected}
                     onToggleSelect={toggleSelect}
                   />
@@ -898,6 +1041,140 @@ export default function Groups() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {addOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => setAddOpen(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-md p-5 flex flex-col gap-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-navy dark:text-white">Add Device to Rack</h3>
+              <button onClick={() => setAddOpen(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl leading-none">
+                ×
+              </button>
+            </div>
+
+            {addFormError && (
+              <p className="text-riskcrit text-xs font-semibold bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg">
+                {addFormError}
+              </p>
+            )}
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Device</label>
+              <input
+                value={addDeviceQuery}
+                onChange={(e) => setAddDeviceQuery(e.target.value)}
+                placeholder="Search hostname…"
+                className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue"
+              />
+              <select
+                value={addDeviceId}
+                onChange={(e) => setAddDeviceId(e.target.value)}
+                size={6}
+                className="border border-slate-300 dark:border-slate-600 rounded-lg text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue"
+              >
+                {allDevices === null && <option disabled>Loading devices…</option>}
+                {allDevices !== null && addDeviceOptions.length === 0 && <option disabled>No devices found</option>}
+                {addDeviceOptions.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.hostname} {d.data_center ? `(currently ${d.data_center}/${d.rack || "?"})` : "(unplaced)"}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Data Center</label>
+                <select
+                  value={addDc}
+                  onChange={(e) => setAddDc(e.target.value)}
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue"
+                >
+                  <option value="">Select…</option>
+                  {dcOptions.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                  <option value="__new__">+ New data center…</option>
+                </select>
+                {addDc === "__new__" && (
+                  <input
+                    autoFocus
+                    value={addDcNew}
+                    onChange={(e) => setAddDcNew(e.target.value)}
+                    placeholder="e.g. DC-East"
+                    className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue mt-1"
+                  />
+                )}
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Rack</label>
+                <select
+                  value={addRack}
+                  onChange={(e) => setAddRack(e.target.value)}
+                  disabled={!addDc}
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue disabled:opacity-40"
+                >
+                  <option value="">Select…</option>
+                  {racksForAddDc.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                  <option value="__new__">+ New rack…</option>
+                </select>
+                {addRack === "__new__" && (
+                  <input
+                    autoFocus
+                    value={addRackNew}
+                    onChange={(e) => setAddRackNew(e.target.value)}
+                    placeholder="e.g. R12"
+                    className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue mt-1"
+                  />
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Rack Position (U slot, optional)
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={addPosition}
+                onChange={(e) => setAddPosition(e.target.value)}
+                placeholder="e.g. 12"
+                className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue w-32"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 mt-1">
+              <button
+                onClick={() => setAddOpen(false)}
+                className="px-3 py-1.5 rounded-full text-sm font-medium text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={assignDevice}
+                disabled={addBusy}
+                className="bg-brandblue hover:bg-blue-600 disabled:opacity-40 text-white font-bold px-4 py-1.5 rounded-full text-sm transition"
+              >
+                {addBusy ? "Adding…" : "Add to Rack"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -26,7 +26,7 @@ from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
 from app.models.device_status_history import DeviceStatusHistory
-from app.services import alert_service, notification_service
+from app.services import alert_service, event_bus, notification_service
 
 # Ports tried, in order, for the TCP-connect reachability check -- this is
 # the *primary* signal (see is_reachable() below), not ICMP ping.
@@ -132,6 +132,16 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
         db.add(DeviceStatusHistory(device_id=device.id, status=new_status, previous_status=device.status))
         device.status = new_status
         db.commit()
+
+        # Push the new node color to every open Topology tab immediately --
+        # a NOC wall display watching this page needs to see a device drop
+        # offline the moment it's detected, not on the next manual refresh.
+        event_bus.publish_event(
+            "device_status_changed",
+            channel=event_bus.TOPOLOGY_CHANNEL,
+            device_id=str(device.id),
+            status=new_status.value,
+        )
 
         # NOC-style alerting: a device dropping off the network entirely
         # (unplugged switch, powered off, cable pulled) is the single most

@@ -32,6 +32,13 @@ class DeviceBase(BaseModel):
     # ("switch") but need different baselines because they're different
     # device_roles ("core" vs "access").
     device_role: str | None = None
+    # Physical placement (Groups page: Data Center -> Rack -> device).
+    # Free-text on purpose -- see Device.data_center/rack in
+    # app/models/device.py. rack_position is a cosmetic 1-based U slot,
+    # not validated against rack height.
+    data_center: str | None = None
+    rack: str | None = None
+    rack_position: int | None = None
     lifecycle_state: DeviceLifecycleState = DeviceLifecycleState.PRODUCTION
     tags: list[str] = Field(default_factory=list)
     custom_fields: dict[str, str] = Field(default_factory=dict)
@@ -97,6 +104,9 @@ class DeviceUpdate(BaseModel):
     site: str | None = None
     device_type: str | None = None
     device_role: str | None = None
+    data_center: str | None = None
+    rack: str | None = None
+    rack_position: int | None = None
     lifecycle_state: DeviceLifecycleState | None = None
     tags: list[str] | None = None
     custom_fields: dict[str, str] | None = None

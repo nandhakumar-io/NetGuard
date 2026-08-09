@@ -21,6 +21,11 @@ from app.core.config import settings
 DASHBOARD_CHANNEL = "netguard:dashboard:events"
 ALERTS_CHANNEL = "netguard:alerts:events"
 NOTIFICATIONS_CHANNEL = "netguard:notifications:events"
+# Topology page (node status/health colors, edges, DC/rack placement).
+# Separate from DASHBOARD_CHANNEL so a busy dashboard (deployments,
+# alerts) doesn't force every open Topology tab to re-render, and vice
+# versa -- the two pages redraw completely different things.
+TOPOLOGY_CHANNEL = "netguard:topology:events"
 
 # Separate sync client for publishers running inside Celery workers
 # (regular, non-async code), and an async client for the FastAPI side
