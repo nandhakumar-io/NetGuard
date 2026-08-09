@@ -18,6 +18,7 @@ finished, the chord callback rolls the per-device results up into a single
 ChangeRequest.status.
 """
 import uuid
+from datetime import datetime, timezone
 
 from celery import chain, chord
 
@@ -33,6 +34,21 @@ from app.services import (
     notification_service,
     pipeline_service,
 )
+
+
+def _seconds_since(past: datetime | None, now: datetime) -> float | None:
+    """(now - past) in seconds, or None if `past` is None (never polled).
+    Treats a naive `past` as UTC -- Device's poll-timestamp columns are
+    DateTime(timezone=True) in Postgres, but some drivers (notably
+    SQLite, used in tests) hand back naive datetimes regardless, and a
+    naive/aware subtraction raises TypeError rather than just being
+    wrong, so this normalizes instead of trusting the driver.
+    """
+    if past is None:
+        return None
+    if past.tzinfo is None:
+        past = past.replace(tzinfo=timezone.utc)
+    return (now - past).total_seconds()
 
 
 @celery_app.task(
@@ -339,6 +355,8 @@ def reachability_task(self, device_id: str) -> str:
         if device is None:
             return "device_missing"
         status = reachability_service.check_device(db, device)
+        device.last_reachability_poll_at = datetime.now(timezone.utc)
+        db.commit()
         return status.value
     finally:
         db.close()
@@ -346,36 +364,84 @@ def reachability_task(self, device_id: str) -> str:
 
 @celery_app.task(name="app.tasks.run_reachability_sweep_task")
 def run_reachability_sweep_task() -> int:
-    """Celery beat entry point: pings every device (SNMP-enabled or not --
-    unlike the SNMP poll sweep, reachability isn't conditional on SNMP
-    being configured) so Device.status reflects reality instead of
-    sitting at UNKNOWN forever. Returns the number of devices checked.
+    """Celery beat entry point: pings every device that's actually due
+    (SNMP-enabled or not -- unlike the SNMP poll sweep, reachability isn't
+    conditional on SNMP being configured). Two things keep this sane past
+    a handful of devices:
+
+      - Per-device cadence: a device only gets enqueued once its own
+        `reachability_poll_interval_seconds` override (or the fleet-wide
+        REACHABILITY_POLL_INTERVAL_SECONDS default when unset) has
+        actually elapsed since `last_reachability_poll_at`. Beat still
+        ticks this sweep on its own fixed schedule, but a device with a
+        looser override just gets skipped on the ticks it isn't due yet
+        -- it doesn't get polled every tick regardless.
+      - Jitter: due devices aren't all enqueued at once. Each gets a
+        random `countdown` up to settings.REACHABILITY_POLL_JITTER_SECONDS
+        so a fleet of hundreds doesn't fire hundreds of simultaneous ICMP
+        probes in the same instant every sweep.
+
+    Returns the number of devices actually enqueued (not the fleet size).
     """
+    import random
+
+    from app.core.config import settings
+
     db = SessionLocal()
     try:
-        device_ids = [str(d.id) for d in db.query(Device.id).all()]
+        now = datetime.now(timezone.utc)
+        due_ids: list[str] = []
+        for device_id, interval_override, last_poll_at in db.query(
+            Device.id, Device.reachability_poll_interval_seconds, Device.last_reachability_poll_at
+        ).all():
+            interval = interval_override or settings.REACHABILITY_POLL_INTERVAL_SECONDS
+            elapsed = _seconds_since(last_poll_at, now)
+            if elapsed is None or elapsed >= interval:
+                due_ids.append(str(device_id))
     finally:
         db.close()
 
-    for device_id in device_ids:
-        reachability_task.delay(device_id)
-    return len(device_ids)
+    jitter_max = max(0, settings.REACHABILITY_POLL_JITTER_SECONDS)
+    for device_id in due_ids:
+        countdown = random.uniform(0, jitter_max) if jitter_max else 0
+        reachability_task.apply_async(args=[device_id], countdown=countdown)
+    return len(due_ids)
 
 
 @celery_app.task(name="app.tasks.run_snmp_poll_sweep_task")
 def run_snmp_poll_sweep_task() -> int:
     """Celery beat entry point: fans out one snmp_poll_task per
-    SNMP-enabled device. Returns the number of devices polled.
+    SNMP-enabled device that's actually due -- same per-device-cadence +
+    jitter treatment as run_reachability_sweep_task above, using
+    `snmp_poll_interval_seconds` / `last_snmp_poll_at` and
+    settings.SNMP_POLL_JITTER_SECONDS instead. Returns the number of
+    devices actually enqueued (not the fleet size).
     """
+    import random
+
+    from app.core.config import settings
+
     db = SessionLocal()
     try:
-        device_ids = [str(d.id) for d in db.query(Device.id).filter(Device.supports_snmp.is_(True)).all()]
+        now = datetime.now(timezone.utc)
+        due_ids: list[str] = []
+        for device_id, interval_override, last_poll_at in (
+            db.query(Device.id, Device.snmp_poll_interval_seconds, Device.last_snmp_poll_at)
+            .filter(Device.supports_snmp.is_(True))
+            .all()
+        ):
+            interval = interval_override or settings.SNMP_POLL_INTERVAL_SECONDS
+            elapsed = _seconds_since(last_poll_at, now)
+            if elapsed is None or elapsed >= interval:
+                due_ids.append(str(device_id))
     finally:
         db.close()
 
-    for device_id in device_ids:
-        snmp_poll_task.delay(device_id)
-    return len(device_ids)
+    jitter_max = max(0, settings.SNMP_POLL_JITTER_SECONDS)
+    for device_id in due_ids:
+        countdown = random.uniform(0, jitter_max) if jitter_max else 0
+        snmp_poll_task.apply_async(args=[device_id], countdown=countdown)
+    return len(due_ids)
 
 
 # --- Compliance report scheduling (weekly / monthly email delivery) ---

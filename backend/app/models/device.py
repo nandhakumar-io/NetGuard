@@ -129,6 +129,23 @@ class Device(Base):
     last_snmp_poll_at = Column(DateTime(timezone=True), nullable=True)
     last_snmp_poll_error = Column(Text, nullable=True)
 
+    # --- Per-device polling cadence override (Discovery at Scale) ---
+    # The fleet-wide defaults (settings.SNMP_POLL_INTERVAL_SECONDS /
+    # REACHABILITY_POLL_INTERVAL_SECONDS) are fine at small counts, but a
+    # real fleet needs some devices polled tighter (a core router) and
+    # others looser (a rarely-changing branch access switch, or one on a
+    # metered/low-bandwidth WAN link where frequent SNMP walks are
+    # actually costly). NULL means "use the fleet default" -- see
+    # app.tasks.run_snmp_poll_sweep_task / run_reachability_sweep_task,
+    # which read these to decide whether a device is due yet, rather than
+    # every device sharing one global cadence tied to beat's own tick.
+    snmp_poll_interval_seconds = Column(Integer, nullable=True)
+    reachability_poll_interval_seconds = Column(Integer, nullable=True)
+    # Reachability's equivalent of last_snmp_poll_at above -- didn't
+    # previously exist because nothing needed to know "was this device's
+    # due time reached yet" until the sweep became interval-aware here.
+    last_reachability_poll_at = Column(DateTime(timezone=True), nullable=True)
+
     # --- Per-metric "last successful read" timestamps ---
     # last_snmp_poll_at above only tells you when a poll *attempt* last
     # ran, not which individual OIDs in that attempt actually resolved.

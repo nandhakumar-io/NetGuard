@@ -21,17 +21,56 @@ services:
       - "traefik.http.services.netguard-backend.loadbalancer.server.port=7001"
       - "traefik.docker.network=proxy"
 
-  # Runs the actual polling/deployment/report tasks that beat (below)
-  # schedules, plus anything enqueued directly from API requests (e.g.
-  # deployment pipelines -- see app/celery_app.py's module docstring).
-  # Stateless and safe to run at any replica count: `docker compose up -d
-  # --scale worker=3` (or more, per NOC size) to add capacity, since work
-  # is pulled from the shared Redis queue and each task only ever runs
-  # once regardless of how many workers are listening.
+  # Deployment pipeline / drift / compliance-report / snapshot-retention
+  # tasks -- everything EXCEPT SNMP/reachability polling, which is routed
+  # to the `polling` queue (see task_routes in app/celery_app.py) and
+  # consumed only by the `poller` service below. Kept separate so a poll
+  # storm across a large fleet can never starve a change-request
+  # deployment of worker capacity, or vice versa. Stateless and safe to
+  # run at any replica count: `docker compose up -d --scale worker=3`.
   worker:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "-Q", "celery", "--concurrency=4"]
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - netguard-internal
+
+  # Discovery at Scale: the ONLY consumer of the `polling` queue, i.e.
+  # every SNMP + reachability poll task. `--concurrency` hard-caps how
+  # many devices this process probes at once, independent of fleet size
+  # -- without it, a beat-triggered sweep across hundreds of due devices
+  # fans out hundreds of simultaneous SNMP walks/pings in one burst
+  # against the management network and the DB connection pool. Combined
+  # with the per-device interval due-check and jitter in
+  # app.tasks.run_snmp_poll_sweep_task / run_reachability_sweep_task,
+  # this is what makes polling scale past a handful of lab devices: only
+  # devices actually due get enqueued, enqueue times are spread out, and
+  # however many land in the queue at once, only POLLER_CONCURRENCY are
+  # ever probed in parallel. Tune POLLER_CONCURRENCY (in .env) to the
+  # management network's realistic concurrent-probe budget, and scale
+  # replicas (`docker compose up -d --scale poller=3`) for more
+  # throughput instead of raising concurrency arbitrarily on one process.
+  poller:
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
+    restart: unless-stopped
+    command:
+      [
+        "celery", "-A", "app.celery_app", "worker",
+        "--loglevel=info",
+        "-Q", "polling",
+        "--concurrency=${POLLER_CONCURRENCY:-10}",
+        "--hostname=poller@%h",
+      ]
     cap_add:
       - NET_RAW
       - NET_ADMIN

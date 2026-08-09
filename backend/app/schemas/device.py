@@ -124,6 +124,14 @@ class DeviceUpdate(BaseModel):
     console_type: str | None = None
     bootstrapped: bool | None = None
     enabled_health_checks: list[str] | None = None
+    # Discovery at Scale: per-device override of the fleet-wide poll
+    # cadence (app.core.config.settings.SNMP_POLL_INTERVAL_SECONDS /
+    # REACHABILITY_POLL_INTERVAL_SECONDS). None/omitted leaves the device
+    # on the fleet default; set explicitly to poll a device tighter
+    # (core router) or looser (metered WAN link, rarely-changing access
+    # switch) than the rest of the fleet.
+    snmp_poll_interval_seconds: int | None = None
+    reachability_poll_interval_seconds: int | None = None
 
 
 class DeviceRead(DeviceBase):
@@ -147,6 +155,12 @@ class DeviceRead(DeviceBase):
     # metrics_service.poll_device. None until the first poll ever runs.
     last_snmp_poll_at: datetime.datetime | None = None
     last_snmp_poll_error: str | None = None
+    # See DeviceUpdate for what these override; last_reachability_poll_at
+    # is reachability's equivalent of last_snmp_poll_at above, stamped by
+    # app.tasks.reachability_task on every attempt.
+    snmp_poll_interval_seconds: int | None = None
+    reachability_poll_interval_seconds: int | None = None
+    last_reachability_poll_at: datetime.datetime | None = None
     # Derived from eol_service.check_device_eol against device.vendor/
     # model/os_version -- never stored, always computed fresh so it stays
     # correct if EOL_DATABASE gets updated without touching this device

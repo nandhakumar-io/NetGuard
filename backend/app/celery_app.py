@@ -66,6 +66,15 @@ celery_app.conf.update(
     # the tightest schedule below (SNMP/reachability polling) so a failover
     # doesn't itself become a visible monitoring gap.
     redbeat_lock_timeout=90,
+    # Discovery at Scale: keep polling traffic off the default queue so it
+    # can be capacity-limited independently of deployment/drift/report
+    # tasks -- see the `poller` service in docker-compose.yaml, which is
+    # the only consumer of this queue and runs with its own
+    # --concurrency limit distinct from the general `worker` service.
+    task_routes={
+        "app.tasks.snmp_poll_task": {"queue": "polling"},
+        "app.tasks.reachability_task": {"queue": "polling"},
+    },
     beat_schedule={
         # Nightly configuration drift sweep (SRS: automated drift detection).
         # Runs off business hours, fanning out one drift_detection_task per

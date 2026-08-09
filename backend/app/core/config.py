@@ -186,6 +186,17 @@ class Settings(BaseSettings):
     REACHABILITY_PING_TIMEOUT_SECONDS: float = 1.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
 
+    # Discovery at Scale: rather than firing every due device's poll task
+    # at the exact same instant every sweep tick (fine for a handful of
+    # devices, a thundering herd of simultaneous SNMP walks / ICMP bursts
+    # against the management network at hundreds), each task in the sweep
+    # is given a random `countdown` spread across this window -- see
+    # app.tasks.run_snmp_poll_sweep_task / run_reachability_sweep_task.
+    # Kept well under the poll interval itself so devices still end up
+    # polled roughly on cadence, just not all in the same second.
+    SNMP_POLL_JITTER_SECONDS: int = 20
+    REACHABILITY_POLL_JITTER_SECONDS: int = 15
+
     # When true, the FastAPI process itself runs a lightweight asyncio loop
     # that polls every SNMP-enabled device every SNMP_POLL_INTERVAL_SECONDS
     # -- functionally the same as app.tasks.run_snmp_poll_sweep_task, but
