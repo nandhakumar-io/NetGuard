@@ -24,7 +24,7 @@ app.services.group_membership_service.
 import sqlalchemy as sa
 
 from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, enum_type_exists
 
 revision = "0037"
 down_revision = "0036"
@@ -33,6 +33,10 @@ depends_on = None
 
 
 def upgrade():
+    if op.get_bind().dialect.name == "postgresql" and not enum_type_exists("devicelifecyclestate"):
+        lifecycle_enum = sa.Enum("staging", "production", "decommissioned", name="devicelifecyclestate")
+        lifecycle_enum.create(op.get_bind(), checkfirst=True)
+
     add_column_if_missing(
         "devices",
         sa.Column(
