@@ -30,16 +30,43 @@ const statusColor: Record<string, string> = {
   unknown: "bg-slate-300 dark:bg-slate-600",
 };
 
+/** Rolls a list of devices up into up/degraded/down/unknown counts, so a
+ * NOC admin can see rack/DC health without opening every card. */
+function healthRollup(devices: GroupDevice[]) {
+  const counts = { online: 0, degraded: 0, offline: 0, unknown: 0 };
+  for (const d of devices) {
+    counts[d.status in counts ? (d.status as keyof typeof counts) : "unknown"]++;
+  }
+  return counts;
+}
+
+function HealthBadge({ devices }: { devices: GroupDevice[] }) {
+  const c = healthRollup(devices);
+  if (devices.length === 0) return null;
+  return (
+    <div className="flex items-center gap-2 text-[11px] font-semibold">
+      {c.online > 0 && <span className="text-risklow flex items-center gap-1">● {c.online} up</span>}
+      {c.degraded > 0 && <span className="text-riskmed flex items-center gap-1">● {c.degraded} degraded</span>}
+      {c.offline > 0 && <span className="text-slate-400 dark:text-slate-500 flex items-center gap-1">● {c.offline} down</span>}
+      {c.unknown > 0 && <span className="text-slate-300 dark:text-slate-600 flex items-center gap-1">● {c.unknown} unknown</span>}
+    </div>
+  );
+}
+
 function RackCard({
   rack,
   dcName,
   canManage,
   onMove,
+  selected,
+  onToggleSelect,
 }: {
   rack: GroupRack;
   dcName: string;
   canManage: boolean;
   onMove: (deviceId: string, dataCenter: string, rack: string) => void;
+  selected: Set<string>;
+  onToggleSelect: (deviceId: string) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
 
@@ -62,33 +89,47 @@ function RackCard({
         if (deviceId) onMove(deviceId, dcName, rack.name);
       }}
     >
-      <div className="bg-slate-100 dark:bg-slate-900 px-4 py-2 flex items-center justify-between border-b border-slate-200 dark:border-slate-700">
-        <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+      <div className="bg-slate-100 dark:bg-slate-900 px-4 py-2 flex items-center justify-between border-b border-slate-200 dark:border-slate-700 gap-3">
+        <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5 shrink-0">
           🗄️ Rack: {rack.name}
         </p>
-        <span className="text-[11px] text-slate-400 dark:text-slate-500">{rack.devices.length} device{rack.devices.length === 1 ? "" : "s"}</span>
+        <HealthBadge devices={rack.devices} />
+        <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0 ml-auto">{rack.devices.length} device{rack.devices.length === 1 ? "" : "s"}</span>
       </div>
       <div className="divide-y divide-slate-100 dark:divide-slate-800">
         {rack.devices.length === 0 && (
           <p className="text-xs text-slate-400 dark:text-slate-500 italic px-4 py-3">Empty rack — drag a device here.</p>
         )}
         {rack.devices.map((d) => (
-          <Link
+          <div
             key={d.id}
-            to={`/devices?q=${encodeURIComponent(d.hostname)}`}
             draggable={canManage}
             onDragStart={(e) => e.dataTransfer.setData("text/device-id", d.id)}
             className="flex items-center gap-2 px-4 py-2 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group"
           >
+            {canManage && (
+              <input
+                type="checkbox"
+                checked={selected.has(d.id)}
+                onChange={() => onToggleSelect(d.id)}
+                onClick={(e) => e.stopPropagation()}
+                className="shrink-0 accent-brandblue"
+              />
+            )}
             {d.rack_position != null && (
               <span className="text-[10px] font-mono text-slate-400 dark:text-slate-500 w-6 text-right">U{d.rack_position}</span>
             )}
             <span className={`w-2 h-2 rounded-full shrink-0 ${statusColor[d.status] || statusColor.unknown}`} />
-            <span className="text-sm font-medium text-navy dark:text-white group-hover:text-brandblue truncate">{d.hostname}</span>
+            <Link
+              to={`/devices?q=${encodeURIComponent(d.hostname)}`}
+              className="text-sm font-medium text-navy dark:text-white group-hover:text-brandblue truncate flex-1"
+            >
+              {d.hostname}
+            </Link>
             {d.device_type && (
-              <span className="ml-auto text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">{d.device_type}</span>
+              <span className="text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">{d.device_type}</span>
             )}
-          </Link>
+          </div>
         ))}
       </div>
     </div>
@@ -476,6 +517,9 @@ export default function Groups() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [moveNotice, setMoveNotice] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkTarget, setBulkTarget] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -502,6 +546,52 @@ export default function Groups() {
       setTimeout(() => setMoveNotice(null), 3000);
     } catch {
       setError("Failed to move device.");
+    }
+  };
+
+  const toggleSelect = (deviceId: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(deviceId) ? next.delete(deviceId) : next.add(deviceId);
+      return next;
+    });
+  };
+
+  // Every known "dataCenter / rack" combo, for the bulk-move target picker.
+  const rackOptions = useMemo(() => {
+    const opts: { label: string; dc: string; rack: string }[] = [];
+    for (const dc of groups) {
+      for (const r of dc.racks) {
+        opts.push({ label: `${dc.name} / ${r.name}`, dc: dc.name, rack: r.name });
+      }
+    }
+    return opts;
+  }, [groups]);
+
+  const runBulkMove = async () => {
+    if (!bulkTarget || selected.size === 0) return;
+    const target = rackOptions.find((o) => o.label === bulkTarget);
+    if (!target) return;
+    setBulkBusy(true);
+    const ids = Array.from(selected);
+    try {
+      await Promise.all(
+        ids.map((id) =>
+          api.patch(`/devices/${id}`, {
+            data_center: target.dc === "Unassigned" ? null : target.dc,
+            rack: target.rack === "Unassigned" ? null : target.rack,
+          })
+        )
+      );
+      setMoveNotice(`Moved ${ids.length} device${ids.length === 1 ? "" : "s"} to ${bulkTarget}.`);
+      setSelected(new Set());
+      setBulkTarget("");
+      load();
+      setTimeout(() => setMoveNotice(null), 3000);
+    } catch {
+      setError("Bulk move failed for one or more devices.");
+    } finally {
+      setBulkBusy(false);
     }
   };
 
@@ -582,6 +672,34 @@ export default function Groups() {
         </p>
       )}
 
+      {canManage && selected.size > 0 && (
+        <div className="sticky top-2 z-10 flex items-center gap-3 flex-wrap bg-navy text-white shadow-lg rounded-full px-4 py-2 text-sm">
+          <span className="font-bold">{selected.size} selected</span>
+          <select
+            value={bulkTarget}
+            onChange={(e) => setBulkTarget(e.target.value)}
+            className="bg-white/10 border border-white/30 rounded-full px-3 py-1 text-xs outline-none"
+          >
+            <option value="" className="text-navy">Move to rack…</option>
+            {rackOptions.map((o) => (
+              <option key={o.label} value={o.label} className="text-navy">
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={runBulkMove}
+            disabled={!bulkTarget || bulkBusy}
+            className="bg-brandblue hover:bg-blue-600 disabled:opacity-40 rounded-full px-3 py-1 text-xs font-bold"
+          >
+            {bulkBusy ? "Moving…" : "Move"}
+          </button>
+          <button onClick={() => setSelected(new Set())} className="text-white/70 hover:text-white text-xs ml-auto">
+            Clear
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <p className="text-sm text-slate-400 dark:text-slate-500 italic">Loading groups…</p>
       ) : filteredGroups.length === 0 ? (
@@ -590,15 +708,24 @@ export default function Groups() {
         <div className="flex flex-col gap-6">
           {filteredGroups.map((dc) => (
             <div key={dc.name} className="bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-3 px-1">
+              <div className="flex items-center justify-between mb-3 px-1 gap-3 flex-wrap">
                 <h2 className="text-lg font-bold text-navy dark:text-white flex items-center gap-2">
                   🏢 {dc.name}
                 </h2>
-                <span className="text-xs text-slate-400 dark:text-slate-500">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.racks.length} rack{dc.racks.length === 1 ? "" : "s"}</span>
+                <HealthBadge devices={dc.racks.flatMap((r) => r.devices)} />
+                <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.racks.length} rack{dc.racks.length === 1 ? "" : "s"}</span>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {dc.racks.map((rack) => (
-                  <RackCard key={rack.name} rack={rack} dcName={dc.name} canManage={canManage} onMove={handleMove} />
+                  <RackCard
+                    key={rack.name}
+                    rack={rack}
+                    dcName={dc.name}
+                    canManage={canManage}
+                    onMove={handleMove}
+                    selected={selected}
+                    onToggleSelect={toggleSelect}
+                  />
                 ))}
               </div>
             </div>

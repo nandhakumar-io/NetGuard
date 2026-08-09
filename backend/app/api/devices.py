@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.alert import Alert
 from app.models.audit_log import AuditLog
+from app.services import audit_service
 from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
@@ -269,11 +270,15 @@ def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(ge
 
 @router.patch("/{device_id}", response_model=DeviceRead)
 def update_device(
-    device_id: uuid.UUID, payload: DeviceUpdate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)
+    device_id: uuid.UUID,
+    payload: DeviceUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
 ):
     """Partial update -- e.g. enabling SNMP monitoring on a device that was
-    added before its community string / SNMPv3 credentials were set up.
-    Only fields present in the request body are changed.
+    added before its community string / SNMPv3 credentials were set up, or
+    moving a device to a new data center/rack from the Groups page (drag-drop
+    or bulk move). Only fields present in the request body are changed.
     """
     device = db.get(Device, device_id)
     if not device:
@@ -285,6 +290,10 @@ def update_device(
             raise HTTPException(status_code=400, detail="Device with this hostname already exists")
 
     was_snmp_enabled = device.supports_snmp
+    # Snapshot before-values for every field actually being changed, so the
+    # audit entry can say what moved rather than just that "something" did.
+    before = {field: getattr(device, field, None) for field in updates}
+    hostname_for_log = device.hostname
 
     for field, value in updates.items():
         if field == "enabled_health_checks":
@@ -312,6 +321,32 @@ def update_device(
 
     if device.supports_snmp and not was_snmp_enabled:
         _poll_snmp_best_effort(db, device)
+
+    if "data_center" in updates or "rack" in updates:
+        # This is the write path the Groups page uses (drag-drop onto a
+        # rack, or the bulk "Move to rack" action) -- log it as a
+        # placement change specifically, since "what moved where" is what
+        # a NOC admin actually wants out of the audit trail here.
+        old_place = f"{before.get('data_center') or 'Unassigned'} / {before.get('rack') or 'Unassigned'}"
+        new_place = f"{device.data_center or 'Unassigned'} / {device.rack or 'Unassigned'}"
+        audit_service.record_event(
+            db,
+            actor=current_user.email,
+            action="Moved device",
+            result="Success",
+            device_hostname=hostname_for_log,
+            detail=f"{old_place} → {new_place}",
+        )
+    elif updates:
+        changed_fields = ", ".join(sorted(updates.keys()))
+        audit_service.record_event(
+            db,
+            actor=current_user.email,
+            action="Updated device",
+            result="Success",
+            device_hostname=hostname_for_log,
+            detail=f"Fields changed: {changed_fields}",
+        )
 
     return DeviceRead.from_device(device)
 

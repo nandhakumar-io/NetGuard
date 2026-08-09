@@ -2,6 +2,9 @@ services:
   backend:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
     env_file:
       - .env
     depends_on:
