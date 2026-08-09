@@ -150,6 +150,32 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
               ↻ Retry Pipeline
             </button>
           )}
+          {deployment.status === "failed" && (
+            <button
+              onClick={async () => {
+                const batchNote = deployment.target_device_count > 1
+                  ? ` Only this device is affected — the other ${deployment.target_device_count - 1} device(s) on this change request are left as-is.`
+                  : "";
+                if (!confirm(`Roll back this device to its pre-deployment configuration?${batchNote}`)) return;
+                try {
+                  const res = await api.post<{ message: string; change_request_id: string }>(
+                    `/deployments/${deployment.id}/rollback`
+                  );
+                  alert(res.data.message);
+                } catch (err: any) {
+                  alert(err?.response?.data?.detail || "Failed to queue partial rollback");
+                }
+              }}
+              title={
+                deployment.target_device_count > 1
+                  ? "Roll back only this device — the rest of the batch is untouched"
+                  : "Roll back this device to its pre-deployment configuration"
+              }
+              className="bg-red-600 text-white rounded px-3 py-1 text-[10px] hover:bg-red-700 font-bold uppercase transition-colors shadow-sm"
+            >
+              ⤺ {deployment.target_device_count > 1 ? "Partial Rollback (this device)" : "Roll Back"}
+            </button>
+          )}
         </h4>
         <div className="bg-[#1e1e1e] border-4 border-slate-800 rounded-lg h-72 overflow-y-auto p-4 font-mono text-[11px] text-slate-300 relative shadow-inner leading-relaxed">
           {loading ? (
@@ -307,7 +333,17 @@ export default function Deployments() {
                 >
                   <td className="px-5 py-4 text-slate-600 dark:text-slate-300 whitespace-nowrap font-medium">{new Date(d.created_at).toLocaleString()}</td>
                   <td className="px-5 py-4 font-mono text-xs text-brandblue font-semibold">{d.change_request_id.slice(0, 8)}</td>
-                  <td className="px-5 py-4 font-mono text-xs text-slate-500 font-semibold">{d.device_id.slice(0, 8)}</td>
+                  <td className="px-5 py-4 font-mono text-xs text-slate-500 font-semibold">
+                    {d.device_id.slice(0, 8)}
+                    {d.target_device_count > 1 && (
+                      <span
+                        className="ml-1.5 font-sans text-[10px] font-semibold text-slate-400 normal-case"
+                        title={`Part of a ${d.target_device_count}-device batch change request`}
+                      >
+                        (1 of {d.target_device_count})
+                      </span>
+                    )}
+                  </td>
                   <td className="px-5 py-4 text-slate-600 font-bold tracking-wide">{d.protocol.toUpperCase()}</td>
                   <td className="px-5 py-4">
                     <span className={`px-2.5 py-1 rounded-md text-[11px] font-bold uppercase tracking-wider shadow-sm ${STATUS_STYLES[d.status]}`}>

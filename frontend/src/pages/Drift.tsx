@@ -50,6 +50,9 @@ export default function DriftPage() {
 
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [remediating, setRemediating] = useState(false);
+  const [remediationError, setRemediationError] = useState<string | null>(null);
+  const [remediationNotice, setRemediationNotice] = useState<string | null>(null);
 
   // "Who's drifted from golden config this week" one-click report -- a
   // deduplicated (one row per device) view scoped to a time window,
@@ -162,6 +165,8 @@ export default function DriftPage() {
       return;
     }
     setDetailLoading(true);
+    setRemediationError(null);
+    setRemediationNotice(null);
     Promise.all([
       api.get(`/drift/${selected.id}`),
       api.get(`/drift/${selected.id}/rollback-recommendation`),
@@ -606,10 +611,61 @@ export default function DriftPage() {
                   </p>
                   <p>{recommendation.reason}</p>
                   {recommendation.recommended && (
-                    <p className="mt-1 text-slate-500">
-                      To roll back, go to the <span className="font-medium text-navy">Devices</span> page and select a
-                      snapshot to restore.
-                    </p>
+                    <>
+                      {detail.baseline === "golden_config" || detail.baseline === "role_baseline" ? (
+                        <>
+                          <p className="mt-1 text-slate-500">
+                            This drift was detected against an approved {detail.baseline === "golden_config" ? "golden config" : "role baseline"} --
+                            it can be auto-remediated by pushing that config straight back to the device, or you
+                            can roll back manually via a specific snapshot on the Devices page instead.
+                          </p>
+                          {canReview && detail.status === "open" && (
+                            <button
+                              onClick={async () => {
+                                if (
+                                  !confirm(
+                                    `Push the ${detail.baseline === "golden_config" ? "golden config" : "role baseline"} to this device now? This queues a normal deployment (snapshot, deploy, health checks, self-healing rollback if it fails).`
+                                  )
+                                )
+                                  return;
+                                setRemediating(true);
+                                setRemediationError(null);
+                                try {
+                                  const res = await api.post<{ message: string; change_request_id: string }>(
+                                    `/drift/${detail.id}/remediate`
+                                  );
+                                  setRemediationNotice(res.data.message);
+                                  const [detailRes, recRes] = await Promise.all([
+                                    api.get(`/drift/${detail.id}`),
+                                    api.get(`/drift/${detail.id}/rollback-recommendation`),
+                                  ]);
+                                  setDetail(detailRes.data);
+                                  setRecommendation(recRes.data);
+                                  load();
+                                } catch (err: any) {
+                                  setRemediationError(err?.response?.data?.detail || "Failed to queue auto-remediation.");
+                                } finally {
+                                  setRemediating(false);
+                                }
+                              }}
+                              disabled={remediating}
+                              className="mt-2 bg-riskcrit text-white rounded-lg px-3 py-1.5 text-xs font-bold uppercase tracking-wider hover:bg-red-700 disabled:opacity-50"
+                            >
+                              {remediating
+                                ? "Queuing…"
+                                : `⚡ Push ${detail.baseline === "golden_config" ? "Golden Config" : "Role Baseline"} to Fix Drift`}
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <p className="mt-1 text-slate-500">
+                          To roll back, go to the <span className="font-medium text-navy">Devices</span> page and select a
+                          snapshot to restore.
+                        </p>
+                      )}
+                      {remediationError && <p className="mt-1 text-riskcrit">{remediationError}</p>}
+                      {remediationNotice && <p className="mt-1 text-risklow font-medium">{remediationNotice}</p>}
+                    </>
                   )}
                 </div>
               )}

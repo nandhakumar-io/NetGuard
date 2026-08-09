@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem } from "../lib/types";
+import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem, TemplateDiffPreviewResponse } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
@@ -35,6 +35,8 @@ const emptyForm = {
   proposed_config: "",
   additional_device_ids: [] as string[],
   canary_enabled: false,
+  maintenance_window_start: "" as string,
+  maintenance_window_end: "" as string,
   // Auto-link (postmortem traceability): set when this form was opened
   // via "Create Change Request" from an Alert Center alert (?alert_id=...
   // on this page's URL, see the useSearchParams effect below).
@@ -166,6 +168,9 @@ export default function ChangeRequests() {
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const [templateRendering, setTemplateRendering] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
+  const [templateDiffPreview, setTemplateDiffPreview] = useState<TemplateDiffPreviewResponse | null>(null);
+  const [templateDiffLoading, setTemplateDiffLoading] = useState(false);
+  const [templateDiffError, setTemplateDiffError] = useState<string | null>(null);
 
   const load = () => {
     Promise.all([api.get<ChangeRequest[]>("/change-requests"), api.get<Device[]>("/devices")])
@@ -203,6 +208,8 @@ export default function ChangeRequests() {
   const selectTemplate = (id: string) => {
     setSelectedTemplateId(id);
     setTemplateError(null);
+    setTemplateDiffPreview(null);
+    setTemplateDiffError(null);
     const t = availableTemplates.find((tpl) => tpl.id === id);
     const initial: Record<string, string> = {};
     t?.variables.forEach((v) => {
@@ -228,6 +235,43 @@ export default function ChangeRequests() {
     }
   };
 
+  // Rendered-config diff preview (not raw template text): renders the
+  // template with the current variable values, then diffs that rendered
+  // output against the target device's golden config (falling back to a
+  // live read if none is set) -- so a reviewer sees the actual delta the
+  // template produces on this device, not just {{ placeholders }} in
+  // isolation.
+  const previewTemplateDiff = async () => {
+    if (!selectedTemplate || !form.device_id) return;
+    setTemplateDiffLoading(true);
+    setTemplateDiffError(null);
+    try {
+      const res = await api.post<TemplateDiffPreviewResponse>(
+        `/config-templates/${selectedTemplate.id}/diff-preview`,
+        { device_id: form.device_id, variables: templateValues, compare_against: "golden" }
+      );
+      setTemplateDiffPreview(res.data);
+    } catch (err: any) {
+      // No golden config set for this device yet -- fall back to a live read.
+      if (err?.response?.status === 404) {
+        try {
+          const res = await api.post<TemplateDiffPreviewResponse>(
+            `/config-templates/${selectedTemplate.id}/diff-preview`,
+            { device_id: form.device_id, variables: templateValues, compare_against: "live" }
+          );
+          setTemplateDiffPreview(res.data);
+          return;
+        } catch (err2: any) {
+          setTemplateDiffError(err2?.response?.data?.detail || "Failed to preview template diff.");
+          return;
+        }
+      }
+      setTemplateDiffError(err?.response?.data?.detail || "Failed to preview template diff.");
+    } finally {
+      setTemplateDiffLoading(false);
+    }
+  };
+
   // Keep the detail panel fresh while a pipeline is running.
   useEffect(() => {
     if (!selected || !["approved", "validating", "deploying", "monitoring"].includes(selected.status)) return;
@@ -241,7 +285,15 @@ export default function ChangeRequests() {
     setLoading(true);
     setError(null);
     try {
-      await api.post("/change-requests", form);
+      await api.post("/change-requests", {
+        ...form,
+        maintenance_window_start: form.maintenance_window_start
+          ? new Date(form.maintenance_window_start).toISOString()
+          : null,
+        maintenance_window_end: form.maintenance_window_end
+          ? new Date(form.maintenance_window_end).toISOString()
+          : null,
+      });
       setForm(emptyForm);
       setShowForm(false);
       load();
@@ -475,6 +527,37 @@ export default function ChangeRequests() {
             </div>
           )}
 
+          <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-50 dark:bg-slate-900">
+            <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 text-xs mb-1">
+              Scheduled Deployment Window (optional)
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+              Leave blank to deploy immediately on approval. Set a start time to auto-deploy at that exact time —
+              approving just queues the change, deployment fires on schedule. An end time is a hard cutoff: approving
+              (or the window elapsing) after it blocks deployment rather than firing late.
+            </p>
+            <div className="flex gap-2">
+              <label className="flex-1 text-xs text-slate-600 dark:text-slate-300">
+                Deploy at
+                <input
+                  type="datetime-local"
+                  className="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-slate-800"
+                  value={form.maintenance_window_start}
+                  onChange={(e) => setForm({ ...form, maintenance_window_start: e.target.value })}
+                />
+              </label>
+              <label className="flex-1 text-xs text-slate-600 dark:text-slate-300">
+                Window closes (optional)
+                <input
+                  type="datetime-local"
+                  className="mt-1 w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-slate-800"
+                  value={form.maintenance_window_end}
+                  onChange={(e) => setForm({ ...form, maintenance_window_end: e.target.value })}
+                />
+              </label>
+            </div>
+          </div>
+
           <input
             className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm"
             placeholder="Business justification (optional)"
@@ -519,15 +602,49 @@ export default function ChangeRequests() {
                       ))}
                     </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={applyTemplate}
-                    disabled={templateRendering}
-                    className="self-start bg-brandblue text-white rounded-lg px-4 py-1.5 text-xs font-bold uppercase tracking-wider hover:bg-navy disabled:opacity-50"
-                  >
-                    {templateRendering ? "Rendering…" : "Fill Proposed Config"}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={applyTemplate}
+                      disabled={templateRendering}
+                      className="self-start bg-brandblue text-white rounded-lg px-4 py-1.5 text-xs font-bold uppercase tracking-wider hover:bg-navy disabled:opacity-50"
+                    >
+                      {templateRendering ? "Rendering…" : "Fill Proposed Config"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={previewTemplateDiff}
+                      disabled={templateDiffLoading || !form.device_id}
+                      title={!form.device_id ? "Select a target device first" : "Preview the rendered diff against this device"}
+                      className="self-start border border-brandblue text-brandblue rounded-lg px-4 py-1.5 text-xs font-bold uppercase tracking-wider hover:bg-blue-50 dark:hover:bg-blue-950/30 disabled:opacity-50"
+                    >
+                      {templateDiffLoading ? "Rendering diff…" : "Preview Rendered Diff"}
+                    </button>
+                  </div>
                   {templateError && <p className="text-riskcrit text-xs">{templateError}</p>}
+                  {templateDiffError && <p className="text-riskcrit text-xs">{templateDiffError}</p>}
+                  {templateDiffPreview && (
+                    <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+                      <div className="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 flex items-center justify-between">
+                        <span>Rendered config vs. {templateDiffPreview.base_label}</span>
+                        {templateDiffPreview.identical && (
+                          <span className="text-green-700 bg-green-100 rounded-full px-2 py-0.5 text-[10px] font-bold">
+                            No changes
+                          </span>
+                        )}
+                      </div>
+                      {templateDiffPreview.change_summary.length > 0 && (
+                        <ul className="px-3 py-2 text-xs text-slate-600 dark:text-slate-300 list-disc list-inside border-b border-slate-100 dark:border-slate-700">
+                          {templateDiffPreview.change_summary.map((line, i) => (
+                            <li key={i}>{line}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="max-h-64 overflow-y-auto">
+                        <ConfigDiff diffText={templateDiffPreview.diff} />
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -779,6 +896,26 @@ export default function ChangeRequests() {
                   {selected.first_approved_by_name && !selected.approved_by_name && (
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                       1st approval by {selected.first_approved_by_name} — awaiting 2nd
+                    </p>
+                  )}
+                  {/* Scheduled deployment window: shows when a change is queued
+                      to auto-deploy at a future time rather than immediately
+                      on approval (see maintenance_window_start/end handling
+                      in POST /change-requests/{id}/approve). */}
+                  {selected.maintenance_window_start && (
+                    <p className="text-xs mt-1">
+                      {selected.status === "approved" && new Date(selected.maintenance_window_start) > new Date() ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-700">
+                          ⏱ scheduled to deploy {new Date(selected.maintenance_window_start).toLocaleString()}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 dark:text-slate-400">
+                          Deployment window: {new Date(selected.maintenance_window_start).toLocaleString()}
+                          {selected.maintenance_window_end && (
+                            <> – {new Date(selected.maintenance_window_end).toLocaleString()}</>
+                          )}
+                        </span>
+                      )}
                     </p>
                   )}
                   {/* Alert -> CR auto-link, for postmortem review. */}

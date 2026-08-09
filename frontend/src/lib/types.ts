@@ -79,6 +79,15 @@ export interface ConfigTemplate {
   updated_at: string;
 }
 
+export interface TemplateDiffPreviewResponse {
+  rendered_config: string;
+  base_label: string;
+  identical: boolean;
+  diff: string;
+  cli_diff: string[];
+  change_summary: string[];
+}
+
 export type ChangePriority = "low" | "medium" | "high" | "emergency";
 export type ChangeStatus =
   | "draft"
@@ -108,6 +117,8 @@ export interface ChangeRequest {
   priority: ChangePriority;
   description: string;
   business_justification?: string | null;
+  maintenance_window_start?: string | null;
+  maintenance_window_end?: string | null;
   current_config?: string | null;
   proposed_config: string;
   config_diff?: string | null;
@@ -603,6 +614,7 @@ export interface DeploymentRecord {
   status: "queued" | "in_progress" | "succeeded" | "failed" | "rolled_back";
   error_message: string | null;
   created_at: string;
+  target_device_count: number;
   health_checks: HealthCheck[];
 }
 

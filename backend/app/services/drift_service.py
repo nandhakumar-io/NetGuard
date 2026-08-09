@@ -30,8 +30,13 @@ Called by:
 import datetime
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from app.models.change_request import ChangeRequest
+    from app.models.user import User
 
 from app.models.alert import Alert, AlertSource
 from app.models.compliance_baseline import ComplianceBaseline
@@ -309,6 +314,115 @@ def rollback_recommendation(drift: ConfigDrift) -> dict:
             "backup and roll back to it once reviewed."
         ),
     }
+
+
+class RemediationError(Exception):
+    """Raised when a drift can't be auto-remediated as requested (wrong
+    baseline type, device busy with another change, etc)."""
+
+
+def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "User") -> "ChangeRequest":
+    """One-click "push golden config to fix drift": builds and auto-approves
+    a ChangeRequest that redeploys the drift's own baseline config back to
+    the device, then queues it on the standard Snapshot -> Deploy -> Health
+    Monitor -> Success/Self-Healing-Rollback pipeline -- same safety net as
+    any other change, not a drift-specific shortcut that skips validation
+    or health checks.
+
+    Only meaningful for GOLDEN_CONFIG and ROLE_BASELINE drift: those
+    baselines are an intentional "this is what should be running" target
+    a NetGuard operator has explicitly approved. PREVIOUS_BACKUP drift has
+    no such intentional target -- the old snapshot is just whatever was
+    running before, not necessarily correct -- so that case is directed to
+    the existing snapshot-picker rollback flow (POST /devices/{id}/rollback)
+    instead of being silently reinterpreted as "restore the old backup".
+    """
+    from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
+    from app.services import credential_service, deployment_engine
+
+    if drift.status != DriftStatus.OPEN:
+        raise RemediationError(
+            f"Drift {drift.id} is already '{drift.status.value}' -- nothing to remediate."
+        )
+
+    if drift.baseline not in (DriftBaseline.GOLDEN_CONFIG, DriftBaseline.ROLE_BASELINE):
+        raise RemediationError(
+            "Auto-remediation pushes an approved baseline config (golden config or role baseline) "
+            "back to the device. This drift was detected against the device's previous backup, which "
+            "isn't an approved target to push -- use POST /devices/{id}/rollback to pick a specific "
+            "backup snapshot to restore instead."
+        )
+
+    baseline_label, baseline_config = _resolve_baseline_config(db, device, drift.baseline)
+
+    in_flight = (
+        db.query(ChangeRequest)
+        .filter(
+            ChangeRequest.device_id == device.id,
+            ChangeRequest.status.in_(
+                (ChangeStatus.APPROVED, ChangeStatus.DEPLOYING, ChangeStatus.MONITORING)
+            ),
+        )
+        .first()
+    )
+    if in_flight is not None:
+        raise RemediationError(
+            f"Device '{device.hostname}' already has change request {in_flight.id} in status "
+            f"'{in_flight.status.value}'. Wait for it to finish before auto-remediating this drift."
+        )
+
+    # Best-effort live read for the audit-trail/diff "before" side; a
+    # failed read never blocks remediation -- it just falls back to the
+    # drift record's own captured live_config-less diff_text context.
+    current_config = None
+    try:
+        ssh_password = credential_service.get_ssh_password(device)
+        from app.services.pipeline_service import DEVICE_TYPE_MAP
+
+        netmiko_type = DEVICE_TYPE_MAP.get(
+            device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
+        )
+        current_config, _ = deployment_engine.read_running_config(
+            netmiko_type, device.ip_address, device.ssh_username or "admin", ssh_password
+        )
+    except Exception:
+        pass
+
+    priority = ChangePriority.EMERGENCY if drift.severity == DriftSeverity.CRITICAL else ChangePriority.HIGH
+
+    cr = ChangeRequest(
+        device_id=device.id,
+        submitted_by=actor.id,
+        approved_by=actor.id,  # auto-remediation: requester is the approver, recorded explicitly
+        priority=priority,
+        description=f"Auto-remediate drift on {device.hostname}: push {baseline_label} to fix drift",
+        business_justification=(
+            f"Configuration drift auto-remediation for drift {drift.id} "
+            f"(severity={drift.severity.value}, compliance={drift.compliance_score}/100). "
+            f"Restoring {baseline_label}."
+        ),
+        current_config=current_config,
+        proposed_config=baseline_config,
+        status=ChangeStatus.APPROVED,
+    )
+    db.add(cr)
+    db.commit()
+    db.refresh(cr)
+
+    drift.status = DriftStatus.ROLLED_BACK
+    db.commit()
+
+    audit_service.record_event(
+        db, actor=actor.email, action="Drift Auto-Remediation Queued", result="Approved",
+        device_hostname=device.hostname, change_request_id=cr.id,
+        detail=f"drift_id={drift.id} baseline={baseline_label} severity={drift.severity.value}",
+    )
+    event_bus.publish_event(
+        "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
+    )
+    event_bus.publish_event("drift_detected", device_id=str(device.id), drift_id=str(drift.id), severity=drift.severity.value, compliance_score=drift.compliance_score)
+
+    return cr
 
 
 def list_drifts(
