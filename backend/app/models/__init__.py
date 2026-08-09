@@ -30,6 +30,7 @@ from app.models.deployment import (  # noqa: F401
 )
 from app.models.device import (  # noqa: F401
     Device,
+    DeviceLifecycleState,
     DeviceStatus,
     DeviceVendor,
     SnmpVersion,

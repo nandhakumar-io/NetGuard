@@ -20,6 +20,8 @@ import {
   FleetHealthSummary,
   RollbackPreviewResponse,
   RetentionPolicyResponse,
+  DeviceLifecycleState,
+  DeviceCsvImportResult,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
 import ConfigDiff from "../components/ConfigDiff";
@@ -1813,6 +1815,54 @@ export default function Devices() {
     bulkPatch({ device_role: bulkRoleValue.trim() }, `Role "${bulkRoleValue.trim()}"`);
   };
 
+  /** Bulk-add tags (union with each device's existing tags, not a
+   * replace) -- mirrors the backend's default "add" mode for
+   * POST /devices/bulk assign_tags, done here via the same per-device
+   * PATCH loop as the other bulk actions so it shares one error/notice
+   * UX with them instead of a second code path. */
+  const [bulkTagsValue, setBulkTagsValue] = useState("");
+  const bulkAssignTags = () => {
+    const newTags = bulkTagsValue
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (newTags.length === 0) return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkNotice(null);
+    (async () => {
+      const updated: Device[] = [];
+      const failed: string[] = [];
+      for (const id of ids) {
+        const device = devices.find((d) => d.id === id);
+        const hostname = device?.hostname || id;
+        const merged = Array.from(new Set([...(device?.tags || []), ...newTags]));
+        try {
+          const res = await api.patch<Device>(`/devices/${id}`, { tags: merged });
+          updated.push(res.data);
+        } catch (err: any) {
+          failed.push(`${hostname} (${extractErrorMessage(err, "failed")})`);
+        }
+      }
+      if (updated.length) {
+        setDevices((prev) => prev.map((d) => updated.find((u) => u.id === d.id) || d));
+        setBulkNotice(`Tags [${newTags.join(", ")}] applied to ${updated.length} device${updated.length === 1 ? "" : "s"}.`);
+        setBulkTagsValue("");
+      }
+      if (failed.length) setBulkError(`Failed for: ${failed.join("; ")}`);
+      setBulkBusy(false);
+    })();
+  };
+
+  /** Bulk lifecycle-state transition (staging -> production ->
+   * decommissioned), e.g. cutting a batch of newly-added devices over
+   * to production together, or marking a retired batch decommissioned
+   * without deleting their history. */
+  const [bulkLifecycleValue, setBulkLifecycleValue] = useState<DeviceLifecycleState>("production");
+  const bulkSetLifecycle = () => bulkPatch({ lifecycle_state: bulkLifecycleValue }, `Lifecycle "${bulkLifecycleValue}"`);
+
   /** Deletes one device, transparently retrying with force=true (after an
    * explicit confirm listing what would be destroyed) if the backend
    * blocks the plain delete because the device has change/deployment
@@ -1928,6 +1978,51 @@ export default function Devices() {
   };
 
   useEffect(load, []);
+
+  // --- CSV bulk import/export (for orgs without NetBox) ---
+  const [csvBusy, setCsvBusy] = useState(false);
+  const [csvImportResult, setCsvImportResult] = useState<DeviceCsvImportResult | null>(null);
+  const csvFileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const exportDevicesCsv = async () => {
+    setCsvBusy(true);
+    try {
+      const res = await api.get<string>("/devices/export", { responseType: "blob" as any });
+      const blob = new Blob([res.data], { type: "text/csv" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "devices_export.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      setError("Failed to export devices.");
+    } finally {
+      setCsvBusy(false);
+    }
+  };
+
+  const importDevicesCsv = async (file: File) => {
+    setCsvBusy(true);
+    setCsvImportResult(null);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await api.post<DeviceCsvImportResult>("/devices/import", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setCsvImportResult(res.data);
+      load();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to import CSV.");
+    } finally {
+      setCsvBusy(false);
+      if (csvFileInputRef.current) csvFileInputRef.current.value = "";
+    }
+  };
 
   useEffect(() => {
     setFleetHealthLoading(true);
@@ -2086,6 +2181,31 @@ export default function Devices() {
             >
             ↻ Refresh
             </button>
+            <button
+              onClick={exportDevicesCsv}
+              disabled={csvBusy}
+              className="text-brandblue font-medium hover:text-navy dark:hover:text-white bg-white dark:bg-slate-800 border border-brandblue hover:bg-slate-50 dark:hover:bg-slate-700 px-3 py-1.5 rounded-full transition shadow-sm text-xs disabled:opacity-50"
+            >
+              ⭳ Export CSV
+            </button>
+            {canManage && (
+              <>
+                <input
+                  ref={csvFileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="hidden"
+                  onChange={(e) => e.target.files?.[0] && importDevicesCsv(e.target.files[0])}
+                />
+                <button
+                  onClick={() => csvFileInputRef.current?.click()}
+                  disabled={csvBusy}
+                  className="text-brandblue font-medium hover:text-navy dark:hover:text-white bg-white dark:bg-slate-800 border border-brandblue hover:bg-slate-50 dark:hover:bg-slate-700 px-3 py-1.5 rounded-full transition shadow-sm text-xs disabled:opacity-50"
+                >
+                  {csvBusy ? "Working…" : "⭱ Import CSV"}
+                </button>
+              </>
+            )}
             {canManage && (
             <button
                 onClick={() => (showForm ? cancelForm() : setShowForm(true))}
@@ -2096,6 +2216,30 @@ export default function Devices() {
             )}
         </div>
       </div>
+
+      {csvImportResult && (
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-xs flex flex-col gap-1 shadow-sm">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-navy dark:text-white">
+              CSV import: {csvImportResult.created.length} created, {csvImportResult.updated.length} updated
+              {csvImportResult.errors.length > 0 && `, ${csvImportResult.errors.length} error(s)`} (of{" "}
+              {csvImportResult.total_rows} rows)
+            </span>
+            <button onClick={() => setCsvImportResult(null)} className="text-slate-400 hover:text-slate-600">
+              ✕
+            </button>
+          </div>
+          {csvImportResult.errors.length > 0 && (
+            <ul className="text-riskcrit list-disc list-inside">
+              {csvImportResult.errors.map((e, i) => (
+                <li key={i}>
+                  Row {e.row}{e.hostname ? ` (${e.hostname})` : ""}: {e.error}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-3">
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400">
@@ -2596,6 +2740,44 @@ export default function Devices() {
               className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
             >
               Tag role
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <input
+              className="border border-white/20 bg-white/10 placeholder-slate-400 rounded-full px-3 py-1.5 text-xs text-white w-32 focus:ring-2 focus:ring-accent outline-none"
+              placeholder="Add tags (a,b)…"
+              value={bulkTagsValue}
+              onChange={(e) => setBulkTagsValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && bulkAssignTags()}
+              disabled={bulkBusy}
+            />
+            <button
+              onClick={bulkAssignTags}
+              disabled={bulkBusy || !bulkTagsValue.trim()}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+            >
+              Tag
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <select
+              className="border border-white/20 bg-white/10 rounded-full px-3 py-1.5 text-xs text-white focus:ring-2 focus:ring-accent outline-none"
+              value={bulkLifecycleValue}
+              onChange={(e) => setBulkLifecycleValue(e.target.value as DeviceLifecycleState)}
+              disabled={bulkBusy}
+            >
+              <option value="staging" className="text-navy">Staging</option>
+              <option value="production" className="text-navy">Production</option>
+              <option value="decommissioned" className="text-navy">Decommissioned</option>
+            </select>
+            <button
+              onClick={bulkSetLifecycle}
+              disabled={bulkBusy}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+            >
+              Set lifecycle
             </button>
           </div>
 

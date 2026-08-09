@@ -1,6 +1,8 @@
 export type DeviceVendor = "cisco" | "juniper" | "arista" | "linux";
 export type DeviceStatus = "online" | "offline" | "degraded" | "unknown";
 
+export type DeviceLifecycleState = "staging" | "production" | "decommissioned";
+
 export interface Device {
   id: string;
   hostname: string;
@@ -35,6 +37,9 @@ export interface Device {
   os_version?: string | null;
   capabilities?: string | null;
   device_role?: string | null;
+  lifecycle_state?: DeviceLifecycleState;
+  tags?: string[];
+  custom_fields?: Record<string, string>;
   data_center?: string | null;
   rack?: string | null;
   rack_position?: number | null;
@@ -756,16 +761,88 @@ export interface AlertSnooze {
   created_at: string | null;
 }
 
+export interface DeviceGroupRule {
+  field: "hostname" | "tag" | "site" | "device_type" | "device_role";
+  pattern: string;
+}
+
 export interface DeviceGroup {
   id: string;
   name: string;
   description: string | null;
   group_type: string;
   parent_group_id: string | null;
+  is_dynamic: boolean;
+  membership_rules: DeviceGroupRule[];
   created_at: string | null;
   updated_at: string | null;
   device_count: number;
   child_group_count: number;
+}
+
+export interface DeviceGroupRuleMatch {
+  device_id: string;
+  hostname: string;
+  matched_rule: DeviceGroupRule;
+  already_member: boolean;
+}
+
+export interface DeviceGroupRulePreview {
+  matches: DeviceGroupRuleMatch[];
+}
+
+export interface DeviceGroupRuleApplyResult {
+  assigned_device_ids: string[];
+  already_member_device_ids: string[];
+}
+
+export interface GroupHealthRollup {
+  group_id: string;
+  group_name: string;
+  include_descendants: boolean;
+  device_count: number;
+  unmonitored_count: number;
+  green_count: number;
+  yellow_count: number;
+  red_count: number;
+  gray_count: number;
+  average_health_score: number | null;
+  worst_health_score: number | null;
+  worst_device_hostname: string | null;
+}
+
+export interface DeviceCsvImportError {
+  row: number;
+  hostname: string | null;
+  error: string;
+}
+
+export interface DeviceCsvImportResult {
+  created: string[];
+  updated: string[];
+  errors: DeviceCsvImportError[];
+  total_rows: number;
+}
+
+export type BulkDeviceAction =
+  | "move_group"
+  | "assign_tags"
+  | "set_lifecycle_state"
+  | "apply_config_template"
+  | "add_maintenance_window";
+
+export interface BulkDeviceActionRequest {
+  device_ids: string[];
+  action: BulkDeviceAction;
+  params: Record<string, unknown>;
+}
+
+export interface BulkDeviceActionResult {
+  action: BulkDeviceAction;
+  affected_device_ids: string[];
+  failed: Record<string, string>;
+  detail: string | null;
+  change_request_id: string | null;
 }
 
 export interface RackGroup {

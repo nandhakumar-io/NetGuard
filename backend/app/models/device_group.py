@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -29,6 +29,27 @@ class DeviceGroup(Base):
     description = Column(String, nullable=True)
     group_type = Column(String, nullable=False, default="static", server_default="static")
     parent_group_id = Column(UUID(as_uuid=True), ForeignKey("device_groups.id"), nullable=True, index=True)
+
+    # --- Dynamic membership (auto-add by hostname/tag/site/... pattern) ---
+    # When true, this group's membership is (also) computed by matching
+    # `membership_rules` against every device, rather than being purely
+    # explicit via POST /device-groups/{id}/devices. Devices matched by a
+    # rule are assigned the same way manual assignment works today (i.e.
+    # Device.group_id is actually set to this group) -- there's no
+    # separate "virtual membership" list to keep in sync elsewhere, so
+    # every other feature that already reads group_id (health rollups,
+    # bulk actions, the Groups page) keeps working unmodified. Rules are
+    # evaluated on demand via POST /device-groups/{id}/rules/apply
+    # (and previewed without writing via .../rules/preview) rather than
+    # on every device write, so a bulk CSV import of 500 devices doesn't
+    # trigger 500 rule scans.
+    is_dynamic = Column(Boolean, nullable=False, default=False, server_default="false")
+    # JSON-encoded list of rule objects: [{"field": "hostname" | "tag" |
+    # "site" | "device_type" | "device_role", "pattern": "edge-*"}, ...].
+    # `pattern` is a glob (fnmatch) pattern, matched case-insensitively.
+    # A device matches the group if it satisfies ANY rule (OR semantics)
+    # -- see app.services.group_membership_service.device_matches_rule.
+    membership_rules = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

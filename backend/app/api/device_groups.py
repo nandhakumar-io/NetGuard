@@ -1,3 +1,4 @@
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,8 +15,13 @@ from app.schemas.device_group import (
     DeviceGroupAssignRequest,
     DeviceGroupCreate,
     DeviceGroupRead,
+    DeviceGroupRuleApplyResult,
+    DeviceGroupRuleMatch,
+    DeviceGroupRulePreview,
     DeviceGroupUpdate,
+    GroupHealthRollup,
 )
+from app.services import group_membership_service
 
 router = APIRouter(prefix="/device-groups", tags=["device-groups"])
 
@@ -25,15 +31,30 @@ router = APIRouter(prefix="/device-groups", tags=["device-groups"])
 GROUP_MANAGER_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 
 
+def _rules_to_json(rules) -> str | None:
+    if not rules:
+        return None
+    return json.dumps([r.model_dump() if hasattr(r, "model_dump") else r for r in rules])
+
+
 def _to_read(db: Session, group: DeviceGroup) -> DeviceGroupRead:
     device_count = db.query(func.count(Device.id)).filter(Device.group_id == group.id).scalar() or 0
     child_group_count = (
         db.query(func.count(DeviceGroup.id)).filter(DeviceGroup.parent_group_id == group.id).scalar() or 0
     )
-    obj = DeviceGroupRead.model_validate(group)
-    obj.device_count = device_count
-    obj.child_group_count = child_group_count
-    return obj
+    return DeviceGroupRead(
+        id=group.id,
+        name=group.name,
+        description=group.description,
+        group_type=group.group_type,
+        parent_group_id=group.parent_group_id,
+        is_dynamic=group.is_dynamic,
+        membership_rules=group_membership_service.parse_rules(group),
+        created_at=group.created_at,
+        updated_at=group.updated_at,
+        device_count=device_count,
+        child_group_count=child_group_count,
+    )
 
 
 @router.get("", response_model=list[DeviceGroupRead])
@@ -46,7 +67,9 @@ def list_groups(db: Session = Depends(get_db), _=Depends(get_current_user)):
 def create_group(payload: DeviceGroupCreate, db: Session = Depends(get_db), _=Depends(GROUP_MANAGER_ROLES)):
     if payload.parent_group_id is not None and not db.get(DeviceGroup, payload.parent_group_id):
         raise HTTPException(status_code=400, detail="Parent group not found")
-    group = DeviceGroup(**payload.model_dump())
+    data = payload.model_dump()
+    data["membership_rules"] = _rules_to_json(payload.membership_rules)
+    group = DeviceGroup(**data)
     db.add(group)
     db.commit()
     db.refresh(group)
@@ -87,6 +110,9 @@ def update_group(
             if cursor.parent_group_id == group_id:
                 raise HTTPException(status_code=400, detail="That would create a group cycle")
             cursor = db.get(DeviceGroup, cursor.parent_group_id)
+
+    if "membership_rules" in updates:
+        updates["membership_rules"] = _rules_to_json(payload.membership_rules)
 
     for field, value in updates.items():
         setattr(group, field, value)
@@ -181,3 +207,74 @@ def remove_device(
     db.commit()
     db.refresh(device)
     return DeviceRead.from_device(device)
+
+
+@router.get("/{group_id}/rules/preview", response_model=DeviceGroupRulePreview)
+def preview_group_rules(group_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Shows which devices a group's `membership_rules` currently match,
+    without writing anything -- lets an admin sanity-check a pattern
+    (e.g. "edge-*") before committing to it via POST .../rules/apply.
+    """
+    group = db.get(DeviceGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    matches = group_membership_service.preview_matches(db, group)
+    return DeviceGroupRulePreview(
+        matches=[
+            DeviceGroupRuleMatch(
+                device_id=m.device.id,
+                hostname=m.device.hostname,
+                matched_rule=m.matched_rule,
+                already_member=m.already_member,
+            )
+            for m in matches
+        ]
+    )
+
+
+@router.post("/{group_id}/rules/apply", response_model=DeviceGroupRuleApplyResult)
+def apply_group_rules(
+    group_id: uuid.UUID, db: Session = Depends(get_db), current_user=Depends(GROUP_MANAGER_ROLES)
+):
+    """Assigns every device currently matching this group's
+    `membership_rules` into the group (Device.group_id = this group).
+    Devices that no longer match an existing rule are NOT removed --
+    same growth-only semantics as manual assignment; use the normal
+    remove-device / reassign endpoints to take a device back out.
+    """
+    from app.services import audit_service
+
+    group = db.get(DeviceGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if not group.membership_rules:
+        raise HTTPException(status_code=400, detail="This group has no membership rules configured")
+
+    assigned, already_member = group_membership_service.apply_rules(db, group)
+    if assigned:
+        audit_service.record_event(
+            db,
+            actor=current_user.email,
+            action="Applied group rules",
+            result="Success",
+            detail=f"Group '{group.name}': {len(assigned)} device(s) newly assigned by rule",
+        )
+    return DeviceGroupRuleApplyResult(assigned_device_ids=assigned, already_member_device_ids=already_member)
+
+
+@router.get("/{group_id}/health-rollup", response_model=GroupHealthRollup)
+def group_health_rollup(
+    group_id: uuid.UUID,
+    include_descendants: bool = False,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Health rollup (green/yellow/red/gray counts + avg/worst score) for
+    a named group -- the same rollup the rack/data-center view already
+    computes, extended to explicit DeviceGroups.
+    """
+    group = db.get(DeviceGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return group_membership_service.health_rollup(db, group, include_descendants=include_descendants)

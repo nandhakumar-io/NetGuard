@@ -1,7 +1,9 @@
 import datetime
+import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -20,7 +22,11 @@ from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.device import (
+    BulkDeviceAction,
+    BulkDeviceActionRequest,
+    BulkDeviceActionResult,
     DeviceCreate,
+    DeviceCsvImportResult,
     DeviceDiscoveryResult,
     DeviceRead,
     DeviceUpdate,
@@ -39,6 +45,7 @@ from app.schemas.rollback import (
 from app.services import (
     audit_service,
     credential_service,
+    device_csv_service,
     eol_service,
     metrics_service,
     netbox_service,
@@ -92,7 +99,10 @@ def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
 def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
     if db.query(Device).filter(Device.hostname == payload.hostname).first():
         raise HTTPException(status_code=400, detail="Device with this hostname already exists")
-    device = Device(**payload.model_dump())
+    data = payload.model_dump()
+    data["tags"] = json.dumps(data["tags"]) if data.get("tags") else None
+    data["custom_fields"] = json.dumps(data["custom_fields"]) if data.get("custom_fields") else None
+    device = Device(**data)
     db.add(device)
     db.commit()
     db.refresh(device)
@@ -259,6 +269,197 @@ def sync_from_netbox(
     return result
 
 
+@router.get("/export")
+def export_devices_csv(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Plain-CSV export of the device inventory -- for orgs that don't
+    run NetBox (see /netbox-sync above), or just want a spreadsheet to
+    bulk-edit and re-import via POST /devices/import.
+    """
+    devices = db.query(Device).order_by(Device.hostname).all()
+    csv_text = device_csv_service.export_devices_csv(devices)
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=devices_export.csv"},
+    )
+
+
+@router.post("/import", response_model=DeviceCsvImportResult)
+def import_devices_csv(
+    file: UploadFile,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Bulk CSV import -- creates devices whose hostname doesn't already
+    exist, updates ones that do (matched by hostname, same convention as
+    /netbox-sync). See app.services.device_csv_service.CSV_FIELDS for the
+    accepted columns; only `hostname` (and `ip_address` for new rows) are
+    required, everything else is optional and left unchanged on update
+    if left blank.
+    """
+    raw = file.file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded CSV")
+
+    try:
+        result = device_csv_service.import_devices_csv(db, text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if result["created"] or result["updated"]:
+        audit_service.record_event(
+            db,
+            actor=current_user.email,
+            action="CSV Import",
+            result="Success",
+            detail=(
+                f"Created {len(result['created'])}, updated {len(result['updated'])}, "
+                f"{len(result['errors'])} row error(s) (of {result['total_rows']} rows)."
+            ),
+        )
+    return result
+
+
+@router.post("/bulk", response_model=BulkDeviceActionResult)
+def bulk_device_action(
+    payload: BulkDeviceActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """Applies one action to many devices at once from the Inventory
+    page's multi-select toolbar. See BulkDeviceActionRequest docstring
+    for the `params` shape each action expects.
+    """
+    devices = db.query(Device).filter(Device.id.in_(payload.device_ids)).all()
+    found = {d.id: d for d in devices}
+    missing = set(payload.device_ids) - set(found.keys())
+    failed: dict[str, str] = {str(m): "Device not found" for m in missing}
+    affected: list[uuid.UUID] = []
+    detail: str | None = None
+    change_request_id: uuid.UUID | None = None
+
+    if payload.action == BulkDeviceAction.MOVE_GROUP:
+        group_id = payload.params.get("group_id")
+        if group_id:
+            from app.models.device_group import DeviceGroup
+
+            if not db.get(DeviceGroup, group_id):
+                raise HTTPException(status_code=400, detail="Target group not found")
+        for device in devices:
+            device.group_id = group_id
+            affected.append(device.id)
+        db.commit()
+        detail = f"Moved {len(affected)} device(s) to group {group_id or '(none)'}"
+
+    elif payload.action == BulkDeviceAction.ASSIGN_TAGS:
+        new_tags = [str(t) for t in payload.params.get("tags", [])]
+        mode = payload.params.get("mode", "add")
+        for device in devices:
+            existing: list[str] = []
+            if device.tags:
+                try:
+                    parsed = json.loads(device.tags)
+                    if isinstance(parsed, list):
+                        existing = parsed
+                except (ValueError, TypeError):
+                    existing = []
+            merged = sorted(set(new_tags)) if mode == "replace" else sorted(set(existing) | set(new_tags))
+            device.tags = json.dumps(merged) if merged else None
+            affected.append(device.id)
+        db.commit()
+        detail = f"{'Replaced' if mode == 'replace' else 'Added'} tags on {len(affected)} device(s)"
+
+    elif payload.action == BulkDeviceAction.SET_LIFECYCLE_STATE:
+        from app.models.device import DeviceLifecycleState
+
+        raw_state = payload.params.get("lifecycle_state")
+        try:
+            state = DeviceLifecycleState(raw_state)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid lifecycle_state: {raw_state}")
+        for device in devices:
+            device.lifecycle_state = state
+            affected.append(device.id)
+        db.commit()
+        detail = f"Set lifecycle_state={state.value} on {len(affected)} device(s)"
+
+    elif payload.action == BulkDeviceAction.ADD_MAINTENANCE_WINDOW:
+        from app.models.maintenance_window import MaintenanceScope, MaintenanceWindow
+
+        name = payload.params.get("name") or "Bulk maintenance window"
+        reason = payload.params.get("reason")
+        starts_at_raw = payload.params.get("start") or payload.params.get("starts_at")
+        ends_at_raw = payload.params.get("end") or payload.params.get("ends_at")
+        if not starts_at_raw or not ends_at_raw:
+            raise HTTPException(status_code=400, detail="start and end are required")
+        try:
+            starts_at = datetime.datetime.fromisoformat(str(starts_at_raw))
+            ends_at = datetime.datetime.fromisoformat(str(ends_at_raw))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start/end must be ISO 8601 datetimes")
+        for device in devices:
+            window = MaintenanceWindow(
+                name=name,
+                reason=reason,
+                scope=MaintenanceScope.DEVICE,
+                device_id=device.id,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                created_by=current_user.email,
+            )
+            db.add(window)
+            affected.append(device.id)
+        db.commit()
+        detail = f"Created {len(affected)} maintenance window(s)"
+
+    elif payload.action == BulkDeviceAction.APPLY_CONFIG_TEMPLATE:
+        if not devices:
+            raise HTTPException(status_code=400, detail="No valid devices selected")
+        template_id = payload.params.get("template_id")
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+
+        from app.api.change_requests import create_change_request
+        from app.api.config_templates import _get_template, _render
+        from app.models.change_request import ChangePriority
+        from app.schemas.change_request import ChangeRequestCreate
+
+        template = _get_template(db, uuid.UUID(str(template_id)))
+        rendered, _version = _render(db, template, payload.params.get("variables", {}), None)
+
+        device_id_list = list(found.keys())
+        cr_payload = ChangeRequestCreate(
+            device_id=device_id_list[0],
+            additional_device_ids=device_id_list[1:],
+            priority=ChangePriority(payload.params.get("priority", "medium")),
+            description=payload.params.get("description") or f"Bulk apply template '{template.name}'",
+            business_justification=payload.params.get("business_justification"),
+            proposed_config=rendered,
+        )
+        cr = create_change_request(cr_payload, db=db, current_user=current_user)
+        change_request_id = cr.id
+        affected = device_id_list
+        detail = f"Created change request {cr.id} covering {len(affected)} device(s)"
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported action: {payload.action}")
+
+    if detail:
+        audit_service.record_event(
+            db, actor=current_user.email, action=f"Bulk {payload.action.value}", result="Success", detail=detail
+        )
+
+    return BulkDeviceActionResult(
+        action=payload.action,
+        affected_device_ids=affected,
+        failed=failed,
+        detail=detail,
+        change_request_id=change_request_id,
+    )
+
+
 @router.get("/{device_id}", response_model=DeviceRead)
 def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
     device = db.get(Device, device_id)
@@ -295,7 +496,13 @@ def update_device(
     hostname_for_log = device.hostname
 
     for field, value in updates.items():
-        if field == "enabled_health_checks":
+        if field in ("tags", "custom_fields"):
+            # Same reasoning as enabled_health_checks below: these are
+            # Text columns storing JSON, but DeviceUpdate exposes them
+            # deserialized (list[str] / dict[str,str]) for a sane API
+            # shape.
+            setattr(device, field, json.dumps(value) if value else None)
+        elif field == "enabled_health_checks":
             # Device.enabled_health_checks is a Text column storing a
             # JSON-encoded list (see DeviceRead.from_device / schemas/device.py).
             # `value` here is the deserialized list[str] | None from

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { Device, DeviceGroup } from "../lib/types";
+import { Device, DeviceGroup, DeviceGroupRule, DeviceGroupRuleMatch, GroupHealthRollup } from "../lib/types";
 
 interface GroupDevice {
   id: string;
@@ -154,8 +154,14 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
   const [formDescription, setFormDescription] = useState("");
   const [formType, setFormType] = useState("static");
   const [formParentId, setFormParentId] = useState<string>("");
+  const [formIsDynamic, setFormIsDynamic] = useState(false);
+  const [formRules, setFormRules] = useState<DeviceGroupRule[]>([]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  const [rollups, setRollups] = useState<Record<string, GroupHealthRollup>>({});
+  const [ruleBusyId, setRuleBusyId] = useState<string | null>(null);
+  const [rulePreview, setRulePreview] = useState<{ groupId: string; matches: DeviceGroupRuleMatch[] } | null>(null);
 
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const [groupDevices, setGroupDevices] = useState<Device[]>([]);
@@ -193,6 +199,8 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
     setFormDescription("");
     setFormType("static");
     setFormParentId(parentId || "");
+    setFormIsDynamic(false);
+    setFormRules([]);
     setFormError(null);
     setFormOpen(true);
   };
@@ -203,6 +211,8 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
     setFormDescription(group.description || "");
     setFormType(group.group_type);
     setFormParentId(group.parent_group_id || "");
+    setFormIsDynamic(group.is_dynamic);
+    setFormRules(group.membership_rules || []);
     setFormError(null);
     setFormOpen(true);
   };
@@ -219,6 +229,8 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
       description: formDescription.trim() || null,
       group_type: formType.trim() || "static",
       parent_group_id: formParentId || null,
+      is_dynamic: formIsDynamic,
+      membership_rules: formRules.filter((r) => r.field && r.pattern.trim()),
     };
     try {
       if (editingGroup) {
@@ -267,6 +279,7 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
       .then((res) => setGroupDevices(res.data))
       .catch(() => setGroupDevices([]))
       .finally(() => setGroupDevicesLoading(false));
+    loadRollup(group.id);
     if (allDevices === null) {
       api
         .get<Device[]>("/devices")
@@ -298,6 +311,46 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
     }
   };
 
+  const previewGroupRules = async (groupId: string) => {
+    setRuleBusyId(groupId);
+    try {
+      const res = await api.get<{ matches: DeviceGroupRuleMatch[] }>(`/device-groups/${groupId}/rules/preview`);
+      setRulePreview({ groupId, matches: res.data.matches });
+    } catch {
+      setError("Failed to preview group rules.");
+    } finally {
+      setRuleBusyId(null);
+    }
+  };
+
+  const applyGroupRules = async (group: DeviceGroup) => {
+    setRuleBusyId(group.id);
+    try {
+      const res = await api.post<{ assigned_device_ids: string[]; already_member_device_ids: string[] }>(
+        `/device-groups/${group.id}/rules/apply`
+      );
+      setNotice(
+        `"${group.name}": ${res.data.assigned_device_ids.length} device(s) newly assigned, ` +
+          `${res.data.already_member_device_ids.length} already members.`
+      );
+      setRulePreview(null);
+      load();
+      if (expandedGroupId === group.id) toggleExpand(group);
+      setTimeout(() => setNotice(null), 4000);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to apply group rules.");
+    } finally {
+      setRuleBusyId(null);
+    }
+  };
+
+  const loadRollup = (groupId: string) => {
+    api
+      .get<GroupHealthRollup>(`/device-groups/${groupId}/health-rollup`)
+      .then((res) => setRollups((prev) => ({ ...prev, [groupId]: res.data })))
+      .catch(() => undefined);
+  };
+
   const renderGroup = (group: DeviceGroup, depth: number): React.ReactNode => {
     const children = byParent.get(group.id) || [];
     const isExpanded = expandedGroupId === group.id;
@@ -322,6 +375,11 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
             {group.description && (
               <span className="text-xs text-slate-400 dark:text-slate-500 truncate hidden sm:inline">— {group.description}</span>
             )}
+            {group.is_dynamic && (
+              <span className="text-[10px] font-bold text-brandblue bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-full px-2 py-0.5 shrink-0">
+                dynamic
+              </span>
+            )}
           </button>
           {canManage && (
             <div className="flex items-center gap-2 shrink-0 text-xs">
@@ -340,6 +398,59 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
 
         {isExpanded && (
           <div className="bg-slate-50 dark:bg-slate-900/40 py-2" style={{ paddingLeft: 12 + depth * 20 + 20 }}>
+            {rollups[group.id] && rollups[group.id].device_count > 0 && (
+              <div className="flex items-center gap-3 text-[11px] font-semibold mb-2">
+                {rollups[group.id].green_count > 0 && <span className="text-risklow">● {rollups[group.id].green_count} green</span>}
+                {rollups[group.id].yellow_count > 0 && <span className="text-riskmed">● {rollups[group.id].yellow_count} yellow</span>}
+                {rollups[group.id].red_count > 0 && <span className="text-riskcrit">● {rollups[group.id].red_count} red</span>}
+                {rollups[group.id].gray_count > 0 && <span className="text-slate-400">● {rollups[group.id].gray_count} gray</span>}
+                {rollups[group.id].unmonitored_count > 0 && (
+                  <span className="text-slate-400">● {rollups[group.id].unmonitored_count} unmonitored</span>
+                )}
+                {rollups[group.id].average_health_score != null && (
+                  <span className="text-slate-400">avg score {rollups[group.id].average_health_score!.toFixed(0)}</span>
+                )}
+              </div>
+            )}
+            {group.is_dynamic && canManage && (
+              <div className="mb-3 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => previewGroupRules(group.id)}
+                    disabled={ruleBusyId === group.id}
+                    className="text-xs font-semibold text-brandblue hover:text-navy disabled:opacity-50"
+                  >
+                    Preview rule matches
+                  </button>
+                  <button
+                    onClick={() => applyGroupRules(group)}
+                    disabled={ruleBusyId === group.id}
+                    className="text-xs font-bold text-white bg-brandblue hover:bg-navy disabled:opacity-50 px-2.5 py-1 rounded-full"
+                  >
+                    {ruleBusyId === group.id ? "Working…" : "Apply rules now"}
+                  </button>
+                </div>
+                {rulePreview && rulePreview.groupId === group.id && (
+                  <div className="text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-2 max-w-md">
+                    {rulePreview.matches.length === 0 ? (
+                      <p className="text-slate-400 italic">No devices currently match this group's rules.</p>
+                    ) : (
+                      <ul className="flex flex-col gap-0.5">
+                        {rulePreview.matches.map((m) => (
+                          <li key={m.device_id} className="flex items-center justify-between gap-2">
+                            <span>{m.hostname}</span>
+                            <span className="text-[10px] text-slate-400">
+                              {m.matched_rule.field}:{m.matched_rule.pattern}
+                              {m.already_member ? " (already member)" : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             {groupDevicesLoading ? (
               <p className="text-xs text-slate-400 italic">Loading devices…</p>
             ) : groupDevices.length === 0 ? (
@@ -490,6 +601,59 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
                   ))}
               </select>
             </label>
+
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-500">
+              <input type="checkbox" checked={formIsDynamic} onChange={(e) => setFormIsDynamic(e.target.checked)} />
+              Dynamic membership (auto-add by rule)
+            </label>
+
+            {formIsDynamic && (
+              <div className="flex flex-col gap-2 border border-slate-200 dark:border-slate-700 rounded-lg p-2">
+                <p className="text-[11px] text-slate-400">
+                  A device is added if it matches ANY rule below. Patterns are globs, e.g. <code>edge-*</code>.
+                </p>
+                {formRules.map((rule, i) => (
+                  <div key={i} className="flex items-center gap-1.5">
+                    <select
+                      value={rule.field}
+                      onChange={(e) =>
+                        setFormRules((prev) =>
+                          prev.map((r, idx) => (idx === i ? { ...r, field: e.target.value as DeviceGroupRule["field"] } : r))
+                        )
+                      }
+                      className="border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-2 py-1 text-xs"
+                    >
+                      <option value="hostname">hostname</option>
+                      <option value="tag">tag</option>
+                      <option value="site">site</option>
+                      <option value="device_type">device_type</option>
+                      <option value="device_role">device_role</option>
+                    </select>
+                    <input
+                      value={rule.pattern}
+                      onChange={(e) =>
+                        setFormRules((prev) => prev.map((r, idx) => (idx === i ? { ...r, pattern: e.target.value } : r)))
+                      }
+                      placeholder="e.g. edge-*"
+                      className="flex-1 border border-slate-300 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-2 py-1 text-xs"
+                    />
+                    <button
+                      onClick={() => setFormRules((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="text-slate-400 hover:text-riskcrit text-xs"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setFormRules((prev) => [...prev, { field: "hostname", pattern: "" }])}
+                  className="text-xs font-semibold text-brandblue hover:text-navy self-start"
+                >
+                  + Add rule
+                </button>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2 mt-2">
               <button onClick={() => setFormOpen(false)} className="text-xs font-bold text-slate-500 px-3 py-1.5">
                 Cancel

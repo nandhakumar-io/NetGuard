@@ -31,6 +31,23 @@ class DeviceStatus(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
+class DeviceLifecycleState(str, enum.Enum):
+    """Where a device sits in its operational lifecycle, independent of
+    live reachability (DeviceStatus above). STAGING is a device that's
+    been added/discovered but not yet cut over into real traffic-serving
+    production use (e.g. still being burned in, awaiting a maintenance
+    window to go live). PRODUCTION is the default -- a live, in-service
+    device, same as every device before this field existed. DECOMMISSIONED
+    is a device kept in inventory for historical/audit purposes (past
+    deployments, config history) after being pulled from service, rather
+    than deleted outright.
+    """
+
+    STAGING = "staging"
+    PRODUCTION = "production"
+    DECOMMISSIONED = "decommissioned"
+
+
 class SnmpVersion(str, enum.Enum):
     V1 = "v1"
     V2C = "v2c"
@@ -78,6 +95,39 @@ class Device(Base):
     # and drift_service's DriftBaseline.ROLE_BASELINE.
     device_role = Column(String, nullable=True)
     status = Column(Enum(DeviceStatus), nullable=False, default=DeviceStatus.UNKNOWN)
+
+    # Lifecycle state (staging -> production -> decommissioned), separate
+    # from the live-reachability `status` above -- a device can be
+    # `status=offline` while `lifecycle_state=staging` (not cabled up
+    # yet) or `status=online` while `lifecycle_state=decommissioned`
+    # (still powered/reachable during a wind-down window). Defaults to
+    # PRODUCTION so every pre-existing device (and any device created
+    # without specifying this) behaves exactly as before this field
+    # existed.
+    lifecycle_state = Column(
+        Enum(DeviceLifecycleState, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=False,
+        default=DeviceLifecycleState.PRODUCTION,
+        server_default=DeviceLifecycleState.PRODUCTION.value,
+    )
+
+    # JSON-encoded list of free-text labels (e.g. ["pci-scope",
+    # "east-region", "auto-migrated"]) -- used for ad-hoc bulk filtering/
+    # bulk-tagging from the Inventory page, and as a match target for
+    # DeviceGroup dynamic membership rules (see
+    # app.services.group_membership_service). Distinct from device_role/
+    # device_type, which are single-value classification fields; a
+    # device can carry any number of tags.
+    tags = Column(Text, nullable=True)
+
+    # JSON-encoded object of org-defined custom fields (e.g.
+    # {"asset_tag": "AT-4471", "owner_team": "NetEng", "cost_center":
+    # "CC-1029"}). Deliberately schemaless (Text, not real columns) so
+    # an org can define whatever fields it needs without a migration
+    # per field; the Inventory UI reads/writes this as a flat string ->
+    # string map. See schemas.device.DeviceRead.from_device for the
+    # decode side.
+    custom_fields = Column(Text, nullable=True)
 
     # --- Physical/logical grouping (Device Grouping: rack + data center) ---
     # Free-text, same convention as `site`/`device_type`/`device_role` above

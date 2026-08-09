@@ -1,9 +1,11 @@
 import datetime
+import enum
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.device import (
+    DeviceLifecycleState,
     DeviceStatus,
     DeviceVendor,
     SnmpAuthProtocol,
@@ -30,6 +32,9 @@ class DeviceBase(BaseModel):
     # ("switch") but need different baselines because they're different
     # device_roles ("core" vs "access").
     device_role: str | None = None
+    lifecycle_state: DeviceLifecycleState = DeviceLifecycleState.PRODUCTION
+    tags: list[str] = Field(default_factory=list)
+    custom_fields: dict[str, str] = Field(default_factory=dict)
     ssh_username: str | None = None
     ssh_credential_ref: str | None = None
 
@@ -92,6 +97,9 @@ class DeviceUpdate(BaseModel):
     site: str | None = None
     device_type: str | None = None
     device_role: str | None = None
+    lifecycle_state: DeviceLifecycleState | None = None
+    tags: list[str] | None = None
+    custom_fields: dict[str, str] | None = None
     group_id: uuid.UUID | None = None
     ssh_username: str | None = None
     ssh_credential_ref: str | None = None
@@ -197,9 +205,35 @@ class DeviceRead(DeviceBase):
             except (ValueError, TypeError):
                 checks = None
 
+        raw_tags = getattr(device, "tags", None)
+        tags: list[str] = []
+        if raw_tags:
+            try:
+                parsed_tags = _json.loads(raw_tags)
+                if isinstance(parsed_tags, list):
+                    tags = [str(t) for t in parsed_tags]
+            except (ValueError, TypeError):
+                tags = []
+
+        raw_custom = getattr(device, "custom_fields", None)
+        custom_fields: dict[str, str] = {}
+        if raw_custom:
+            try:
+                parsed_custom = _json.loads(raw_custom)
+                if isinstance(parsed_custom, dict):
+                    custom_fields = {str(k): str(v) for k, v in parsed_custom.items()}
+            except (ValueError, TypeError):
+                custom_fields = {}
+
         obj = cls.model_construct(
-            **{k: getattr(device, k, None) for k in cls.model_fields if k != "enabled_health_checks"},
+            **{
+                k: getattr(device, k, None)
+                for k in cls.model_fields
+                if k not in ("enabled_health_checks", "tags", "custom_fields")
+            },
             enabled_health_checks=checks,
+            tags=tags,
+            custom_fields=custom_fields,
         )
         obj.snmp_credentials_configured = bool(
             device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted
@@ -294,6 +328,63 @@ class InventoryItem(BaseModel):
     description: str | None = None
     model: str | None = None
     serial_number: str | None = None
+
+
+class DeviceCsvImportError(BaseModel):
+    row: int
+    hostname: str | None = None
+    error: str
+
+
+class DeviceCsvImportResult(BaseModel):
+    """Result of POST /devices/import. `created`/`updated` list the
+    hostnames actually written; `errors` covers per-row problems (bad
+    vendor value, missing required column, ...) -- a row with an error
+    doesn't block the rest of the file from importing.
+    """
+
+    created: list[str] = Field(default_factory=list)
+    updated: list[str] = Field(default_factory=list)
+    errors: list[DeviceCsvImportError] = Field(default_factory=list)
+    total_rows: int = 0
+
+
+class BulkDeviceAction(str, enum.Enum):
+    MOVE_GROUP = "move_group"
+    ASSIGN_TAGS = "assign_tags"
+    SET_LIFECYCLE_STATE = "set_lifecycle_state"
+    APPLY_CONFIG_TEMPLATE = "apply_config_template"
+    ADD_MAINTENANCE_WINDOW = "add_maintenance_window"
+
+
+class BulkDeviceActionRequest(BaseModel):
+    """Body for POST /devices/bulk. `params` is interpreted based on
+    `action`:
+
+      - move_group: {"group_id": "<uuid>" | None}
+      - assign_tags: {"tags": ["a","b"], "mode": "add" | "replace"}
+        (mode defaults to "add" -- union with each device's existing tags)
+      - set_lifecycle_state: {"lifecycle_state": "staging"|"production"|"decommissioned"}
+      - apply_config_template: {"template_id": "<uuid>", "variables": {...},
+        "description": "...", "priority": "medium"} -- creates a single
+        multi-device ChangeRequest (see app.api.change_requests) covering
+        all selected devices, it does not push config directly.
+      - add_maintenance_window: {"name": "...", "reason": "...",
+        "start": "<iso datetime>", "end": "<iso datetime>"} -- creates one
+        DEVICE-scoped MaintenanceWindow per selected device.
+    """
+
+    device_ids: list[uuid.UUID]
+    action: BulkDeviceAction
+    params: dict = Field(default_factory=dict)
+
+
+class BulkDeviceActionResult(BaseModel):
+    action: BulkDeviceAction
+    affected_device_ids: list[uuid.UUID] = Field(default_factory=list)
+    failed: dict[str, str] = Field(default_factory=dict)  # device_id (str) -> error message
+    detail: str | None = None
+    change_request_id: uuid.UUID | None = None
 
 
 class DeviceDiscoveryResult(BaseModel):
