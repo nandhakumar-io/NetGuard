@@ -102,6 +102,20 @@ class Alert(Base):
     # migration 0034.
     muted_by_snooze_id = Column(UUID(as_uuid=True), ForeignKey("alert_snoozes.id"), nullable=True, index=True)
 
+    # Escalation Policies (app.models.escalation_policy +
+    # app.services.escalation_service): set the first time this alert
+    # breaches an enabled policy's unack_minutes threshold while still
+    # unacknowledged/unresolved. `last_escalated_at` is the same as
+    # `escalated_at` for a one-shot policy, but keeps advancing on every
+    # repeat firing for a policy with `repeat_minutes` set, so the sweep
+    # can tell "already escalated once, no repeat due yet" apart from
+    # "repeat window elapsed, fire again" without a second table.
+    escalated = Column(Boolean, nullable=False, default=False, server_default="false")
+    escalated_at = Column(DateTime(timezone=True), nullable=True)
+    last_escalated_at = Column(DateTime(timezone=True), nullable=True)
+    escalation_policy_id = Column(UUID(as_uuid=True), ForeignKey("escalation_policies.id"), nullable=True, index=True)
+    escalation_count = Column(Integer, nullable=False, default=0, server_default="0")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     root_cause = relationship("Alert", remote_side=[id], foreign_keys=[root_cause_alert_id])

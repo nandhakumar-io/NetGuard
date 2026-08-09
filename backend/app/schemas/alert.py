@@ -28,6 +28,11 @@ class AlertRead(BaseModel):
     # muted_by_snooze_id is still set on the row (history, not a live
     # mute -- see app.services.alert_snooze_service.active_mute_map).
     muted_until: datetime | None = None
+    escalated: bool = False
+    escalated_at: datetime | None = None
+    last_escalated_at: datetime | None = None
+    escalation_count: int = 0
+    escalation_policy_id: uuid.UUID | None = None
     created_at: datetime
 
     class Config:

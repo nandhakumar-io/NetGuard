@@ -109,6 +109,47 @@ def get_summary(db: Session = Depends(get_db), _: User = Depends(get_current_use
     return alert_service.get_alert_summary(db)
 
 
+@router.get("/correlated-groups")
+def list_correlated_groups(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Alert Correlation UI: groups every active root-cause alert
+    (app.services.alert_correlation_service) with the alerts it has
+    suppressed, so the frontend can render "these 12 alerts are one root
+    cause" instead of listing every suppressed alert as an independent,
+    equally-urgent row. Only returns groups with at least one currently
+    -suppressed (still-active) dependent -- a root cause alert with no
+    live dependents left (all resolved) isn't a "storm" anymore.
+    """
+    suppressed = (
+        db.query(Alert)
+        .filter(Alert.suppressed == True, Alert.resolved == False, Alert.root_cause_alert_id.isnot(None))
+        .all()
+    )
+    if not suppressed:
+        return []
+
+    root_ids = {a.root_cause_alert_id for a in suppressed}
+    roots = {r.id: r for r in db.query(Alert).filter(Alert.id.in_(root_ids)).all()}
+
+    grouped: dict[uuid.UUID, list[Alert]] = {}
+    for alert in suppressed:
+        grouped.setdefault(alert.root_cause_alert_id, []).append(alert)
+
+    groups = []
+    for root_id, dependents in grouped.items():
+        root = roots.get(root_id)
+        if not root:
+            continue
+        groups.append(
+            {
+                "root_cause_alert": AlertRead.model_validate(root),
+                "suppressed_alerts": [AlertRead.model_validate(a) for a in dependents],
+                "total_alert_count": len(dependents) + 1,
+            }
+        )
+    groups.sort(key=lambda g: g["total_alert_count"], reverse=True)
+    return groups
+
+
 @router.get("/{alert_id}", response_model=AlertRead)
 def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     alert = db.get(Alert, alert_id)

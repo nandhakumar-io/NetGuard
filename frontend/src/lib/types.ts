@@ -390,6 +390,36 @@ export interface WeeklyGoldenDriftReport {
   devices: WeeklyGoldenDriftEntry[];
 }
 
+// --- Drift trending / flapping ---
+
+export interface DriftTrendPoint {
+  bucket_start: string;
+  total: number;
+  critical: number;
+  high: number;
+  distinct_devices: number;
+}
+
+export interface DriftTrendResponse {
+  days: number;
+  bucket_days: number;
+  points: DriftTrendPoint[];
+}
+
+export interface FlappingDeviceEntry {
+  device_id: string;
+  hostname: string;
+  event_count: number;
+  last_detected_at: string;
+  max_severity: DriftSeverity;
+}
+
+export interface FlappingDevicesResponse {
+  days: number;
+  min_events: number;
+  devices: FlappingDeviceEntry[];
+}
+
 // --- Snapshot Retention Policy ---
 
 export interface RetentionPolicy {
@@ -521,6 +551,11 @@ export interface Alert {
   suppressed: boolean;
   suppressed_by_window_id?: string | null;
   muted_until?: string | null;
+  escalated?: boolean;
+  escalated_at?: string | null;
+  last_escalated_at?: string | null;
+  escalation_count?: number;
+  escalation_policy_id?: string | null;
   created_at: string;
 }
 
@@ -530,6 +565,50 @@ export interface AlertSummary {
   info: number;
   active_total: number;
   resolved: number;
+}
+
+// --- Alert correlation grouping ---
+
+export interface CorrelatedAlertGroup {
+  root_cause_alert: Alert;
+  suppressed_alerts: Alert[];
+  total_alert_count: number;
+}
+
+// --- Escalation Policies ---
+
+export type EscalationSeverityScope = "critical" | "warning" | "all";
+export type EscalationChannel = "email" | "webhook" | "slack" | "teams";
+
+export interface EscalationPolicy {
+  id: string;
+  name: string;
+  description?: string | null;
+  severity_scope: EscalationSeverityScope;
+  unack_minutes: number;
+  repeat_minutes?: number | null;
+  secondary_contacts?: string | null;
+  channel: EscalationChannel;
+  webhook_url?: string | null;
+  enabled: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface EscalatedAlertEntry {
+  id: string;
+  device_id: string | null;
+  severity: AlertSeverity;
+  category: string;
+  message: string;
+  acknowledged: boolean;
+  escalated_at?: string | null;
+  last_escalated_at?: string | null;
+  escalation_count: number;
+  escalation_policy_id?: string | null;
+  escalation_policy_name?: string | null;
+  created_at: string;
 }
 
 // --- Maintenance Windows ---

@@ -510,3 +510,98 @@ def fleet_summary(db: Session) -> dict:
             1 for d in open_drifts if _rollback_recommended(d.severity, d.compliance_score)
         ),
     }
+
+
+def drift_trend(db: Session, days: int = 90, bucket_days: int = 7) -> list[dict]:
+    """Fleet-wide drift event volume bucketed over time (default: weekly
+    buckets over the last ~13 weeks) -- "is drift getting more or less
+    frequent overall" for a dashboard trend chart. Complements
+    fleet_summary (a snapshot of *currently open* drift) with a time
+    series of *detection events*, resolved or not.
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    rows = (
+        db.query(ConfigDrift.detected_at, ConfigDrift.severity, ConfigDrift.device_id)
+        .filter(ConfigDrift.detected_at >= since)
+        .all()
+    )
+
+    buckets: dict[datetime.date, dict] = {}
+    bucket_start = since.date()
+    now_date = datetime.datetime.now(datetime.timezone.utc).date()
+    cursor = bucket_start
+    while cursor <= now_date:
+        buckets[cursor] = {"bucket_start": cursor, "total": 0, "critical": 0, "high": 0, "devices": set()}
+        cursor += datetime.timedelta(days=bucket_days)
+
+    bucket_keys = sorted(buckets.keys())
+
+    def _bucket_for(dt: datetime.datetime) -> datetime.date:
+        d = dt.date()
+        # Find the latest bucket_start <= d (buckets are evenly spaced from
+        # bucket_start, so this is a simple reverse scan over a short list).
+        chosen = bucket_keys[0]
+        for k in bucket_keys:
+            if k <= d:
+                chosen = k
+            else:
+                break
+        return chosen
+
+    for detected_at, severity, device_id in rows:
+        key = _bucket_for(detected_at)
+        b = buckets[key]
+        b["total"] += 1
+        if severity == DriftSeverity.CRITICAL:
+            b["critical"] += 1
+        elif severity == DriftSeverity.HIGH:
+            b["high"] += 1
+        b["devices"].add(device_id)
+
+    return [
+        {
+            "bucket_start": buckets[k]["bucket_start"],
+            "total": buckets[k]["total"],
+            "critical": buckets[k]["critical"],
+            "high": buckets[k]["high"],
+            "distinct_devices": len(buckets[k]["devices"]),
+        }
+        for k in bucket_keys
+    ]
+
+
+def flapping_devices(db: Session, days: int = 30, min_events: int = 3) -> list[dict]:
+    """Devices whose config keeps drifting -- `min_events`+ drift
+    detections in the last `days` days -- i.e. "is this device drifting
+    more often lately / is someone repeatedly hand-editing it (flapping
+    config)" instead of a one-off change. Ranked by event count
+    descending, then by how recently it last drifted.
+
+    This is a simple frequency heuristic, not a statistical anomaly
+    detector: a device that's *supposed* to change often (e.g. one with
+    frequent legitimate maintenance) will also show up here. It's meant
+    to prompt a look, not to auto-flag wrongdoing.
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    rows = (
+        db.query(ConfigDrift)
+        .filter(ConfigDrift.detected_at >= since)
+        .order_by(ConfigDrift.detected_at.desc())
+        .all()
+    )
+
+    by_device: dict = {}
+    for row in rows:
+        entry = by_device.setdefault(
+            row.device_id,
+            {"device_id": row.device_id, "event_count": 0, "last_detected_at": row.detected_at, "max_severity": row.severity},
+        )
+        entry["event_count"] += 1
+        if row.detected_at > entry["last_detected_at"]:
+            entry["last_detected_at"] = row.detected_at
+        if _SEVERITY_RANK[row.severity] > _SEVERITY_RANK[entry["max_severity"]]:
+            entry["max_severity"] = row.severity
+
+    results = [e for e in by_device.values() if e["event_count"] >= min_events]
+    results.sort(key=lambda e: (e["event_count"], e["last_detected_at"]), reverse=True)
+    return results

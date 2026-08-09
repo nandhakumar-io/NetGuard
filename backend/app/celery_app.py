@@ -123,6 +123,14 @@ celery_app.conf.update(
             "task": "app.tasks.run_snapshot_retention_task",
             "schedule": crontab(hour=settings.SNAPSHOT_RETENTION_SWEEP_HOUR_UTC, minute=0),
         },
+        # Escalation Policies: scans unacknowledged alerts and notifies
+        # secondary/on-call contacts for anything that's breached an
+        # enabled policy's unack_minutes threshold. See
+        # app.services.escalation_service.
+        "alert-escalation-sweep": {
+            "task": "app.tasks.run_escalation_sweep_task",
+            "schedule": float(settings.ESCALATION_SWEEP_INTERVAL_SECONDS),
+        },
     },
 )
 

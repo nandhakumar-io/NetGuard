@@ -64,3 +64,31 @@ class WeeklyGoldenDriftReport(BaseModel):
     since: datetime.datetime
     days: int
     devices: list[WeeklyGoldenDriftEntry]
+
+
+class DriftTrendPoint(BaseModel):
+    bucket_start: datetime.date
+    total: int
+    critical: int
+    high: int
+    distinct_devices: int
+
+
+class DriftTrendResponse(BaseModel):
+    days: int
+    bucket_days: int
+    points: list[DriftTrendPoint]
+
+
+class FlappingDeviceEntry(BaseModel):
+    device_id: uuid.UUID
+    hostname: str
+    event_count: int
+    last_detected_at: datetime.datetime
+    max_severity: DriftSeverity
+
+
+class FlappingDevicesResponse(BaseModel):
+    days: int
+    min_events: int
+    devices: list[FlappingDeviceEntry]

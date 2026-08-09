@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
-import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, AlertSnooze } from "../lib/types";
+import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
 
 const SEVERITY_CONFIG = {
   critical: { color: "text-riskcrit", bg: "bg-riskcrit", bgLight: "bg-red-50", border: "border-riskcrit/20", icon: "🚨", label: "Critical" },
@@ -32,7 +32,7 @@ function timeAgo(dateStr: string): string {
 const OP_LABELS: Record<string, string> = { gt: ">", gte: "≥", lt: "<", lte: "≤", eq: "=" };
 const METRIC_LABELS: Record<string, string> = { cpu: "CPU %", memory: "Memory %", bandwidth: "Bandwidth %", temperature: "Temp °C", uptime: "Uptime (s)" };
 
-type Tab = "alerts" | "rules" | "webhooks";
+type Tab = "alerts" | "rules" | "escalations" | "webhooks";
 
 export default function AlertCenter() {
   const navigate = useNavigate();
@@ -77,6 +77,23 @@ export default function AlertCenter() {
   const [testingWebhook, setTestingWebhook] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<WebhookTestResult | null>(null);
 
+  // Escalation Policies state
+  const [policies, setPolicies] = useState<EscalationPolicy[]>([]);
+  const [policiesLoading, setPoliciesLoading] = useState(false);
+  const [escalationLog, setEscalationLog] = useState<EscalatedAlertEntry[]>([]);
+  const [showPolicyForm, setShowPolicyForm] = useState(false);
+  const [editingPolicy, setEditingPolicy] = useState<EscalationPolicy | null>(null);
+  const [policyForm, setPolicyForm] = useState({
+    name: "",
+    description: "",
+    severity_scope: "critical",
+    unack_minutes: "15",
+    repeat_minutes: "",
+    secondary_contacts: "",
+    channel: "email",
+    webhook_url: "",
+  });
+
   const fetchAlerts = useCallback(() => {
     const params = new URLSearchParams();
     if (severityFilter) params.set("severity", severityFilter);
@@ -104,6 +121,20 @@ export default function AlertCenter() {
     api.get<WebhookEndpoint[]>("/webhooks").then((res) => setWebhooks(res.data)).catch(() => {}).finally(() => setWebhooksLoading(false));
   }, []);
 
+  const fetchPolicies = useCallback(() => {
+    setPoliciesLoading(true);
+    Promise.all([
+      api.get<EscalationPolicy[]>("/escalation-policies"),
+      api.get<EscalatedAlertEntry[]>("/escalation-policies/log"),
+    ])
+      .then(([policiesRes, logRes]) => {
+        setPolicies(policiesRes.data);
+        setEscalationLog(logRes.data);
+      })
+      .catch(() => {})
+      .finally(() => setPoliciesLoading(false));
+  }, []);
+
   useEffect(() => {
     setLoading(true);
     fetchAlerts();
@@ -113,7 +144,8 @@ export default function AlertCenter() {
   useEffect(() => {
     if (tab === "rules") fetchRules();
     if (tab === "webhooks") fetchWebhooks();
-  }, [tab, fetchRules, fetchWebhooks]);
+    if (tab === "escalations") fetchPolicies();
+  }, [tab, fetchRules, fetchWebhooks, fetchPolicies]);
 
   // WebSocket for realtime
   useEffect(() => {
@@ -301,6 +333,65 @@ export default function AlertCenter() {
     }
   };
 
+  // Escalation Policy CRUD
+  const resetPolicyForm = () => {
+    setPolicyForm({ name: "", description: "", severity_scope: "critical", unack_minutes: "15", repeat_minutes: "", secondary_contacts: "", channel: "email", webhook_url: "" });
+    setEditingPolicy(null);
+    setShowPolicyForm(false);
+  };
+
+  const handleSavePolicy = async () => {
+    const payload = {
+      name: policyForm.name,
+      description: policyForm.description || null,
+      severity_scope: policyForm.severity_scope,
+      unack_minutes: parseInt(policyForm.unack_minutes) || 15,
+      repeat_minutes: policyForm.repeat_minutes ? parseInt(policyForm.repeat_minutes) : null,
+      secondary_contacts: policyForm.secondary_contacts || null,
+      channel: policyForm.channel,
+      webhook_url: policyForm.webhook_url || null,
+    };
+    try {
+      if (editingPolicy) {
+        await api.put(`/escalation-policies/${editingPolicy.id}`, payload);
+      } else {
+        await api.post("/escalation-policies", payload);
+      }
+      resetPolicyForm();
+      fetchPolicies();
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
+  };
+
+  const handleDeletePolicy = async (id: string) => {
+    if (!window.confirm("Delete this escalation policy?")) return;
+    try {
+      await api.delete(`/escalation-policies/${id}`);
+      fetchPolicies();
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
+  };
+
+  const handleTogglePolicy = async (id: string) => {
+    try {
+      await api.patch(`/escalation-policies/${id}/toggle`);
+      fetchPolicies();
+    } catch {
+      // Best-effort; the surrounding list/table stays on its last good state.
+    }
+  };
+
+  const handleRunEscalationNow = async () => {
+    try {
+      await api.post("/escalation-policies/run-now");
+      fetchPolicies();
+    } catch {
+      // Best-effort.
+    }
+  };
+
   // Webhook CRUD
   const resetWebhookForm = () => {
     setWebhookForm({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "" });
@@ -422,7 +513,7 @@ export default function AlertCenter() {
 
       {/* Tabs */}
       <div className="flex items-center gap-1 mt-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 px-2 py-1.5 shadow-sm">
-        {(["alerts", "rules", "webhooks"] as Tab[]).map((t) => (
+        {(["alerts", "rules", "escalations", "webhooks"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -432,7 +523,7 @@ export default function AlertCenter() {
                 : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
             }`}
           >
-            {t === "alerts" ? "🔔 Alerts" : t === "rules" ? "⚙️ Alert Rules" : "🔗 Webhooks"}
+            {t === "alerts" ? "🔔 Alerts" : t === "rules" ? "⚙️ Alert Rules" : t === "escalations" ? "📟 Escalations" : "🔗 Webhooks"}
           </button>
         ))}
       </div>
@@ -623,6 +714,18 @@ export default function AlertCenter() {
                                     🔕 Muted until {new Date(alert.muted_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                                   </span>
                                 )}
+                                {alert.escalated && (
+                                  <span
+                                    title={
+                                      alert.last_escalated_at
+                                        ? `Escalated ${alert.escalation_count ?? 1}x, last at ${new Date(alert.last_escalated_at).toLocaleString()}`
+                                        : "Escalated to secondary contact"
+                                    }
+                                    className="text-[11px] font-medium text-orange-600 bg-orange-50 dark:bg-orange-950/40 dark:text-orange-300 px-2 py-0.5 rounded-full"
+                                  >
+                                    📟 Escalated{(alert.escalation_count ?? 0) > 1 ? ` ×${alert.escalation_count}` : ""}
+                                  </span>
+                                )}
                               </div>
                               <h3 className="font-semibold text-navy dark:text-white mt-1.5 text-sm">{alert.category}</h3>
                               <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{alert.message}</p>
@@ -638,7 +741,7 @@ export default function AlertCenter() {
                                   className="mt-2 text-[11px] font-semibold text-brandblue hover:text-navy dark:text-white flex items-center gap-1"
                                 >
                                   <span>{isExpanded ? "▾" : "▸"}</span>
-                                  {impacted.length} downstream alert{impacted.length === 1 ? "" : "s"} suppressed as impacted
+                                  {impacted.length + 1} alerts, 1 root cause — {impacted.length} downstream suppressed as impacted
                                 </button>
                               )}
                             </div>
@@ -894,6 +997,148 @@ export default function AlertCenter() {
               </table>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ===== ESCALATIONS TAB ===== */}
+      {tab === "escalations" && (
+        <div className="mt-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-bold text-navy dark:text-white uppercase tracking-wider">Escalation Policies</h2>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleRunEscalationNow}
+                title="Trigger an out-of-cycle sweep instead of waiting for the next scheduled tick"
+                className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 px-3 py-1.5 rounded-lg"
+              >
+                ▶ Run Now
+              </button>
+              <button
+                onClick={() => { resetPolicyForm(); setShowPolicyForm(true); }}
+                className="text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-3 py-1.5 rounded-lg shadow-sm"
+              >
+                + New Policy
+              </button>
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-500 dark:text-slate-400 -mt-2">
+            If an alert matching a policy's severity sits unacknowledged past its threshold, secondary contacts are notified. Set a repeat interval to keep re-notifying until someone acks.
+          </p>
+
+          {/* Policy Form */}
+          {showPolicyForm && (
+            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 shadow-sm">
+              <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4">{editingPolicy ? "Edit Policy" : "Create Policy"}</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <input placeholder="Policy Name" value={policyForm.name} onChange={(e) => setPolicyForm({ ...policyForm, name: e.target.value })} className="col-span-full text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900 focus:ring-2 focus:ring-brandblue/30 outline-none" />
+                <input placeholder="Description (optional)" value={policyForm.description} onChange={(e) => setPolicyForm({ ...policyForm, description: e.target.value })} className="col-span-full text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                <select value={policyForm.severity_scope} onChange={(e) => setPolicyForm({ ...policyForm, severity_scope: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900">
+                  <option value="critical">Critical only</option>
+                  <option value="warning">Warning only</option>
+                  <option value="all">All severities</option>
+                </select>
+                <input placeholder="Unacknowledged minutes" type="number" value={policyForm.unack_minutes} onChange={(e) => setPolicyForm({ ...policyForm, unack_minutes: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                <input placeholder="Repeat every N minutes (optional)" type="number" value={policyForm.repeat_minutes} onChange={(e) => setPolicyForm({ ...policyForm, repeat_minutes: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                <select value={policyForm.channel} onChange={(e) => setPolicyForm({ ...policyForm, channel: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900">
+                  <option value="email">Email</option>
+                  <option value="webhook">Webhook</option>
+                  <option value="slack">Slack</option>
+                  <option value="teams">Teams</option>
+                </select>
+                <input placeholder="Secondary contacts (comma-separated emails)" value={policyForm.secondary_contacts} onChange={(e) => setPolicyForm({ ...policyForm, secondary_contacts: e.target.value })} className="col-span-2 text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                {policyForm.channel !== "email" && (
+                  <input placeholder="Webhook URL" value={policyForm.webhook_url} onChange={(e) => setPolicyForm({ ...policyForm, webhook_url: e.target.value })} className="col-span-full text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                )}
+              </div>
+              <div className="flex items-center justify-end gap-2 mt-4">
+                <button onClick={resetPolicyForm} className="text-xs font-bold text-slate-500 px-3 py-1.5">Cancel</button>
+                <button onClick={handleSavePolicy} disabled={!policyForm.name || !policyForm.unack_minutes} className="text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-4 py-2 rounded-lg shadow-sm disabled:opacity-40">{editingPolicy ? "Update" : "Create"}</button>
+              </div>
+            </div>
+          )}
+
+          {/* Policy List */}
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+            {policiesLoading ? (
+              <div className="p-8 text-center text-sm text-slate-400">Loading…</div>
+            ) : policies.length === 0 ? (
+              <div className="p-8 text-center text-sm text-slate-400">No escalation policies yet — unacknowledged alerts won't be escalated to a secondary contact.</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  <tr>
+                    <th className="text-left px-4 py-2.5">Name</th>
+                    <th className="text-left px-4 py-2.5">Scope</th>
+                    <th className="text-left px-4 py-2.5">Unack Threshold</th>
+                    <th className="text-left px-4 py-2.5">Repeat</th>
+                    <th className="text-left px-4 py-2.5">Channel</th>
+                    <th className="text-left px-4 py-2.5">Status</th>
+                    <th className="text-right px-4 py-2.5">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                  {policies.map((p) => (
+                    <tr key={p.id}>
+                      <td className="px-4 py-2.5">
+                        <p className="font-semibold text-navy dark:text-white">{p.name}</p>
+                        {p.description && <p className="text-xs text-slate-400">{p.description}</p>}
+                      </td>
+                      <td className="px-4 py-2.5 capitalize">{p.severity_scope}</td>
+                      <td className="px-4 py-2.5">{p.unack_minutes}m</td>
+                      <td className="px-4 py-2.5">{p.repeat_minutes ? `every ${p.repeat_minutes}m` : "one-shot"}</td>
+                      <td className="px-4 py-2.5 capitalize">{p.channel}</td>
+                      <td className="px-4 py-2.5">
+                        <button onClick={() => handleTogglePolicy(p.id)} className={`text-xs font-bold uppercase px-2.5 py-1 rounded-lg transition-colors ${p.enabled ? "text-risklow bg-green-50 hover:bg-green-100" : "text-slate-400 bg-slate-100 hover:bg-slate-200"}`}>
+                          {p.enabled ? "Enabled" : "Disabled"}
+                        </button>
+                      </td>
+                      <td className="px-4 py-2.5 text-right space-x-3">
+                        <button onClick={() => { setEditingPolicy(p); setPolicyForm({ name: p.name, description: p.description || "", severity_scope: p.severity_scope, unack_minutes: String(p.unack_minutes), repeat_minutes: p.repeat_minutes ? String(p.repeat_minutes) : "", secondary_contacts: p.secondary_contacts || "", channel: p.channel, webhook_url: p.webhook_url || "" }); setShowPolicyForm(true); }} className="text-xs text-brandblue hover:text-navy font-medium">Edit</button>
+                        <button onClick={() => handleDeletePolicy(p.id)} className="text-xs text-riskcrit hover:text-red-800 font-medium">Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Escalation Log */}
+          <div>
+            <h2 className="text-sm font-bold text-navy dark:text-white uppercase tracking-wider mb-3">Escalation Log</h2>
+            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+              {escalationLog.length === 0 ? (
+                <div className="p-8 text-center text-sm text-slate-400">Nothing has been escalated yet.</div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    <tr>
+                      <th className="text-left px-4 py-2.5">Alert</th>
+                      <th className="text-left px-4 py-2.5">Policy</th>
+                      <th className="text-left px-4 py-2.5">Times</th>
+                      <th className="text-left px-4 py-2.5">Last Escalated</th>
+                      <th className="text-left px-4 py-2.5">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                    {escalationLog.map((e) => (
+                      <tr key={e.id}>
+                        <td className="px-4 py-2.5">
+                          <p className="font-semibold text-navy dark:text-white">{e.category}</p>
+                          <p className="text-xs text-slate-400">{e.message}</p>
+                        </td>
+                        <td className="px-4 py-2.5">{e.escalation_policy_name || "—"}</td>
+                        <td className="px-4 py-2.5">×{e.escalation_count}</td>
+                        <td className="px-4 py-2.5">{e.last_escalated_at ? timeAgo(e.last_escalated_at) : "—"}</td>
+                        <td className="px-4 py-2.5">{e.acknowledged ? <span className="text-risklow">Acknowledged</span> : <span className="text-riskcrit font-semibold">Still unacked</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

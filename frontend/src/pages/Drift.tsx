@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus, WeeklyGoldenDriftReport } from "../lib/types";
+import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus, DriftTrendResponse, FlappingDevicesResponse, WeeklyGoldenDriftReport } from "../lib/types";
 import ConfigDiff from "../components/ConfigDiff";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
@@ -61,6 +61,10 @@ export default function DriftPage() {
   const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [weeklyError, setWeeklyError] = useState<string | null>(null);
   const [weeklyOpen, setWeeklyOpen] = useState(false);
+
+  // Drift trending / flapping-device detection.
+  const [trend, setTrend] = useState<DriftTrendResponse | null>(null);
+  const [flapping, setFlapping] = useState<FlappingDevicesResponse | null>(null);
 
   const runWeeklyReport = () => {
     setWeeklyOpen(true);
@@ -146,11 +150,15 @@ export default function DriftPage() {
       api.get<DriftFleetSummary>("/drift/summary"),
       api.get<Drift[]>("/drift"),
       api.get<Device[]>("/devices"),
+      api.get<DriftTrendResponse>("/drift/trends", { params: { days: 90, bucket_days: 7 } }),
+      api.get<FlappingDevicesResponse>("/drift/flapping", { params: { days: 30, min_events: 3 } }),
     ])
-      .then(([summaryRes, driftRes, devRes]) => {
+      .then(([summaryRes, driftRes, devRes, trendRes, flappingRes]) => {
         setSummary(summaryRes.data);
         setDrifts(driftRes.data);
         setDevices(devRes.data);
+        setTrend(trendRes.data);
+        setFlapping(flappingRes.data);
       })
       .finally(() => setInitialLoading(false));
   };
@@ -242,6 +250,76 @@ export default function DriftPage() {
           <StatCard label="Rollback Recommended" value={summary.rollback_recommended_count} accent="red" />
         </div>
       )}
+
+      {/* Drift trend + flapping devices */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl p-5">
+          <h2 className="text-sm font-bold text-navy">Drift Trend (last {trend?.days ?? 90} days)</h2>
+          <p className="text-xs text-slate-500 mt-1 mb-4">
+            Fleet-wide drift detections per {trend?.bucket_days ?? 7}-day bucket — a rising trend means devices are drifting more often, not just that more scans ran.
+          </p>
+          {!trend || trend.points.length === 0 ? (
+            <p className="text-xs text-slate-400 py-8 text-center">No drift activity in this window.</p>
+          ) : (
+            (() => {
+              const max = Math.max(1, ...trend.points.map((p) => p.total));
+              return (
+                <div className="flex items-end gap-1.5 h-40">
+                  {trend.points.map((p) => (
+                    <div key={p.bucket_start} className="flex-1 flex flex-col items-center justify-end h-full group relative">
+                      <div className="w-full flex flex-col justify-end h-full rounded-t overflow-hidden bg-slate-100" style={{ height: "100%" }}>
+                        <div
+                          className="w-full bg-riskcrit"
+                          style={{ height: `${(p.critical / max) * 100}%` }}
+                          title={`${p.critical} critical`}
+                        />
+                        <div
+                          className="w-full bg-orange-400"
+                          style={{ height: `${(p.high / max) * 100}%` }}
+                          title={`${p.high} high`}
+                        />
+                        <div
+                          className="w-full bg-brandblue"
+                          style={{ height: `${((p.total - p.critical - p.high) / max) * 100}%` }}
+                          title={`${p.total - p.critical - p.high} other`}
+                        />
+                      </div>
+                      <div className="absolute -top-6 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-bold bg-navy text-white px-1.5 py-0.5 rounded whitespace-nowrap">
+                        {p.total} on {new Date(p.bucket_start).toLocaleDateString()}
+                      </div>
+                      <span className="text-[9px] text-slate-400 mt-1 rotate-0">{new Date(p.bucket_start).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()
+          )}
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5">
+          <h2 className="text-sm font-bold text-navy">Flapping Devices</h2>
+          <p className="text-xs text-slate-500 mt-1 mb-3">
+            {flapping ? `≥${flapping.min_events} drift events in the last ${flapping.days} days` : "Devices drifting repeatedly"} — a sign of unmanaged hand-edits, not a one-off change.
+          </p>
+          {!flapping || flapping.devices.length === 0 ? (
+            <p className="text-xs text-slate-400 py-6 text-center">No repeatedly-drifting devices right now.</p>
+          ) : (
+            <ul className="space-y-2">
+              {flapping.devices.map((d) => (
+                <li key={d.device_id} className="flex items-center justify-between text-xs border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+                  <div>
+                    <p className="font-semibold text-navy">{d.hostname}</p>
+                    <p className="text-slate-400">last drift {new Date(d.last_detected_at).toLocaleDateString()}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className={`inline-block px-2 py-0.5 rounded-full font-bold ${severityStyle[d.max_severity]}`}>{d.event_count}x</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
 
       <div className="mt-6 bg-white border border-slate-200 rounded-xl p-5">
         <div className="flex items-center justify-between flex-wrap gap-3">

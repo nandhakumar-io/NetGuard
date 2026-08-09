@@ -16,6 +16,7 @@ from app.api import (
     device_groups,
     devices,
     drift,
+    escalation_policies,
     firmware_upgrades,
     flows,
     global_search,
@@ -50,6 +51,7 @@ api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
 api_router.include_router(alert_rules.router)
+api_router.include_router(escalation_policies.router)
 api_router.include_router(gns3.router)
 api_router.include_router(notification.router)
 api_router.include_router(reports.router)

@@ -183,6 +183,13 @@ class Settings(BaseSettings):
     # leaving every manually-added ("non-lab") device stuck at UNKNOWN
     # forever regardless of whether it was actually reachable.
     REACHABILITY_POLL_INTERVAL_SECONDS: int = 60
+
+    # Escalation Policies: how often app.tasks.run_escalation_sweep_task
+    # scans unacknowledged alerts and escalates any that have breached an
+    # enabled EscalationPolicy's unack_minutes threshold. Kept short (well
+    # under the smallest realistic unack_minutes) so an escalation fires
+    # close to the threshold instead of up to a full sweep interval late.
+    ESCALATION_SWEEP_INTERVAL_SECONDS: int = 60
     REACHABILITY_PING_TIMEOUT_SECONDS: float = 1.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
 

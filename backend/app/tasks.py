@@ -548,3 +548,21 @@ def run_snapshot_retention_task(self) -> dict:
         return snapshot_service.purge_expired_snapshots(db)
     finally:
         db.close()
+
+
+@celery_app.task(name="app.tasks.run_escalation_sweep_task")
+def run_escalation_sweep_task() -> int:
+    """Celery beat entry point (see celery_app "alert-escalation-sweep"):
+    evaluates every enabled EscalationPolicy against currently active,
+    unacknowledged alerts and notifies secondary contacts for any that
+    have breached their policy's unack_minutes threshold. See
+    app.services.escalation_service.run_escalation_sweep. Returns the
+    number of escalations fired this tick.
+    """
+    from app.services import escalation_service
+
+    db = SessionLocal()
+    try:
+        return escalation_service.run_escalation_sweep(db)
+    finally:
+        db.close()

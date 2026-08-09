@@ -38,6 +38,11 @@ from app.models.device import (  # noqa: F401
 from app.models.device_group import DeviceGroup  # noqa: F401
 from app.models.device_metric import DeviceMetric, HealthColor  # noqa: F401
 from app.models.discovered_neighbor import DiscoveredNeighbor  # noqa: F401
+from app.models.escalation_policy import (  # noqa: F401
+    EscalationChannel,
+    EscalationPolicy,
+    EscalationSeverityScope,
+)
 from app.models.firmware_upgrade import (  # noqa: F401
     FirmwareUpgrade,
     FirmwareUpgradeStatus,
