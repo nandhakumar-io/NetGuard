@@ -945,18 +945,22 @@ def discover_device(
         device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS, vendor=device.vendor.value
     )
 
-    # Backfill Device.platform/model/serial_number from discovery whenever
-    # they're still blank -- these were being computed by snmp_service all
-    # along but the values had nowhere to land (dropped by the response
-    # model, never written to the Device row). Only fills gaps, never
-    # overwrites an operator-entered value, so a manually-corrected
-    # platform/model/serial isn't clobbered by a later re-discovery.
+    # Backfill Device.platform/model/serial_number/os_version from
+    # discovery whenever they're still blank -- these were being computed
+    # by snmp_service all along but the values had nowhere to land
+    # (dropped by the response model, never written to the Device row).
+    # Only fills gaps, never overwrites an operator-entered value, so a
+    # manually-corrected platform/model/serial/os_version isn't clobbered
+    # by a later re-discovery. Same detection path for Cisco and Juniper
+    # -- see snmp_service._detect_os_version_from_sysdescr.
     if not device.platform and result.get("detected_platform"):
         device.platform = result["detected_platform"]
     if not device.model and result.get("detected_model"):
         device.model = result["detected_model"]
     if not device.serial_number and result.get("detected_serial_number"):
         device.serial_number = result["detected_serial_number"]
+    if not device.os_version and result.get("detected_os_version"):
+        device.os_version = result["detected_os_version"]
     db.commit()
 
     return DeviceDiscoveryResult(
@@ -971,6 +975,7 @@ def discover_device(
         detected_platform=result.get("detected_platform"),
         detected_model=result.get("detected_model"),
         detected_serial_number=result.get("detected_serial_number"),
+        detected_os_version=result.get("detected_os_version"),
         retrieved_at=datetime.datetime.utcnow(),
     )
 

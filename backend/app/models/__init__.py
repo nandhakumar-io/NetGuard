@@ -49,6 +49,7 @@ from app.models.firmware_upgrade import (  # noqa: F401
     FirmwareUpgradeStatus,
 )
 from app.models.golden_config import GoldenConfig  # noqa: F401
+from app.models.interface_metric import InterfaceMetric  # noqa: F401
 from app.models.interface_status import (  # noqa: F401
     InterfaceOperStatus,
     InterfaceStatus,

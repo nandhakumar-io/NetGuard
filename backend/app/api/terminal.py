@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import uuid
 
 import asyncssh
@@ -20,19 +21,28 @@ TELNET_CONNECT_TIMEOUT_SECONDS = 8
 
 
 async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket) -> None:
+    """Pumps device -> browser. Deliberately does NOT close the websocket
+    itself on exit (device EOF, SSH channel drop, etc.) -- it used to, but
+    that raced with read_from_ws below: if this task closed the socket
+    while read_from_ws was mid-await on websocket.receive_text(), Starlette
+    raises a bare RuntimeError (not WebSocketDisconnect) for a
+    server-initiated close, which read_from_ws's `except Exception` catches
+    but still leaves both tasks tearing the connection down independently
+    -- one clean, one not -- producing an unclean TCP close that the
+    browser reports as a generic 'error' event with no reason instead of a
+    graceful 'close'. The caller (_try_ssh) now owns the single close, with
+    an explicit reason, after both tasks are done/cancelled.
+    """
     try:
         while True:
             data = await process.stdout.read(4096)
             if not data:
                 break
             await websocket.send_text(data)
-    except Exception as e:
+    except (asyncssh.Error, OSError, ConnectionError) as e:
         print(f"SSH stream read error: {e}")
-    finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+    except Exception as e:  # noqa: BLE001
+        print(f"SSH stream read error (unexpected): {e}")
 
 
 async def read_from_ws(process: asyncssh.SSHClientProcess, websocket: WebSocket) -> None:
@@ -41,10 +51,17 @@ async def read_from_ws(process: asyncssh.SSHClientProcess, websocket: WebSocket)
             data = await websocket.receive_text()
             process.stdin.write(data)
     except WebSocketDisconnect:
-        process.stdin.close()
-    except Exception as e:
+        pass
+    except RuntimeError:
+        # Starlette raises this (not WebSocketDisconnect) when the socket
+        # was already closed from our side rather than by the client --
+        # expected once read_from_ssh's loop ends and the caller closes up.
+        pass
+    except Exception as e:  # noqa: BLE001
         print(f"WebSocket read error: {e}")
-        process.stdin.close()
+    finally:
+        with contextlib.suppress(Exception):
+            process.stdin.close()
 
 
 async def read_from_telnet(reader: telnetlib3.TelnetReader, websocket: WebSocket) -> None:
@@ -54,13 +71,8 @@ async def read_from_telnet(reader: telnetlib3.TelnetReader, websocket: WebSocket
             if not data:
                 break
             await websocket.send_text(data)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Telnet stream read error: {e}")
-    finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
 
 
 async def read_from_ws_telnet(writer: telnetlib3.TelnetWriter, websocket: WebSocket) -> None:
@@ -69,10 +81,53 @@ async def read_from_ws_telnet(writer: telnetlib3.TelnetWriter, websocket: WebSoc
             data = await websocket.receive_text()
             writer.write(data)
     except WebSocketDisconnect:
-        writer.close()
-    except Exception as e:
+        pass
+    except RuntimeError:
+        pass
+    except Exception as e:  # noqa: BLE001
         print(f"WebSocket read error: {e}")
-        writer.close()
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+
+
+async def _run_pumped_session(
+    websocket: WebSocket,
+    read_task_coro,
+    write_task_coro,
+    protocol_label: str,
+) -> None:
+    """Runs the device-read and browser-write pump tasks together, and is
+    the SOLE owner of closing the websocket once the session ends -- for
+    whichever reason ends first (device dropped the connection, browser
+    disconnected, either pump errored). Using asyncio.wait(FIRST_COMPLETED)
+    instead of asyncio.gather means we don't wait on (or get tripped up by)
+    the second task once the session is clearly over, and we always send a
+    real close frame with a reason instead of letting the socket die
+    uncleanly -- which is what the browser was surfacing as the opaque
+    'Connection dropped by server' error regardless of the actual cause.
+    """
+    read_task = asyncio.create_task(read_task_coro)
+    write_task = asyncio.create_task(write_task_coro)
+
+    done, pending = await asyncio.wait({read_task, write_task}, return_when=asyncio.FIRST_COMPLETED)
+
+    for task in pending:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    # Surface why the session ended, if the finished task raised.
+    reason = f"{protocol_label} session ended"
+    for task in done:
+        exc = task.exception() if task.done() and not task.cancelled() else None
+        if exc:
+            reason = f"{protocol_label} session ended: {exc}"
+
+    with contextlib.suppress(Exception):
+        await websocket.send_text(f"\r\n\x1b[33m*** {reason} ***\x1b[0m\r\n")
+    with contextlib.suppress(Exception):
+        await websocket.close(code=1000, reason=reason[:120])
 
 
 def get_current_user_ws(token: str, db: Session) -> User | None:
@@ -103,11 +158,14 @@ async def _try_ssh(websocket: WebSocket, device: Device, username: str, password
             client_keys=None,
             connect_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
         ) as conn:
-            process = await conn.create_process(term_type="xterm-256color")
+            process = await conn.create_process(term_type="xterm-256color", term_size=(120, 40))
             await websocket.send_text(f"\r\n\x1b[32mConnected via SSH to {device.ip_address}.\x1b[0m\r\n")
-            task1 = asyncio.create_task(read_from_ssh(process, websocket))
-            task2 = asyncio.create_task(read_from_ws(process, websocket))
-            await asyncio.gather(task1, task2)
+            await _run_pumped_session(
+                websocket,
+                read_from_ssh(process, websocket),
+                read_from_ws(process, websocket),
+                protocol_label="SSH",
+            )
         return True
     except (asyncssh.Error, OSError, asyncio.TimeoutError, ConnectionRefusedError) as exc:
         # Connection-phase failure (refused, timed out, no SSH server, auth
@@ -160,9 +218,12 @@ async def _try_telnet(websocket: WebSocket, device: Device, username: str, passw
         f"\r\n\x1b[36mConnected via Telnet to {host}:{port}. "
         f"Log in manually below (username: {username}).\x1b[0m\r\n"
     )
-    task1 = asyncio.create_task(read_from_telnet(reader, websocket))
-    task2 = asyncio.create_task(read_from_ws_telnet(writer, websocket))
-    await asyncio.gather(task1, task2)
+    await _run_pumped_session(
+        websocket,
+        read_from_telnet(reader, websocket),
+        read_from_ws_telnet(writer, websocket),
+        protocol_label="Telnet",
+    )
 
 
 @router.websocket("/{device_id}/terminal")

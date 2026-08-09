@@ -428,4 +428,5 @@ class DeviceDiscoveryResult(BaseModel):
     detected_platform: str | None = None
     detected_model: str | None = None
     detected_serial_number: str | None = None
+    detected_os_version: str | None = None
     retrieved_at: datetime.datetime

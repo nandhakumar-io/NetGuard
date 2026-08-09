@@ -27,6 +27,25 @@ class DeviceMetricRead(BaseModel):
     polled_at: datetime.datetime
 
 
+class InterfaceMetricRead(BaseModel):
+    """Latest per-interface bandwidth/error reading -- the per-link
+    counterpart to DeviceMetricRead's whole-device figure. Sourced from
+    IF-MIB ifTable/ifXTable, which Cisco and Juniper both implement the
+    same way, so this shape applies identically to either vendor.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    if_index: str
+    if_descr: str
+    octets_total: int | None = None
+    speed_bps: int | None = None
+    errors: int | None = None
+    utilization_pct: float | None = None
+    error_delta: int | None = None
+    polled_at: datetime.datetime
+
+
 class MetricFreshness(BaseModel):
     """Per-metric last-successful-read timestamps (ISO strings, None if
     that metric has never once resolved for this device) -- lets a card

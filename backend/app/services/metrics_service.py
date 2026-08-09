@@ -19,6 +19,7 @@ from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
 from app.models.device_status_history import DeviceStatusHistory
+from app.models.interface_metric import InterfaceMetric
 from app.models.interface_status import InterfaceOperStatus, InterfaceStatus
 from app.services import (
     alert_service,
@@ -242,6 +243,94 @@ def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) ->
                 category=category,
                 note=f"{device.hostname}: interface {if_descr} is back up",
             )
+
+
+def _sync_interface_metrics(db: Session, device: Device, metrics: SnmpMetrics, poll_interval_seconds: float) -> None:
+    """Per-interface counterpart to DeviceMetric's whole-device
+    interface_utilization_pct: writes one InterfaceMetric row per
+    currently-up interface in this poll, with utilization_pct computed
+    the same delta-against-previous-poll way as
+    _compute_interface_utilization, just scoped to a single ifIndex
+    instead of the device-wide sum.
+
+    Vendor-neutral: metrics.per_interface already comes from IF-MIB
+    ifTable/ifXTable (see snmp_service.walk_interface_stats), which
+    Cisco and Juniper both implement identically -- there is nothing
+    Cisco- or Juniper-specific to branch on here. Down interfaces are
+    skipped (matching walk_interface_stats' own "no meaningful current
+    rate" treatment); an interface's first-ever row simply has
+    utilization_pct=None until a second sample exists to diff against,
+    same as the device-level figure.
+    """
+    if not metrics.per_interface:
+        return
+
+    up_entries = [e for e in metrics.per_interface if e.get("status") == "up"]
+    if not up_entries:
+        return
+
+    if_indexes = [str(e.get("if_index")) for e in up_entries]
+
+    # Latest prior InterfaceMetric row per if_index, in one query rather
+    # than N -- same "latest per key" subquery shape used elsewhere in
+    # this module/topology_service for device-level lookups.
+    latest_subq = (
+        db.query(InterfaceMetric.if_index, func.max(InterfaceMetric.polled_at).label("latest_polled_at"))
+        .filter(InterfaceMetric.device_id == device.id, InterfaceMetric.if_index.in_(if_indexes))
+        .group_by(InterfaceMetric.if_index)
+        .subquery()
+    )
+    previous_rows = (
+        db.query(InterfaceMetric)
+        .join(
+            latest_subq,
+            (InterfaceMetric.if_index == latest_subq.c.if_index)
+            & (InterfaceMetric.polled_at == latest_subq.c.latest_polled_at),
+        )
+        .all()
+    )
+    previous_by_index = {row.if_index: row for row in previous_rows}
+
+    for entry in up_entries:
+        if_index = str(entry.get("if_index"))
+        if_descr = entry.get("if_descr") or f"if{if_index}"
+        octets_total = entry.get("octets_total")
+        speed_bps = entry.get("speed_bps")
+        errors = entry.get("errors")
+
+        previous = previous_by_index.get(if_index)
+        utilization_pct = None
+        error_delta = None
+
+        if (
+            octets_total is not None
+            and speed_bps
+            and previous is not None
+            and previous.octets_total is not None
+            and poll_interval_seconds > 0
+        ):
+            delta_octets = octets_total - previous.octets_total
+            if delta_octets >= 0:  # negative delta = counter reset/reboot -- not a valid rate
+                bps = (delta_octets * 8) / poll_interval_seconds
+                utilization_pct = max(0.0, min(100.0, round((bps / speed_bps) * 100, 1)))
+
+        if errors is not None and previous is not None and previous.errors is not None:
+            delta_errors = errors - previous.errors
+            if delta_errors >= 0:
+                error_delta = delta_errors
+
+        db.add(
+            InterfaceMetric(
+                device_id=device.id,
+                if_index=if_index,
+                if_descr=if_descr,
+                octets_total=octets_total,
+                speed_bps=speed_bps,
+                errors=errors,
+                utilization_pct=utilization_pct,
+                error_delta=error_delta,
+            )
+        )
 
 
 def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, previous: DeviceMetric | None) -> None:
@@ -476,6 +565,7 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     _raise_alerts(db, device, metrics)
     _check_device_restart(db, device, metrics, previous)
     _sync_interface_status(db, device, metrics)
+    _sync_interface_metrics(db, device, metrics, interval_seconds)
 
     db.commit()
     db.refresh(row)

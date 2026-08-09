@@ -61,14 +61,30 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
       term.write(event.data);
     };
 
+    // Browsers fire 'error' for practically any abnormal socket condition
+    // with zero detail (no code, no reason) -- it's always followed by a
+    // 'close' event, which DOES carry the reason the backend sent. So we
+    // no longer render a banner from onerror itself (it was showing a
+    // generic "Connection dropped by server" even for perfectly normal,
+    // server-explained disconnects); we just log it and let onclose,
+    // which fires right after, report what actually happened.
     ws.onerror = (e) => {
       console.error('WebSocket Error:', e);
-      setError('Connection dropped by server.');
-      term.writeln('\r\n\x1b[31m*** Backend connection dropped ***\x1b[0m');
     };
 
-    ws.onclose = () => {
-      term.writeln('\r\n\x1b[33m*** Session Closed ***\x1b[0m');
+    ws.onclose = (event) => {
+      if (event.wasClean && event.reason) {
+        // Backend already sent a human-readable reason as terminal output
+        // right before closing (see terminal.py's _run_pumped_session) --
+        // just note the session ended, don't duplicate the reason text.
+        term.writeln('\r\n\x1b[33m*** Session Closed ***\x1b[0m');
+      } else if (!event.wasClean) {
+        const detail = event.reason ? `: ${event.reason}` : ` (code ${event.code})`;
+        setError(`Connection dropped by server${detail}.`);
+        term.writeln(`\r\n\x1b[31m*** Backend connection dropped${detail} ***\x1b[0m`);
+      } else {
+        term.writeln('\r\n\x1b[33m*** Session Closed ***\x1b[0m');
+      }
     };
 
     // When a user types in xterm, immediately cast those literal byte chunks over WS

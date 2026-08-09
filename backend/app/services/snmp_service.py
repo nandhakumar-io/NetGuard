@@ -946,6 +946,43 @@ def _detect_platform_from_sysdescr(sys_descr: str | None) -> str | None:
     return None
 
 
+# sysDescr version tokens, matched in order (first match wins). Every
+# vendor NetGuard targets embeds the running software version somewhere
+# in its sysDescr banner:
+#   Cisco IOS/IOS-XE:  "...Version 15.2(4)M6, RELEASE SOFTWARE..."
+#   Cisco NX-OS:       "...system: version 9.3(5)..." (lowercase "version")
+#   Juniper Junos:      "...JUNOS 20.4R3.8 [...]" or "...kernel JUNOS 20.4R3.8..."
+#   Arista EOS:          "...EOS version 4.24.0F..."
+# The Cisco/Arista "Version X" pattern is checked first since it's the
+# most specific (anchored to the literal word "Version"/"version");
+# JUNOS's own pattern only fires when that one didn't match, since Junos
+# sysDescr never contains the word "Version" in this sense.
+_VERSION_PATTERNS: list[re.Pattern] = [
+    re.compile(r"[Vv]ersion\s+([A-Za-z0-9.()/_-]+)"),
+    re.compile(r"JUNOS\s+([A-Za-z0-9.-]+)"),
+]
+
+
+def _detect_os_version_from_sysdescr(sys_descr: str | None) -> str | None:
+    """Best-effort software version out of sysDescr -- vendor-neutral
+    (regex over free text, no per-vendor OID), so it works the same way
+    for Cisco and Juniper. Returns None rather than raising when no
+    pattern matches (e.g. a vendor NetGuard doesn't specifically target,
+    or a sysDescr format we haven't seen) -- an unrecognized banner
+    format should leave Device.os_version blank, not crash discovery.
+    """
+    if not sys_descr:
+        return None
+    for pattern in _VERSION_PATTERNS:
+        match = pattern.search(sys_descr)
+        if match:
+            # Trim a trailing comma/bracket that sometimes rides along
+            # when the version token is immediately followed by more
+            # banner text (e.g. "Version 15.2(4)M6," or "JUNOS 20.4R3.8 [").
+            return match.group(1).rstrip(",[")
+    return None
+
+
 def discover_inventory(
     ip_address: str, auth: "SnmpAuthConfig", timeout: float = 5.0, vendor: str | None = None
 ) -> dict:
@@ -982,6 +1019,7 @@ def discover_inventory(
     inventory = _discover_physical_inventory(ip_address, auth, timeout)
     detected_model, detected_serial_number = _detect_chassis_summary(inventory)
     detected_platform = _detect_platform_from_sysdescr(sys_descr)
+    detected_os_version = _detect_os_version_from_sysdescr(sys_descr)
 
     if (vendor or "").lower() == "juniper" and (not detected_model or not detected_serial_number):
         box_descr = _get_via_pysnmp(ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxDescr"], timeout)
@@ -1001,6 +1039,7 @@ def discover_inventory(
         "detected_platform": detected_platform,
         "detected_model": detected_model,
         "detected_serial_number": detected_serial_number,
+        "detected_os_version": detected_os_version,
     }
 
 

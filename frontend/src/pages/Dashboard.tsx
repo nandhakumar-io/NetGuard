@@ -499,6 +499,90 @@ export default function Dashboard() {
         </Card>
       </div>
 
+      {/* ---- Instant troubleshooting: offline devices, iface errors, port flaps ---- */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-6">
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Offline / Degraded Devices</p>
+            <Link to="/devices" className="text-xs text-brandblue font-medium hover:underline">All devices →</Link>
+          </div>
+          {(summary?.offline_devices?.length ?? 0) === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-sm font-semibold text-emerald-600">All reachable</p>
+              <p className="text-xs text-slate-400 mt-1">No offline or degraded devices right now.</p>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {summary?.offline_devices?.map((d) => (
+                <div key={d.id} className="flex items-start justify-between gap-2 text-sm">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${d.status === "offline" ? "bg-red-500" : "bg-amber-500"}`} />
+                      <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 ml-4 truncate">{d.ip_address}{d.last_error ? ` · ${d.last_error}` : ""}</p>
+                  </div>
+                  <span className="text-[11px] text-slate-400 shrink-0">{d.last_seen ? timeAgo(d.last_seen) : "never"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Interface Errors</p>
+            <span className="text-[11px] text-slate-300">by device</span>
+          </div>
+          {(summary?.top_error_devices?.length ?? 0) === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-sm font-semibold text-emerald-600">Clean</p>
+              <p className="text-xs text-slate-400 mt-1">No interface errors on the latest poll.</p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {summary?.top_error_devices?.map((d, i) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <div className="min-w-0">
+                    <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                    <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
+                  </div>
+                  <span className="text-red-600 font-semibold text-xs shrink-0 ml-2">{d.interface_errors.toLocaleString()} errs</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Flapping Interfaces</p>
+            <span className="text-[11px] text-slate-300">last 24h</span>
+          </div>
+          {(summary?.flapping_interfaces?.length ?? 0) === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-sm font-semibold text-emerald-600">Stable</p>
+              <p className="text-xs text-slate-400 mt-1">No ports have flapped in the last 24h.</p>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {summary?.flapping_interfaces?.map((f, i) => (
+                <div key={i} className="flex items-start justify-between gap-2 text-sm">
+                  <div className="min-w-0">
+                    <span className="font-medium text-slate-700 truncate">{f.hostname}</span>
+                    <p className="text-[11px] text-slate-400 truncate">{f.interface}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <span className="text-amber-600 font-semibold text-xs">{f.flap_count}×</span>
+                    <p className="text-[10px] text-slate-400">{f.last_change ? timeAgo(f.last_change) : ""}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
       {/* ---- Group availability -------------------------------------------- */}
       <Card className="p-6">
         <div className="flex items-center justify-between mb-4">

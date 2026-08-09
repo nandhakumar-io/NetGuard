@@ -9,18 +9,21 @@ device over the network.
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
 from app.models.device_metric import DeviceMetric
+from app.models.interface_metric import InterfaceMetric
 from app.models.user import User, UserRole
 from app.schemas.metrics import (
     DeviceHealthSummary,
     DeviceMetricRead,
     FleetAvailabilitySummary,
     FleetHealthSummary,
+    InterfaceMetricRead,
     UnstableDevice,
 )
 from app.services import metrics_service
@@ -134,6 +137,41 @@ def get_metric_history(
     errors over time for one device, oldest-first."""
     device = _get_device(db, device_id)
     return metrics_service.metric_history(db, device.id, hours=hours, limit=limit)
+
+
+@router.get("/devices/{device_id}/metrics/interfaces", response_model=list[InterfaceMetricRead])
+def get_latest_interface_metrics(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Latest per-interface bandwidth/error reading for every interface
+    with at least one recorded poll -- the Interfaces tab's utilization
+    breakdown (see app.models.interface_metric.InterfaceMetric). Works
+    identically for Cisco and Juniper: both are read via the standard
+    IF-MIB ifTable/ifXTable, with no vendor-specific OID handling
+    needed here.
+
+    Returns [] rather than 404 when nothing's been polled yet -- an
+    unpolled device's Interfaces tab should render an empty state, not
+    an error.
+    """
+    device = _get_device(db, device_id)
+
+    latest_subq = (
+        db.query(InterfaceMetric.if_index, func.max(InterfaceMetric.polled_at).label("latest_polled_at"))
+        .filter(InterfaceMetric.device_id == device.id)
+        .group_by(InterfaceMetric.if_index)
+        .subquery()
+    )
+    rows = (
+        db.query(InterfaceMetric)
+        .join(
+            latest_subq,
+            (InterfaceMetric.if_index == latest_subq.c.if_index)
+            & (InterfaceMetric.polled_at == latest_subq.c.latest_polled_at),
+        )
+        .filter(InterfaceMetric.device_id == device.id)
+        .order_by(InterfaceMetric.if_descr)
+        .all()
+    )
+    return rows
 
 
 @router.post("/devices/{device_id}/metrics/poll", response_model=DeviceMetricRead)

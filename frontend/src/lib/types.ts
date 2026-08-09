@@ -524,6 +524,9 @@ export interface DashboardSummary {
   }[];
   down_ports: { hostname: string; interface: string; down_since: string | null }[];
   recent_reboots: { hostname: string; ip_address: string; uptime_seconds: number; polled_at: string | null }[];
+  offline_devices: { id: string; hostname: string; ip_address: string; status: string; last_seen: string | null; last_error: string | null }[];
+  top_error_devices: { hostname: string; ip_address: string; interface_errors: number }[];
+  flapping_interfaces: { hostname: string; interface: string; flap_count: number; last_change: string | null }[];
   recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
   recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
 }

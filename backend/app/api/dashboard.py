@@ -330,8 +330,90 @@ def _compute_summary(db: Session) -> dict:
         for r in recent_reboot_rows
     ]
 
+    # --- Instant-troubleshooting additions ---
+
+    # 6. Offline/degraded devices, by name -- devices_online/devices_total
+    # above only give a count; when something's actually down, the first
+    # thing anyone needs is *which* device and *since when*, without
+    # having to jump to the full Inventory page and filter. Ordered by
+    # least-recently-seen first (longest outages surface at the top).
+    offline_rows = (
+        db.query(Device)
+        .filter(Device.status.in_([DeviceStatus.OFFLINE, DeviceStatus.DEGRADED]))
+        .order_by(Device.last_reachability_poll_at.asc().nulls_first())
+        .limit(15)
+        .all()
+    )
+    offline_devices = [
+        {
+            "id": str(d.id),
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "status": d.status.value if hasattr(d.status, "value") else d.status,
+            "last_seen": d.last_reachability_poll_at.isoformat() if d.last_reachability_poll_at else None,
+            "last_error": d.last_snmp_poll_error,
+        }
+        for d in offline_rows
+    ]
+
+    # 7. Top interface-error devices -- interface_errors is already
+    # collected every poll (used today only to sort the Top Bandwidth
+    # widget's tie-breaks) but was never surfaced on its own. CRC/input
+    # errors climbing on a link is a classic "why is this connection
+    # flaky" signal independent of raw utilization, so it deserves its
+    # own instant-triage list rather than being buried inside bandwidth.
+    top_errors = sorted(
+        (r for r in latest_metrics_query if (r[0].interface_errors or 0) > 0),
+        key=lambda x: (x[0].interface_errors or 0),
+        reverse=True,
+    )[:5]
+    top_error_devices = [
+        {
+            "hostname": r[1],
+            "ip_address": r[2],
+            "interface_errors": r[0].interface_errors or 0,
+        }
+        for r in top_errors
+    ]
+
+    # 8. Flapping interfaces (last 24h) -- interface_statuses is a
+    # transition log (one row per up/down change), so counting rows per
+    # (device_id, if_index) in the window directly answers "which port is
+    # bouncing" -- the single most common cause of intermittent
+    # connectivity complaints, and previously only visible one device at a
+    # time on that device's own history tab.
+    flap_since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+    flap_rows = (
+        db.query(
+            InterfaceStatus.device_id,
+            InterfaceStatus.if_descr,
+            Device.hostname,
+            func.count(InterfaceStatus.id).label("flap_count"),
+            func.max(InterfaceStatus.changed_at).label("last_change"),
+        )
+        .join(Device, Device.id == InterfaceStatus.device_id)
+        .filter(InterfaceStatus.changed_at >= flap_since, InterfaceStatus.is_transition == True)
+        .group_by(InterfaceStatus.device_id, InterfaceStatus.if_descr, Device.hostname)
+        .having(func.count(InterfaceStatus.id) > 1)
+        .order_by(desc("flap_count"))
+        .limit(10)
+        .all()
+    )
+    flapping_interfaces = [
+        {
+            "hostname": r.hostname,
+            "interface": r.if_descr,
+            "flap_count": r.flap_count,
+            "last_change": r.last_change.isoformat() if r.last_change else None,
+        }
+        for r in flap_rows
+    ]
+
     return {
         "devices_online": devices_online,
+        "offline_devices": offline_devices,
+        "top_error_devices": top_error_devices,
+        "flapping_interfaces": flapping_interfaces,
         "devices_total": devices_total,
         "active_deployments": active_deployments,
         "failed_deployments": failed_deployments,
