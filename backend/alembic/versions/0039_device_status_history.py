@@ -25,7 +25,7 @@ down_revision = "0038"
 branch_labels = None
 depends_on = None
 
-_STATUS_ENUM = sa.Enum("online", "offline", "degraded", "unknown", name="devicestatus", create_type=False)
+_STATUS_ENUM = postgresql.ENUM("online", "offline", "degraded", "unknown", name="devicestatus", create_type=False)
 
 
 def upgrade():
