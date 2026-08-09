@@ -15,7 +15,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../lib/api";
-import { DashboardSummary, Alert, DeviceGroup, Device } from "../lib/types";
+import { DashboardSummary, Alert, DeviceGroup, Device, FleetAvailabilitySummary, UnstableDevice } from "../lib/types";
 import Sparkline from "../components/Sparkline";
 import { useAuth } from "../lib/auth";
 
@@ -116,6 +116,8 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [recentAlerts, setRecentAlerts] = useState<Alert[]>([]);
   const [groupStats, setGroupStats] = useState<GroupStat[]>([]);
+  const [availability, setAvailability] = useState<FleetAvailabilitySummary | null>(null);
+  const [unstableDevices, setUnstableDevices] = useState<UnstableDevice[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
@@ -132,6 +134,16 @@ export default function Dashboard() {
       .finally(() => setLoading(false));
 
     api.get<Alert[]>("/alerts?status=active&limit=6").then((res) => setRecentAlerts(res.data)).catch(() => {});
+
+    api
+      .get<FleetAvailabilitySummary>("/metrics/fleet-availability", { params: { hours: 24 } })
+      .then((res) => setAvailability(res.data))
+      .catch(() => {});
+
+    api
+      .get<UnstableDevice[]>("/metrics/unstable-devices", { params: { hours: 24, limit: 6 } })
+      .then((res) => setUnstableDevices(res.data))
+      .catch(() => {});
 
     api
       .get<DeviceGroup[]>("/device-groups")
@@ -391,6 +403,93 @@ export default function Dashboard() {
                       <p className={`text-[10px] font-semibold uppercase tracking-wide ${s.text}`}>{alert.category}</p>
                       <p className="text-xs text-slate-700 truncate">{alert.message}</p>
                       <p className="text-[10px] text-slate-400 mt-0.5">{timeAgo(alert.created_at)}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* ---- Fleet availability + flapping devices ------------------------ */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-6">
+        <Card className="p-6">
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet Availability</p>
+            <span className="text-[11px] text-slate-300">last 24h</span>
+          </div>
+          {availability === null ? (
+            <div className="h-24 flex items-center justify-center text-sm text-slate-400">Loading…</div>
+          ) : availability.fleet_availability_pct === null ? (
+            <p className="text-sm text-slate-400 italic py-6 text-center">
+              Not enough status history yet — availability builds up as devices are polled/pinged over time.
+            </p>
+          ) : (
+            <>
+              <p
+                className={`text-4xl font-bold mt-2 ${
+                  availability.fleet_availability_pct >= 99.9
+                    ? "text-emerald-600"
+                    : availability.fleet_availability_pct >= 99
+                    ? "text-amber-600"
+                    : "text-red-600"
+                }`}
+              >
+                {availability.fleet_availability_label}
+              </p>
+              <p className="text-[11px] text-slate-400 mt-1 mb-4">
+                {availability.devices_in_rollup} device{availability.devices_in_rollup === 1 ? "" : "s"} in rollup
+              </p>
+              {availability.worst_devices.length > 0 && (
+                <div className="pt-3 border-t border-slate-100 space-y-1.5">
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Lowest availability</p>
+                  {availability.worst_devices.slice(0, 4).map((d) => (
+                    <div key={d.device_id} className="flex items-center justify-between text-xs">
+                      <span className="text-slate-600 truncate">{d.hostname}</span>
+                      <span
+                        className={`font-semibold shrink-0 ml-2 ${
+                          d.availability_pct >= 99.9 ? "text-emerald-600" : d.availability_pct >= 99 ? "text-amber-600" : "text-red-600"
+                        }`}
+                      >
+                        {d.availability_pct.toFixed(2)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+
+        <Card className="p-6 xl:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Flapping Devices</p>
+            <span className="text-[11px] text-slate-300">reachability + interface + drift · last 24h</span>
+          </div>
+          {unstableDevices.length === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-sm font-semibold text-emerald-600">Stable</p>
+              <p className="text-xs text-slate-400 mt-1">No devices are flapping right now.</p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {unstableDevices.map((d) => {
+                const maxScore = unstableDevices[0].instability_score || 1;
+                const pct = Math.min((d.instability_score / maxScore) * 100, 100);
+                return (
+                  <div key={d.device_id}>
+                    <div className="flex items-center justify-between text-sm mb-1">
+                      <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                      <span className="text-[11px] text-slate-400 shrink-0 ml-2">
+                        {d.reachability_flaps} reach · {d.interface_flaps} iface · {d.drift_events} drift
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${pct >= 66 ? "bg-red-500" : pct >= 33 ? "bg-amber-500" : "bg-brandblue"}`}
+                        style={{ width: `${pct}%` }}
+                      />
                     </div>
                   </div>
                 );

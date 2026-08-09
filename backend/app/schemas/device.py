@@ -313,6 +313,11 @@ class LldpNeighbor(BaseModel):
     local_port_index: str
     neighbor_name: str | None = None
     neighbor_port: str | None = None
+    # Raw lldpRemChassisId -- always populated when a neighbor row exists
+    # at all (mandatory TLV, unlike System Name). Useful on its own when
+    # neighbor_name had to fall back to this same value because the
+    # neighbor didn't send an optional System Name TLV (common on Junos).
+    neighbor_chassis_id: str | None = None
 
 
 class CdpNeighbor(BaseModel):
@@ -402,4 +407,15 @@ class DeviceDiscoveryResult(BaseModel):
     lldp_neighbors: list[LldpNeighbor] = Field(default_factory=list)
     cdp_neighbors: list[CdpNeighbor] = Field(default_factory=list)
     inventory: list[InventoryItem] = Field(default_factory=list)
+    # Best-effort single values derived from sysDescr + ENTITY-MIB
+    # (entPhysicalTable's chassis row) -- see
+    # snmp_service._detect_platform_from_sysdescr / _detect_chassis_summary.
+    # These were being computed all along but discarded: never declared on
+    # this response model (silently dropped by pydantic) and never written
+    # back to Device.platform/model/serial_number. Now surfaced here *and*
+    # persisted by the discovery endpoint so Overview page fields actually
+    # populate instead of staying blank forever.
+    detected_platform: str | None = None
+    detected_model: str | None = None
+    detected_serial_number: str | None = None
     retrieved_at: datetime.datetime

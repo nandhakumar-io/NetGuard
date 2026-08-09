@@ -19,7 +19,9 @@ from app.models.user import User, UserRole
 from app.schemas.metrics import (
     DeviceHealthSummary,
     DeviceMetricRead,
+    FleetAvailabilitySummary,
     FleetHealthSummary,
+    UnstableDevice,
 )
 from app.services import metrics_service
 
@@ -49,6 +51,32 @@ def get_fleet_health_summary(
     (e.g. ?vendor=juniper) so the UI's vendor fleet tabs can reuse this
     endpoint instead of a separate one."""
     return metrics_service.fleet_health_summary(db, vendor=vendor)
+
+
+@router.get("/metrics/fleet-availability", response_model=FleetAvailabilitySummary)
+def get_fleet_availability(
+    hours: int = Query(24, ge=1, le=8760, description="Rollup window in hours"),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Classic NOC "how many nines" fleet uptime number, time-weighted
+    from DeviceStatusHistory over the requested window (default 24h).
+    Also returns the 10 worst-availability devices in the window so the
+    dashboard can show what's dragging the number down."""
+    return metrics_service.fleet_availability_summary(db, hours=hours)
+
+
+@router.get("/metrics/unstable-devices", response_model=list[UnstableDevice])
+def get_unstable_devices(
+    hours: int = Query(24, ge=1, le=8760, description="Rollup window in hours"),
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """"Top flapping devices" widget: combines reachability flaps +
+    interface flaps + config drift events into one ranked instability
+    list (see app.services.metrics_service.unstable_devices)."""
+    return metrics_service.unstable_devices(db, hours=hours, limit=limit)
 
 
 @router.get("/metrics/health", response_model=list[DeviceHealthSummary])

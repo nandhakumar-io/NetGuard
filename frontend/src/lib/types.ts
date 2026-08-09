@@ -314,7 +314,7 @@ export interface CompareConfigResponse {
 
 // --- Configuration Drift Detection ---
 
-export type DriftBaseline = "golden_config" | "previous_backup";
+export type DriftBaseline = "golden_config" | "previous_backup" | "role_baseline";
 export type DriftSeverity = "low" | "medium" | "high" | "critical";
 export type DriftStatus = "open" | "approved" | "rolled_back" | "dismissed";
 
@@ -1023,6 +1023,29 @@ export interface FleetHealthSummary {
   unknown: number;
   average_health_score: number | null;
   devices_with_stale_metrics: number;
+}
+
+export interface DeviceAvailability {
+  device_id: string;
+  hostname: string;
+  availability_pct: number;
+}
+
+export interface FleetAvailabilitySummary {
+  window_hours: number;
+  devices_in_rollup: number;
+  fleet_availability_pct: number | null;
+  fleet_availability_label: string;
+  worst_devices: DeviceAvailability[];
+}
+
+export interface UnstableDevice {
+  device_id: string;
+  hostname: string;
+  reachability_flaps: number;
+  interface_flaps: number;
+  drift_events: number;
+  instability_score: number;
 }
 
 // --- Syslog Collection & Correlation ---

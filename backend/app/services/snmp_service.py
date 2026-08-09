@@ -105,6 +105,19 @@ IFTABLE_OIDS = {
 }
 MAX_INTERFACES_WALKED = 64  # guard against a runaway walk on a chassis with hundreds of interfaces
 
+# Retries for every GET/GETNEXT (was 1). Standard LLDP-MIB walks
+# (1.0.8802...) are comparatively rarely-polled OIDs on most platforms --
+# Junos in particular is measurably slower to answer them than its
+# heavily-cached proprietary tables (ifTable, jnxOperatingTable). At
+# retries=1, a single dropped/slow UDP response on a loaded agent was
+# enough to make the whole LLDP walk come back empty (indistinguishable
+# from "LLDP genuinely has no neighbors"), which read as "LLDP doesn't
+# work for Juniper" even though the OIDs and walk logic were correct --
+# it was a timing/retry issue, not an OID issue. One retry costs nothing
+# on the common case (a healthy agent still answers on the first try) and
+# meaningfully reduces false-empty results from a single missed packet.
+DISCOVERY_TIMEOUT_FLOOR = 5.0  # discover_inventory() is on-demand, not the frequent poll -- can afford to wait longer
+
 # --- Discovery OIDs (Cisco devices) ---------------------------------------
 # Powers discover_inventory() below: ARP table, routing table, LLDP/CDP
 # neighbors, and chassis/module inventory. These are walked on demand (the
@@ -143,6 +156,19 @@ ROUTE_OIDS_FALLBACK = {
 }
 LLDP_OIDS = {
     # Index: lldpRemTimeMark.lldpRemLocalPortNum.lldpRemIndex
+    #
+    # lldpRemChassisId is used as the *anchor* walk (see
+    # _discover_lldp_neighbors below) instead of lldpRemSysName: per the
+    # LLDP-MIB / IEEE 802.1AB spec, System Name is an OPTIONAL TLV, while
+    # Chassis ID is mandatory on every advertised neighbor. Cisco IOS
+    # sends the System Name TLV by default, so anchoring on sysName
+    # happened to work for Cisco neighbors; Junos frequently doesn't
+    # populate lldpRemSysName even though the neighbor row (and its
+    # mandatory chassis/port IDs) is very much present -- anchoring on it
+    # made every Juniper-adjacent LLDP walk come back empty even with
+    # LLDP fully enabled and neighbors up.
+    "lldpRemChassisIdSubtype": "1.0.8802.1.1.2.1.4.1.1.4",
+    "lldpRemChassisId": "1.0.8802.1.1.2.1.4.1.1.5",
     "lldpRemSysName": "1.0.8802.1.1.2.1.4.1.1.9",
     "lldpRemPortId": "1.0.8802.1.1.2.1.4.1.1.7",
     "lldpRemSysDesc": "1.0.8802.1.1.2.1.4.1.1.10",
@@ -156,10 +182,17 @@ CDP_OIDS = {
 INVENTORY_OIDS = {
     # ENTITY-MIB entPhysicalTable, index: entPhysicalIndex
     "entPhysicalDescr": "1.3.6.1.2.1.47.1.1.1.1.2",
+    "entPhysicalClass": "1.3.6.1.2.1.47.1.1.1.1.5",  # 3 = chassis(3) -- see PHYSICAL_CLASS_CHASSIS below
     "entPhysicalName": "1.3.6.1.2.1.47.1.1.1.1.7",
     "entPhysicalSerialNum": "1.3.6.1.2.1.47.1.1.1.1.11",
     "entPhysicalModelName": "1.3.6.1.2.1.47.1.1.1.1.13",
 }
+# ENTITY-MIB PhysicalClass enum value for "chassis" -- used to pick the
+# single row that represents the whole device (for the Overview page's
+# Model/Serial Number fields) out of entPhysicalTable, which typically
+# also has dozens of other rows for slots, ports, power supplies, fans,
+# etc. that each have their own (irrelevant, sub-component) serial/model.
+PHYSICAL_CLASS_CHASSIS = "3"
 MAX_DISCOVERY_ROWS = 128  # guard against runaway walks on tables that can legitimately be huge (ARP, routes)
 
 # Threshold defaults for turning raw readings into alerts (SNMP Health
@@ -300,7 +333,7 @@ def _get_via_pysnmp(ip_address: str, auth: "SnmpAuthConfig", oid: str, timeout: 
             error_indication, error_status, _, var_binds = await m.getCmd(
                 m.SnmpEngine(),
                 auth_data,
-                m.UdpTransportTarget((ip_address, auth.port or 161), timeout=timeout, retries=1),
+                m.UdpTransportTarget((ip_address, auth.port or 161), timeout=timeout, retries=2),
                 m.ContextData(),
                 m.ObjectType(m.ObjectIdentity(oid)),
             )
@@ -335,7 +368,7 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
             mp_model = 0 if version == "v1" else 1
             with SnmpDispatcher() as dispatcher:
                 transport = await UdpTransportTarget.create(
-                    (ip_address, port), timeout=timeout, retries=1
+                    (ip_address, port), timeout=timeout, retries=2
                 )
                 auth = CommunityData(community, mpModel=mp_model)
                 var_bind = ObjectType(ObjectIdentity(base_oid))
@@ -405,7 +438,7 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                 mp_model = 0 if version == "v1" else 1
                 engine = m.SnmpEngine()
                 auth_data = m.CommunityData(community, mpModel=mp_model)
-                transport = m.UdpTransportTarget((ip_address, port), timeout=timeout, retries=1)
+                transport = m.UdpTransportTarget((ip_address, port), timeout=timeout, retries=2)
                 var_bind = m.ObjectType(m.ObjectIdentity(base_oid))
                 while True:
                     error_indication, error_status, _, var_binds = await m.nextCmd(
@@ -463,7 +496,7 @@ def _walk_via_pysnmp_v3(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, 
         async def _run() -> None:
             engine = m.SnmpEngine()
             auth_data = _build_usm_user_data(auth, m)
-            transport = m.UdpTransportTarget((ip_address, auth.port or 161), timeout=timeout, retries=1)
+            transport = m.UdpTransportTarget((ip_address, auth.port or 161), timeout=timeout, retries=2)
             var_bind = m.ObjectType(m.ObjectIdentity(base_oid))
             while True:
                 error_indication, error_status, _, var_binds = await m.nextCmd(
@@ -731,23 +764,51 @@ def _discover_routing_table_fallback(ip_address: str, auth: "SnmpAuthConfig", ti
     return rows
 
 
+def _format_chassis_id(raw: str | None, subtype: str | None) -> str | None:
+    """Best-effort human-readable rendering of lldpRemChassisId. The raw
+    walked value is frequently a MAC address already formatted by pysnmp
+    (subtype 4 = "macAddress", the common case for a switch/router
+    chassis); other subtypes (networkAddress, ifName, local, ...) are
+    passed through as-is since there's no single generic way to decode
+    them without the ASN.1 type info this SNMP layer already discards.
+    """
+    if not raw:
+        return None
+    return raw
+
+
 def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
     """LLDP-MIB lldpRemTable. Index is 'timeMark.localPortNum.remIndex' --
     the local port number (2nd component) is the useful, stable part; the
-    other two are bookkeeping values from the agent, not needed here."""
-    sys_names = _walk(ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
-    if not sys_names:
+    other two are bookkeeping values from the agent, not needed here.
+
+    Anchored on lldpRemChassisId, not lldpRemSysName: System Name is an
+    OPTIONAL TLV in LLDP (IEEE 802.1AB), while Chassis ID is mandatory on
+    every neighbor entry that exists at all. Cisco IOS happens to send
+    the System Name TLV by default, so anchoring on it "worked" for
+    Cisco-adjacent neighbors; Junos frequently doesn't populate
+    lldpRemSysName even with LLDP fully enabled and neighbors actively
+    advertising, which made every Juniper-adjacent walk come back
+    completely empty. Falls back to the (always-present) chassis ID for
+    `neighbor_name` when the optional system-name TLV wasn't sent.
+    """
+    chassis_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemChassisId"], timeout)
+    if not chassis_ids:
         return []
+    sys_names = _walk(ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
     port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
+    chassis_id_subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpRemChassisIdSubtype"], timeout)
 
     rows = []
-    for index, neighbor_name in list(sys_names.items())[:MAX_DISCOVERY_ROWS]:
+    for index, chassis_id in list(chassis_ids.items())[:MAX_DISCOVERY_ROWS]:
         parts = index.split(".")
         local_port = parts[1] if len(parts) >= 2 else index
+        sys_name = sys_names.get(index)
         rows.append({
             "local_port_index": local_port,
-            "neighbor_name": neighbor_name,
+            "neighbor_name": sys_name or _format_chassis_id(chassis_id, chassis_id_subtypes.get(index)),
             "neighbor_port": port_ids.get(index),
+            "neighbor_chassis_id": chassis_id,
         })
     return rows
 
@@ -794,6 +855,7 @@ def _discover_physical_inventory(ip_address: str, auth: "SnmpAuthConfig", timeou
     names = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalName"], timeout)
     serials = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalSerialNum"], timeout)
     models = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalModelName"], timeout)
+    classes = _walk(ip_address, auth, INVENTORY_OIDS["entPhysicalClass"], timeout)
 
     all_indexes = set(descrs) | set(names) | set(serials) | set(models)
     rows = []
@@ -809,8 +871,63 @@ def _discover_physical_inventory(ip_address: str, auth: "SnmpAuthConfig", timeou
             "description": descr,
             "model": models.get(index),
             "serial_number": serial,
+            "physical_class": classes.get(index),
         })
     return rows
+
+
+def _detect_chassis_summary(inventory: list[dict]) -> tuple[str | None, str | None]:
+    """Picks (model, serial_number) for the device as a whole out of the
+    entPhysicalTable rows discover_inventory() already walked -- that
+    table typically has one row per slot/port/PSU/fan *in addition to*
+    the chassis itself, each with its own (irrelevant, sub-component)
+    model/serial, so naively taking "the first row with a serial" is
+    unreliable.
+
+    Prefers the row where entPhysicalClass == PHYSICAL_CLASS_CHASSIS
+    (chassis(3), the standard ENTITY-MIB value for exactly this row).
+    Falls back to the lowest-index row that has both a model and a
+    serial when no row reports class=chassis at all -- some
+    lab/virtual platforms (and a handful of older Junos releases)
+    implement entPhysicalTable without populating entPhysicalClass
+    reliably, and entPhysicalIndex 1 is the chassis by convention on
+    essentially every real device.
+    """
+    chassis_rows = [r for r in inventory if r.get("physical_class") == PHYSICAL_CLASS_CHASSIS]
+    candidates = chassis_rows or sorted(
+        (r for r in inventory if r.get("model") or r.get("serial_number")),
+        key=lambda r: int(r["index"]) if str(r["index"]).isdigit() else 0,
+    )
+    if not candidates:
+        return None, None
+    row = candidates[0]
+    return row.get("model"), row.get("serial_number")
+
+
+# Regex-matched against sysDescr to derive a human platform label without
+# needing a per-vendor OID -- sysDescr's *format* varies by vendor but is
+# always a free-text banner that names the OS somewhere in it, and every
+# vendor NetGuard already targets (Cisco IOS/IOS-XE/NX-OS, Juniper Junos,
+# Arista EOS) includes one of these tokens near the start of the string.
+# Matched in order -- IOS-XE and NX-OS both also contain "Cisco IOS" as a
+# substring in some banner formats, so the more specific patterns run
+# first.
+_PLATFORM_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"IOS-XE", re.IGNORECASE), "IOS-XE"),
+    (re.compile(r"NX-OS", re.IGNORECASE), "NX-OS"),
+    (re.compile(r"\bIOS\b", re.IGNORECASE), "IOS"),
+    (re.compile(r"JUNOS", re.IGNORECASE), "Junos"),
+    (re.compile(r"\bEOS\b", re.IGNORECASE), "EOS"),
+]
+
+
+def _detect_platform_from_sysdescr(sys_descr: str | None) -> str | None:
+    if not sys_descr:
+        return None
+    for pattern, label in _PLATFORM_PATTERNS:
+        if pattern.search(sys_descr):
+            return label
+    return None
 
 
 def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 5.0) -> dict:
@@ -825,15 +942,33 @@ def discover_inventory(ip_address: str, auth: "SnmpAuthConfig", timeout: float =
     doesn't support (e.g. LLDP disabled, or a non-Cisco device with no
     CDP) just comes back as an empty list rather than failing the whole
     discovery call.
+
+    Also derives device-level `detected_platform` / `detected_model` /
+    `detected_serial_number` -- best-effort single values (not a raw
+    per-component table like `inventory`) meant to backfill
+    Device.platform/model/serial_number on the Overview page when those
+    are still blank. See _detect_chassis_summary and
+    _detect_platform_from_sysdescr for how each is derived.
     """
+    # Discovery is on-demand (not the frequent health poll), so it can
+    # afford a longer per-request timeout than callers may pass in --
+    # floor it rather than trust a short SNMP_TIMEOUT_SECONDS tuned for
+    # the routine poll's tighter budget. See DISCOVERY_TIMEOUT_FLOOR.
+    timeout = max(timeout, DISCOVERY_TIMEOUT_FLOOR)
     hostname = _get_via_pysnmp(ip_address, auth, OIDS["sysName"], timeout)
+    sys_descr = _get_via_pysnmp(ip_address, auth, OIDS["sysDescr"], timeout)
+    inventory = _discover_physical_inventory(ip_address, auth, timeout)
+    detected_model, detected_serial_number = _detect_chassis_summary(inventory)
     return {
         "hostname": hostname,
         "arp_table": _discover_arp_table(ip_address, auth, timeout),
         "routing_table": _discover_routing_table(ip_address, auth, timeout),
         "lldp_neighbors": _discover_lldp_neighbors(ip_address, auth, timeout),
         "cdp_neighbors": _discover_cdp_neighbors(ip_address, auth, timeout),
-        "inventory": _discover_physical_inventory(ip_address, auth, timeout),
+        "inventory": inventory,
+        "detected_platform": _detect_platform_from_sysdescr(sys_descr),
+        "detected_model": detected_model,
+        "detected_serial_number": detected_serial_number,
     }
 
 

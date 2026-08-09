@@ -75,6 +75,40 @@ class FleetHealthSummary(BaseModel):
     devices_with_stale_metrics: int = 0
 
 
+class DeviceAvailability(BaseModel):
+    """One device's time-weighted availability % within the rollup
+    window -- see FleetAvailabilitySummary.worst_devices."""
+
+    device_id: uuid.UUID
+    hostname: str
+    availability_pct: float
+
+
+class FleetAvailabilitySummary(BaseModel):
+    """NOC-style "how many nines" fleet uptime rollup, time-weighted from
+    DeviceStatusHistory over the requested window (see
+    app.services.metrics_service.fleet_availability_summary)."""
+
+    window_hours: int
+    devices_in_rollup: int
+    fleet_availability_pct: float | None = None
+    fleet_availability_label: str  # e.g. "99.95%", or "n/a" if nothing to roll up yet
+    worst_devices: list[DeviceAvailability] = []
+
+
+class UnstableDevice(BaseModel):
+    """One device's combined instability signal -- reachability flaps +
+    interface flaps + config drift events, all within the same window --
+    see app.services.metrics_service.unstable_devices."""
+
+    device_id: uuid.UUID
+    hostname: str
+    reachability_flaps: int
+    interface_flaps: int
+    drift_events: int
+    instability_score: int
+
+
 class AlertRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

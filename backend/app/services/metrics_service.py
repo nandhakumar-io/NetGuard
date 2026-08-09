@@ -12,11 +12,13 @@ notifications for anything critical -- then exposes the read-side queries
 import datetime
 import uuid
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
+from app.models.device_status_history import DeviceStatusHistory
 from app.models.interface_status import InterfaceOperStatus, InterfaceStatus
 from app.services import (
     alert_service,
@@ -447,7 +449,10 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     # ping-based reachability sweep, which is a more direct signal for
     # "is it actually offline."
     if metrics.uptime_seconds is not None:
-        device.status = DeviceStatus.DEGRADED if color in ("yellow", "red") else DeviceStatus.ONLINE
+        new_status = DeviceStatus.DEGRADED if color in ("yellow", "red") else DeviceStatus.ONLINE
+        if device.status != new_status:
+            db.add(DeviceStatusHistory(device_id=device.id, status=new_status, previous_status=device.status))
+        device.status = new_status
 
     _stamp_metric_freshness(device, metrics)
 
@@ -559,6 +564,207 @@ def fleet_health_summary(db: Session, vendor: str | None = None) -> dict:
         "average_health_score": round(sum(scores) / len(scores)) if scores else None,
         "devices_with_stale_metrics": stale_count,
     }
+
+
+def _nines(pct: float) -> str:
+    """Renders an availability percentage as the classic NOC "how many
+    nines" label (99.9%, 99.95%, 99.99%, ...) instead of a flat rounded
+    number, since that's the conventional way an availability SLA number
+    gets talked about on a NOC dashboard. Caps the displayed precision at
+    4 nines (99.99%) -- beyond that the extra digits aren't meaningful
+    given this rollup's polling-interval-scale sampling resolution.
+    """
+    if pct >= 99.99:
+        return "99.99%"
+    if pct >= 99.9:
+        return f"{pct:.2f}%"
+    if pct >= 99:
+        return f"{pct:.1f}%"
+    return f"{pct:.1f}%"
+
+
+def _as_aware_utc(dt: datetime.datetime) -> datetime.datetime:
+    """Normalizes a DateTime(timezone=True) column value to a
+    timezone-aware UTC datetime. Postgres round-trips these as aware, but
+    SQLite (used in tests) drops the tzinfo on read -- comparing/
+    subtracting a naive value against the aware `now`/`since` below raises
+    TypeError, so every row read out of the DB in this rollup is coerced
+    through here first.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def fleet_availability_summary(db: Session, hours: int = 24) -> dict:
+    """Fleet-wide uptime rollup ("five nines" number) computed from
+    DeviceStatusHistory: for each monitored device, what fraction of the
+    window was it in an "available" state (ONLINE or DEGRADED -- reachable
+    counts even if unhealthy; only OFFLINE/UNKNOWN count as down) versus
+    unavailable.
+
+    Time-weighted, not a snapshot: a device that was offline for 10
+    minutes out of a 24h window is ~99.3% available for that window, not
+    just "counted as down" or "counted as up" based on its current status.
+    Devices with no history rows at all in the window are assumed to have
+    held their current status for the whole window (nothing changed, so
+    there was nothing to log) -- see the per-device loop below.
+
+    Devices with `supports_snmp=False` and no reachability history are
+    excluded from the rollup rather than silently reported as 100%
+    available, since a device NetGuard has literally never checked
+    shouldn't drag the number up.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    since = now - datetime.timedelta(hours=hours)
+
+    devices = db.query(Device).all()
+    per_device: list[dict] = []
+    total_available_seconds = 0.0
+    total_seconds = 0.0
+
+    for device in devices:
+        history = (
+            db.query(DeviceStatusHistory)
+            .filter(DeviceStatusHistory.device_id == device.id, DeviceStatusHistory.changed_at >= since)
+            .order_by(DeviceStatusHistory.changed_at.asc())
+            .all()
+        )
+        # The most recent transition *before* the window opened -- tells
+        # us what status the device was actually in at `since`, so the
+        # very first segment of the window isn't wrongly assumed
+        # UNKNOWN/available.
+        prior = (
+            db.query(DeviceStatusHistory)
+            .filter(DeviceStatusHistory.device_id == device.id, DeviceStatusHistory.changed_at < since)
+            .order_by(DeviceStatusHistory.changed_at.desc())
+            .first()
+        )
+        if not history and prior is None:
+            # Never once observed changing status -- nothing to roll up
+            # for this device (e.g. added but never polled/pinged yet).
+            continue
+
+        status_at_window_start = prior.status if prior is not None else (history[0].previous_status or device.status)
+        window_seconds = (now - since).total_seconds()
+        available_seconds = 0.0
+        cursor = since
+        current_status = status_at_window_start
+        for row in history:
+            changed_at = _as_aware_utc(row.changed_at)
+            segment = (changed_at - cursor).total_seconds()
+            if current_status in (DeviceStatus.ONLINE, DeviceStatus.DEGRADED):
+                available_seconds += max(segment, 0.0)
+            cursor = changed_at
+            current_status = row.status
+        tail_segment = (now - cursor).total_seconds()
+        if current_status in (DeviceStatus.ONLINE, DeviceStatus.DEGRADED):
+            available_seconds += max(tail_segment, 0.0)
+
+        pct = (available_seconds / window_seconds * 100) if window_seconds > 0 else 100.0
+        per_device.append({
+            "device_id": device.id,
+            "hostname": device.hostname,
+            "availability_pct": round(pct, 3),
+        })
+        total_available_seconds += available_seconds
+        total_seconds += window_seconds
+
+    fleet_pct = (total_available_seconds / total_seconds * 100) if total_seconds > 0 else None
+    worst = sorted(per_device, key=lambda d: d["availability_pct"])[:10]
+
+    return {
+        "window_hours": hours,
+        "devices_in_rollup": len(per_device),
+        "fleet_availability_pct": round(fleet_pct, 3) if fleet_pct is not None else None,
+        "fleet_availability_label": _nines(fleet_pct) if fleet_pct is not None else "n/a",
+        "worst_devices": worst,
+    }
+
+
+def unstable_devices(db: Session, hours: int = 24, limit: int = 10) -> list[dict]:
+    """"Top flapping devices" NOC widget: combines three independent
+    instability signals into one per-device score so an operator doesn't
+    have to cross-reference three separate pages to notice a device is
+    generally misbehaving:
+
+      - reachability_flaps: DeviceStatusHistory transitions in the window
+        (device dropping on/off the network -- flaky cabling, power,
+        upstream link).
+      - interface_flaps: InterfaceStatus transitions in the window, summed
+        across all of the device's interfaces (a specific port bouncing --
+        bad transceiver, duplex mismatch, STP topology change).
+      - drift_events: ConfigDrift rows detected in the window (config
+        changing out from under the baseline -- often *correlated* with
+        the other two, e.g. someone flapping an interface administratively
+        while troubleshooting, or a device reloading to a different
+        startup-config).
+
+    `instability_score` is a simple weighted sum (reachability flaps
+    weighted highest since a whole device dropping off is the worst
+    signal, drift weighted lowest since a single config change is a much
+    weaker instability signal than either kind of flapping) -- good enough
+    to rank/triage with, not a scientific SLA metric.
+    """
+    from app.models.config_drift import ConfigDrift
+
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+
+    reachability_counts: dict[uuid.UUID, int] = {}
+    for device_id, count in (
+        db.query(DeviceStatusHistory.device_id, func.count(DeviceStatusHistory.id))
+        .filter(DeviceStatusHistory.changed_at >= since)
+        .group_by(DeviceStatusHistory.device_id)
+        .all()
+    ):
+        reachability_counts[device_id] = count
+
+    interface_counts: dict[uuid.UUID, int] = {}
+    for device_id, count in (
+        db.query(InterfaceStatus.device_id, func.count(InterfaceStatus.id))
+        .filter(InterfaceStatus.changed_at >= since)
+        .group_by(InterfaceStatus.device_id)
+        .all()
+    ):
+        interface_counts[device_id] = count
+
+    drift_counts: dict[uuid.UUID, int] = {}
+    for device_id, count in (
+        db.query(ConfigDrift.device_id, func.count(ConfigDrift.id))
+        .filter(ConfigDrift.detected_at >= since)
+        .group_by(ConfigDrift.device_id)
+        .all()
+    ):
+        drift_counts[device_id] = count
+
+    device_ids = set(reachability_counts) | set(interface_counts) | set(drift_counts)
+    if not device_ids:
+        return []
+
+    devices_by_id = {d.id: d for d in db.query(Device).filter(Device.id.in_(device_ids)).all()}
+
+    rows = []
+    for device_id in device_ids:
+        device = devices_by_id.get(device_id)
+        if device is None:
+            continue
+        reachability_flaps = reachability_counts.get(device_id, 0)
+        interface_flaps = interface_counts.get(device_id, 0)
+        drift_events = drift_counts.get(device_id, 0)
+        score = (reachability_flaps * 5) + (interface_flaps * 2) + (drift_events * 1)
+        if score == 0:
+            continue
+        rows.append({
+            "device_id": device_id,
+            "hostname": device.hostname,
+            "reachability_flaps": reachability_flaps,
+            "interface_flaps": interface_flaps,
+            "drift_events": drift_events,
+            "instability_score": score,
+        })
+
+    rows.sort(key=lambda r: r["instability_score"], reverse=True)
+    return rows[:limit]
 
 
 def metric_history(

@@ -923,6 +923,21 @@ def discover_device(
     from app.core.config import settings
 
     result = snmp_service.discover_inventory(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
+
+    # Backfill Device.platform/model/serial_number from discovery whenever
+    # they're still blank -- these were being computed by snmp_service all
+    # along but the values had nowhere to land (dropped by the response
+    # model, never written to the Device row). Only fills gaps, never
+    # overwrites an operator-entered value, so a manually-corrected
+    # platform/model/serial isn't clobbered by a later re-discovery.
+    if not device.platform and result.get("detected_platform"):
+        device.platform = result["detected_platform"]
+    if not device.model and result.get("detected_model"):
+        device.model = result["detected_model"]
+    if not device.serial_number and result.get("detected_serial_number"):
+        device.serial_number = result["detected_serial_number"]
+    db.commit()
+
     return DeviceDiscoveryResult(
         device_id=device.id,
         hostname=device.hostname,
@@ -932,6 +947,9 @@ def discover_device(
         lldp_neighbors=result["lldp_neighbors"],
         cdp_neighbors=result["cdp_neighbors"],
         inventory=result["inventory"],
+        detected_platform=result.get("detected_platform"),
+        detected_model=result.get("detected_model"),
+        detected_serial_number=result.get("detected_serial_number"),
         retrieved_at=datetime.datetime.utcnow(),
     )
 

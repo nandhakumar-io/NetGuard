@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric, HealthColor
+from app.models.device_status_history import DeviceStatusHistory
 from app.services import alert_service, notification_service
 
 # Ports tried, in order, for the TCP-connect reachability check -- this is
@@ -128,6 +129,7 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
 
     if device.status != new_status:
         was_offline = device.status == DeviceStatus.OFFLINE
+        db.add(DeviceStatusHistory(device_id=device.id, status=new_status, previous_status=device.status))
         device.status = new_status
         db.commit()
 
