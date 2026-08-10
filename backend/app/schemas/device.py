@@ -169,6 +169,13 @@ class DeviceRead(DeviceBase):
     # plain on DeviceBase (it's just a pointer, not a secret) -- this flag
     # is specifically about whether a real password is on file.
     ssh_credentials_configured: bool = False
+    # Whether an SSH private key is on file (POST /devices/{id}/ssh-credentials
+    # private_key field), independent of ssh_credentials_configured (password).
+    ssh_key_configured: bool = False
+    # "password" (default) or "key" -- which credential the terminal
+    # currently presents for this device. Plain field (not derived), safe
+    # to expose since it's not a secret.
+    ssh_auth_method: str = "password"
     # Set by every SNMP poll attempt (success or failure) -- see
     # metrics_service.poll_device. None until the first poll ever runs.
     last_snmp_poll_at: datetime.datetime | None = None
@@ -249,6 +256,8 @@ class DeviceRead(DeviceBase):
             device.snmp_community_encrypted or device.snmp_auth_key_encrypted or device.snmp_priv_key_encrypted
         )
         obj.ssh_credentials_configured = bool(device.ssh_password_encrypted)
+        obj.ssh_key_configured = bool(device.ssh_private_key_encrypted)
+        obj.ssh_auth_method = getattr(device, "ssh_auth_method", None) or "password"
 
         from app.services import eol_service
 
@@ -298,6 +307,14 @@ class SshCredentialsUpdate(BaseModel):
 
     username: str | None = None
     password: str | None = None
+    # Key-based auth alternative to `password` -- PEM/OpenSSH-format
+    # private key text, encrypted at rest (see credential_service.
+    # set_ssh_private_key). Send private_key="" to explicitly clear it.
+    private_key: str | None = None
+    private_key_passphrase: str | None = None
+    # "password" or "key" -- which credential the terminal should present.
+    # Omit to leave the device's current setting unchanged.
+    auth_method: str | None = None
 
 
 class SshTestResult(BaseModel):

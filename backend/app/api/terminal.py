@@ -15,12 +15,13 @@ from fastapi import (
 from jose import JWTError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import require_roles
 from app.core.security import decode_access_token
 from app.models.device import Device
 from app.models.user import User, UserRole
-from app.services import audit_service, credential_service
+from app.services import audit_service, command_guard, credential_service
 
 router = APIRouter(prefix="/devices", tags=["terminal"])
 
@@ -53,11 +54,45 @@ async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket
         print(f"SSH stream read error (unexpected): {e}")
 
 
-async def read_from_ws(process: asyncssh.SSHClientProcess, websocket: WebSocket) -> None:
+async def read_from_ws(
+    process: asyncssh.SSHClientProcess,
+    websocket: WebSocket,
+    guard_state: command_guard.LineGuardState | None = None,
+    db: Session | None = None,
+    user: User | None = None,
+    device: Device | None = None,
+) -> None:
+    """Pumps browser -> device. When guard_state is provided, typed lines
+    are held and checked against the destructive-command deny-list (see
+    command_guard) before being forwarded -- see that module's docstring
+    for why this has to buffer per-line rather than forward bytes live.
+    guard_state is None for callers that don't want gating (kept optional
+    so this function still works standalone / in tests).
+    """
     try:
         while True:
             data = await websocket.receive_text()
-            process.stdin.write(data)
+
+            if guard_state is None:
+                process.stdin.write(data)
+                continue
+
+            local_echo, to_forward, blocked_rule = command_guard.feed_keystroke(guard_state, data)
+            if local_echo:
+                await websocket.send_text(local_echo)
+            if to_forward is not None:
+                process.stdin.write(to_forward)
+            if blocked_rule:
+                await websocket.send_text(
+                    f"\x1b[41m\x1b[97m *** BLOCKED: '{blocked_rule}' is a destructive command and was "
+                    f"NOT sent to the device. Type {command_guard.OVERRIDE_TOKEN} and press Enter to "
+                    f"send it anyway, or anything else to cancel. *** \x1b[0m\r\n"
+                )
+                if db is not None and user is not None and device is not None:
+                    audit_service.record_event(
+                        db, actor=user.email, action="Terminal Command Blocked", result=blocked_rule,
+                        device_hostname=device.hostname,
+                    )
     except WebSocketDisconnect:
         pass
     except RuntimeError:
@@ -68,6 +103,12 @@ async def read_from_ws(process: asyncssh.SSHClientProcess, websocket: WebSocket)
     except Exception as e:  # noqa: BLE001
         print(f"WebSocket read error: {e}")
     finally:
+        if guard_state is not None and guard_state.forwarded_override_count and db is not None and user is not None and device is not None:
+            audit_service.record_event(
+                db, actor=user.email, action="Terminal Command Override Used",
+                result=f"{guard_state.forwarded_override_count} overridden",
+                device_hostname=device.hostname,
+            )
         with contextlib.suppress(Exception):
             process.stdin.close()
 
@@ -83,11 +124,40 @@ async def read_from_telnet(reader: telnetlib3.TelnetReader, websocket: WebSocket
         print(f"Telnet stream read error: {e}")
 
 
-async def read_from_ws_telnet(writer: telnetlib3.TelnetWriter, websocket: WebSocket) -> None:
+async def read_from_ws_telnet(
+    writer: telnetlib3.TelnetWriter,
+    websocket: WebSocket,
+    guard_state: command_guard.LineGuardState | None = None,
+    db: Session | None = None,
+    user: User | None = None,
+    device: Device | None = None,
+) -> None:
+    """Same deny-list gating as read_from_ws, for the Telnet fallback path
+    (lab devices) -- see command_guard module docstring."""
     try:
         while True:
             data = await websocket.receive_text()
-            writer.write(data)
+
+            if guard_state is None:
+                writer.write(data)
+                continue
+
+            local_echo, to_forward, blocked_rule = command_guard.feed_keystroke(guard_state, data)
+            if local_echo:
+                await websocket.send_text(local_echo)
+            if to_forward is not None:
+                writer.write(to_forward)
+            if blocked_rule:
+                await websocket.send_text(
+                    f"\x1b[41m\x1b[97m *** BLOCKED: '{blocked_rule}' is a destructive command and was "
+                    f"NOT sent to the device. Type {command_guard.OVERRIDE_TOKEN} and press Enter to "
+                    f"send it anyway, or anything else to cancel. *** \x1b[0m\r\n"
+                )
+                if db is not None and user is not None and device is not None:
+                    audit_service.record_event(
+                        db, actor=user.email, action="Terminal Command Blocked", result=blocked_rule,
+                        device_hostname=device.hostname,
+                    )
     except WebSocketDisconnect:
         pass
     except RuntimeError:
@@ -95,6 +165,12 @@ async def read_from_ws_telnet(writer: telnetlib3.TelnetWriter, websocket: WebSoc
     except Exception as e:  # noqa: BLE001
         print(f"WebSocket read error: {e}")
     finally:
+        if guard_state is not None and guard_state.forwarded_override_count and db is not None and user is not None and device is not None:
+            audit_service.record_event(
+                db, actor=user.email, action="Terminal Command Override Used",
+                result=f"{guard_state.forwarded_override_count} overridden",
+                device_hostname=device.hostname,
+            )
         with contextlib.suppress(Exception):
             writer.close()
 
@@ -195,11 +271,122 @@ class _PinningSSHClient(asyncssh.SSHClient):
         return True
 
 
-async def _try_ssh(websocket: WebSocket, device: Device, username: str, password: str, db: Session) -> bool:
+DEMO_CANNED_RESPONSES: dict[str, str] = {
+    "show version": (
+        "Cisco IOS Software, IOS-XE Software\r\n"
+        "ROM: Bootstrap program is IOS-XE boot loader\r\n"
+        "Uptime is 42 weeks, 3 days, 6 hours, 12 minutes\r\n"
+        "System image file is \"flash:packages.conf\"\r\n\r\n"
+        "cisco WS-C3850-24T (MIPS) processor with 4194304K bytes of memory.\r\n"
+    ),
+    "show ip interface brief": (
+        "Interface              IP-Address      OK? Method Status                Protocol\r\n"
+        "GigabitEthernet0/0     10.10.0.1       YES NVRAM  up                    up\r\n"
+        "GigabitEthernet0/1     10.10.1.1       YES NVRAM  up                    up\r\n"
+        "GigabitEthernet0/2     unassigned      YES NVRAM  administratively down down\r\n"
+    ),
+    "show running-config": (
+        "! Demo device -- running-config is simulated, not a real device\r\n"
+        "hostname demo-core-sw01\r\n"
+        "!\r\n"
+        "interface GigabitEthernet0/1\r\n"
+        " description UPLINK-TO-CORE\r\n"
+        " ip address 10.10.1.1 255.255.255.0\r\n"
+        "!\r\n"
+        "end\r\n"
+    ),
+    "show cdp neighbors": (
+        "Device ID        Local Intrfce     Capability  Platform  Port ID\r\n"
+        "demo-dist-sw01    Gig 0/1           R S I       WS-C3850  Gig 1/1\r\n"
+        "demo-edge-fw01    Gig 0/2           R S I       ASA5525   Gig 0/0\r\n"
+    ),
+}
+DEMO_HELP_TEXT = (
+    "This is a simulated demo session -- not a real device. Try: "
+    + ", ".join(f"`{c}`" for c in DEMO_CANNED_RESPONSES)
+    + "."
+)
+
+
+async def _run_demo_terminal_session(websocket: WebSocket, device: Device, user: User, db: Session) -> None:
+    """Demo Mode's stand-in for a real device session (see
+    app.core.demo_mode). Never opens a real network connection --
+    everything here is a fixed, canned transcript keyed off a handful of
+    common read-only commands, so the public demo can show off the
+    Terminal feature without asyncssh ever touching a real device (which
+    the demo dataset's fake IPs couldn't reach anyway) and without
+    needing real SSH credentials to exist for the demo device at all.
+    Read-only by construction: there's no code path here that forwards
+    anything to a real device, so there's nothing for command_guard to
+    even need to block.
+    """
+    audit_service.record_event(
+        db, actor=user.email, action="Terminal Session Opened (Demo)", result="Started",
+        device_hostname=device.hostname,
+    )
+
+    prompt = f"{device.hostname}#"
+    await websocket.send_text(
+        f"\r\n\x1b[36mConnected to {device.hostname} (demo session -- not a real device).\x1b[0m\r\n"
+    )
+    await websocket.send_text(f"\r\n{DEMO_HELP_TEXT}\r\n\r\n{prompt} ")
+
+    line = ""
+    try:
+        while True:
+            data = await websocket.receive_text()
+            for ch in data:
+                if ch in ("\r", "\n"):
+                    await websocket.send_text("\r\n")
+                    command = line.strip().lower()
+                    line = ""
+                    if not command:
+                        pass
+                    elif command in ("exit", "quit", "logout"):
+                        await websocket.send_text("\r\n\x1b[33mDemo session ended.\x1b[0m\r\n")
+                        await websocket.close(code=1000, reason="demo_session_exit")
+                        return
+                    elif command in DEMO_CANNED_RESPONSES:
+                        await websocket.send_text(DEMO_CANNED_RESPONSES[command].replace("\n", "\r\n"))
+                    else:
+                        await websocket.send_text(
+                            f"% Not simulated in this demo.\r\n{DEMO_HELP_TEXT}\r\n"
+                        )
+                    await websocket.send_text(f"\r\n{prompt} ")
+                elif ch in ("\x7f", "\b"):  # backspace/delete
+                    if line:
+                        line = line[:-1]
+                        await websocket.send_text("\b \b")
+                else:
+                    line += ch
+                    await websocket.send_text(ch)
+    except WebSocketDisconnect:
+        pass
+    except RuntimeError:
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1000, reason="demo_session_ended")
+
+
+async def _try_ssh(
+    websocket: WebSocket,
+    device: Device,
+    username: str,
+    db: Session,
+    *,
+    password: str | None = None,
+    client_keys: list | None = None,
+    user: User | None = None,
+) -> bool:
     """Returns True if an SSH session ran (successfully or not, but far
     enough that telnet should NOT also be attempted -- e.g. the user
     disconnected mid-session). Returns False only for a connection-phase
     failure, which is the signal to fall back to Telnet.
+
+    Exactly one of `password` / `client_keys` is expected, matching the
+    device's ssh_auth_method -- see device_terminal, which resolves the
+    right credential before calling this.
     """
     try:
         async with asyncssh.connect(
@@ -208,15 +395,18 @@ async def _try_ssh(websocket: WebSocket, device: Device, username: str, password
             password=password,
             known_hosts=None,
             client_factory=lambda: _PinningSSHClient(device, db),
-            client_keys=None,
+            client_keys=client_keys,
             connect_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
         ) as conn:
             process = await conn.create_process(term_type="xterm-256color", term_size=(120, 40))
             await websocket.send_text(f"\r\n\x1b[32mConnected via SSH to {device.ip_address}.\x1b[0m\r\n")
+            guard_state = command_guard.LineGuardState(
+                device_id=str(device.id), username=username,
+            )
             await _run_pumped_session(
                 websocket,
                 read_from_ssh(process, websocket),
-                read_from_ws(process, websocket),
+                read_from_ws(process, websocket, guard_state, db, user, device),
                 protocol_label="SSH",
             )
         return True
@@ -247,7 +437,10 @@ async def _try_ssh(websocket: WebSocket, device: Device, username: str, password
         return False
 
 
-async def _try_telnet(websocket: WebSocket, device: Device, username: str, password: str) -> None:
+async def _try_telnet(
+    websocket: WebSocket, device: Device, username: str, password: str,
+    db: Session | None = None, user: User | None = None,
+) -> None:
     # Lab devices (see Device.console_host/console_port) expose their
     # console only via the GNS3 controller's per-node telnet port -- that's
     # the only thing reachable before the node has SSH configured at all.
@@ -275,10 +468,11 @@ async def _try_telnet(websocket: WebSocket, device: Device, username: str, passw
         f"\r\n\x1b[36mConnected via Telnet to {host}:{port}. "
         f"Log in manually below (username: {username}).\x1b[0m\r\n"
     )
+    guard_state = command_guard.LineGuardState(device_id=str(device.id), username=username)
     await _run_pumped_session(
         websocket,
         read_from_telnet(reader, websocket),
-        read_from_ws_telnet(writer, websocket),
+        read_from_ws_telnet(writer, websocket, guard_state, db, user, device),
         protocol_label="Telnet",
     )
 
@@ -345,6 +539,12 @@ async def device_terminal(
         await websocket.close()
         return
 
+    if settings.DEMO_MODE:
+        # Skip real credential resolution/SSH/Telnet entirely -- see
+        # _run_demo_terminal_session's docstring for why.
+        await _run_demo_terminal_session(websocket, device, user, db)
+        return
+
     # No premature check on device.ssh_credential_ref here -- that's only
     # the legacy env-var-ref field. get_ssh_password() below already checks
     # every real credential source in priority order (ssh_password_encrypted
@@ -356,12 +556,32 @@ async def device_terminal(
     # legacy ref field, even though get_ssh_password() would have found it
     # fine -- the Terminal button failed with "No SSH credentials mapped"
     # for exactly the devices that actually had credentials configured.
-    try:
-        password = credential_service.get_ssh_password(device)
-    except credential_service.CredentialNotFoundError as exc:
-        await websocket.send_text(f"\r\n\x1b[31mError: {exc}\x1b[0m\r\n")
-        await websocket.close()
-        return
+    use_key_auth = (device.ssh_auth_method or "password") == "key"
+    password: str | None = None
+    ssh_client_keys: list | None = None
+
+    if use_key_auth:
+        try:
+            key_pem, passphrase = credential_service.get_ssh_private_key(device)
+            ssh_client_keys = [asyncssh.import_private_key(key_pem, passphrase=passphrase)]
+        except credential_service.CredentialNotFoundError as exc:
+            await websocket.send_text(f"\r\n\x1b[31mError: {exc}\x1b[0m\r\n")
+            await websocket.close()
+            return
+        except asyncssh.KeyImportError as exc:
+            await websocket.send_text(
+                f"\r\n\x1b[31mError: stored SSH private key for '{device.hostname}' could not be parsed "
+                f"({exc}). Re-check the key format/passphrase via POST /devices/{device.id}/ssh-credentials.\x1b[0m\r\n"
+            )
+            await websocket.close()
+            return
+    else:
+        try:
+            password = credential_service.get_ssh_password(device)
+        except credential_service.CredentialNotFoundError as exc:
+            await websocket.send_text(f"\r\n\x1b[31mError: {exc}\x1b[0m\r\n")
+            await websocket.close()
+            return
 
     username = device.ssh_username or "admin"
     audit_service.record_event(
@@ -372,7 +592,10 @@ async def device_terminal(
     await websocket.send_text(f"\r\n\x1b[36mInitiating secure shell connection to {device.ip_address}...\x1b[0m\r\n")
 
     try:
-        ssh_ran = await _try_ssh(websocket, device, username, password, db)
+        ssh_ran = await _try_ssh(
+            websocket, device, username, db,
+            password=password, client_keys=ssh_client_keys, user=user,
+        )
         if not ssh_ran:
             # Telnet is unencrypted -- credentials and full session
             # content go over the wire in cleartext. That's an accepted
@@ -386,7 +609,12 @@ async def device_terminal(
             # credentials for real infrastructure. Refuse instead and
             # surface the failure so an admin fixes SSH access.
             if device.lab_provider:
-                await _try_telnet(websocket, device, username, password)
+                # Telnet has no concept of key-based auth; if the device is
+                # configured for ssh_auth_method=key we still fall back to
+                # manual login over Telnet (password shown as empty -- the
+                # operator logs in by hand, same as any lab device without
+                # credentials on file).
+                await _try_telnet(websocket, device, username, password or "", db, user)
             else:
                 await websocket.send_text(
                     "\r\n\x1b[31mSSH is unavailable for this device and it is not a lab "

@@ -1054,10 +1054,21 @@ def set_ssh_credentials(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
+    touched: list[str] = []
     if payload.username is not None:
         device.ssh_username = payload.username
+        touched.append("username")
     if payload.password is not None:
         credential_service.set_ssh_password(device, payload.password)
+        touched.append("password")
+    if payload.private_key is not None:
+        credential_service.set_ssh_private_key(device, payload.private_key, payload.private_key_passphrase)
+        touched.append("private_key")
+    if payload.auth_method is not None:
+        if payload.auth_method not in ("password", "key"):
+            raise HTTPException(status_code=400, detail="auth_method must be 'password' or 'key'")
+        device.ssh_auth_method = payload.auth_method
+        touched.append("auth_method")
 
     db.commit()
     db.refresh(device)
@@ -1065,7 +1076,7 @@ def set_ssh_credentials(
     audit_service.record_event(
         db, actor=current_user.email, action="SSH Credentials Updated", result="Success",
         device_hostname=device.hostname,
-        detail="username" if payload.username is not None else "password",
+        detail=", ".join(touched) if touched else "no-op",
     )
 
     return DeviceRead.from_device(device)

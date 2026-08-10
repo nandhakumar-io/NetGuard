@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
-import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
+import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
 
 const SEVERITY_CONFIG = {
   critical: { color: "text-riskcrit", bg: "bg-riskcrit", bgLight: "bg-red-50", border: "border-riskcrit/20", icon: "🚨", label: "Critical" },
@@ -76,6 +76,13 @@ export default function AlertCenter() {
   const [webhookForm, setWebhookForm] = useState({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "" });
   const [testingWebhook, setTestingWebhook] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<WebhookTestResult | null>(null);
+  // Delivery log: expanded per-webhook (deliveriesOpenFor holds the
+  // webhook id currently expanded, one at a time), fetched on demand
+  // rather than eagerly for every webhook on tab load.
+  const [deliveriesOpenFor, setDeliveriesOpenFor] = useState<string | null>(null);
+  const [deliveries, setDeliveries] = useState<Record<string, WebhookDeliveryAttempt[]>>({});
+  const [deliveriesLoading, setDeliveriesLoading] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   // Escalation Policies state
   const [policies, setPolicies] = useState<EscalationPolicy[]>([]);
@@ -442,6 +449,39 @@ export default function AlertCenter() {
       setTestResult({ success: false, message: "Request failed", status_code: null });
     } finally {
       setTestingWebhook(null);
+    }
+  };
+
+  const toggleDeliveries = async (id: string) => {
+    if (deliveriesOpenFor === id) {
+      setDeliveriesOpenFor(null);
+      return;
+    }
+    setDeliveriesOpenFor(id);
+    if (deliveries[id]) return; // already loaded once this session
+    setDeliveriesLoading(id);
+    try {
+      const res = await api.get<WebhookDeliveryAttempt[]>(`/webhooks/${id}/deliveries`);
+      setDeliveries((prev) => ({ ...prev, [id]: res.data }));
+    } catch {
+      setDeliveries((prev) => ({ ...prev, [id]: [] }));
+    } finally {
+      setDeliveriesLoading(null);
+    }
+  };
+
+  const handleRetryDelivery = async (webhookId: string, attemptId: string) => {
+    setRetryingId(attemptId);
+    try {
+      const res = await api.post<WebhookDeliveryAttempt>(`/webhooks/deliveries/${attemptId}/retry`);
+      setDeliveries((prev) => ({
+        ...prev,
+        [webhookId]: [res.data, ...(prev[webhookId] || [])],
+      }));
+    } catch {
+      // Best-effort -- the delivery list simply won't show a new row.
+    } finally {
+      setRetryingId(null);
     }
   };
 
@@ -1235,6 +1275,16 @@ export default function AlertCenter() {
                         {testingWebhook === wh.id ? "Testing…" : "Test"}
                       </button>
                       <button
+                        onClick={() => toggleDeliveries(wh.id)}
+                        className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                          deliveriesOpenFor === wh.id
+                            ? "text-white bg-navy"
+                            : "text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600"
+                        }`}
+                      >
+                        {deliveriesOpenFor === wh.id ? "Hide Deliveries" : "Deliveries"}
+                      </button>
+                      <button
                         onClick={() => {
                           setEditingWebhook(wh);
                           setWebhookForm({
@@ -1251,6 +1301,50 @@ export default function AlertCenter() {
                       <button onClick={() => handleDeleteWebhook(wh.id)} className="text-xs text-riskcrit hover:text-red-800 font-medium">Delete</button>
                     </div>
                   </div>
+
+                  {/* Delivery Log */}
+                  {deliveriesOpenFor === wh.id && (
+                    <div className="mt-4 border-t border-slate-100 dark:border-slate-700 pt-3">
+                      {deliveriesLoading === wh.id ? (
+                        <p className="text-xs text-slate-400">Loading delivery history…</p>
+                      ) : (deliveries[wh.id] || []).length === 0 ? (
+                        <p className="text-xs text-slate-400">No delivery attempts logged yet.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {(deliveries[wh.id] || []).map((d) => (
+                            <div
+                              key={d.id}
+                              className="flex items-start justify-between gap-3 text-xs bg-slate-50 dark:bg-slate-900 rounded-lg px-3 py-2"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className={`font-bold px-1.5 py-0.5 rounded ${d.success ? "text-risklow bg-green-50" : "text-riskcrit bg-red-50"}`}>
+                                    {d.success ? "✅ Delivered" : "❌ Failed"}
+                                  </span>
+                                  <span className="font-medium text-navy dark:text-white">{d.event}</span>
+                                  {d.status_code != null && <span className="text-slate-400">HTTP {d.status_code}</span>}
+                                  {d.is_retry && <span className="text-slate-400 italic">retry{d.retried_by ? ` by ${d.retried_by}` : ""}</span>}
+                                </div>
+                                <p className="text-slate-400 dark:text-slate-500 mt-0.5">
+                                  {new Date(d.attempted_at).toLocaleString()}
+                                </p>
+                                {d.error && <p className="text-riskcrit mt-0.5 truncate">{d.error}</p>}
+                              </div>
+                              {!d.success && (
+                                <button
+                                  onClick={() => handleRetryDelivery(wh.id, d.id)}
+                                  disabled={retryingId === d.id}
+                                  className="shrink-0 text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-2.5 py-1 rounded-lg disabled:opacity-40"
+                                >
+                                  {retryingId === d.id ? "Retrying…" : "Retry"}
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

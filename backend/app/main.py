@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app import models  # noqa: F401  ensures models are registered on Base.metadata
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.demo_mode import DemoModeMiddleware
 
 logger = logging.getLogger("netguard.snmp_inprocess")
 
@@ -207,6 +208,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Added after CORSMiddleware above so it sits *inside* it in the request
+# pipeline (Starlette wraps middleware in the reverse order they're
+# added) -- same reasoning as the unhandled_exception_handler below: a
+# 403 raised here still needs to pass back out through CORSMiddleware to
+# get CORS headers, or the browser reports it as an opaque network error
+# instead of a readable 403 with a "detail" message.
+app.add_middleware(DemoModeMiddleware)
 
 
 @app.exception_handler(Exception)

@@ -31,6 +31,7 @@ from app.api import (
     path_trace,
     rbac,
     reports,
+    secrets_rotation,
     syslog,
     terminal,
     topology,
@@ -63,6 +64,7 @@ api_router.include_router(gns3.router)
 api_router.include_router(notification.router)
 api_router.include_router(reports.router)
 api_router.include_router(rbac.router)
+api_router.include_router(secrets_rotation.router)
 api_router.include_router(topology.router)
 api_router.include_router(terminal.router)
 api_router.include_router(compliance_baselines.router)

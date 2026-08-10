@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from jose import JWTError
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,7 @@ from app.schemas.auth import (
     MfaSetupResponse,
     MfaVerifyRequest,
     RefreshRequest,
+    SessionRead,
     Token,
     TokenPair,
     UserCreate,
@@ -215,6 +216,79 @@ def update_user_role(
     user.role = payload.role
     db.commit()
     return {"id": str(user.id), "email": user.email, "role": user.role.value}
+
+
+@router.get("/sessions", response_model=list[SessionRead])
+def list_sessions(
+    current_refresh_token: str | None = Query(
+        None,
+        description="Raw refresh token of the session making this request, if known. "
+        "Used only to flag which returned session is 'current' (by matching its hash) -- "
+        "never persisted or logged.",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lists this user's active (non-revoked, non-expired) refresh-token
+    sessions -- i.e. everywhere they're currently logged in. Backs the
+    Security page's session-management UI. A device/browser only shows up
+    here between login and its refresh token being rotated/revoked/expired;
+    the access token used to reach this endpoint has no session identity of
+    its own (see RefreshToken model), so there's nothing to list once every
+    refresh token for the account has lapsed.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    current_hash = hash_refresh_token(current_refresh_token) if current_refresh_token else None
+
+    records = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.user_id == current_user.id, RefreshToken.revoked.is_(False))
+        .order_by(RefreshToken.created_at.desc())
+        .all()
+    )
+
+    sessions = []
+    for r in records:
+        expires_at = r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now:
+            continue
+        sessions.append(
+            SessionRead(
+                id=str(r.id),
+                created_at=r.created_at,
+                expires_at=expires_at,
+                current=bool(current_hash and r.token_hash == current_hash),
+            )
+        )
+    return sessions
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+def revoke_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Revokes one of the current user's own sessions (refresh tokens),
+    e.g. to sign out a lost/stolen device remotely. Scoped to
+    `user_id == current_user.id` so a user can never revoke someone else's
+    session by guessing an id. Immediately effective: the associated
+    refresh token can no longer be exchanged via POST /auth/refresh; any
+    still-live access token for that session keeps working until it
+    naturally expires (ACCESS_TOKEN_EXPIRE_MINUTES), same as /auth/logout.
+    """
+    record = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.id == session_id, RefreshToken.user_id == current_user.id)
+        .first()
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    record.revoked = True
+    db.commit()
 
 
 @router.get("/me")

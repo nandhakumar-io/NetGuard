@@ -346,6 +346,33 @@ class Settings(BaseSettings):
     SNAPSHOT_RETENTION_MIN_PER_DEVICE: int = 10
     SNAPSHOT_RETENTION_SWEEP_HOUR_UTC: int = 3
 
+    # Terminal command allow/deny-listing (app.api.terminal): lines the
+    # user sends to the web terminal are buffered until Enter and checked
+    # against TERMINAL_BLOCKED_COMMAND_PATTERNS (case-insensitive regex,
+    # matched against the trimmed line) before being forwarded to the
+    # device. A match is never sent -- these are destructive/disruptive
+    # commands (reload, factory erase, etc.) that should go through the
+    # existing Change Request / approval-gated pipeline instead of being
+    # run ad hoc from an interactive shell. Set
+    # TERMINAL_COMMAND_FILTER_ENABLED=False to disable filtering entirely
+    # (e.g. for a lab-only deployment where this would just be friction).
+    TERMINAL_COMMAND_FILTER_ENABLED: bool = True
+    TERMINAL_BLOCKED_COMMAND_PATTERNS: list[str] = [
+        r"^reload\b",
+        r"^reload\s+in\b",
+        r"^write\s+erase\b",
+        r"^erase\s+",
+        r"^format\s+",
+        r"^delete\s+/force",
+        r"^delete\s+/recursive",
+        r"^\s*no\s+boot\s+system\b",
+        r"^request\s+system\s+reboot\b",
+        r"^request\s+system\s+halt\b",
+        r"^request\s+vmhost\s+reboot\b",
+        r"^system\s+reboot\b",
+        r"^system\s+halt\b",
+    ]
+
     GNS3_ENABLED: bool = False
     GNS3_BASE_URL: str = "http://localhost:3080"
     GNS3_USERNAME: str | None = None

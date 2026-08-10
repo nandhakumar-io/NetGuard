@@ -46,3 +46,23 @@ class WebhookTestResult(BaseModel):
     success: bool
     message: str
     status_code: int | None = None
+
+
+class WebhookDeliveryRead(BaseModel):
+    id: uuid.UUID
+    webhook_endpoint_id: uuid.UUID
+    webhook_endpoint_name: str | None = None
+    event: str
+    event_type: str | None = None
+    severity: str | None = None
+    success: bool
+    status_code: int | None = None
+    response_body: str | None = None
+    error: str | None = None
+    is_retry: bool
+    retry_of_id: uuid.UUID | None = None
+    retried_by: str | None = None
+    attempted_at: datetime
+
+    class Config:
+        from_attributes = True

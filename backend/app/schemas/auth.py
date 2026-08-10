@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, EmailStr
 
 from app.models.user import UserRole
@@ -70,3 +72,15 @@ class MfaVerifyRequest(BaseModel):
 
 class MfaDisableRequest(BaseModel):
     password: str
+
+
+class SessionRead(BaseModel):
+    """A single active (non-revoked, non-expired) refresh token issued to
+    the current user -- i.e. a logged-in "session" on some device/browser.
+    The raw token itself is never exposed, only enough metadata to let a
+    user recognize and revoke it (see GET/DELETE /auth/sessions)."""
+
+    id: str
+    created_at: datetime
+    expires_at: datetime
+    current: bool = False

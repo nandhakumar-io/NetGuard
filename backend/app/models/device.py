@@ -160,6 +160,23 @@ class Device(Base):
     # priority over ssh_credential_ref (env-var lookup) when present; see
     # credential_service.get_ssh_password.
     ssh_password_encrypted = Column(Text, nullable=True)
+    # Fernet-encrypted (app.core.crypto) SSH private key in PEM/OpenSSH
+    # format, set via POST /devices/{id}/ssh-credentials (private_key
+    # field) -- an alternative to ssh_password_encrypted for devices/orgs
+    # that require key-based auth instead of a shared password. Never
+    # returned by any GET endpoint; see credential_service.get_ssh_private_key.
+    ssh_private_key_encrypted = Column(Text, nullable=True)
+    # Optional passphrase protecting ssh_private_key_encrypted above, also
+    # Fernet-encrypted at rest. NULL means the key is unencrypted (or has
+    # no passphrase).
+    ssh_private_key_passphrase_encrypted = Column(Text, nullable=True)
+    # Which credential the terminal (app.api.terminal) and other SSH
+    # consumers should present: "password" (default, unchanged behavior)
+    # or "key" (use ssh_private_key_encrypted instead of
+    # ssh_password_encrypted). Kept as a plain string rather than an Enum
+    # column so a bad/legacy value degrades to "password" instead of a
+    # DB-level constraint violation.
+    ssh_auth_method = Column(String, nullable=False, default="password", server_default="password")
     # Trust-on-first-use SSH host key pin (app.api.terminal). Set to the
     # SHA256 fingerprint of the host key presented on a device's first
     # terminal connection; every subsequent connection must match it or

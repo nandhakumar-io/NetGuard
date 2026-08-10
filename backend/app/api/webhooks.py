@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
-from app.models.webhook import WebhookEndpoint
+from app.models.webhook import WebhookDeliveryAttempt, WebhookEndpoint
 from app.schemas.webhook import (
     WebhookCreate,
+    WebhookDeliveryRead,
     WebhookRead,
     WebhookTestResult,
     WebhookUpdate,
 )
+from app.services.notification_service import deliver_webhook
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -156,3 +158,124 @@ def test_webhook(
         )
     except Exception as exc:
         return WebhookTestResult(success=False, message=str(exc)[:300])
+
+
+def _delivery_to_read(attempt: WebhookDeliveryAttempt, webhook_name: str | None = None) -> WebhookDeliveryRead:
+    return WebhookDeliveryRead(
+        id=attempt.id,
+        webhook_endpoint_id=attempt.webhook_endpoint_id,
+        webhook_endpoint_name=webhook_name or (attempt.webhook_endpoint.name if attempt.webhook_endpoint else None),
+        event=attempt.event,
+        event_type=attempt.event_type,
+        severity=attempt.severity,
+        success=attempt.success,
+        status_code=attempt.status_code,
+        response_body=attempt.response_body,
+        error=attempt.error,
+        is_retry=attempt.is_retry,
+        retry_of_id=attempt.retry_of_id,
+        retried_by=attempt.retried_by,
+        attempted_at=attempt.attempted_at,
+    )
+
+
+@router.get("/deliveries", response_model=list[WebhookDeliveryRead])
+def list_all_deliveries(
+    limit: int = Query(100, ge=1, le=500),
+    success: bool | None = Query(None, description="Filter to only successful (true) or only failed (false) attempts."),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Recent delivery attempts across every webhook endpoint, newest
+    first -- backs the top-level delivery log view (as opposed to
+    GET /webhooks/{id}/deliveries, scoped to one endpoint)."""
+    q = db.query(WebhookDeliveryAttempt).order_by(WebhookDeliveryAttempt.attempted_at.desc())
+    if success is not None:
+        q = q.filter(WebhookDeliveryAttempt.success == success)
+    rows = q.limit(limit).all()
+    return [_delivery_to_read(r) for r in rows]
+
+
+@router.get("/{webhook_id}/deliveries", response_model=list[WebhookDeliveryRead])
+def list_webhook_deliveries(
+    webhook_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    wh = db.get(WebhookEndpoint, webhook_id)
+    if not wh:
+        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    rows = (
+        db.query(WebhookDeliveryAttempt)
+        .filter(WebhookDeliveryAttempt.webhook_endpoint_id == webhook_id)
+        .order_by(WebhookDeliveryAttempt.attempted_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_delivery_to_read(r, webhook_name=wh.name) for r in rows]
+
+
+@router.post("/deliveries/{attempt_id}/retry", response_model=WebhookDeliveryRead)
+def retry_delivery(
+    attempt_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Manually resends the same event to the same webhook endpoint,
+    logging a brand-new WebhookDeliveryAttempt row (is_retry=True,
+    retry_of_id pointing at the original) rather than mutating the
+    original row in place -- the original attempt is a historical fact
+    ("this failed at this time") that a later success shouldn't erase
+    from the log.
+
+    404s if the original attempt is gone; 409s if the webhook endpoint
+    it targeted has since been deleted (nothing to resend to) or
+    disabled (retrying would silently violate the user's own "don't
+    send to this endpoint" setting).
+    """
+    original = db.get(WebhookDeliveryAttempt, attempt_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
+
+    wh = db.get(WebhookEndpoint, original.webhook_endpoint_id)
+    if not wh:
+        raise HTTPException(status_code=409, detail="The webhook endpoint this was sent to no longer exists")
+    if not wh.enabled:
+        raise HTTPException(status_code=409, detail="This webhook endpoint is disabled -- enable it before retrying")
+
+    new_attempt = deliver_webhook(
+        db, wh,
+        event=original.event,
+        message=_reconstruct_message(original),
+        severity=original.severity or "info",
+        event_type=original.event_type,
+        is_retry=True,
+        retry_of_id=original.id,
+        retried_by=user.email,
+    )
+    return _delivery_to_read(new_attempt, webhook_name=wh.name)
+
+
+def _reconstruct_message(original: WebhookDeliveryAttempt) -> str:
+    """Recovers the plain-text message for a retry from the originally
+    logged request_payload, since WebhookDeliveryAttempt doesn't store
+    the raw `message` separately from the fully-formatted per-type
+    payload. Falls back to the stored event title if the payload can't
+    be parsed (e.g. a row from before this column existed)."""
+    if original.request_payload:
+        try:
+            body = json.loads(original.request_payload)
+            text = body.get("text") or body.get("message")
+            if text:
+                # Slack/Teams/Telegram formatting wraps the message with
+                # an emoji + "NetGuard — <event>\n" header -- strip that
+                # back off so a retry re-wraps it fresh rather than
+                # double-wrapping.
+                marker = "\n"
+                if marker in text:
+                    return text.split(marker, 1)[1]
+                return text
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return original.event

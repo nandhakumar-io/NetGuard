@@ -1230,6 +1230,23 @@ export interface WebhookTestResult {
   status_code: number | null;
 }
 
+export interface WebhookDeliveryAttempt {
+  id: string;
+  webhook_endpoint_id: string;
+  webhook_endpoint_name: string | null;
+  event: string;
+  event_type: string | null;
+  severity: string | null;
+  success: boolean;
+  status_code: number | null;
+  response_body: string | null;
+  error: string | null;
+  is_retry: boolean;
+  retry_of_id: string | null;
+  retried_by: string | null;
+  attempted_at: string;
+}
+
 // --- Topology Snapshots & Diff ---
 
 export interface TopologySnapshotSummary {

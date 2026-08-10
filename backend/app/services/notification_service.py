@@ -18,6 +18,7 @@ others and never blocks the caller's actual workflow (deployment pipeline,
 drift sweep, health poll). Every failure is logged and swallowed, same
 policy as event_bus.
 """
+import json
 import logging
 import smtplib
 import uuid
@@ -227,14 +228,101 @@ def _post_telegram(event: str, message: str, severity: str) -> None:
         logger.warning("Telegram notification send failed", exc_info=True)
 
 
+def _build_webhook_payload(wh_type: str, event: str, message: str, severity: str, event_type: str) -> dict:
+    """Formats the outbound JSON body for a given webhook type. Split out
+    from _fan_out_user_webhooks so the exact same formatting logic backs
+    a manual retry (app.api.webhooks.retry_delivery) -- a retry should
+    resend what a fresh delivery of the same event would send today, not
+    replay a stored payload that might be built from a since-removed
+    field shape."""
+    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+    if wh_type == "telegram":
+        return {
+            "chat_id": "",  # filled in by the caller, which has the WebhookEndpoint row
+            "text": f"{emoji} <b>NetGuard — {event}</b>\n{message}",
+            "parse_mode": "HTML",
+        }
+    if wh_type == "slack":
+        return {"text": f"{emoji} *NetGuard — {event}*\n{message}"}
+    if wh_type == "teams":
+        return {"text": f"{emoji} **NetGuard — {event}**\n{message}"}
+    return {
+        "event": event,
+        "event_type": event_type,
+        "message": message,
+        "severity": severity,
+        "source": "netguard",
+    }
+
+
+def deliver_webhook(
+    db: Session,
+    wh,
+    event: str,
+    message: str,
+    severity: str = "info",
+    event_type: str | None = None,
+    is_retry: bool = False,
+    retry_of_id=None,
+    retried_by: str | None = None,
+):
+    """Sends one webhook delivery attempt and records it as a
+    WebhookDeliveryAttempt row, whatever the outcome. Used both by the
+    normal notify() fan-out (see _fan_out_user_webhooks below) and by the
+    manual retry endpoint (POST /webhooks/deliveries/{id}/retry) -- the
+    exact same send-and-log path either way, so a retried delivery is
+    indistinguishable in the log from a fresh one except for is_retry/
+    retry_of_id. Never raises: any failure (bad URL, timeout, non-2xx
+    response) is captured into the logged row and returned, not thrown,
+    since a webhook failure must never interrupt whatever workflow
+    triggered the notification.
+    """
+    from app.models.webhook import WebhookDeliveryAttempt
+
+    wh_type = wh.webhook_type.value if hasattr(wh.webhook_type, "value") else wh.webhook_type
+    payload = _build_webhook_payload(wh_type, event, message, severity, event_type or event)
+    if wh_type == "telegram":
+        payload["chat_id"] = wh.telegram_chat_id or ""
+
+    attempt = WebhookDeliveryAttempt(
+        webhook_endpoint_id=wh.id,
+        event=event,
+        event_type=event_type,
+        severity=severity,
+        request_payload=json.dumps(payload),
+        is_retry=is_retry,
+        retry_of_id=retry_of_id,
+        retried_by=retried_by,
+    )
+
+    try:
+        resp = httpx.post(wh.url, json=payload, timeout=TIMEOUT_SECONDS)
+        attempt.status_code = resp.status_code
+        attempt.response_body = resp.text[:500] if resp.text else None
+        attempt.success = resp.status_code < 400
+        if not attempt.success:
+            attempt.error = f"HTTP {resp.status_code}"
+    except Exception as exc:  # noqa: BLE001 -- network/timeout/DNS/etc, all logged the same way
+        attempt.success = False
+        attempt.error = str(exc)[:500]
+
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+
+    if not attempt.success:
+        logger.warning("User webhook delivery failed for %s: %s", wh.name, attempt.error)
+
+    return attempt
+
+
 def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: str) -> None:
     """Send the notification to all enabled user-configured WebhookEndpoint rows."""
     import json as _json
 
-    from app.core.database import SessionLocal as _SessionLocal
     from app.models.webhook import WebhookEndpoint
 
-    db = _SessionLocal()
+    db = SessionLocal()
     try:
         webhooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.enabled == True).all()
         for wh in webhooks:
@@ -247,32 +335,7 @@ def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: 
                 except (ValueError, TypeError):
                     pass
 
-            wh_type = wh.webhook_type.value if hasattr(wh.webhook_type, "value") else wh.webhook_type
-            emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
-
-            try:
-                if wh_type == "telegram":
-                    chat_id = wh.telegram_chat_id or ""
-                    text = f"{emoji} <b>NetGuard — {event}</b>\n{message}"
-                    tg_url = wh.url
-                    httpx.post(tg_url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=TIMEOUT_SECONDS)
-                elif wh_type == "slack":
-                    text = f"{emoji} *NetGuard — {event}*\n{message}"
-                    httpx.post(wh.url, json={"text": text}, timeout=TIMEOUT_SECONDS)
-                elif wh_type == "teams":
-                    text = f"{emoji} **NetGuard — {event}**\n{message}"
-                    httpx.post(wh.url, json={"text": text}, timeout=TIMEOUT_SECONDS)
-                else:
-                    payload = {
-                        "event": event,
-                        "event_type": event_type,
-                        "message": message,
-                        "severity": severity,
-                        "source": "netguard",
-                    }
-                    httpx.post(wh.url, json=payload, timeout=TIMEOUT_SECONDS)
-            except Exception:
-                logger.warning("User webhook post failed for %s", wh.name, exc_info=True)
+            deliver_webhook(db, wh, event=event, message=message, severity=severity, event_type=event_type)
     except Exception:
         logger.warning("Failed to fan out to user webhooks", exc_info=True)
     finally:
