@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # "*", becomes a full credential-theft CSRF hole on every endpoint.
     # Defaults to the Vite dev server origin so local development keeps
     # working without extra setup.
-    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173"
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,https://netguard.notoriousdev.in"
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:
