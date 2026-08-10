@@ -28,7 +28,7 @@ def client():
             db.close()
 
     app.dependency_overrides[get_db] = _override_get_db
-    rate_limiter._failed_attempts.clear()
+    rate_limiter._fallback_attempts.clear()
 
     with TestClient(app) as c:
         yield c

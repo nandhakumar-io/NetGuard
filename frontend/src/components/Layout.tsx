@@ -1,32 +1,75 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import NotificationBell from "./NotificationBell";
 import CommandPalette from "./CommandPalette";
 
-const links = [
-  { to: "/", label: "Dashboard", end: true },
-  { to: "/change-requests", label: "Change Requests" },
-  { to: "/deployments", label: "Deployments" },
-  { to: "/devices", label: "Devices" },
-  { to: "/groups", label: "Groups" },
-  { to: "/config-search", label: "Config Search" },
-  { to: "/templates", label: "Templates" },
-  { to: "/topology", label: "Topology" },
-  { to: "/path-trace", label: "Path Trace" },
-  { to: "/syslog", label: "Syslog" },
-  { to: "/traffic-analysis", label: "Traffic Analysis" },
-  { to: "/drift", label: "Drift" },
-  { to: "/alerts", label: "Alerts" },
-  { to: "/maintenance-windows", label: "Maintenance Windows" },
-  { to: "/firmware-upgrades", label: "Firmware Upgrades" },
-  { to: "/incidents", label: "Incidents" },
-  { to: "/insights", label: "Insights" },
-  { to: "/lab", label: "GNS3 Lab" },
-  { to: "/audit-log", label: "Audit Log" },
-  { to: "/rbac-audit", label: "RBAC Audit" },
-  { to: "/jit-access", label: "JIT Access" },
-  { to: "/security", label: "Security" },
+type NavItem = { to: string; label: string; end?: boolean };
+type NavGroup = { label: string; icon: JSX.Element; items: NavItem[] };
+
+const iconProps = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2 } as const;
+
+const groups: NavGroup[] = [
+  {
+    label: "Overview",
+    icon: <svg {...iconProps}><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>,
+    items: [{ to: "/", label: "Dashboard", end: true }, { to: "/insights", label: "Insights" }],
+  },
+  {
+    label: "Change Management",
+    icon: <svg {...iconProps}><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>,
+    items: [
+      { to: "/change-requests", label: "Change Requests" },
+      { to: "/deployments", label: "Deployments" },
+      { to: "/templates", label: "Templates" },
+      { to: "/maintenance-windows", label: "Maintenance Windows" },
+      { to: "/firmware-upgrades", label: "Firmware Upgrades" },
+    ],
+  },
+  {
+    label: "Inventory",
+    icon: <svg {...iconProps}><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" /></svg>,
+    items: [
+      { to: "/devices", label: "Devices" },
+      { to: "/groups", label: "Groups" },
+      { to: "/config-search", label: "Config Search" },
+    ],
+  },
+  {
+    label: "Network Visibility",
+    icon: <svg {...iconProps}><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M12 7v6M12 13l-5.5 4M12 13l5.5 4" /></svg>,
+    items: [
+      { to: "/topology", label: "Topology" },
+      { to: "/path-trace", label: "Path Trace" },
+      { to: "/traffic-analysis", label: "Traffic Analysis" },
+      { to: "/syslog", label: "Syslog" },
+      { to: "/drift", label: "Drift" },
+    ],
+  },
+  {
+    label: "Alerting",
+    icon: <svg {...iconProps}><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></svg>,
+    items: [
+      { to: "/alerts", label: "Alerts" },
+      { to: "/incidents", label: "Incidents" },
+    ],
+  },
+  {
+    label: "Security & Access",
+    icon: <svg {...iconProps}><path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6l8-4z" /></svg>,
+    items: [
+      { to: "/security", label: "Security" },
+      { to: "/jit-access", label: "JIT Access" },
+      { to: "/audit-log", label: "Audit Log" },
+      { to: "/rbac-audit", label: "RBAC Audit" },
+    ],
+  },
+  {
+    label: "Lab",
+    icon: <svg {...iconProps}><path d="M9 2v6L4 20a1 1 0 001 1h14a1 1 0 001-1L15 8V2" /><path d="M9 2h6" /></svg>,
+    items: [{ to: "/lab", label: "GNS3 Lab" }],
+  },
 ];
 
 function ThemeToggle() {
@@ -53,33 +96,90 @@ function ThemeToggle() {
   );
 }
 
+function isGroupActive(group: NavGroup, pathname: string): boolean {
+  return group.items.some((item) =>
+    item.end ? pathname === item.to : pathname === item.to || pathname.startsWith(item.to + "/")
+  );
+}
+
+function NavGroupSection({ group, defaultOpen }: { group: NavGroup; defaultOpen: boolean }) {
+  // Each group manages its own open/closed state -- click the header to
+  // expand, click again to collapse, independent of the other groups.
+  // Re-syncs to defaultOpen when the active route moves into/out of this
+  // group (e.g. navigating via the command palette), so the group
+  // containing the current page stays expanded automatically without
+  // fighting a manual toggle mid-session.
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-noc-muted hover:bg-white/5 hover:text-slate-200 dark:hover:text-noc-text transition-colors"
+      >
+        <span className="text-slate-500 dark:text-noc-muted">{group.icon}</span>
+        <span className="flex-1 text-left">{group.label}</span>
+        <svg
+          width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          className={`transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+        >
+          <path d="M9 6l6 6-6 6" />
+        </svg>
+      </button>
+      <div
+        className={`grid overflow-hidden transition-[grid-template-rows] duration-200 ease-out ${
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="pl-4 pt-1 pb-1 space-y-0.5">
+            {group.items.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  `block px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                    isActive
+                      ? "bg-brandblue text-white dark:bg-noc-cyan/15 dark:text-noc-cyan dark:border-l-2 dark:border-noc-cyan"
+                      : "text-slate-300 dark:text-noc-muted hover:bg-white/5 hover:text-white dark:hover:text-noc-text"
+                  }`
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100">
-      <aside className="w-60 bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col">
+      <aside className="w-64 bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col">
         <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border">
           <p className="font-display text-xl font-bold tracking-widest uppercase">NetGuard</p>
           <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider">Network Ops Console</p>
         </div>
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {links.map((l) => (
-            <NavLink
-              key={l.to}
-              to={l.to}
-              end={l.end}
-              className={({ isActive }) =>
-                `block px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  isActive
-                    ? "bg-brandblue text-white dark:bg-noc-cyan/15 dark:text-noc-cyan dark:border-l-2 dark:border-noc-cyan"
-                    : "text-slate-300 dark:text-noc-muted hover:bg-white/5 hover:text-white dark:hover:text-noc-text"
-                }`
-              }
-            >
-              {l.label}
-            </NavLink>
+          {groups.map((group) => (
+            <NavGroupSection
+              key={group.label}
+              group={group}
+              defaultOpen={isGroupActive(group, location.pathname)}
+            />
           ))}
         </nav>
         <div className="px-5 py-4 border-t border-white/10 dark:border-noc-border">
