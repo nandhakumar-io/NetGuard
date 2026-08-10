@@ -46,3 +46,31 @@ class RollbackResponse(BaseModel):
     change_request_id: uuid.UUID
     status: str
     message: str
+
+
+class RollbackSection(BaseModel):
+    """One independently revertible block found in a device's current
+    config (an ACL, VLAN, interface stanza, etc) -- the picklist for a
+    section-level (partial) rollback."""
+    key: str
+    kind: str
+    name: str
+    line_count: int
+
+
+class PartialRollbackRequest(BaseModel):
+    snapshot_id: uuid.UUID
+    section_key: str
+    reason: str | None = None
+
+
+class PartialRollbackPreviewResponse(BaseModel):
+    device_id: uuid.UUID
+    snapshot_id: uuid.UUID
+    section_key: str
+    section: dict
+    current_source: str
+    diff: str
+    identical: bool
+    blocked: bool = False
+    blocked_reason: str | None = None

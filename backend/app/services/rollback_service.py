@@ -24,6 +24,7 @@ from app.models.snapshot import ConfigSnapshot
 from app.models.user import User
 from app.services import (
     audit_service,
+    config_section_service,
     credential_service,
     deployment_engine,
     diff_engine,
@@ -253,6 +254,190 @@ def initiate_rollback(
         device_hostname=device.hostname, change_request_id=cr.id,
         detail=(
             f"target snapshot={snapshot.id} version={snapshot.version}"
+            + (f" reason={reason}" if reason else "")
+        ),
+    )
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
+
+    return cr
+
+
+# ---------------------------------------------------------------------------
+# Partial / section-level rollback
+#
+# A full rollback restores the entire snapshot. That's the right call when
+# a device is broken in ways that are hard to isolate, but for the common
+# case -- "the ACL I just pushed broke something, put just that ACL back" --
+# restoring the whole config is more blast radius than the incident calls
+# for: it also reverts anything else that changed on the box since that
+# snapshot, intentionally or not. These functions build a proposed config
+# that is the device's *current* config with only one section swapped back
+# to the snapshot's version, then run it through the exact same
+# Snapshot -> Deploy -> Health Monitor pipeline as any other change.
+# ---------------------------------------------------------------------------
+
+
+def _current_config_for_device(db: Session, device: Device) -> tuple[str | None, str]:
+    """Best-effort live read with the same live -> last-snapshot ->
+    unavailable fallback chain used elsewhere in this module."""
+    try:
+        ssh_password = credential_service.get_ssh_password(device)
+        current_config, _used_protocol = deployment_engine.read_running_config(
+            _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
+        )
+        return current_config, "live"
+    except credential_service.CredentialNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    latest = (
+        db.query(ConfigSnapshot)
+        .filter(ConfigSnapshot.device_id == device.id)
+        .order_by(ConfigSnapshot.created_at.desc())
+        .first()
+    )
+    if latest is not None:
+        return snapshot_service.decrypt_config(latest.running_config_encrypted), "last_snapshot"
+    return None, "unavailable"
+
+
+def list_rollback_sections(db: Session, device: Device) -> list[dict]:
+    """Sections available to partially roll back, derived from the
+    device's current (live, or last-snapshot-as-fallback) configuration.
+    Powers the "what do you want to revert?" picker in the rollback
+    confirmation modal, alongside the existing full-snapshot list."""
+    current_config, current_source = _current_config_for_device(db, device)
+    if not current_config:
+        return []
+    return [
+        {"key": s.key, "kind": s.kind, "name": s.name, "line_count": len(s.lines)}
+        for s in config_section_service.list_sections(current_config)
+    ] if current_source else []
+
+
+def preview_partial_rollback(db: Session, device: Device, snapshot: ConfigSnapshot, section_key: str) -> dict:
+    """Read-only preview of a section-level rollback: shows the diff
+    that reverting only `section_key` (e.g. "ACL:BLOCK_TELNET") to its
+    version in `snapshot` would produce, without touching the device or
+    creating a ChangeRequest."""
+    if snapshot.device_id != device.id:
+        raise RollbackError(f"Snapshot {snapshot.id} does not belong to device '{device.hostname}'.")
+
+    target_config = snapshot_service.decrypt_config(snapshot.running_config_encrypted)
+    current_config, current_source = _current_config_for_device(db, device)
+
+    if not current_config:
+        raise RollbackError(
+            f"No live or previously-snapshotted configuration is available for '{device.hostname}' "
+            "to compute a partial rollback against."
+        )
+
+    try:
+        new_config, section_info = config_section_service.build_partial_config(
+            current_config, target_config, section_key
+        )
+    except ValueError as exc:
+        raise RollbackError(str(exc)) from exc
+
+    diff_text = diff_engine.generate_diff(current_config, new_config)
+
+    in_flight = (
+        db.query(ChangeRequest)
+        .filter(ChangeRequest.device_id == device.id, ChangeRequest.status.in_(_IN_FLIGHT_STATUSES))
+        .first()
+    )
+
+    return {
+        "device_id": device.id,
+        "snapshot_id": snapshot.id,
+        "section_key": section_key,
+        "section": section_info,
+        "current_source": current_source,
+        "diff": diff_text,
+        "identical": current_config == new_config,
+        "blocked": in_flight is not None,
+        "blocked_reason": (
+            f"Device '{device.hostname}' already has change request {in_flight.id} in status "
+            f"'{in_flight.status.value}'. It must finish before this rollback can be confirmed."
+            if in_flight is not None
+            else None
+        ),
+    }
+
+
+def initiate_partial_rollback(
+    db: Session,
+    device: Device,
+    snapshot: ConfigSnapshot,
+    section_key: str,
+    actor: User,
+    reason: str | None = None,
+) -> ChangeRequest:
+    """Builds and auto-approves a ChangeRequest that reverts only
+    `section_key` to its version in `snapshot`, leaving the rest of the
+    device's current config untouched. Runs through the same
+    Snapshot -> Deploy -> Health Monitor -> Rollback pipeline as any
+    other change -- including automatic full-config rollback if *this*
+    (smaller) change still fails its health checks."""
+    if snapshot.device_id != device.id:
+        raise RollbackError(f"Snapshot {snapshot.id} does not belong to device '{device.hostname}'.")
+
+    in_flight = (
+        db.query(ChangeRequest)
+        .filter(ChangeRequest.device_id == device.id, ChangeRequest.status.in_(_IN_FLIGHT_STATUSES))
+        .first()
+    )
+    if in_flight is not None:
+        raise RollbackError(
+            f"Device '{device.hostname}' already has change request {in_flight.id} "
+            f"in status '{in_flight.status.value}'. Wait for it to finish before rolling back."
+        )
+
+    target_config = snapshot_service.decrypt_config(snapshot.running_config_encrypted)
+    current_config, _current_source = _current_config_for_device(db, device)
+    if not current_config:
+        raise RollbackError(
+            f"No live or previously-snapshotted configuration is available for '{device.hostname}' "
+            "to compute a partial rollback against."
+        )
+
+    try:
+        new_config, section_info = config_section_service.build_partial_config(
+            current_config, target_config, section_key
+        )
+    except ValueError as exc:
+        raise RollbackError(str(exc)) from exc
+
+    description = (
+        f"Partial rollback of {device.hostname}: {section_info['kind']} '{section_info['name']}' "
+        f"-> snapshot v{snapshot.version} ({snapshot.checksum[:12]}...)"
+    )
+    if reason:
+        description += f" — {reason}"
+
+    cr = ChangeRequest(
+        device_id=device.id,
+        submitted_by=actor.id,
+        approved_by=actor.id,
+        priority=ChangePriority.EMERGENCY,
+        description=description,
+        business_justification=reason or "Section-level rollback to a prior configuration snapshot.",
+        current_config=current_config,
+        proposed_config=new_config,
+        is_rollback="true",
+        rollback_snapshot_id=snapshot.id,
+        status=ChangeStatus.APPROVED,
+    )
+    db.add(cr)
+    db.commit()
+    db.refresh(cr)
+
+    audit_service.record_event(
+        db, actor=actor.email, action="Partial Rollback Requested", result="Approved",
+        device_hostname=device.hostname, change_request_id=cr.id,
+        detail=(
+            f"section={section_key} target snapshot={snapshot.id} version={snapshot.version}"
             + (f" reason={reason}" if reason else "")
         ),
     )

@@ -37,9 +37,12 @@ from app.schemas.device import (
 )
 from app.schemas.interface_status import InterfaceCurrentStatus, InterfaceStatusRead
 from app.schemas.rollback import (
+    PartialRollbackPreviewResponse,
+    PartialRollbackRequest,
     RollbackPreviewResponse,
     RollbackRequest,
     RollbackResponse,
+    RollbackSection,
     SnapshotSummary,
 )
 from app.services import (
@@ -828,6 +831,94 @@ def rollback_device(
         change_request_id=cr.id,
         status=cr.status.value,
         message=f"Rollback queued for {device.hostname}. Track progress via the change request or deployments feed.",
+    )
+
+
+@router.get("/{device_id}/rollback/sections", response_model=list[RollbackSection])
+def list_device_rollback_sections(
+    device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)
+):
+    """Independently revertible sections (ACLs, VLANs, interface
+    stanzas, ...) found in the device's current configuration -- the
+    picklist for a section-level rollback. Pair a `key` from this list
+    with a `snapshot_id` on the partial-rollback preview/confirm
+    endpoints below to revert just that one section.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return rollback_service.list_rollback_sections(db, device)
+
+
+@router.get("/{device_id}/rollback/partial/preview", response_model=PartialRollbackPreviewResponse)
+def preview_partial_device_rollback(
+    device_id: uuid.UUID,
+    snapshot_id: uuid.UUID,
+    section_key: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(ROLLBACK_ROLES),
+):
+    """Shows the diff a section-level rollback would apply -- reverting
+    only `section_key` to its version in `snapshot_id`, leaving every
+    other line of the device's current config untouched. Read-only.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    snapshot = db.get(ConfigSnapshot, snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    try:
+        preview = rollback_service.preview_partial_rollback(db, device, snapshot, section_key)
+    except rollback_service.RollbackError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return PartialRollbackPreviewResponse(**preview)
+
+
+@router.post("/{device_id}/rollback/partial", response_model=RollbackResponse, status_code=202)
+def rollback_device_partial(
+    device_id: uuid.UUID,
+    payload: PartialRollbackRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(ROLLBACK_ROLES),
+):
+    """Section-level (partial) rollback: reverts only `section_key`
+    (e.g. `"ACL:BLOCK_TELNET"`, from GET .../rollback/sections) to its
+    version in `snapshot_id`, instead of restoring the entire device
+    config. Reduces the blast radius of the rollback itself -- anything
+    changed elsewhere on the box since that snapshot is left alone.
+
+    Runs through the same Snapshot -> Deploy -> Health Monitor pipeline
+    as a full rollback, including automatic full-config rollback if this
+    smaller change still fails its health checks.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    snapshot = db.get(ConfigSnapshot, payload.snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    try:
+        cr = rollback_service.initiate_partial_rollback(
+            db, device, snapshot, payload.section_key, current_user, reason=payload.reason
+        )
+    except rollback_service.RollbackError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    run_deployment_pipeline_task.delay(str(cr.id), current_user.email)
+
+    return RollbackResponse(
+        change_request_id=cr.id,
+        status=cr.status.value,
+        message=(
+            f"Partial rollback of {payload.section_key} queued for {device.hostname}. "
+            "Track progress via the change request or deployments feed."
+        ),
     )
 
 

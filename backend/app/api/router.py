@@ -8,6 +8,7 @@ from app.api import (
     auth,
     change_requests,
     compliance_baselines,
+    config_intents,
     config_management,
     config_search,
     config_templates,
@@ -75,3 +76,4 @@ api_router.include_router(maintenance_windows.router)
 api_router.include_router(firmware_upgrades.router)
 api_router.include_router(flows.router)
 api_router.include_router(webhooks.router)
+api_router.include_router(config_intents.router)
