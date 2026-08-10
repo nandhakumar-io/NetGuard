@@ -17,7 +17,7 @@ import {
 import { api } from "../lib/api";
 import { DashboardSummary, Alert, DeviceGroup, Device, FleetAvailabilitySummary, UnstableDevice, DashboardPreferenceResponse, DashboardLayoutEntry, DashboardWidgetInfo } from "../lib/types";
 import Sparkline from "../components/Sparkline";
-import DashboardCustomizePanel from "../components/DashboardCustomizePanel";
+import DashboardCustomizePanel from "../components/DashboardCustomizePanel"; // Trigger HMR
 import { useAuth } from "../lib/auth";
 
 function timeAgo(dateStr: string): string {
