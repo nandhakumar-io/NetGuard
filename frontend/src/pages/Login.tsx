@@ -2,11 +2,14 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth, UserRole } from "../lib/auth";
 
+// Network Administrator and Security are privileged roles and are
+// deliberately excluded from self-registration -- the backend now
+// downgrades either one to network_engineer if sent anyway (see
+// UserCreate.sanitized_role in app/schemas/auth.py). Granting those roles
+// requires an existing admin to call PATCH /auth/users/{id}/role.
 const ROLES: { value: UserRole; label: string }[] = [
   { value: "network_engineer", label: "Network Engineer" },
   { value: "noc_engineer", label: "NOC Engineer" },
-  { value: "network_admin", label: "Network Administrator" },
-  { value: "security", label: "Security Team" },
   { value: "auditor", label: "Enterprise Auditor" },
 ];
 
@@ -195,6 +198,7 @@ export default function Login() {
         </form>
         <p className="text-[11px] text-slate-400 mt-4 text-center">
           Approving change requests requires a Network Administrator role.
+          Admin and Security accounts are granted by an existing admin, not self-selected at sign-up.
         </p>
       </div>
     </div>

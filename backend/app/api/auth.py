@@ -3,7 +3,7 @@ from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles
 from app.core.security import (
     create_access_token,
     create_mfa_challenge_token,
@@ -15,7 +15,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.refresh_token import RefreshToken
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.auth import (
     LoginRequest,
     MfaCodeRequest,
@@ -27,6 +27,7 @@ from app.schemas.auth import (
     Token,
     TokenPair,
     UserCreate,
+    UserRoleUpdate,
 )
 from app.services import mfa_service, rate_limiter
 
@@ -52,11 +53,16 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # payload.role is client-controlled and this endpoint is unauthenticated
+    # -- never trust it directly, or anyone can self-register as
+    # network_admin. sanitized_role() downgrades NETWORK_ADMIN/SECURITY to
+    # NETWORK_ENGINEER; those roles can only be granted afterward by an
+    # existing admin via PATCH /auth/users/{user_id}/role.
     user = User(
         email=payload.email,
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
-        role=payload.role,
+        role=payload.sanitized_role(),
     )
     db.add(user)
     db.commit()
@@ -96,10 +102,26 @@ def mfa_verify(payload: MfaVerifyRequest, db: Session = Depends(get_db)):
     except JWTError:
         raise HTTPException(status_code=401, detail="MFA challenge expired or invalid, please log in again")
 
-    user = db.query(User).filter(User.email == claims.get("sub")).first()
+    email = claims.get("sub")
+
+    # A TOTP code is only 6 digits -- without a limiter here, an attacker
+    # who already has a valid (short-lived) MFA challenge token could
+    # brute-force the ~1M code space directly against this endpoint,
+    # bypassing the point of MFA entirely. Shares the same
+    # email-keyed Redis limiter as the password check above.
+    locked_out, retry_after = rate_limiter.is_locked_out(f"mfa:{email}")
+    if locked_out:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed MFA attempts. Try again in {retry_after} seconds.",
+        )
+
+    user = db.query(User).filter(User.email == email).first()
     if not user or not mfa_service.verify_code(user.mfa_secret, payload.code):
+        rate_limiter.record_failed_attempt(f"mfa:{email}")
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
+    rate_limiter.reset_attempts(f"mfa:{email}")
     return _issue_token_pair(db, user)
 
 
@@ -173,6 +195,26 @@ def logout(payload: RefreshRequest, db: Session = Depends(get_db)):
     if record:
         record.revoked = True
         db.commit()
+
+
+@router.patch("/users/{user_id}/role")
+def update_user_role(
+    user_id: str,
+    payload: UserRoleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.NETWORK_ADMIN)),
+):
+    """The only path to granting NETWORK_ADMIN or SECURITY -- public
+    /auth/register can never self-assign either (see UserCreate.sanitized_role).
+    Restricted to existing network_admins.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.role = payload.role
+    db.commit()
+    return {"id": str(user.id), "email": user.email, "role": user.role.value}
 
 
 @router.get("/me")

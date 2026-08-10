@@ -30,6 +30,25 @@ class UserCreate(BaseModel):
     password: str
     role: UserRole = UserRole.NETWORK_ENGINEER
 
+    def sanitized_role(self) -> UserRole:
+        """Roles a caller may grant *themselves* via public /auth/register.
+
+        NETWORK_ADMIN and SECURITY are privileged roles (device
+        create/delete, credential writes, JIT approval, config push,
+        compliance/RBAC visibility) and must never be self-assigned --
+        anyone hitting the open registration endpoint with
+        role=network_admin in the body would otherwise get full control
+        of every managed device. Those two roles can only be granted by
+        an existing NETWORK_ADMIN via PATCH /auth/users/{id}/role.
+        """
+        if self.role in (UserRole.NETWORK_ADMIN, UserRole.SECURITY):
+            return UserRole.NETWORK_ENGINEER
+        return self.role
+
+
+class UserRoleUpdate(BaseModel):
+    role: UserRole
+
 
 class RefreshRequest(BaseModel):
     refresh_token: str

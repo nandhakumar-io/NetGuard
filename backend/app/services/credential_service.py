@@ -16,13 +16,27 @@ store is a one-file change:
   - Production: swap `_fetch_from_env` for a call to Vault, AWS Secrets
     Manager, or Azure Key Vault, keyed by the same `ssh_credential_ref`.
     Callers (pipeline_service) don't need to change.
+
+The DB-encrypted path (Device.ssh_password_encrypted / snmp_*_encrypted,
+set via POST /devices/{id}/ssh-credentials and /snmp-credentials, Fernet
+encryption via app.core.crypto) is always tried first and is the intended
+storage for real deployments -- it's the only option here where the
+secret at rest is actually encrypted. The env-var path is a legacy
+fallback: env vars are visible to anything that can read the process
+environment (docker inspect, /proc/<pid>/environ, a compose file checked
+into a repo, CI logs that happen to dump env), so resolving a credential
+that way in production is logged as a warning to surface devices that
+still need migrating to the encrypted DB path.
 """
+import logging
 import os
 import re
 
 from app.core import crypto
 from app.core.config import settings
 from app.models.device import Device
+
+logger = logging.getLogger("netguard.credential_service")
 
 
 class CredentialNotFoundError(Exception):
@@ -36,6 +50,18 @@ def _env_key(credential_ref: str) -> str:
 
 def _fetch_from_env(credential_ref: str) -> str | None:
     return os.environ.get(_env_key(credential_ref))
+
+
+def _warn_env_fallback_in_production(*, device: Device, label: str) -> None:
+    if settings.ENVIRONMENT == "production":
+        logger.warning(
+            "%s credential for device '%s' resolved via legacy env-var fallback "
+            "(NETGUARD_CRED_*) instead of the encrypted DB path in production. "
+            "Env vars are visible to anything with process/container access -- "
+            "migrate this device to the encrypted credential (POST "
+            "/devices/%s/%s-credentials) when convenient.",
+            label, device.hostname, device.id, label.lower(),
+        )
 
 
 def _fetch_dev_default() -> str | None:
@@ -77,6 +103,7 @@ def get_ssh_password(device: Device) -> str:
     if device.ssh_credential_ref:
         password = _fetch_from_env(device.ssh_credential_ref)
         if password:
+            _warn_env_fallback_in_production(device=device, label="SSH")
             return password
 
     password = _fetch_dev_default()
@@ -111,6 +138,7 @@ def get_secret(credential_ref: str | None, *, device: Device, label: str) -> str
         raise CredentialNotFoundError(
             f"No {label} credential found in the secret store for ref '{credential_ref}' (device '{device.hostname}')."
         )
+    _warn_env_fallback_in_production(device=device, label=label)
     return secret
 
 
@@ -157,6 +185,7 @@ def get_snmp_community(device: Device) -> str:
     if device.snmp_community_ref:
         secret = _fetch_from_env(device.snmp_community_ref)
         if secret:
+            _warn_env_fallback_in_production(device=device, label="SNMP")
             return secret
     fallback = _fetch_dev_default()
     if fallback:
@@ -176,7 +205,10 @@ def get_snmp_v3_auth_key(device: Device) -> str | None:
         if secret:
             return secret
     if device.snmp_auth_credential_ref:
-        return _fetch_from_env(device.snmp_auth_credential_ref)
+        secret = _fetch_from_env(device.snmp_auth_credential_ref)
+        if secret:
+            _warn_env_fallback_in_production(device=device, label="SNMP")
+        return secret
     return None
 
 
@@ -189,5 +221,8 @@ def get_snmp_v3_priv_key(device: Device) -> str | None:
         if secret:
             return secret
     if device.snmp_privacy_credential_ref:
-        return _fetch_from_env(device.snmp_privacy_credential_ref)
+        secret = _fetch_from_env(device.snmp_privacy_credential_ref)
+        if secret:
+            _warn_env_fallback_in_production(device=device, label="SNMP")
+        return secret
     return None

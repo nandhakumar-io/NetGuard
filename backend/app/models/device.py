@@ -160,6 +160,17 @@ class Device(Base):
     # priority over ssh_credential_ref (env-var lookup) when present; see
     # credential_service.get_ssh_password.
     ssh_password_encrypted = Column(Text, nullable=True)
+    # Trust-on-first-use SSH host key pin (app.api.terminal). Set to the
+    # SHA256 fingerprint of the host key presented on a device's first
+    # terminal connection; every subsequent connection must match it or
+    # the session is refused rather than silently trusting whatever key
+    # is offered (asyncssh's known_hosts=None default) -- that default
+    # accepts any host key including an attacker's, which turns the web
+    # terminal into a transparent MITM/credential-capture point on a
+    # network with any on-path attacker. NULL means "no key pinned yet";
+    # cleared via POST /devices/{id}/ssh-host-key/reset after legitimate
+    # device re-imaging or SSH host key rotation.
+    ssh_host_key_fingerprint = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # --- Inventory detail (Device Inventory page columns) ---

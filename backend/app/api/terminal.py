@@ -4,14 +4,22 @@ import uuid
 
 import asyncssh
 import telnetlib3
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.deps import require_roles
 from app.core.security import decode_access_token
 from app.models.device import Device
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services import audit_service, credential_service
 
 router = APIRouter(prefix="/devices", tags=["terminal"])
@@ -143,7 +151,51 @@ def get_current_user_ws(token: str, db: Session) -> User | None:
         return None
 
 
-async def _try_ssh(websocket: WebSocket, device: Device, username: str, password: str) -> bool:
+class _HostKeyMismatchError(Exception):
+    """Raised when a device's presented SSH host key doesn't match the
+    fingerprint pinned on first connection -- see _PinningSSHClient."""
+
+
+class _PinningSSHClient(asyncssh.SSHClient):
+    """Trust-on-first-use host key verification.
+
+    Replaces known_hosts=None (which silently accepts *any* host key on
+    *every* connection -- meaning an on-path attacker can MITM the
+    terminal transparently and capture device credentials + full session
+    content). On a device's first terminal connection we pin the
+    SHA256 fingerprint of the key it presents; every later connection
+    must present the same key or the connection is aborted before any
+    credential is sent. A real host key rotation (device re-imaged,
+    replaced) requires an explicit reset via
+    POST /devices/{id}/ssh-host-key/reset rather than silently
+    re-trusting whatever shows up next.
+    """
+
+    def __init__(self, device: Device, db: Session):
+        self._device = device
+        self._db = db
+
+    def validate_host_public_key(self, host, addr, port, key) -> bool:
+        fingerprint = key.get_fingerprint("sha256")
+
+        if not self._device.ssh_host_key_fingerprint:
+            self._device.ssh_host_key_fingerprint = fingerprint
+            self._db.commit()
+            return True
+
+        if fingerprint != self._device.ssh_host_key_fingerprint:
+            raise _HostKeyMismatchError(
+                f"SSH host key for {host} changed since it was first trusted "
+                f"(pinned {self._device.ssh_host_key_fingerprint}, presented "
+                f"{fingerprint}). Refusing to connect -- this could mean the "
+                f"device was legitimately re-imaged, or that traffic is being "
+                f"intercepted. If this is expected, clear the pinned key via "
+                f"POST /devices/{self._device.id}/ssh-host-key/reset."
+            )
+        return True
+
+
+async def _try_ssh(websocket: WebSocket, device: Device, username: str, password: str, db: Session) -> bool:
     """Returns True if an SSH session ran (successfully or not, but far
     enough that telnet should NOT also be attempted -- e.g. the user
     disconnected mid-session). Returns False only for a connection-phase
@@ -155,6 +207,7 @@ async def _try_ssh(websocket: WebSocket, device: Device, username: str, password
             username=username,
             password=password,
             known_hosts=None,
+            client_factory=lambda: _PinningSSHClient(device, db),
             client_keys=None,
             connect_timeout=SSH_CONNECT_TIMEOUT_SECONDS,
         ) as conn:
@@ -167,26 +220,30 @@ async def _try_ssh(websocket: WebSocket, device: Device, username: str, password
                 protocol_label="SSH",
             )
         return True
+    except _HostKeyMismatchError as exc:
+        # Deliberately does NOT fall back to Telnet. If we fell back here,
+        # an attacker doing the MITM in the first place could simply block
+        # SSH and let the session silently downgrade to unencrypted
+        # Telnet, defeating the whole point of pinning. This must be a
+        # hard stop the operator has to consciously clear.
+        await websocket.send_text(f"\r\n\x1b[31m*** SECURITY WARNING: {exc} ***\x1b[0m\r\n")
+        await websocket.close(code=1008, reason="ssh_host_key_mismatch")
+        return True
     except (asyncssh.Error, OSError, asyncio.TimeoutError, ConnectionRefusedError) as exc:
         # Connection-phase failure (refused, timed out, no SSH server, auth
-        # rejected because the daemon isn't even up yet, etc.) -- this is
-        # exactly the case that should fall back to Telnet, not a hard
-        # error. GNS3 lab nodes in particular have no SSH server at all
-        # until they've been bootstrapped over their console.
-        await websocket.send_text(
-            f"\r\n\x1b[33mSSH unavailable ({exc}). Falling back to Telnet "
-            f"-- this session will be unencrypted.\x1b[0m\r\n"
-        )
+        # rejected because the daemon isn't even up yet, etc.). Whether
+        # this actually falls back to Telnet is decided by the caller
+        # based on device.lab_provider -- see device_terminal -- not here,
+        # since this message shouldn't promise a Telnet fallback that
+        # won't happen for non-lab devices.
+        await websocket.send_text(f"\r\n\x1b[33mSSH unavailable ({exc}).\x1b[0m\r\n")
         return False
     except Exception as exc:  # noqa: BLE001
         # Anything else (e.g. an asyncssh API/kwarg mismatch surfacing as
         # TypeError -- see the pty= kwarg bug this replaced) should still
-        # degrade to Telnet rather than kill the session and look like an
-        # unconditional "SSH failed" to the user.
-        await websocket.send_text(
-            f"\r\n\x1b[33mSSH session failed unexpectedly ({exc}). Falling back to Telnet "
-            f"-- this session will be unencrypted.\x1b[0m\r\n"
-        )
+        # be treated as a connection-phase failure rather than killing the
+        # session outright.
+        await websocket.send_text(f"\r\n\x1b[33mSSH session failed unexpectedly ({exc}).\x1b[0m\r\n")
         return False
 
 
@@ -224,6 +281,34 @@ async def _try_telnet(websocket: WebSocket, device: Device, username: str, passw
         read_from_ws_telnet(writer, websocket),
         protocol_label="Telnet",
     )
+
+
+@router.post("/{device_id}/ssh-host-key/reset")
+def reset_ssh_host_key(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.NETWORK_ADMIN)),
+):
+    """Clears a device's pinned SSH host key fingerprint, so the *next*
+    terminal connection re-pins whatever key is presented (see
+    _PinningSSHClient). Only for deliberate cases -- device re-imaged,
+    hardware replaced, host key intentionally rotated -- since clearing
+    the pin re-opens the TOFU window until the next connection. Restricted
+    to network_admin and audit-logged, same as other admin-surface
+    credential/device actions.
+    """
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    device.ssh_host_key_fingerprint = None
+    db.commit()
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="SSH Host Key Reset", result="Success",
+        device_hostname=device.hostname,
+    )
+    return {"device_id": str(device.id), "ssh_host_key_fingerprint": None}
 
 
 @router.websocket("/{device_id}/terminal")
@@ -287,9 +372,29 @@ async def device_terminal(
     await websocket.send_text(f"\r\n\x1b[36mInitiating secure shell connection to {device.ip_address}...\x1b[0m\r\n")
 
     try:
-        ssh_ran = await _try_ssh(websocket, device, username, password)
+        ssh_ran = await _try_ssh(websocket, device, username, password, db)
         if not ssh_ran:
-            await _try_telnet(websocket, device, username, password)
+            # Telnet is unencrypted -- credentials and full session
+            # content go over the wire in cleartext. That's an accepted
+            # trade-off for GNS3 lab nodes (device.lab_provider set),
+            # which frequently have no SSH server until bootstrapped over
+            # console and live in an isolated lab environment. It is NOT
+            # acceptable for real production/physical devices reachable
+            # over the actual network -- silently downgrading those to
+            # Telnet just because SSH happened to be unreachable (refused,
+            # timed out, misconfigured) would hand any on-path attacker
+            # credentials for real infrastructure. Refuse instead and
+            # surface the failure so an admin fixes SSH access.
+            if device.lab_provider:
+                await _try_telnet(websocket, device, username, password)
+            else:
+                await websocket.send_text(
+                    "\r\n\x1b[31mSSH is unavailable for this device and it is not a lab "
+                    "device, so this session will NOT fall back to unencrypted "
+                    "Telnet. Fix SSH access (service, host key, credentials) and "
+                    "retry.\x1b[0m\r\n"
+                )
+                await websocket.close(code=1011, reason="ssh_unavailable_no_telnet_fallback")
     except Exception as e:
         try:
             await websocket.send_text(f"\r\n\x1b[31mConnection interrupted: {e!s}\x1b[0m\r\n")

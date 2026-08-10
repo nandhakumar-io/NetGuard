@@ -103,6 +103,11 @@ async def _topology_snapshot_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail loudly before accepting any traffic if ENVIRONMENT=production
+    # is set but SECRET_KEY/SECRET_ENCRYPTION_KEY/CORS_ALLOWED_ORIGINS are
+    # still on insecure dev defaults -- see Settings.validate_production_secrets.
+    settings.validate_production_secrets()
+
     # Schema is owned by Alembic migrations (see backend/alembic/). The
     # Docker image's entrypoint.sh runs `alembic upgrade head` before
     # starting uvicorn -- but when running locally with `uvicorn
@@ -197,7 +202,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=settings.cors_allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

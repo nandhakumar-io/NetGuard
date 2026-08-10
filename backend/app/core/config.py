@@ -22,6 +22,46 @@ class Settings(BaseSettings):
     # in the database (Device.snmp_*_encrypted). Falls back to a fixed
     # dev-only key if unset -- production deployments should set this.
     SECRET_ENCRYPTION_KEY: str | None = None
+    # Comma-separated list of exact frontend origins allowed to call this
+    # API with credentials, e.g. "https://netguard.example.com". Never
+    # use "*" here together with allow_credentials=True (see main.py) --
+    # that combination is either rejected outright by the browser or, if
+    # ever "fixed" by reflecting the request Origin instead of a literal
+    # "*", becomes a full credential-theft CSRF hole on every endpoint.
+    # Defaults to the Vite dev server origin so local development keeps
+    # working without extra setup.
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173"
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.CORS_ALLOWED_ORIGINS.split(",") if o.strip()]
+
+    def validate_production_secrets(self) -> None:
+        """Called once at startup (see app.main lifespan). Refuses to boot
+        in production with a secret still set to its dev-only default --
+        an unset SECRET_KEY means anyone who has read this open-source
+        codebase can forge access tokens for any user; an unset
+        SECRET_ENCRYPTION_KEY means every stored SNMP credential is
+        encrypted with a key baked into source control. Failing loudly
+        here beats failing silently and finding out during an incident.
+        """
+        if self.ENVIRONMENT != "production":
+            return
+
+        problems = []
+        if self.SECRET_KEY == "change-me-to-a-long-random-string":
+            problems.append("SECRET_KEY is still the default placeholder")
+        if not self.SECRET_ENCRYPTION_KEY:
+            problems.append("SECRET_ENCRYPTION_KEY is unset (falls back to a key committed in app/core/crypto.py)")
+        if self.CORS_ALLOWED_ORIGINS.strip() in ("", "*"):
+            problems.append("CORS_ALLOWED_ORIGINS is unset or \"*\" -- set it to your real frontend origin(s)")
+
+        if problems:
+            raise RuntimeError(
+                "Refusing to start with ENVIRONMENT=production and insecure defaults: "
+                + "; ".join(problems)
+            )
+
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
