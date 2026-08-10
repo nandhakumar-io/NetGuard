@@ -251,5 +251,57 @@ def root():
 
 
 @app.get("/health")
+@app.get("/healthz")
 def health():
+    """Liveness probe: answers "is the process up" only -- no DB/Redis
+    dialout, ~0ms, so a load balancer/orchestrator can hit this at a tight
+    interval without adding load to either dependency. /healthz is the
+    conventional k8s-style alias for the same check; keep /health too since
+    existing deployments/monitors already point at it.
+    """
     return {"status": "healthy"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness probe: actually dials DB and Redis so a load balancer with
+    multiple workers (now viable behind the Redis-backed rate limiter) can
+    tell "process is up" (/healthz) apart from "process can actually serve
+    traffic" (this) -- e.g. during startup before migrations finish, or if
+    Redis/Postgres drops. Kept intentionally cheap (SELECT 1 / PING, no
+    Ollama/NetBox/GNS3/SMTP dialout) so it's safe to poll frequently; use
+    GET /health/detailed for the full dependency breakdown instead.
+    """
+    import redis
+    from sqlalchemy import text
+
+    from app.core.database import SessionLocal
+
+    checks: dict[str, str] = {}
+    ready = True
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+        ready = False
+    finally:
+        db.close()
+
+    try:
+        client = redis.Redis.from_url(settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+        client.ping()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+        ready = False
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    body = {"status": "ready" if ready else "not_ready", "checks": checks}
+    return JSONResponse(status_code=200 if ready else 503, content=body)

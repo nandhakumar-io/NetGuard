@@ -29,6 +29,7 @@ import ConfigViewer from "../components/ConfigViewer";
 import { WebTerminal } from "../components/WebTerminal";
 import SnmpCredentialsModal from "../components/SnmpCredentialsModal";
 import SshCredentialsModal from "../components/SshCredentialsModal";
+import BulkRotateCredentialsModal from "../components/BulkRotateCredentialModal";
 
 const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
   green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800" },
@@ -1723,6 +1724,7 @@ export default function Devices() {
   const [bulkDcValue, setBulkDcValue] = useState("");
   const [bulkRackValue, setBulkRackValue] = useState("");
   const [bulkRoleValue, setBulkRoleValue] = useState("");
+  const [showBulkRotateModal, setShowBulkRotateModal] = useState(false);
 
   const toggleSelected = (id: string) => {
     setSelectedIds((prev) => {
@@ -2782,6 +2784,14 @@ export default function Devices() {
           </div>
 
           <button
+            onClick={() => setShowBulkRotateModal(true)}
+            disabled={bulkBusy}
+            className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+          >
+            Rotate credentials
+          </button>
+
+          <button
             onClick={bulkDelete}
             disabled={bulkBusy}
             className="ml-auto text-xs font-bold bg-riskcrit hover:bg-red-700 text-white px-3 py-1.5 rounded-full disabled:opacity-50 whitespace-nowrap"
@@ -3072,6 +3082,29 @@ export default function Devices() {
               </div>
             </div>
           </div>
+        )}
+
+        {showBulkRotateModal && (
+          <BulkRotateCredentialsModal
+            deviceIds={Array.from(selectedIds)}
+            deviceCount={selectedIds.size}
+            onClose={() => setShowBulkRotateModal(false)}
+            onDone={(result) => {
+              setShowBulkRotateModal(false);
+              const affectedCount = result.affected_device_ids.length;
+              const failedCount = Object.keys(result.failed).length;
+              setBulkNotice(result.detail || `Rotated credentials on ${affectedCount} device(s).`);
+              if (failedCount) {
+                setBulkError(
+                  `Failed for: ${Object.entries(result.failed)
+                    .map(([id, msg]) => `${devices.find((d) => d.id === id)?.hostname || id} (${msg})`)
+                    .join("; ")}`
+                );
+              } else {
+                setBulkError(null);
+              }
+            }}
+          />
         )}
     </div>
   );

@@ -15,8 +15,9 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../lib/api";
-import { DashboardSummary, Alert, DeviceGroup, Device, FleetAvailabilitySummary, UnstableDevice } from "../lib/types";
+import { DashboardSummary, Alert, DeviceGroup, Device, FleetAvailabilitySummary, UnstableDevice, DashboardPreferenceResponse, DashboardLayoutEntry, DashboardWidgetInfo } from "../lib/types";
 import Sparkline from "../components/Sparkline";
+import DashboardCustomizePanel from "../components/DashboardCustomizePanel";
 import { useAuth } from "../lib/auth";
 
 function timeAgo(dateStr: string): string {
@@ -111,6 +112,32 @@ function StatCard({
   );
 }
 
+// Grid span (out of a 6-col grid) for each customizable widget id --
+// literal class strings (not dynamically built) so Tailwind's content
+// scanner picks them up. Roughly mirrors the original hand-grouped rows
+// (e.g. fleet_health + fleet_history_chart = 3+3, uplinks +
+// active_alerts = 4+2) while letting any subset/order actually render
+// sensibly once a widget can be hidden or moved independently.
+const WIDGET_SPAN: Record<string, string> = {
+  fleet_health: "md:col-span-2 xl:col-span-3",
+  fleet_history_chart: "md:col-span-2 xl:col-span-3",
+  uplinks: "md:col-span-2 xl:col-span-4",
+  active_alerts: "md:col-span-1 xl:col-span-2",
+  fleet_availability: "md:col-span-1 xl:col-span-2",
+  top_flapping_devices: "md:col-span-2 xl:col-span-4",
+  offline_devices: "md:col-span-1 xl:col-span-2",
+  top_interface_errors: "md:col-span-1 xl:col-span-2",
+  flapping_interfaces: "md:col-span-1 xl:col-span-2",
+  top_cpu_devices: "md:col-span-2 xl:col-span-3",
+  top_memory_devices: "md:col-span-2 xl:col-span-3",
+  top_bandwidth_devices: "md:col-span-2 xl:col-span-3",
+  down_ports: "md:col-span-2 xl:col-span-3",
+  recent_reboots: "md:col-span-2 xl:col-span-3",
+  recent_backups: "md:col-span-2 xl:col-span-3",
+  recent_protocol_operations: "md:col-span-2 xl:col-span-3",
+  group_availability: "md:col-span-2 xl:col-span-6",
+};
+
 export default function Dashboard() {
   const { user } = useAuth();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -121,6 +148,33 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // --- Dashboard widget customization ---
+  const [layout, setLayout] = useState<DashboardLayoutEntry[]>([]);
+  const [availableWidgets, setAvailableWidgets] = useState<DashboardWidgetInfo[]>([]);
+  const [showCustomize, setShowCustomize] = useState(false);
+  const [savingLayout, setSavingLayout] = useState(false);
+
+  const loadPreferences = () => {
+    api
+      .get<DashboardPreferenceResponse>("/dashboard/preferences")
+      .then((res) => {
+        setLayout(res.data.layout);
+        setAvailableWidgets(res.data.available_widgets);
+      })
+      .catch(() => {});
+  };
+
+  const saveLayout = (next: DashboardLayoutEntry[]) => {
+    setSavingLayout(true);
+    api
+      .put<DashboardPreferenceResponse>("/dashboard/preferences", { layout: next })
+      .then((res) => {
+        setLayout(res.data.layout);
+        setAvailableWidgets(res.data.available_widgets);
+      })
+      .finally(() => setSavingLayout(false));
+  };
 
   const loadAll = () => {
     api
@@ -167,6 +221,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadAll();
+    loadPreferences();
     const interval = setInterval(loadAll, 15000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,15 +267,27 @@ export default function Dashboard() {
             {lastUpdated && <> · refreshed {timeAgo(lastUpdated.toISOString())}</>}
           </p>
         </div>
-        <button
-          onClick={loadAll}
-          className="w-9 h-9 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:text-brandblue hover:border-brandblue/40 transition-colors"
-          title="Refresh"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21 12a9 9 0 11-3-6.7M21 4v6h-6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCustomize(true)}
+            className="h-9 px-3 rounded-full bg-white border border-slate-200 shadow-sm flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-brandblue hover:border-brandblue/40 transition-colors"
+            title="Customize dashboard widgets"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Customize
+          </button>
+          <button
+            onClick={loadAll}
+            className="w-9 h-9 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:text-brandblue hover:border-brandblue/40 transition-colors"
+            title="Refresh"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 12a9 9 0 11-3-6.7M21 4v6h-6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -264,359 +331,555 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ---- Fleet health + history -------------------------------------- */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5 mb-6">
-        <Card className="p-6">
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Fleet Health</p>
-          <div className="flex items-center gap-6">
-            <div className="w-32 h-32 relative shrink-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={donutData.length ? donutData : [{ name: "No data", value: 1, color: "#E2E8F0" }]} dataKey="value" innerRadius={44} outerRadius={60} startAngle={90} endAngle={-270} strokeWidth={0}>
-                    {(donutData.length ? donutData : [{ color: "#E2E8F0" }]).map((d, i) => (
-                      <Cell key={i} fill={d.color} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className={`text-2xl font-bold ${offline === 0 ? "text-emerald-600" : "text-slate-800"}`}>{onlinePct.toFixed(0)}%</span>
-                <span className="text-[10px] text-slate-400 uppercase tracking-wide">Online</span>
-              </div>
-            </div>
-            <div className="flex-1 space-y-2.5 min-w-0">
-              <div className="flex items-center justify-between text-sm">
-                <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Online</span>
-                <span className="font-semibold text-slate-800">{online}</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-red-500" />Offline</span>
-                <span className="font-semibold text-slate-800">{offline}</span>
-              </div>
-              <div className="h-px bg-slate-100 my-1" />
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-500">Deploy success</span>
-                <span className="font-semibold text-slate-800">{summary?.deployment_success_rate ?? 100}%</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-500">Open drifts</span>
-                <span className="font-semibold text-slate-800">{summary?.open_drifts ?? 0}</span>
-              </div>
-            </div>
-          </div>
-          <div className="grid grid-cols-3 gap-2 mt-6 pt-5 border-t border-slate-100">
-            <Gauge label="CPU" value={avgCpu} color="#06B6D4" />
-            <Gauge label="RAM" value={avgMem} color="#8B5CF6" />
-            <Gauge label="HEALTH" value={summary?.global_health_score ?? 100} color="#10B981" />
-          </div>
-        </Card>
-
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet History — CPU / Memory / Bandwidth</p>
-            <Link to="/traffic-analysis" className="text-xs text-brandblue font-medium hover:underline">Details →</Link>
-          </div>
-          {(summary?.fleet_health_history?.length ?? 0) === 0 ? (
-            <div className="h-64 flex items-center justify-center text-sm text-slate-400">Not enough polling history yet.</div>
-          ) : (
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={summary?.fleet_health_history}>
-                  <defs>
-                    <linearGradient id="cpuFillL" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#06B6D4" stopOpacity={0.25} />
-                      <stop offset="95%" stopColor="#06B6D4" stopOpacity={0.01} />
-                    </linearGradient>
-                    <linearGradient id="memFillL" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} />
-                      <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.01} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
-                  <XAxis dataKey="timestamp" tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")} tick={{ fontSize: 10, fill: "#94A3B8" }} minTickGap={40} axisLine={false} tickLine={false} />
-                  <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: "#94A3B8" }} width={34} domain={[0, 100]} axisLine={false} tickLine={false} />
-                  <Tooltip
-                    contentStyle={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12 }}
-                    formatter={(v: number, name: string) => [`${v?.toFixed?.(1) ?? v}%`, name]}
-                    labelFormatter={(v) => (v ? new Date(v).toLocaleString() : "")}
-                  />
-                  <Area type="monotone" dataKey="avg_cpu" name="CPU" stroke="#06B6D4" fill="url(#cpuFillL)" strokeWidth={2} connectNulls />
-                  <Area type="monotone" dataKey="avg_memory" name="Memory" stroke="#8B5CF6" fill="url(#memFillL)" strokeWidth={2} connectNulls />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* ---- Uplinks + alerts -------------------------------------------- */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-6">
-        <Card className="p-6 xl:col-span-2">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Uplinks &amp; WAN Links</p>
-            <Link to="/devices" className="text-xs text-brandblue font-medium hover:underline">All devices →</Link>
-          </div>
-          {(summary?.uplinks?.length ?? 0) === 0 ? (
-            <p className="text-sm text-slate-400 italic py-6 text-center">No devices tagged as WAN/uplink/core/edge yet.</p>
-          ) : (
-            <div className="space-y-4">
-              {summary?.uplinks?.map((link, i) => (
-                <div key={i}>
-                  <div className="flex justify-between items-center gap-2 text-sm mb-1.5">
-                    <span className="flex items-center gap-2 font-medium text-slate-700 truncate">
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${link.status === "online" ? "bg-emerald-500" : link.status === "offline" ? "bg-red-500" : "bg-slate-300"}`} />
-                      {link.hostname}
-                      <span className="text-slate-400 font-normal text-xs">{link.ip_address}</span>
-                    </span>
-                    <span className="text-slate-500 text-xs font-medium shrink-0">{link.utilization_pct.toFixed(0)}% util</span>
-                  </div>
-                  <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${link.utilization_pct >= 90 ? "bg-red-500" : link.utilization_pct >= 65 ? "bg-amber-500" : "bg-brandblue"}`}
-                      style={{ width: `${Math.min(link.utilization_pct, 100)}%` }}
-                    />
+      {(() => {
+        const widgetContent: Record<string, React.ReactNode> = {
+          fleet_health: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Fleet Health</p>
+              <div className="flex items-center gap-6">
+                <div className="w-32 h-32 relative shrink-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={donutData.length ? donutData : [{ name: "No data", value: 1, color: "#E2E8F0" }]} dataKey="value" innerRadius={44} outerRadius={60} startAngle={90} endAngle={-270} strokeWidth={0}>
+                        {(donutData.length ? donutData : [{ color: "#E2E8F0" }]).map((d, i) => (
+                          <Cell key={i} fill={d.color} />
+                        ))}
+                      </Pie>
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className={`text-2xl font-bold ${offline === 0 ? "text-emerald-600" : "text-slate-800"}`}>{onlinePct.toFixed(0)}%</span>
+                    <span className="text-[10px] text-slate-400 uppercase tracking-wide">Online</span>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Active Alerts</p>
-            <Link to="/alerts" className="text-xs text-brandblue font-medium hover:underline">View all →</Link>
-          </div>
-          {recentAlerts.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm font-semibold text-emerald-600">All clear</p>
-              <p className="text-xs text-slate-400 mt-1">No active alerts right now.</p>
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {recentAlerts.map((alert) => {
-                const s = SEV_STYLES[alert.severity] || SEV_STYLES.info;
-                return (
-                  <div key={alert.id} className={`flex gap-2.5 rounded-lg px-3 py-2 border ${s.bg}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${s.dot}`} />
-                    <div className="min-w-0">
-                      <p className={`text-[10px] font-semibold uppercase tracking-wide ${s.text}`}>{alert.category}</p>
-                      <p className="text-xs text-slate-700 truncate">{alert.message}</p>
-                      <p className="text-[10px] text-slate-400 mt-0.5">{timeAgo(alert.created_at)}</p>
-                    </div>
+                <div className="flex-1 space-y-2.5 min-w-0">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Online</span>
+                    <span className="font-semibold text-slate-800">{online}</span>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </Card>
-      </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-red-500" />Offline</span>
+                    <span className="font-semibold text-slate-800">{offline}</span>
+                  </div>
+                  <div className="h-px bg-slate-100 my-1" />
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-500">Deploy success</span>
+                    <span className="font-semibold text-slate-800">{summary?.deployment_success_rate ?? 100}%</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-500">Open drifts</span>
+                    <span className="font-semibold text-slate-800">{summary?.open_drifts ?? 0}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-6 pt-5 border-t border-slate-100">
+                <Gauge label="CPU" value={avgCpu} color="#06B6D4" />
+                <Gauge label="RAM" value={avgMem} color="#8B5CF6" />
+                <Gauge label="HEALTH" value={summary?.global_health_score ?? 100} color="#10B981" />
+              </div>
+            </Card>
+          ),
 
-      {/* ---- Fleet availability + flapping devices ------------------------ */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-6">
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-1">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet Availability</p>
-            <span className="text-[11px] text-slate-300">last 24h</span>
-          </div>
-          {availability === null ? (
-            <div className="h-24 flex items-center justify-center text-sm text-slate-400">Loading…</div>
-          ) : availability.fleet_availability_pct === null ? (
-            <p className="text-sm text-slate-400 italic py-6 text-center">
-              Not enough status history yet — availability builds up as devices are polled/pinged over time.
-            </p>
-          ) : (
-            <>
-              <p
-                className={`text-4xl font-bold mt-2 ${
-                  availability.fleet_availability_pct >= 99.9
-                    ? "text-emerald-600"
-                    : availability.fleet_availability_pct >= 99
-                    ? "text-amber-600"
-                    : "text-red-600"
-                }`}
-              >
-                {availability.fleet_availability_label}
-              </p>
-              <p className="text-[11px] text-slate-400 mt-1 mb-4">
-                {availability.devices_in_rollup} device{availability.devices_in_rollup === 1 ? "" : "s"} in rollup
-              </p>
-              {availability.worst_devices.length > 0 && (
-                <div className="pt-3 border-t border-slate-100 space-y-1.5">
-                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Lowest availability</p>
-                  {availability.worst_devices.slice(0, 4).map((d) => (
-                    <div key={d.device_id} className="flex items-center justify-between text-xs">
-                      <span className="text-slate-600 truncate">{d.hostname}</span>
-                      <span
-                        className={`font-semibold shrink-0 ml-2 ${
-                          d.availability_pct >= 99.9 ? "text-emerald-600" : d.availability_pct >= 99 ? "text-amber-600" : "text-red-600"
-                        }`}
-                      >
-                        {d.availability_pct.toFixed(2)}%
+          fleet_history_chart: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet History — CPU / Memory / Bandwidth</p>
+                <Link to="/traffic-analysis" className="text-xs text-brandblue font-medium hover:underline">Details →</Link>
+              </div>
+              {(summary?.fleet_health_history?.length ?? 0) === 0 ? (
+                <div className="h-64 flex items-center justify-center text-sm text-slate-400">Not enough polling history yet.</div>
+              ) : (
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={summary?.fleet_health_history}>
+                      <defs>
+                        <linearGradient id="cpuFillL" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#06B6D4" stopOpacity={0.25} />
+                          <stop offset="95%" stopColor="#06B6D4" stopOpacity={0.01} />
+                        </linearGradient>
+                        <linearGradient id="memFillL" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} />
+                          <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.01} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                      <XAxis dataKey="timestamp" tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")} tick={{ fontSize: 10, fill: "#94A3B8" }} minTickGap={40} axisLine={false} tickLine={false} />
+                      <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: "#94A3B8" }} width={34} domain={[0, 100]} axisLine={false} tickLine={false} />
+                      <Tooltip
+                        contentStyle={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12 }}
+                        formatter={(v: number, name: string) => [`${v?.toFixed?.(1) ?? v}%`, name]}
+                        labelFormatter={(v) => (v ? new Date(v).toLocaleString() : "")}
+                      />
+                      <Area type="monotone" dataKey="avg_cpu" name="CPU" stroke="#06B6D4" fill="url(#cpuFillL)" strokeWidth={2} connectNulls />
+                      <Area type="monotone" dataKey="avg_memory" name="Memory" stroke="#8B5CF6" fill="url(#memFillL)" strokeWidth={2} connectNulls />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </Card>
+          ),
+
+          uplinks: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Uplinks &amp; WAN Links</p>
+                <Link to="/devices" className="text-xs text-brandblue font-medium hover:underline">All devices →</Link>
+              </div>
+              {(summary?.uplinks?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No devices tagged as WAN/uplink/core/edge yet.</p>
+              ) : (
+                <div className="space-y-4">
+                  {summary?.uplinks?.map((link, i) => (
+                    <div key={i}>
+                      <div className="flex justify-between items-center gap-2 text-sm mb-1.5">
+                        <span className="flex items-center gap-2 font-medium text-slate-700 truncate">
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${link.status === "online" ? "bg-emerald-500" : link.status === "offline" ? "bg-red-500" : "bg-slate-300"}`} />
+                          {link.hostname}
+                          <span className="text-slate-400 font-normal text-xs">{link.ip_address}</span>
+                        </span>
+                        <span className="text-slate-500 text-xs font-medium shrink-0">{link.utilization_pct.toFixed(0)}% util</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${link.utilization_pct >= 90 ? "bg-red-500" : link.utilization_pct >= 65 ? "bg-amber-500" : "bg-brandblue"}`}
+                          style={{ width: `${Math.min(link.utilization_pct, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          active_alerts: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Active Alerts</p>
+                <Link to="/alerts" className="text-xs text-brandblue font-medium hover:underline">View all →</Link>
+              </div>
+              {recentAlerts.length === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm font-semibold text-emerald-600">All clear</p>
+                  <p className="text-xs text-slate-400 mt-1">No active alerts right now.</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {recentAlerts.map((alert) => {
+                    const s = SEV_STYLES[alert.severity] || SEV_STYLES.info;
+                    return (
+                      <div key={alert.id} className={`flex gap-2.5 rounded-lg px-3 py-2 border ${s.bg}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${s.dot}`} />
+                        <div className="min-w-0">
+                          <p className={`text-[10px] font-semibold uppercase tracking-wide ${s.text}`}>{alert.category}</p>
+                          <p className="text-xs text-slate-700 truncate">{alert.message}</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">{timeAgo(alert.created_at)}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          ),
+
+          fleet_availability: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet Availability</p>
+                <span className="text-[11px] text-slate-300">last 24h</span>
+              </div>
+              {availability === null ? (
+                <div className="h-24 flex items-center justify-center text-sm text-slate-400">Loading…</div>
+              ) : availability.fleet_availability_pct === null ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">
+                  Not enough status history yet — availability builds up as devices are polled/pinged over time.
+                </p>
+              ) : (
+                <>
+                  <p
+                    className={`text-4xl font-bold mt-2 ${
+                      availability.fleet_availability_pct >= 99.9
+                        ? "text-emerald-600"
+                        : availability.fleet_availability_pct >= 99
+                        ? "text-amber-600"
+                        : "text-red-600"
+                    }`}
+                  >
+                    {availability.fleet_availability_label}
+                  </p>
+                  <p className="text-[11px] text-slate-400 mt-1 mb-4">
+                    {availability.devices_in_rollup} device{availability.devices_in_rollup === 1 ? "" : "s"} in rollup
+                  </p>
+                  {availability.worst_devices.length > 0 && (
+                    <div className="pt-3 border-t border-slate-100 space-y-1.5">
+                      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Lowest availability</p>
+                      {availability.worst_devices.slice(0, 4).map((d) => (
+                        <div key={d.device_id} className="flex items-center justify-between text-xs">
+                          <span className="text-slate-600 truncate">{d.hostname}</span>
+                          <span
+                            className={`font-semibold shrink-0 ml-2 ${
+                              d.availability_pct >= 99.9 ? "text-emerald-600" : d.availability_pct >= 99 ? "text-amber-600" : "text-red-600"
+                            }`}
+                          >
+                            {d.availability_pct.toFixed(2)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </Card>
+          ),
+
+          top_flapping_devices: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Flapping Devices</p>
+                <span className="text-[11px] text-slate-300">reachability + interface + drift · last 24h</span>
+              </div>
+              {unstableDevices.length === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm font-semibold text-emerald-600">Stable</p>
+                  <p className="text-xs text-slate-400 mt-1">No devices are flapping right now.</p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {unstableDevices.map((d) => {
+                    const maxScore = unstableDevices[0].instability_score || 1;
+                    const pct = Math.min((d.instability_score / maxScore) * 100, 100);
+                    return (
+                      <div key={d.device_id}>
+                        <div className="flex items-center justify-between text-sm mb-1">
+                          <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                          <span className="text-[11px] text-slate-400 shrink-0 ml-2">
+                            {d.reachability_flaps} reach · {d.interface_flaps} iface · {d.drift_events} drift
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${pct >= 66 ? "bg-red-500" : pct >= 33 ? "bg-amber-500" : "bg-brandblue"}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          ),
+
+          offline_devices: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Offline / Degraded Devices</p>
+                <Link to="/devices" className="text-xs text-brandblue font-medium hover:underline">All devices →</Link>
+              </div>
+              {(summary?.offline_devices?.length ?? 0) === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm font-semibold text-emerald-600">All reachable</p>
+                  <p className="text-xs text-slate-400 mt-1">No offline or degraded devices right now.</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {summary?.offline_devices?.map((d) => (
+                    <div key={d.id} className="flex items-start justify-between gap-2 text-sm">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${d.status === "offline" ? "bg-red-500" : "bg-amber-500"}`} />
+                          <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 ml-4 truncate">{d.ip_address}{d.last_error ? ` · ${d.last_error}` : ""}</p>
+                      </div>
+                      <span className="text-[11px] text-slate-400 shrink-0">{d.last_seen ? timeAgo(d.last_seen) : "never"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          top_interface_errors: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Interface Errors</p>
+                <span className="text-[11px] text-slate-300">by device</span>
+              </div>
+              {(summary?.top_error_devices?.length ?? 0) === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm font-semibold text-emerald-600">Clean</p>
+                  <p className="text-xs text-slate-400 mt-1">No interface errors on the latest poll.</p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {summary?.top_error_devices?.map((d, i) => (
+                    <div key={i} className="flex items-center justify-between text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
+                      </div>
+                      <span className="text-red-600 font-semibold text-xs shrink-0 ml-2">{d.interface_errors.toLocaleString()} errs</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          flapping_interfaces: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Flapping Interfaces</p>
+                <span className="text-[11px] text-slate-300">last 24h</span>
+              </div>
+              {(summary?.flapping_interfaces?.length ?? 0) === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm font-semibold text-emerald-600">Stable</p>
+                  <p className="text-xs text-slate-400 mt-1">No ports have flapped in the last 24h.</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {summary?.flapping_interfaces?.map((f, i) => (
+                    <div key={i} className="flex items-start justify-between gap-2 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{f.hostname}</span>
+                        <p className="text-[11px] text-slate-400 truncate">{f.interface}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="text-amber-600 font-semibold text-xs">{f.flap_count}×</span>
+                        <p className="text-[10px] text-slate-400">{f.last_change ? timeAgo(f.last_change) : ""}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          top_cpu_devices: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Top CPU Devices</p>
+              {(summary?.top_cpu_devices?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No metrics polled yet.</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {summary?.top_cpu_devices?.map((d, i) => (
+                    <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Sparkline values={d.cpu_history} color="#06B6D4" width={48} height={18} />
+                        <span className="font-semibold text-slate-800 text-xs w-10 text-right">{d.cpu.toFixed(0)}%</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          top_memory_devices: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Top Memory Devices</p>
+              {(summary?.top_memory_devices?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No metrics polled yet.</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {summary?.top_memory_devices?.map((d, i) => (
+                    <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Sparkline values={d.memory_history} color="#8B5CF6" width={48} height={18} />
+                        <span className="font-semibold text-slate-800 text-xs w-10 text-right">{d.memory.toFixed(0)}%</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          top_bandwidth_devices: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Top Bandwidth Devices</p>
+              {(summary?.top_bandwidth_devices?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No metrics polled yet.</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {summary?.top_bandwidth_devices?.map((d, i) => (
+                    <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Sparkline values={d.bandwidth_history} color="#0EA5E9" width={48} height={18} />
+                        <span className="font-semibold text-slate-800 text-xs w-10 text-right">{d.bandwidth.toFixed(0)}%</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          down_ports: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Down Ports</p>
+              {(summary?.down_ports?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No down ports right now.</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {summary?.down_ports?.map((p, i) => (
+                    <div key={i} className="flex items-start justify-between gap-2 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{p.hostname}</span>
+                        <p className="text-[11px] text-slate-400 truncate">{p.interface}</p>
+                      </div>
+                      <span className="text-[11px] text-slate-400 shrink-0">{p.down_since ? timeAgo(p.down_since) : ""}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          recent_reboots: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Recent Reboots</p>
+              {(summary?.recent_reboots?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No devices have restarted recently.</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {summary?.recent_reboots?.map((r, i) => (
+                    <div key={i} className="flex items-start justify-between gap-2 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{r.hostname}</span>
+                        <p className="text-[11px] text-slate-400 truncate">{r.ip_address}</p>
+                      </div>
+                      <span className="text-[11px] text-slate-400 shrink-0">up {Math.round(r.uptime_seconds / 60)}m</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          recent_backups: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Recent Backups</p>
+              {(summary?.recent_backups?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No config backups yet.</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {summary?.recent_backups?.map((b) => (
+                    <div key={b.id} className="flex items-center justify-between gap-2 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{b.hostname}</span>
+                        <span className="text-slate-400 font-normal text-xs ml-2">v{b.version}</span>
+                      </div>
+                      <span className="text-[11px] text-slate-400 shrink-0">{timeAgo(b.created_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ),
+
+          recent_protocol_operations: (
+            <Card className="p-6 h-full">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-4">Recent Protocol Operations</p>
+              {(summary?.recent_protocol_operations?.length ?? 0) === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No protocol operations recorded yet.</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {summary?.recent_protocol_operations?.map((op) => (
+                    <div key={op.id} className="flex items-center justify-between gap-2 text-sm">
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-700 truncate">{op.device_hostname}</span>
+                        <span className="text-slate-400 font-normal text-xs ml-2">{op.protocol.toUpperCase()} · {op.operation}</span>
+                      </div>
+                      <span className={`text-[11px] font-semibold shrink-0 ${op.success ? "text-emerald-600" : "text-red-600"}`}>
+                        {op.success ? "OK" : "Failed"}
                       </span>
                     </div>
                   ))}
                 </div>
               )}
-            </>
-          )}
-        </Card>
+            </Card>
+          ),
 
-        <Card className="p-6 xl:col-span-2">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Flapping Devices</p>
-            <span className="text-[11px] text-slate-300">reachability + interface + drift · last 24h</span>
-          </div>
-          {unstableDevices.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm font-semibold text-emerald-600">Stable</p>
-              <p className="text-xs text-slate-400 mt-1">No devices are flapping right now.</p>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {unstableDevices.map((d) => {
-                const maxScore = unstableDevices[0].instability_score || 1;
-                const pct = Math.min((d.instability_score / maxScore) * 100, 100);
-                return (
-                  <div key={d.device_id}>
-                    <div className="flex items-center justify-between text-sm mb-1">
-                      <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
-                      <span className="text-[11px] text-slate-400 shrink-0 ml-2">
-                        {d.reachability_flaps} reach · {d.interface_flaps} iface · {d.drift_events} drift
-                      </span>
-                    </div>
-                    <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${pct >= 66 ? "bg-red-500" : pct >= 33 ? "bg-amber-500" : "bg-brandblue"}`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </Card>
-      </div>
+          group_availability: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Group Availability <span className="text-slate-300 font-normal normal-case">· last poll per group</span></p>
+                <Link to="/groups" className="text-xs text-brandblue font-medium hover:underline">All groups →</Link>
+              </div>
+              {groupStats.length === 0 ? (
+                <p className="text-sm text-slate-400 italic py-6 text-center">No device groups yet. Create one from the Groups page.</p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {groupStats.map((g) => {
+                    const pct = g.total > 0 ? (g.online / g.total) * 100 : 0;
+                    const tone = pct >= 90 ? "text-emerald-600" : pct >= 50 ? "text-amber-600" : "text-red-600";
+                    const barTone = pct >= 90 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-500" : "bg-red-500";
+                    return (
+                      <div key={g.id} className="border border-slate-100 rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-semibold text-slate-700 truncate">{g.name}</span>
+                          <span className={`text-sm font-bold ${tone}`}>{pct.toFixed(0)}%</span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mb-2">{g.online}/{g.total} online</p>
+                        <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden mb-2">
+                          <div className={`h-full rounded-full ${barTone}`} style={{ width: `${pct}%` }} />
+                        </div>
+                        <div className="flex items-center gap-3 text-[11px] text-slate-400">
+                          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />{g.online} online</span>
+                          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" />{g.offline} offline</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          ),
+        };
 
-      {/* ---- Instant troubleshooting: offline devices, iface errors, port flaps ---- */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-6">
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Offline / Degraded Devices</p>
-            <Link to="/devices" className="text-xs text-brandblue font-medium hover:underline">All devices →</Link>
-          </div>
-          {(summary?.offline_devices?.length ?? 0) === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm font-semibold text-emerald-600">All reachable</p>
-              <p className="text-xs text-slate-400 mt-1">No offline or degraded devices right now.</p>
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {summary?.offline_devices?.map((d) => (
-                <div key={d.id} className="flex items-start justify-between gap-2 text-sm">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${d.status === "offline" ? "bg-red-500" : "bg-amber-500"}`} />
-                      <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 ml-4 truncate">{d.ip_address}{d.last_error ? ` · ${d.last_error}` : ""}</p>
-                  </div>
-                  <span className="text-[11px] text-slate-400 shrink-0">{d.last_seen ? timeAgo(d.last_seen) : "never"}</span>
+        const orderedIds = layout.length > 0 ? layout : availableWidgets.map((w) => ({ id: w.id, visible: w.default_visible }));
+
+        return (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-5 mb-6">
+            {orderedIds
+              .filter((entry) => entry.visible && widgetContent[entry.id])
+              .map((entry) => (
+                <div key={entry.id} className={WIDGET_SPAN[entry.id] || "md:col-span-2 xl:col-span-3"}>
+                  {widgetContent[entry.id]}
                 </div>
               ))}
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Interface Errors</p>
-            <span className="text-[11px] text-slate-300">by device</span>
           </div>
-          {(summary?.top_error_devices?.length ?? 0) === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm font-semibold text-emerald-600">Clean</p>
-              <p className="text-xs text-slate-400 mt-1">No interface errors on the latest poll.</p>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {summary?.top_error_devices?.map((d, i) => (
-                <div key={i} className="flex items-center justify-between text-sm">
-                  <div className="min-w-0">
-                    <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
-                    <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
-                  </div>
-                  <span className="text-red-600 font-semibold text-xs shrink-0 ml-2">{d.interface_errors.toLocaleString()} errs</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
+        );
+      })()}
 
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Flapping Interfaces</p>
-            <span className="text-[11px] text-slate-300">last 24h</span>
-          </div>
-          {(summary?.flapping_interfaces?.length ?? 0) === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm font-semibold text-emerald-600">Stable</p>
-              <p className="text-xs text-slate-400 mt-1">No ports have flapped in the last 24h.</p>
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {summary?.flapping_interfaces?.map((f, i) => (
-                <div key={i} className="flex items-start justify-between gap-2 text-sm">
-                  <div className="min-w-0">
-                    <span className="font-medium text-slate-700 truncate">{f.hostname}</span>
-                    <p className="text-[11px] text-slate-400 truncate">{f.interface}</p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <span className="text-amber-600 font-semibold text-xs">{f.flap_count}×</span>
-                    <p className="text-[10px] text-slate-400">{f.last_change ? timeAgo(f.last_change) : ""}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* ---- Group availability -------------------------------------------- */}
-      <Card className="p-6">
-        <div className="flex items-center justify-between mb-4">
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Group Availability <span className="text-slate-300 font-normal normal-case">· last poll per group</span></p>
-          <Link to="/groups" className="text-xs text-brandblue font-medium hover:underline">All groups →</Link>
-        </div>
-        {groupStats.length === 0 ? (
-          <p className="text-sm text-slate-400 italic py-6 text-center">No device groups yet. Create one from the Groups page.</p>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {groupStats.map((g) => {
-              const pct = g.total > 0 ? (g.online / g.total) * 100 : 0;
-              const tone = pct >= 90 ? "text-emerald-600" : pct >= 50 ? "text-amber-600" : "text-red-600";
-              const barTone = pct >= 90 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-500" : "bg-red-500";
-              return (
-                <div key={g.id} className="border border-slate-100 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm font-semibold text-slate-700 truncate">{g.name}</span>
-                    <span className={`text-sm font-bold ${tone}`}>{pct.toFixed(0)}%</span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mb-2">{g.online}/{g.total} online</p>
-                  <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden mb-2">
-                    <div className={`h-full rounded-full ${barTone}`} style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="flex items-center gap-3 text-[11px] text-slate-400">
-                    <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />{g.online} online</span>
-                    <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" />{g.offline} offline</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
+      {showCustomize && (
+        <DashboardCustomizePanel
+          layout={layout.length > 0 ? layout : availableWidgets.map((w) => ({ id: w.id, visible: w.default_visible }))}
+          availableWidgets={availableWidgets}
+          saving={savingLayout}
+          onClose={() => setShowCustomize(false)}
+          onSave={(next) => {
+            saveLayout(next);
+            setShowCustomize(false);
+          }}
+        />
+      )}
     </div>
   );
 }

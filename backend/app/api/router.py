@@ -24,6 +24,7 @@ from app.api import (
     health,
     incidents,
     jit_access,
+    jobs,
     maintenance_windows,
     metrics,
     notification,
@@ -50,6 +51,7 @@ api_router.include_router(change_requests.router)
 api_router.include_router(audit.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(deployments.router)
+api_router.include_router(jobs.router)
 api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)

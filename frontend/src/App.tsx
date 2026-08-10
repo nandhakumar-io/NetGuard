@@ -5,6 +5,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import ChangeRequests from "./pages/ChangeRequests";
 import Deployments from "./pages/Deployments";
+import Jobs from "./pages/Jobs";
 import Devices from "./pages/Devices";
 import Groups from "./pages/Groups";
 import AuditLog from "./pages/AuditLog";
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/change-requests" element={<ChangeRequests />} />
           <Route path="/deployments" element={<Deployments />} />
+          <Route path="/jobs" element={<Jobs />} />
           <Route path="/devices" element={<Devices />} />
           <Route path="/devices/config" element={<DeviceConfiguration />} />
           <Route path="/groups" element={<Groups />} />

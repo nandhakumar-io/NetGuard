@@ -14,6 +14,8 @@ const SECTION_META: Array<{ key: keyof Omit<GlobalSearchResponse, "query">; labe
   { key: "groups", label: "Groups", icon: "🗂️" },
   { key: "alerts", label: "Alerts", icon: "🚨" },
   { key: "change_requests", label: "Change Requests", icon: "📝" },
+  { key: "templates", label: "Config Templates", icon: "📄" },
+  { key: "incidents", label: "Incidents", icon: "🔥" },
   { key: "configs", label: "Config matches", icon: "🔎" },
 ];
 
@@ -120,7 +122,7 @@ export default function CommandPalette() {
               setActiveIndex(0);
             }}
             onKeyDown={onKeyDownInput}
-            placeholder="Search devices, groups, alerts, change requests, configs…"
+            placeholder="Search devices, groups, alerts, change requests, templates, incidents, configs…"
             className="flex-1 bg-transparent outline-none text-sm text-navy dark:text-white placeholder:text-slate-400"
           />
           {loading && <span className="text-[10px] text-slate-400">Searching…</span>}
@@ -129,7 +131,7 @@ export default function CommandPalette() {
         <div className="max-h-[60vh] overflow-y-auto py-2">
           {!query.trim() && (
             <p className="px-4 py-6 text-center text-xs text-slate-400">
-              Start typing to search across devices, groups, alerts, change requests, and configs.
+              Start typing to search across devices, groups, alerts, change requests, templates, incidents, and configs.
             </p>
           )}
           {query.trim() && results && flatResults.length === 0 && !loading && (

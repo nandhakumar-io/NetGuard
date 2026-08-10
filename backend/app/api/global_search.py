@@ -2,8 +2,9 @@
 
 Unifies the fleet's existing, separately-built search surfaces into one
 endpoint instead of introducing a fourth: device inventory lookup
-(hostname/IP/site, already how Devices.tsx filters client-side), Alert
-Center (category/message), Change Requests (description), and
+(hostname/IP/site, already how Devices.tsx filters client-side), device
+groups, Alert Center (category/message), Change Requests (description),
+Config Templates (name/description), Incidents (title/summary), and
 Configuration Search (app.api.config_search's line-grep across every
 device's decrypted running config). Each category is capped and returned
 separately so the frontend palette can group results under headers rather
@@ -22,8 +23,10 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.alert import Alert
 from app.models.change_request import ChangeRequest
+from app.models.config_template import ConfigTemplate
 from app.models.device import Device
 from app.models.device_group import DeviceGroup
+from app.models.incident import Incident
 
 router = APIRouter(prefix="/search", tags=["global-search"])
 
@@ -120,6 +123,40 @@ def global_search(
         for c in changes
     ]
 
+    templates = (
+        db.query(ConfigTemplate)
+        .filter(or_(ConfigTemplate.name.ilike(like), ConfigTemplate.description.ilike(like)))
+        .order_by(ConfigTemplate.name)
+        .limit(PER_CATEGORY_LIMIT)
+        .all()
+    )
+    template_results = [
+        {
+            "id": str(t.id),
+            "title": t.name,
+            "subtitle": t.description or (t.device_role and f"role: {t.device_role}") or "",
+            "url": f"/templates?template={t.id}",
+        }
+        for t in templates
+    ]
+
+    incidents = (
+        db.query(Incident)
+        .filter(or_(Incident.title.ilike(like), Incident.summary.ilike(like)))
+        .order_by(Incident.created_at.desc())
+        .limit(PER_CATEGORY_LIMIT)
+        .all()
+    )
+    incident_results = [
+        {
+            "id": str(i.id),
+            "title": i.title,
+            "subtitle": i.status.value if hasattr(i.status, "value") else str(i.status),
+            "url": f"/incidents?incident={i.id}",
+        }
+        for i in incidents
+    ]
+
     config_results: list[dict] = []
     if len(q) >= CONFIG_MIN_QUERY_LENGTH:
         config_results = _search_configs_brief(db, q, limit=CONFIG_MATCH_LIMIT)
@@ -130,6 +167,8 @@ def global_search(
         "groups": group_results,
         "alerts": alert_results,
         "change_requests": change_results,
+        "templates": template_results,
+        "incidents": incident_results,
         "configs": config_results,
     }
 

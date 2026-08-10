@@ -23,6 +23,7 @@ from app.models.config_template import (  # noqa: F401
     ConfigTemplate,
     ConfigTemplateVersion,
 )
+from app.models.dashboard_preference import DashboardPreference  # noqa: F401
 from app.models.deployment import (  # noqa: F401
     Deployment,
     DeploymentStatus,

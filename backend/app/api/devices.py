@@ -453,6 +453,52 @@ def bulk_device_action(
         affected = device_id_list
         detail = f"Created change request {cr.id} covering {len(affected)} device(s)"
 
+    elif payload.action == BulkDeviceAction.ROTATE_CREDENTIALS:
+        if not devices:
+            raise HTTPException(status_code=400, detail="No valid devices selected")
+
+        ssh_username = payload.params.get("ssh_username")
+        ssh_password = payload.params.get("ssh_password")
+        snmp_community = payload.params.get("snmp_community")
+        snmp_v3_auth_key = payload.params.get("snmp_v3_auth_key")
+        snmp_v3_priv_key = payload.params.get("snmp_v3_priv_key")
+
+        if (
+            ssh_username is None
+            and ssh_password is None
+            and snmp_community is None
+            and snmp_v3_auth_key is None
+            and snmp_v3_priv_key is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="At least one of ssh_username, ssh_password, snmp_community, "
+                "snmp_v3_auth_key, snmp_v3_priv_key is required",
+            )
+
+        rotated_ssh = ssh_username is not None or ssh_password is not None
+        rotated_snmp = snmp_community is not None or snmp_v3_auth_key is not None or snmp_v3_priv_key is not None
+
+        for device in devices:
+            if ssh_username is not None:
+                device.ssh_username = ssh_username
+            if ssh_password is not None:
+                credential_service.set_ssh_password(device, ssh_password)
+            if rotated_snmp:
+                credential_service.set_snmp_credentials(
+                    device,
+                    community=snmp_community,
+                    v3_auth_key=snmp_v3_auth_key,
+                    v3_priv_key=snmp_v3_priv_key,
+                )
+            affected.append(device.id)
+        db.commit()
+
+        rotated_what = ", ".join(
+            filter(None, [rotated_ssh and "SSH", rotated_snmp and "SNMP"])
+        )
+        detail = f"Rotated {rotated_what} credential(s) on {len(affected)} device(s)"
+
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported action: {payload.action}")
 

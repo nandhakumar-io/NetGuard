@@ -1,22 +1,32 @@
 import asyncio
 import contextlib
 import datetime
+import json
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
+from app.core.deps import get_current_user
 from app.models.alert import Alert, AlertSeverity
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.config_drift import ConfigDrift, DriftStatus
+from app.models.dashboard_preference import DashboardPreference
 from app.models.deployment import Deployment, DeploymentStatus
 from app.models.device import Device, DeviceStatus
 from app.models.device_metric import DeviceMetric
 from app.models.interface_status import InterfaceStatus
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
-from app.services import event_bus
+from app.models.user import User
+from app.schemas.dashboard_preference import (
+    DashboardLayoutEntry,
+    DashboardPreferenceRead,
+    DashboardPreferenceUpdate,
+    DashboardWidgetInfo,
+)
+from app.services import dashboard_widgets, event_bus
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -438,6 +448,65 @@ def _compute_summary(db: Session) -> dict:
         "recent_backups": recent_backups,
         "recent_protocol_operations": recent_protocol_operations,
     }
+
+
+@router.get("/preferences", response_model=DashboardPreferenceRead)
+def get_dashboard_preferences(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Returns this user's dashboard widget layout (which widgets show,
+    in what order) plus the full widget catalog so the frontend's
+    customize panel can render human-readable labels without hardcoding
+    the registry a second time. A user who has never customized
+    anything gets the registry's default layout back -- no row is
+    created until they actually save one via PUT.
+    """
+    pref = db.query(DashboardPreference).filter(DashboardPreference.user_id == current_user.id).first()
+    if pref is None:
+        layout = dashboard_widgets.default_layout()
+    else:
+        try:
+            saved = json.loads(pref.layout)
+        except (ValueError, TypeError):
+            saved = []
+        layout = dashboard_widgets.merge_layout(saved)
+
+    return DashboardPreferenceRead(
+        layout=[DashboardLayoutEntry(**e) for e in layout],
+        available_widgets=[
+            DashboardWidgetInfo(id=w.id, title=w.title, data_source=w.data_source, default_visible=w.default_visible)
+            for w in dashboard_widgets.DASHBOARD_WIDGETS
+        ],
+    )
+
+
+@router.put("/preferences", response_model=DashboardPreferenceRead)
+def set_dashboard_preferences(
+    payload: DashboardPreferenceUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Saves this user's widget selection/order. Reconciled through
+    dashboard_widgets.merge_layout before storing, so a stale client
+    payload referencing a since-removed widget id doesn't get persisted,
+    and any widget the client's payload omitted is appended rather than
+    silently dropped from the user's dashboard.
+    """
+    merged = dashboard_widgets.merge_layout([e.model_dump() for e in payload.layout])
+
+    pref = db.query(DashboardPreference).filter(DashboardPreference.user_id == current_user.id).first()
+    if pref is None:
+        pref = DashboardPreference(user_id=current_user.id, layout=json.dumps(merged))
+        db.add(pref)
+    else:
+        pref.layout = json.dumps(merged)
+    db.commit()
+
+    return DashboardPreferenceRead(
+        layout=[DashboardLayoutEntry(**e) for e in merged],
+        available_widgets=[
+            DashboardWidgetInfo(id=w.id, title=w.title, data_source=w.data_source, default_visible=w.default_visible)
+            for w in dashboard_widgets.DASHBOARD_WIDGETS
+        ],
+    )
 
 
 @router.get("/summary")

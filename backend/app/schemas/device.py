@@ -370,6 +370,7 @@ class BulkDeviceAction(str, enum.Enum):
     SET_LIFECYCLE_STATE = "set_lifecycle_state"
     APPLY_CONFIG_TEMPLATE = "apply_config_template"
     ADD_MAINTENANCE_WINDOW = "add_maintenance_window"
+    ROTATE_CREDENTIALS = "rotate_credentials"
 
 
 class BulkDeviceActionRequest(BaseModel):
@@ -387,6 +388,14 @@ class BulkDeviceActionRequest(BaseModel):
       - add_maintenance_window: {"name": "...", "reason": "...",
         "start": "<iso datetime>", "end": "<iso datetime>"} -- creates one
         DEVICE-scoped MaintenanceWindow per selected device.
+      - rotate_credentials: {"ssh_password": "...", "ssh_username": "...",
+        "snmp_community": "...", "snmp_v3_auth_key": "...",
+        "snmp_v3_priv_key": "..."} -- sets the same new secret(s) on every
+        selected device (Fernet-encrypted at rest via credential_service,
+        same as the single-device ssh-credentials/snmp-credentials
+        endpoints). Only the fields present are rotated; omit a field to
+        leave that credential untouched on every device. Pass "" for a
+        field to explicitly clear it fleet-wide instead of setting it.
     """
 
     device_ids: list[uuid.UUID]

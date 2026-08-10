@@ -531,6 +531,25 @@ export interface DashboardSummary {
   recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
 }
 
+// --- Dashboard widget customization ---
+
+export interface DashboardWidgetInfo {
+  id: string;
+  title: string;
+  data_source: string;
+  default_visible: boolean;
+}
+
+export interface DashboardLayoutEntry {
+  id: string;
+  visible: boolean;
+}
+
+export interface DashboardPreferenceResponse {
+  layout: DashboardLayoutEntry[];
+  available_widgets: DashboardWidgetInfo[];
+}
+
 // --- Alert System ---
 
 export type AlertSeverity = "critical" | "warning" | "info";
@@ -843,6 +862,8 @@ export interface GlobalSearchResponse {
   groups: GlobalSearchResultItem[];
   alerts: GlobalSearchResultItem[];
   change_requests: GlobalSearchResultItem[];
+  templates: GlobalSearchResultItem[];
+  incidents: GlobalSearchResultItem[];
   configs: GlobalSearchResultItem[];
 }
 
