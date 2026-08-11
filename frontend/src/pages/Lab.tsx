@@ -267,8 +267,8 @@ export default function Lab() {
                 )}
                 {nodesError && <p className="text-riskcrit text-xs">{nodesError}</p>}
 
-                <div className="overflow-hidden rounded-xl border border-slate-200">
-                  <table className="w-full text-sm">
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="w-full text-sm min-w-[560px]">
                     <thead className="bg-navy text-white">
                       <tr>
                         <th className="text-left px-4 py-3 font-semibold">Node</th>

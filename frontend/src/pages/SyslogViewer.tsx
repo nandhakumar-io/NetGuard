@@ -184,7 +184,7 @@ export default function SyslogViewer() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search message text…"
-          className="flex-1 min-w-[200px] text-xs font-medium border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 bg-white dark:bg-slate-900 text-navy dark:text-white"
+          className="flex-1 min-w-[140px] sm:min-w-[200px] text-xs font-medium border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 bg-white dark:bg-slate-900 text-navy dark:text-white"
         />
       </div>
 
@@ -205,12 +205,17 @@ export default function SyslogViewer() {
             {messages.map((m) => {
               const cfg = SEVERITY_CONFIG[m.severity] || SEVERITY_CONFIG.INFORMATIONAL;
               return (
-                <div key={m.id} className="flex gap-3 px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors">
-                  <span
-                    className={`shrink-0 text-[10px] font-black uppercase tracking-wide px-2 py-1 rounded ${cfg.bg} ${cfg.color} w-20 text-center h-fit`}
-                  >
-                    {cfg.label}
-                  </span>
+                <div key={m.id} className="flex flex-col sm:flex-row gap-1.5 sm:gap-3 px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors">
+                  <div className="flex items-center gap-2 sm:contents">
+                    <span
+                      className={`shrink-0 text-[10px] font-black uppercase tracking-wide px-2 py-1 rounded ${cfg.bg} ${cfg.color} sm:w-20 text-center h-fit`}
+                    >
+                      {cfg.label}
+                    </span>
+                    <span className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 sm:hidden ml-auto">
+                      {timeAgo(m.received_at)}
+                    </span>
+                  </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs font-bold text-navy dark:text-white">
@@ -225,7 +230,7 @@ export default function SyslogViewer() {
                     </div>
                     <p className="text-[13px] text-slate-700 dark:text-slate-300 font-mono break-words mt-0.5">{m.message}</p>
                   </div>
-                  <span className="shrink-0 text-[11px] font-semibold text-slate-400 dark:text-slate-500 pt-0.5">
+                  <span className="hidden sm:block shrink-0 text-[11px] font-semibold text-slate-400 dark:text-slate-500 pt-0.5">
                     {timeAgo(m.received_at)}
                   </span>
                 </div>

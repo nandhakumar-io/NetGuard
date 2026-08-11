@@ -350,8 +350,8 @@ export default function DriftPage() {
                 No device has drifted from its golden config in the last {weeklyReport.days} days.
               </p>
             ) : weeklyReport ? (
-              <div className="overflow-hidden border border-slate-200 rounded-lg">
-                <table className="w-full text-sm">
+              <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                <table className="w-full text-sm min-w-[560px]">
                   <thead className="bg-slate-50">
                     <tr>
                       <th className="text-left px-4 py-2 font-semibold text-slate-500 text-xs uppercase">Device</th>
@@ -575,8 +575,8 @@ export default function DriftPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden self-start">
-          <table className="w-full text-sm">
+        <div className="bg-white border border-slate-200 rounded-xl overflow-x-auto self-start">
+          <table className="w-full text-sm min-w-[560px]">
             <thead className="bg-navy text-white">
               <tr>
                 <th className="text-left px-4 py-3 font-semibold">Device</th>

@@ -150,8 +150,8 @@ export default function FirmwareUpgradesPage() {
 
       {error && <div className="p-3 bg-red-50 text-red-700 rounded-md text-sm">{error}</div>}
 
-      <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm min-w-[640px]">
           <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
             <tr>
               <th className="text-left px-4 py-3">Device</th>

@@ -260,7 +260,8 @@ export default function JitAccess() {
         ) : mine.length === 0 ? (
           <p className="text-xs text-slate-400">No elevation requests yet.</p>
         ) : (
-          <table className="w-full text-xs">
+          <div className="overflow-x-auto">
+          <table className="w-full text-xs min-w-[480px]">
             <thead>
               <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-700">
                 <th className="py-1.5 pr-2">Role</th>
@@ -304,6 +305,7 @@ export default function JitAccess() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -314,7 +316,8 @@ export default function JitAccess() {
           {all.length === 0 ? (
             <p className="text-xs text-slate-400">No elevations on record.</p>
           ) : (
-            <table className="w-full text-xs">
+            <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[560px]">
               <thead>
                 <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-700">
                   <th className="py-1.5 pr-2">User</th>
@@ -354,6 +357,7 @@ export default function JitAccess() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       )}

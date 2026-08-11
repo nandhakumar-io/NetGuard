@@ -918,8 +918,8 @@ export default function ChangeRequests() {
       </div>
 
       {queueTab === "queue" && (
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mt-3 mb-3">
-          <table className="w-full text-sm">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-x-auto mt-3 mb-3">
+          <table className="w-full text-sm min-w-[720px]">
             <thead className="bg-navy dark:bg-slate-950 text-white">
               <tr>
                 <th className="text-left px-4 py-3 font-semibold">Device</th>
@@ -1014,8 +1014,8 @@ export default function ChangeRequests() {
 
       <div className={queueTab === "queue" ? "grid grid-cols-1 gap-6" : "grid grid-cols-1 lg:grid-cols-2 gap-6"}>
         {queueTab === "all" && (
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden self-start">
-          <table className="w-full text-sm">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-x-auto self-start">
+          <table className="w-full text-sm min-w-[560px]">
             <thead className="bg-navy dark:bg-slate-950 text-white">
               <tr>
                 <th className="text-left px-4 py-3 font-semibold">Device</th>

@@ -99,8 +99,8 @@ export default function RbacAudit() {
       </div>
 
       <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400 mb-3">Permission Matrix</h2>
-      <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl overflow-hidden mb-8">
-        <table className="w-full text-sm">
+      <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl overflow-x-auto mb-8">
+        <table className="w-full text-sm min-w-[700px]">
           <thead className="bg-navy text-white">
             <tr>
               <th className="text-left px-4 py-3 font-semibold">Resource</th>
@@ -144,8 +144,8 @@ export default function RbacAudit() {
         </select>
       </div>
 
-      <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl overflow-x-auto">
+        <table className="w-full text-sm min-w-[560px]">
           <thead className="bg-navy text-white">
             <tr>
               <th className="text-left px-4 py-3 font-semibold">User</th>

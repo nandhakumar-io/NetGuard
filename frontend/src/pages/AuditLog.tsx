@@ -98,8 +98,8 @@ export default function AuditLog() {
         </button>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+        <table className="w-full text-sm min-w-[700px]">
           <thead className="bg-navy text-white">
             <tr>
               <th className="text-left px-4 py-3 font-semibold">Time</th>

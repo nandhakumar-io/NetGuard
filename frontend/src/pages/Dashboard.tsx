@@ -54,8 +54,8 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 function Gauge({ label, value, color }: { label: string; value: number; color: string }) {
   const data = [{ value: Math.max(0, Math.min(value, 100)) }];
   return (
-    <div className="flex flex-col items-center">
-      <div className="w-24 h-16 relative">
+    <div className="flex flex-col items-center min-w-0 w-full">
+      <div className="w-full max-w-24 h-16 relative">
         <ResponsiveContainer width="100%" height="100%">
           <RadialBarChart
             innerRadius="70%"

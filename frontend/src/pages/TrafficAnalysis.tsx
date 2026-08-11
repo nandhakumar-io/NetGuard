@@ -223,11 +223,11 @@ export default function TrafficAnalysis() {
       </div>
 
       {/* Top conversations */}
-      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-x-auto">
         <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide p-5 pb-3">
           Top conversations
         </p>
-        <table className="w-full text-sm">
+        <table className="w-full text-sm min-w-[600px]">
           <thead>
             <tr className="text-left text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide border-y border-slate-100 dark:border-slate-700">
               <th className="px-5 py-2">Source</th>
@@ -260,11 +260,11 @@ export default function TrafficAnalysis() {
       </div>
 
       {/* Exporters */}
-      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-x-auto">
         <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide p-5 pb-3">
           Flow exporters
         </p>
-        <table className="w-full text-sm">
+        <table className="w-full text-sm min-w-[520px]">
           <thead>
             <tr className="text-left text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide border-y border-slate-100 dark:border-slate-700">
               <th className="px-5 py-2">Exporter</th>

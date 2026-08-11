@@ -173,8 +173,8 @@ export default function Incidents() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-5">
-        <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl overflow-x-auto">
+          <table className="w-full text-sm min-w-[600px]">
             <thead className="bg-navy text-white">
               <tr>
                 <th className="text-left px-4 py-3 font-semibold">Title</th>

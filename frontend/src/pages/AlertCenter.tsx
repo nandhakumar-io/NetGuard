@@ -521,7 +521,7 @@ export default function AlertCenter() {
       </div>
 
       {/* NOC Summary Bar */}
-      <div className="grid grid-cols-3 gap-4 mt-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
         <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-4 shadow-sm flex items-center gap-3">
           <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-lg font-bold ${nocUnreachable > 0 ? "bg-red-100 dark:bg-red-950/40 text-riskcrit" : "bg-green-50 dark:bg-green-950/30 text-risklow"}`}>
             {nocUnreachable > 0 ? "🔴" : "✅"}
@@ -989,8 +989,8 @@ export default function AlertCenter() {
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Create rules to automatically fire alerts based on device metrics thresholds.</p>
             </div>
           ) : (
-            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
-              <table className="w-full">
+            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-x-auto">
+              <table className="w-full min-w-[720px]">
                 <thead className="bg-slate-50 dark:bg-slate-900">
                   <tr>
                     <th className="text-left px-5 py-3 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Rule</th>
@@ -1108,13 +1108,13 @@ export default function AlertCenter() {
           )}
 
           {/* Policy List */}
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-x-auto">
             {policiesLoading ? (
               <div className="p-8 text-center text-sm text-slate-400">Loading…</div>
             ) : policies.length === 0 ? (
               <div className="p-8 text-center text-sm text-slate-400">No escalation policies yet — unacknowledged alerts won't be escalated to a secondary contact.</div>
             ) : (
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[700px]">
                 <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-bold uppercase tracking-wider text-slate-400">
                   <tr>
                     <th className="text-left px-4 py-2.5">Name</th>
@@ -1156,11 +1156,11 @@ export default function AlertCenter() {
           {/* Escalation Log */}
           <div>
             <h2 className="text-sm font-bold text-navy dark:text-white uppercase tracking-wider mb-3">Escalation Log</h2>
-            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-x-auto">
               {escalationLog.length === 0 ? (
                 <div className="p-8 text-center text-sm text-slate-400">Nothing has been escalated yet.</div>
               ) : (
-                <table className="w-full text-sm">
+                <table className="w-full text-sm min-w-[500px]">
                   <thead className="bg-slate-50 dark:bg-slate-900/50 text-[11px] font-bold uppercase tracking-wider text-slate-400">
                     <tr>
                       <th className="text-left px-4 py-2.5">Alert</th>
