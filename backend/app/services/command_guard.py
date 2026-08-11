@@ -7,8 +7,8 @@ resulting command matches a destructive pattern (like 'reload'), it blocks
 the newline from being forwarded to the device, leaving the command untriggered,
 and returns the blocked rule to the caller so they can surface a warning.
 """
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 OVERRIDE_TOKEN = "FORCE"
 
@@ -33,13 +33,13 @@ def feed_keystroke(state: LineGuardState, data: str) -> tuple[str, str | None, s
     for char in data:
         if char in ("\r", "\n"):
             command = state._line.strip()
-            
+
             matched_rule = None
             for p, rule_name in _DESTRUCTIVE_RULES:
                 if p.search(command):
                     matched_rule = rule_name
                     break
-            
+
             if matched_rule:
                 if command.endswith(OVERRIDE_TOKEN):
                     state.forwarded_override_count += 1
@@ -49,7 +49,7 @@ def feed_keystroke(state: LineGuardState, data: str) -> tuple[str, str | None, s
                     # do not forward the newline character!
             else:
                 to_forward += char
-            
+
             state._line = ""
         elif char in ("\b", "\x7f"):
             if state._line:
