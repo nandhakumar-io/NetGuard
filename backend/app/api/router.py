@@ -7,6 +7,7 @@ from app.api import (
     audit,
     auth,
     change_requests,
+    chatops,
     compliance_baselines,
     config_intents,
     config_management,
@@ -20,6 +21,7 @@ from app.api import (
     escalation_policies,
     firmware_upgrades,
     flows,
+    gitops,
     global_search,
     gns3,
     health,
@@ -77,3 +79,5 @@ api_router.include_router(firmware_upgrades.router)
 api_router.include_router(flows.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(config_intents.router)
+api_router.include_router(chatops.router)
+api_router.include_router(gitops.router)

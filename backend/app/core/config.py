@@ -82,6 +82,22 @@ class Settings(BaseSettings):
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None
 
+    # Two-way ChatOps (FR: approve/reject a change request, trigger a
+    # rollback, query device status from Slack/Teams instead of the UI).
+    # SLACK_SIGNING_SECRET verifies every inbound Slack request (slash
+    # command + interactive button click) came from Slack, per Slack's
+    # request-signing scheme -- required for /chatops/slack/* to accept
+    # anything. SLACK_BOT_TOKEN (xoxb-...) is only needed if you want
+    # NetGuard to edit the original message in place (e.g. swap the
+    # Approve/Reject buttons for "Approved by Priya"); without it,
+    # NetGuard still replies, just as a new message via response_url.
+    SLACK_SIGNING_SECRET: str | None = None
+    SLACK_BOT_TOKEN: str | None = None
+    # Shared secret configured on a Microsoft Teams "Outgoing Webhook"
+    # connector (Teams calls this the HMAC security token). Every inbound
+    # POST /chatops/teams/commands is HMAC-SHA256-verified against it.
+    TEAMS_OUTGOING_WEBHOOK_SECRET: str | None = None
+
     # Telegram Bot API integration (FR-11 extension). TELEGRAM_BOT_TOKEN
     # is the bot token from @BotFather; TELEGRAM_CHAT_ID is the chat/group
     # ID to send notifications to. Both must be set for Telegram delivery
@@ -231,6 +247,12 @@ class Settings(BaseSettings):
     # under the smallest realistic unack_minutes) so an escalation fires
     # close to the threshold instead of up to a full sweep interval late.
     ESCALATION_SWEEP_INTERVAL_SECONDS: int = 60
+
+    # GitOps (config-as-code): how often the periodic safety-net re-pull
+    # (app.tasks.run_gitops_auto_sync_sweep_task) runs, independent of any
+    # webhook. Webhook-triggered syncs happen immediately regardless of
+    # this interval.
+    GITOPS_AUTO_SYNC_INTERVAL_SECONDS: int = 900
     REACHABILITY_PING_TIMEOUT_SECONDS: float = 1.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
 

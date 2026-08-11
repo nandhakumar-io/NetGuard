@@ -49,6 +49,11 @@ from app.models.firmware_upgrade import (  # noqa: F401
     FirmwareUpgrade,
     FirmwareUpgradeStatus,
 )
+from app.models.git_repo_config import (  # noqa: F401
+    GitRepoConfig,
+    GitSyncDirection,
+    GitSyncStatus,
+)
 from app.models.golden_config import GoldenConfig  # noqa: F401
 from app.models.interface_metric import InterfaceMetric  # noqa: F401
 from app.models.interface_status import (  # noqa: F401

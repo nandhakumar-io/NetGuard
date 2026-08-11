@@ -131,6 +131,13 @@ celery_app.conf.update(
             "task": "app.tasks.run_escalation_sweep_task",
             "schedule": float(settings.ESCALATION_SWEEP_INTERVAL_SECONDS),
         },
+        # GitOps: safety-net periodic re-pull for any auto_sync_enabled
+        # repo, in case its webhook was never configured or a delivery
+        # failed -- see app.tasks.run_gitops_auto_sync_sweep_task.
+        "gitops-auto-sync-sweep": {
+            "task": "app.tasks.run_gitops_auto_sync_sweep_task",
+            "schedule": float(settings.GITOPS_AUTO_SYNC_INTERVAL_SECONDS),
+        },
     },
 )
 

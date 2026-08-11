@@ -63,6 +63,7 @@ const groups: NavGroup[] = [
       { to: "/jit-access", label: "JIT Access" },
       { to: "/audit-log", label: "Audit Log" },
       { to: "/rbac-audit", label: "RBAC Audit" },
+      { to: "/integrations", label: "Integrations" },
     ],
   },
   {

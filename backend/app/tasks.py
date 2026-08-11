@@ -566,3 +566,67 @@ def run_escalation_sweep_task() -> int:
         return escalation_service.run_escalation_sweep(db)
     finally:
         db.close()
+
+
+# --- GitOps sync ---------------------------------------------------------
+
+
+@celery_app.task(
+    name="app.tasks.git_repo_sync_task",
+    bind=True,
+    # Network I/O against an external Git host -- worth a couple of
+    # retries on a transient clone/fetch failure, same rationale as the
+    # SNMP/reachability tasks above. git_sync_service itself never raises
+    # out of sync_repo (failures are recorded on the row), so this only
+    # covers a crash in the task plumbing itself (e.g. DB hiccup).
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 2},
+)
+def git_repo_sync_task(self, repo_id: str) -> dict:
+    """Entry point for both a manual sync (POST /gitops/repos/{id}/sync)
+    and a webhook-triggered sync (POST /gitops/webhook/{id} on a push to
+    the watched branch). Runs off the request thread since a clone/fetch
+    against a real Git host can take longer than an HTTP client wants to
+    wait.
+    """
+    from app.models.git_repo_config import GitRepoConfig
+    from app.services import git_sync_service
+
+    db = SessionLocal()
+    try:
+        repo = db.get(GitRepoConfig, uuid.UUID(repo_id))
+        if repo is None:
+            return {"error": "repo not found"}
+        return git_sync_service.sync_repo(db, repo)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_gitops_auto_sync_sweep_task")
+def run_gitops_auto_sync_sweep_task() -> int:
+    """Celery beat entry point: periodically re-pulls every
+    auto_sync_enabled GitRepoConfig with a PULL/BIDIRECTIONAL direction,
+    as a safety net for teams that haven't wired up a repo webhook (or
+    whose webhook delivery failed) -- the same behavior a webhook trigger
+    gets, just on a timer instead of on push. Returns how many repos were
+    swept.
+    """
+    from app.models.git_repo_config import GitRepoConfig, GitSyncDirection
+    from app.services import git_sync_service
+
+    db = SessionLocal()
+    try:
+        repos = (
+            db.query(GitRepoConfig)
+            .filter(
+                GitRepoConfig.auto_sync_enabled == True,  # noqa: E712
+                GitRepoConfig.direction.in_([GitSyncDirection.PULL, GitSyncDirection.BIDIRECTIONAL]),
+            )
+            .all()
+        )
+        for repo in repos:
+            git_sync_service.sync_repo(db, repo)
+        return len(repos)
+    finally:
+        db.close()

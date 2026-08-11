@@ -13,6 +13,7 @@ from app.models.config_template import (
     ConfigTemplateVersion,
     TemplateVersionStatus,
 )
+from app.models.git_repo_config import GitRepoConfig, GitSyncDirection, GitSyncStatus
 from app.models.golden_config import GoldenConfig
 from app.models.user import User, UserRole
 from app.schemas.config_template import (
@@ -30,6 +31,7 @@ from app.schemas.config_template import (
 from app.services import (
     config_format_service,
     diff_engine,
+    git_sync_service,
     snapshot_service,
     template_service,
 )
@@ -283,6 +285,28 @@ def approve_template_version(
 
     db.commit()
     db.refresh(version)
+
+    # GitOps mirror (config-as-code): best-effort push of the newly
+    # published version to every PUSH/BIDIRECTIONAL repo. Never blocks or
+    # fails the approval itself -- NetGuard's own record of what's
+    # published is authoritative regardless of whether the repo mirror
+    # commit succeeds; a failure is recorded on the repo row (surfaced in
+    # the GitOps settings page) rather than raised here.
+    push_repos = (
+        db.query(GitRepoConfig)
+        .filter(GitRepoConfig.direction.in_([GitSyncDirection.PUSH, GitSyncDirection.BIDIRECTIONAL]))
+        .all()
+    )
+    for repo in push_repos:
+        try:
+            git_sync_service.push_template_version(db, repo, row, version)
+            repo.last_sync_status = GitSyncStatus.SUCCEEDED
+            repo.last_sync_error = None
+        except git_sync_service.GitSyncError as exc:
+            repo.last_sync_status = GitSyncStatus.FAILED
+            repo.last_sync_error = str(exc)
+        db.commit()
+
     return ConfigTemplateVersionRead.from_orm_row(version)
 
 

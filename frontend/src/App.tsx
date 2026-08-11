@@ -26,6 +26,7 @@ import Incidents from "./pages/Incidents";
 import RbacAudit from "./pages/RbacAudit";
 import JitAccess from "./pages/JitAccess";
 import Insights from "./pages/Insights";
+import IntegrationsPage from "./pages/Integrations";
 
 export default function App() {
   return (
@@ -57,6 +58,7 @@ export default function App() {
           <Route path="/lab" element={<Lab />} />
           <Route path="/audit-log" element={<AuditLog />} />
           <Route path="/security" element={<Security />} />
+          <Route path="/integrations" element={<IntegrationsPage />} />
         </Route>
       </Route>
     </Routes>

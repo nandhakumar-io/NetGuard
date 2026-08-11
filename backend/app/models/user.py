@@ -29,4 +29,12 @@ class User(Base):
     mfa_secret = Column(String, nullable=True)  # TOTP secret; set on /mfa/setup, unused until enabled
     mfa_enabled = Column(String, default="false")  # "true" / "false" -- string for SQLite/Postgres portability
 
+    # ChatOps identity links (FR: two-way Slack/Teams). Populated only via
+    # POST /chatops/links by a Network Admin -- never self-service from an
+    # unauthenticated Slack/Teams message, since that would let anyone who
+    # can DM the bot claim to be any NetGuard user. Nullable/unique: a
+    # given Slack or Teams account maps to at most one NetGuard user.
+    slack_user_id = Column(String, unique=True, index=True, nullable=True)
+    msteams_user_id = Column(String, unique=True, index=True, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
