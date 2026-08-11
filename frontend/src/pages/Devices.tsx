@@ -19,6 +19,8 @@ import {
   HealthCheckCatalogEntry,
   FleetHealthSummary,
   RollbackPreviewResponse,
+  RollbackSection,
+  PartialRollbackPreviewResponse,
   RetentionPolicyResponse,
   DeviceLifecycleState,
   DeviceCsvImportResult,
@@ -1695,6 +1697,60 @@ export default function Devices() {
   const [rollbackPreviewLoading, setRollbackPreviewLoading] = useState(false);
   const [rollbackPreviewError, setRollbackPreviewError] = useState<string | null>(null);
 
+  // Section-level (partial) rollback: an alternate mode of the same modal.
+  // "full" restores the entire snapshot (unchanged, existing behavior);
+  // "partial" restores only one section (an ACL, VLAN, interface, ...) of
+  // it, leaving the rest of the device's current config untouched.
+  const [rollbackMode, setRollbackMode] = useState<"full" | "partial">("full");
+  const [rollbackSections, setRollbackSections] = useState<RollbackSection[] | null>(null);
+  const [rollbackSectionsLoading, setRollbackSectionsLoading] = useState(false);
+  const [rollbackSectionsError, setRollbackSectionsError] = useState<string | null>(null);
+  const [rollbackSectionKey, setRollbackSectionKey] = useState<string>("");
+  const [partialRollbackPreview, setPartialRollbackPreview] = useState<PartialRollbackPreviewResponse | null>(null);
+  const [partialRollbackPreviewLoading, setPartialRollbackPreviewLoading] = useState(false);
+  const [partialRollbackPreviewError, setPartialRollbackPreviewError] = useState<string | null>(null);
+
+  // Reset to "full" mode and clear section state each time a new rollback
+  // target is picked, and load that device's revertible sections so the
+  // "Section-level" tab has something to offer as soon as it's clicked.
+  useEffect(() => {
+    setRollbackMode("full");
+    setRollbackSectionKey("");
+    setRollbackSections(null);
+    setPartialRollbackPreview(null);
+    setPartialRollbackPreviewError(null);
+    if (!rollbackTarget) return;
+    setRollbackSectionsLoading(true);
+    setRollbackSectionsError(null);
+    api
+      .get<RollbackSection[]>(`/devices/${rollbackTarget.device.id}/rollback/sections`)
+      .then((res) => setRollbackSections(res.data))
+      .catch((err) => setRollbackSectionsError(err?.response?.data?.detail || "Failed to load revertible sections."))
+      .finally(() => setRollbackSectionsLoading(false));
+  }, [rollbackTarget?.device.id]);
+
+  // Partial rollback preview: fetched as soon as both a snapshot and a
+  // section are chosen in "Section-level" mode.
+  useEffect(() => {
+    if (rollbackMode !== "partial" || !rollbackTarget || !rollbackSectionKey) {
+      setPartialRollbackPreview(null);
+      setPartialRollbackPreviewError(null);
+      return;
+    }
+    setPartialRollbackPreviewLoading(true);
+    setPartialRollbackPreviewError(null);
+    setPartialRollbackPreview(null);
+    api
+      .get<PartialRollbackPreviewResponse>(`/devices/${rollbackTarget.device.id}/rollback/partial/preview`, {
+        params: { snapshot_id: rollbackTarget.snapshot.id, section_key: rollbackSectionKey },
+      })
+      .then((res) => setPartialRollbackPreview(res.data))
+      .catch((err) =>
+        setPartialRollbackPreviewError(err?.response?.data?.detail || "Failed to load partial rollback preview.")
+      )
+      .finally(() => setPartialRollbackPreviewLoading(false));
+  }, [rollbackMode, rollbackTarget?.device.id, rollbackTarget?.snapshot.id, rollbackSectionKey]);
+
   useEffect(() => {
     if (!rollbackTarget) {
       setRollbackPreview(null);
@@ -1949,13 +2005,21 @@ export default function Devices() {
 
   const confirmRollback = async () => {
     if (!rollbackTarget) return;
+    if (rollbackMode === "partial" && !rollbackSectionKey) return;
     setRollbackSubmitting(true);
     setRollbackError(null);
     try {
-      const res = await api.post(`/devices/${rollbackTarget.device.id}/rollback`, {
-        snapshot_id: rollbackTarget.snapshot.id,
-        reason: rollbackReason || undefined,
-      });
+      const res =
+        rollbackMode === "partial"
+          ? await api.post(`/devices/${rollbackTarget.device.id}/rollback/partial`, {
+              snapshot_id: rollbackTarget.snapshot.id,
+              section_key: rollbackSectionKey,
+              reason: rollbackReason || undefined,
+            })
+          : await api.post(`/devices/${rollbackTarget.device.id}/rollback`, {
+              snapshot_id: rollbackTarget.snapshot.id,
+              reason: rollbackReason || undefined,
+            });
       setRollbackNotice(
         `${res.data.message} (change request ${String(res.data.change_request_id).slice(0, 8)})`
       );
@@ -2983,54 +3047,151 @@ export default function Devices() {
         <div className="fixed inset-0 bg-navy/60 backdrop-blur-sm flex items-center justify-center z-50 px-4">
           <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full p-6 max-h-[85vh] overflow-y-auto">
             <h3 className="text-xl font-bold text-navy dark:text-white">Roll back {rollbackTarget.device.hostname}?</h3>
-            <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">
-              This triggers a full pipeline redeployment restoring snapshot <span className="font-mono font-bold">v{rollbackTarget.snapshot.version}</span> (
-              {new Date(rollbackTarget.snapshot.created_at).toLocaleString()}). 
-            </p>
 
-            <div className="mt-4">
-              <h4 className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wide mb-2">
-                Preview: What This Rollback Will Change
-              </h4>
-              {rollbackPreviewLoading ? (
-                <p className="text-xs text-slate-400">Loading preview…</p>
-              ) : rollbackPreviewError ? (
-                <p className="text-xs text-riskcrit">{rollbackPreviewError}</p>
-              ) : rollbackPreview ? (
-                <div>
-                  {rollbackPreview.warning && (
-                    <p className="text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 mb-2">
-                      {rollbackPreview.warning}
-                    </p>
-                  )}
-                  {rollbackPreview.blocked && (
-                    <p className="text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 mb-2 font-semibold">
-                      {rollbackPreview.blocked_reason}
-                    </p>
-                  )}
-                  {rollbackPreview.identical ? (
-                    <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/20 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2">
-                      No difference -- the live configuration already matches this snapshot.
-                    </p>
-                  ) : (
-                    <>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 font-mono">
-                        +{rollbackPreview.added_lines}/-{rollbackPreview.removed_lines} lines · comparing{" "}
-                        {rollbackPreview.current_source === "live"
-                          ? "live configuration"
-                          : rollbackPreview.current_source === "last_snapshot"
-                          ? "most recent snapshot"
-                          : "nothing (no baseline available)"}{" "}
-                        against v{rollbackPreview.target_version}
-                      </p>
-                      <div className="max-h-64 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
-                        <ConfigDiff diffText={rollbackPreview.diff} />
-                      </div>
-                    </>
-                  )}
-                </div>
-              ) : null}
+            <div className="flex gap-2 mt-4 border-b border-slate-200 dark:border-slate-700">
+              <button
+                onClick={() => setRollbackMode("full")}
+                className={`px-3 py-2 text-xs font-bold uppercase tracking-wide border-b-2 -mb-px transition-colors ${
+                  rollbackMode === "full"
+                    ? "border-riskcrit text-riskcrit"
+                    : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
+              >
+                Full Rollback
+              </button>
+              <button
+                onClick={() => setRollbackMode("partial")}
+                className={`px-3 py-2 text-xs font-bold uppercase tracking-wide border-b-2 -mb-px transition-colors ${
+                  rollbackMode === "partial"
+                    ? "border-riskcrit text-riskcrit"
+                    : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
+              >
+                Section-Level (Partial)
+              </button>
             </div>
+
+            {rollbackMode === "full" ? (
+              <>
+                <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">
+                  This triggers a full pipeline redeployment restoring snapshot <span className="font-mono font-bold">v{rollbackTarget.snapshot.version}</span> (
+                  {new Date(rollbackTarget.snapshot.created_at).toLocaleString()}). Every line of the device's config is replaced.
+                </p>
+
+                <div className="mt-4">
+                  <h4 className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wide mb-2">
+                    Preview: What This Rollback Will Change
+                  </h4>
+                  {rollbackPreviewLoading ? (
+                    <p className="text-xs text-slate-400">Loading preview…</p>
+                  ) : rollbackPreviewError ? (
+                    <p className="text-xs text-riskcrit">{rollbackPreviewError}</p>
+                  ) : rollbackPreview ? (
+                    <div>
+                      {rollbackPreview.warning && (
+                        <p className="text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 mb-2">
+                          {rollbackPreview.warning}
+                        </p>
+                      )}
+                      {rollbackPreview.blocked && (
+                        <p className="text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 mb-2 font-semibold">
+                          {rollbackPreview.blocked_reason}
+                        </p>
+                      )}
+                      {rollbackPreview.identical ? (
+                        <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/20 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2">
+                          No difference -- the live configuration already matches this snapshot.
+                        </p>
+                      ) : (
+                        <>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 font-mono">
+                            +{rollbackPreview.added_lines}/-{rollbackPreview.removed_lines} lines · comparing{" "}
+                            {rollbackPreview.current_source === "live"
+                              ? "live configuration"
+                              : rollbackPreview.current_source === "last_snapshot"
+                              ? "most recent snapshot"
+                              : "nothing (no baseline available)"}{" "}
+                            against v{rollbackPreview.target_version}
+                          </p>
+                          <div className="max-h-64 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+                            <ConfigDiff diffText={rollbackPreview.diff} />
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">
+                  Reverts only <span className="font-bold">one section</span> (an ACL, VLAN, interface, route-map, ...) to its version in
+                  snapshot <span className="font-mono font-bold">v{rollbackTarget.snapshot.version}</span>. Everything else in the device's
+                  current configuration is left completely untouched — smaller blast radius than a full rollback.
+                </p>
+
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mt-4 mb-1 uppercase tracking-wide">
+                  Section to revert
+                </label>
+                {rollbackSectionsLoading ? (
+                  <p className="text-xs text-slate-400">Loading revertible sections…</p>
+                ) : rollbackSectionsError ? (
+                  <p className="text-xs text-riskcrit">{rollbackSectionsError}</p>
+                ) : rollbackSections && rollbackSections.length === 0 ? (
+                  <p className="text-xs text-slate-400">
+                    No independently revertible sections were detected on this device's current configuration. Use Full Rollback instead.
+                  </p>
+                ) : (
+                  <select
+                    className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue outline-none bg-white dark:bg-slate-700"
+                    value={rollbackSectionKey}
+                    onChange={(e) => setRollbackSectionKey(e.target.value)}
+                  >
+                    <option value="">Select a section…</option>
+                    {rollbackSections?.map((s) => (
+                      <option key={s.key} value={s.key}>
+                        {s.kind}: {s.name} ({s.line_count} lines)
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                {rollbackSectionKey && (
+                  <div className="mt-4">
+                    <h4 className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wide mb-2">
+                      Preview: What This Section Rollback Will Change
+                    </h4>
+                    {partialRollbackPreviewLoading ? (
+                      <p className="text-xs text-slate-400">Loading preview…</p>
+                    ) : partialRollbackPreviewError ? (
+                      <p className="text-xs text-riskcrit">{partialRollbackPreviewError}</p>
+                    ) : partialRollbackPreview ? (
+                      <div>
+                        {partialRollbackPreview.blocked && (
+                          <p className="text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 mb-2 font-semibold">
+                            {partialRollbackPreview.blocked_reason}
+                          </p>
+                        )}
+                        {!partialRollbackPreview.section.existed_in_target && (
+                          <p className="text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 mb-2">
+                            This section didn't exist yet in snapshot v{rollbackTarget.snapshot.version} — reverting will remove it entirely.
+                          </p>
+                        )}
+                        {partialRollbackPreview.identical ? (
+                          <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/20 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2">
+                            No difference -- this section already matches the snapshot.
+                          </p>
+                        ) : (
+                          <div className="max-h-64 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+                            <ConfigDiff diffText={partialRollbackPreview.diff} />
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </>
+            )}
 
             <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mt-5 mb-1 uppercase tracking-wide">Reason (optional)</label>
             <input
@@ -3050,10 +3211,13 @@ export default function Devices() {
               </button>
               <button
                 onClick={confirmRollback}
-                disabled={rollbackSubmitting || rollbackPreviewLoading || !!rollbackPreview?.blocked}
+                disabled={
+                  rollbackSubmitting ||
+                  (rollbackMode === "full" ? rollbackPreviewLoading || !!rollbackPreview?.blocked : !rollbackSectionKey || partialRollbackPreviewLoading || !!partialRollbackPreview?.blocked)
+                }
                 className="bg-riskcrit text-white rounded-lg px-5 py-2 text-sm font-bold hover:opacity-90 disabled:opacity-50 shadow-md transform active:scale-95 transition-all"
               >
-                {rollbackSubmitting ? "Queuing Pipeline…" : "Confirm Rollback"}
+                {rollbackSubmitting ? "Queuing Pipeline…" : rollbackMode === "partial" ? "Confirm Section Rollback" : "Confirm Rollback"}
               </button>
             </div>
           </div>

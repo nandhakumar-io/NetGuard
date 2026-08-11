@@ -459,7 +459,59 @@ export interface RollbackPreviewResponse {
   blocked_reason?: string | null;
 }
 
+// --- Partial (Section-Level) Rollback ---
+
+export interface RollbackSection {
+  key: string;
+  kind: string;
+  name: string;
+  line_count: number;
+}
+
+export interface PartialRollbackPreviewResponse {
+  device_id: string;
+  snapshot_id: string;
+  section_key: string;
+  section: {
+    kind: string;
+    name: string;
+    existed_in_target: boolean;
+    current_line_count: number;
+    target_line_count: number;
+  };
+  current_source: string;
+  diff: string;
+  identical: boolean;
+  blocked: boolean;
+  blocked_reason?: string | null;
+}
+
 // --- Notification Center ---
+
+// --- Multi-Stage Approval Chain (Peer Review / Manager Sign-off) ---
+
+export type ApprovalStageType = "peer_review" | "manager_signoff" | "admin_approval";
+export type ApprovalStageStatus = "pending" | "approved" | "rejected";
+
+export interface ApprovalStage {
+  id: string;
+  change_request_id: string;
+  sequence: number;
+  stage_type: ApprovalStageType;
+  required_role: string;
+  status: ApprovalStageStatus;
+  acted_by?: string | null;
+  acted_by_name?: string | null;
+  acted_at?: string | null;
+  notes?: string | null;
+}
+
+export interface ApprovalChain {
+  change_request_id: string;
+  stages: ApprovalStage[];
+  fully_approved: boolean;
+  current_stage_sequence: number | null;
+}
 
 export type NotificationEventType =
   | "deployment_succeeded"

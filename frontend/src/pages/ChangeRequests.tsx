@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem, TemplateDiffPreviewResponse } from "../lib/types";
+import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
@@ -58,6 +58,14 @@ export default function ChangeRequests() {
   const [requests, setRequests] = useState<ChangeRequest[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selected, setSelected] = useState<ChangeRequest | null>(null);
+
+  // Multi-stage approval chain (Peer Review -> Manager Sign-off -> Admin
+  // Approval) for the currently selected change request, if it has one.
+  const [approvalChain, setApprovalChain] = useState<ApprovalChain | null>(null);
+  const [approvalChainLoading, setApprovalChainLoading] = useState(false);
+  const [chainActing, setChainActing] = useState(false);
+  const [chainActionError, setChainActionError] = useState<string | null>(null);
+  const [chainNotes, setChainNotes] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -280,6 +288,32 @@ export default function ChangeRequests() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id, selected?.status]);
 
+  // Load (and, while pending, keep refreshing) the approval chain for
+  // whichever change request is selected -- only PENDING_APPROVAL requests
+  // can have an in-progress chain, so no need to poll once it's resolved.
+  const loadApprovalChain = (id: string) => {
+    setApprovalChainLoading(true);
+    api
+      .get<ApprovalChain>(`/change-requests/${id}/approval-chain`)
+      .then((res) => setApprovalChain(res.data))
+      .catch(() => setApprovalChain(null))
+      .finally(() => setApprovalChainLoading(false));
+  };
+
+  useEffect(() => {
+    setChainNotes("");
+    setChainActionError(null);
+    if (!selected) {
+      setApprovalChain(null);
+      return;
+    }
+    loadApprovalChain(selected.id);
+    if (selected.status !== "pending_approval") return;
+    const interval = setInterval(() => loadApprovalChain(selected.id), 5000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, selected?.status]);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -315,6 +349,29 @@ export default function ChangeRequests() {
       setActionError(err?.response?.data?.detail || `Failed to ${action} the request.`);
     } finally {
       setActing(false);
+    }
+  };
+
+  // Peer Review / Manager Sign-off stage action. Rejecting requires a
+  // reason (segregation-of-duties audit trail) even though the API
+  // itself only requires notes on rejection informally -- enforced here.
+  const actOnChain = async (id: string, approve: boolean) => {
+    if (!approve && !chainNotes.trim()) {
+      setChainActionError("A reason is required when rejecting a stage.");
+      return;
+    }
+    setChainActing(true);
+    setChainActionError(null);
+    try {
+      await api.post(`/change-requests/${id}/approval-chain/act`, { approve, notes: chainNotes || undefined });
+      setChainNotes("");
+      loadApprovalChain(id);
+      load();
+      if (queueTab === "queue") loadQueue();
+    } catch (err: any) {
+      setChainActionError(err?.response?.data?.detail || "Failed to record your decision on this stage.");
+    } finally {
+      setChainActing(false);
     }
   };
 
@@ -1062,6 +1119,86 @@ export default function ChangeRequests() {
                   </div>
                 </details>
               </div>
+              {approvalChain && approvalChain.stages.length > 0 && (
+                <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3">
+                  <h4 className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wide mb-2">
+                    Approval Chain (Segregation of Duties)
+                  </h4>
+                  <ol className="space-y-2">
+                    {approvalChain.stages.map((stage) => {
+                      const label =
+                        stage.stage_type === "peer_review"
+                          ? "Peer Review"
+                          : stage.stage_type === "manager_signoff"
+                          ? "Manager Sign-off"
+                          : "Admin Approval";
+                      const badge =
+                        stage.status === "approved"
+                          ? "bg-green-100 text-green-700"
+                          : stage.status === "rejected"
+                          ? "bg-red-100 text-red-700"
+                          : "bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400";
+                      const eligibleRoles = stage.required_role.split("/");
+                      const isMyPendingStage =
+                        stage.status === "pending" &&
+                        approvalChain.current_stage_sequence === stage.sequence &&
+                        !!user?.role &&
+                        eligibleRoles.includes(user.role) &&
+                        user?.id !== selected.submitted_by;
+
+                      return (
+                        <li key={stage.id} className="flex items-start gap-3">
+                          <span className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-0.5 mt-0.5 ${badge}`}>
+                            {stage.sequence}. {label}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              {stage.status === "pending"
+                                ? `Awaiting ${stage.required_role.replace(/_/g, " ").replace(/\//g, " or ")}`
+                                : `${stage.status === "approved" ? "Approved" : "Rejected"} by ${
+                                    stage.acted_by_name ?? "unknown"
+                                  }${stage.acted_at ? " · " + new Date(stage.acted_at).toLocaleString() : ""}`}
+                              {stage.notes && <span className="italic"> — "{stage.notes}"</span>}
+                            </p>
+                            {isMyPendingStage && (
+                              <div className="mt-1.5 flex items-center gap-2">
+                                <input
+                                  className="flex-1 border border-slate-300 dark:border-slate-600 rounded-md px-2 py-1 text-xs focus:ring-2 focus:ring-brandblue outline-none"
+                                  placeholder="Notes (required to reject)"
+                                  value={chainNotes}
+                                  onChange={(e) => setChainNotes(e.target.value)}
+                                />
+                                <button
+                                  onClick={() => actOnChain(selected.id, true)}
+                                  disabled={chainActing}
+                                  className="bg-risklow text-white rounded-md px-3 py-1 text-xs font-semibold hover:opacity-90 disabled:opacity-50"
+                                >
+                                  {label === "Peer Review" ? "Approve Review" : "Sign Off"}
+                                </button>
+                                <button
+                                  onClick={() => actOnChain(selected.id, false)}
+                                  disabled={chainActing}
+                                  className="bg-riskcrit text-white rounded-md px-3 py-1 text-xs font-semibold hover:opacity-90 disabled:opacity-50"
+                                >
+                                  Reject
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {chainActionError && <p className="text-riskcrit text-xs mt-2">{chainActionError}</p>}
+                  {approvalChain.current_stage_sequence !== null &&
+                    approvalChain.stages[approvalChain.current_stage_sequence! - 1]?.stage_type !== "admin_approval" &&
+                    !approvalChain.stages.some((s) => s.status === "rejected") && (
+                      <p className="text-[11px] text-slate-400 mt-2 italic">
+                        Network Administrator approval below is only available once every earlier stage is approved.
+                      </p>
+                    )}
+                </div>
+              )}
               {selected.requires_dual_approval && selected.status === "pending_approval" && (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2">
                   {selected.first_approved_by
@@ -1071,34 +1208,44 @@ export default function ChangeRequests() {
               )}
               {actionError && <p className="text-riskcrit text-xs">{actionError}</p>}
               {selected.status === "pending_approval" &&
-                (canApprove ? (
-                  <div className="flex gap-2 pt-2">
-                    <button
-                      onClick={() => act(selected.id, "approve")}
-                      disabled={acting}
-                      className="bg-risklow text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
-                    >
-                      {acting
-                        ? "Working…"
-                        : selected.requires_dual_approval
-                        ? selected.first_approved_by
-                          ? "Give 2nd Approval & Deploy"
-                          : "Give 1st Approval"
-                        : "Approve & Deploy"}
-                    </button>
-                    <button
-                      onClick={() => act(selected.id, "reject")}
-                      disabled={acting}
-                      className="bg-riskcrit text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
-                    >
-                      Reject
-                    </button>
-                  </div>
-                ) : (
-                  <p className="text-xs text-slate-400 dark:text-slate-500 italic pt-2">
-                    Only a Network Administrator can approve or reject this request.
-                  </p>
-                ))}
+                (() => {
+                  const chainBlocking =
+                    !!approvalChain &&
+                    approvalChain.stages.length > 0 &&
+                    !approvalChain.fully_approved &&
+                    !approvalChain.stages.some((s) => s.status === "rejected");
+                  return canApprove ? (
+                    <div className="flex gap-2 pt-2">
+                      <button
+                        onClick={() => act(selected.id, "approve")}
+                        disabled={acting || chainBlocking}
+                        title={chainBlocking ? "Earlier approval chain stages must be cleared first." : undefined}
+                        className="bg-risklow text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+                      >
+                        {acting
+                          ? "Working…"
+                          : chainBlocking
+                          ? "Waiting on Approval Chain"
+                          : selected.requires_dual_approval
+                          ? selected.first_approved_by
+                            ? "Give 2nd Approval & Deploy"
+                            : "Give 1st Approval"
+                          : "Approve & Deploy"}
+                      </button>
+                      <button
+                        onClick={() => act(selected.id, "reject")}
+                        disabled={acting}
+                        className="bg-riskcrit text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400 dark:text-slate-500 italic pt-2">
+                      Only a Network Administrator can approve or reject this request.
+                    </p>
+                  );
+                })()}
               {["approved", "validating", "deploying", "monitoring", "success", "failed", "rolled_back"].includes(
                 selected.status
               ) && (
