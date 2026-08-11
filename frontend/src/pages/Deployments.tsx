@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState, useRef } from "react";
 import { api } from "../lib/api";
 import { DeploymentRecord, DeploymentLog } from "../lib/types";
 import PipelineStages, { Stage, StageState, stagesFromStatus } from "../components/PipelineStages";
+import { useToast, errorMessage } from "../lib/toast";
+import { useConfirm } from "../lib/confirm";
 
 const STATUS_STYLES: Record<DeploymentRecord["status"], string> = {
   queued: "bg-slate-100 text-slate-600",
@@ -21,6 +23,8 @@ const STATUS_FILTERS: { value: DeploymentRecord["status"] | "all"; label: string
 ];
 
 function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [logs, setLogs] = useState<DeploymentLog[]>([]);
   const [loading, setLoading] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -141,8 +145,9 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
               onClick={async () => {
                 try {
                   await api.post(`/deployments/${deployment.id}/retry`);
-                } catch (err: any) {
-                  alert(err?.response?.data?.detail || "Failed to trigger retry");
+                  toast.success("Pipeline retry triggered.");
+                } catch (err) {
+                  toast.error(errorMessage(err, "Failed to trigger retry"));
                 }
               }}
               className="bg-amber-500 text-white rounded px-3 py-1 text-[10px] hover:bg-amber-600 font-bold uppercase transition-colors shadow-sm"
@@ -156,14 +161,14 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
                 const batchNote = deployment.target_device_count > 1
                   ? ` Only this device is affected — the other ${deployment.target_device_count - 1} device(s) on this change request are left as-is.`
                   : "";
-                if (!confirm(`Roll back this device to its pre-deployment configuration?${batchNote}`)) return;
+                if (!(await confirm(`Roll back this device to its pre-deployment configuration?${batchNote}`, { confirmLabel: "Roll back" }))) return;
                 try {
                   const res = await api.post<{ message: string; change_request_id: string }>(
                     `/deployments/${deployment.id}/rollback`
                   );
-                  alert(res.data.message);
-                } catch (err: any) {
-                  alert(err?.response?.data?.detail || "Failed to queue partial rollback");
+                  toast.success(res.data.message);
+                } catch (err) {
+                  toast.error(errorMessage(err, "Failed to queue partial rollback"));
                 }
               }}
               title={

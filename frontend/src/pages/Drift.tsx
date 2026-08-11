@@ -4,6 +4,8 @@ import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, Dri
 import ConfigDiff from "../components/ConfigDiff";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
+import { useToast, errorMessage } from "../lib/toast";
+import { useConfirm } from "../lib/confirm";
 
 const severityStyle: Record<DriftSeverity, string> = {
   low: "bg-risklow/10 text-risklow",
@@ -29,6 +31,8 @@ const SEVERITY_FILTERS: { value: DriftSeverity | "all"; label: string }[] = [
 
 export default function DriftPage() {
   const { user } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const canReview = user?.role === "network_admin";
 
   const [summary, setSummary] = useState<DriftFleetSummary | null>(null);
@@ -140,9 +144,14 @@ export default function DriftPage() {
   };
 
   const deleteRoleBaseline = async (role: string) => {
-    if (!confirm(`Delete the compliance baseline for role "${role}"? Devices with this role will fall back to golden config / previous backup for drift scans.`)) return;
-    await api.delete(`/compliance-baselines/${encodeURIComponent(role)}`);
-    loadRoleBaselines();
+    if (!(await confirm(`Delete the compliance baseline for role "${role}"? Devices with this role will fall back to golden config / previous backup for drift scans.`, { confirmLabel: "Delete" }))) return;
+    try {
+      await api.delete(`/compliance-baselines/${encodeURIComponent(role)}`);
+      loadRoleBaselines();
+      toast.success(`Baseline for "${role}" deleted.`);
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to delete compliance baseline."));
+    }
   };
 
   const load = () => {
@@ -701,9 +710,10 @@ export default function DriftPage() {
                             <button
                               onClick={async () => {
                                 if (
-                                  !confirm(
-                                    `Push the ${detail.baseline === "golden_config" ? "golden config" : "role baseline"} to this device now? This queues a normal deployment (snapshot, deploy, health checks, self-healing rollback if it fails).`
-                                  )
+                                  !(await confirm(
+                                    `Push the ${detail.baseline === "golden_config" ? "golden config" : "role baseline"} to this device now? This queues a normal deployment (snapshot, deploy, health checks, self-healing rollback if it fails).`,
+                                    { danger: false, confirmLabel: "Push config" }
+                                  ))
                                 )
                                   return;
                                 setRemediating(true);

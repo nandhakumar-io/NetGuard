@@ -26,6 +26,8 @@ import {
   DeviceCsvImportResult,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
+import { useToast, errorMessage } from "../lib/toast";
+import { useConfirm } from "../lib/confirm";
 import ConfigDiff from "../components/ConfigDiff";
 import ConfigViewer from "../components/ConfigViewer";
 import { WebTerminal } from "../components/WebTerminal";
@@ -171,6 +173,8 @@ function DeviceInlineDetails({
   onQueueRollback: (snapshot: Snapshot, reason: string) => void;
   onDeviceUpdated: (updated: Device) => void;
 }) {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [activeTab, setActiveTab] = useState<TabName>("Overview");
   const [showSnmpCredsModal, setShowSnmpCredsModal] = useState(false);
   const [showSshCredsModal, setShowSshCredsModal] = useState(false);
@@ -420,9 +424,10 @@ function DeviceInlineDetails({
   const clearDeviceAlerts = async () => {
     if (activeDeviceAlertCount === 0) return;
     if (
-      !window.confirm(
-        `Permanently delete all ${deviceAlerts.length} alert${deviceAlerts.length === 1 ? "" : "s"} for ${device.hostname}? This removes them entirely -- it cannot be undone.`
-      )
+      !(await confirm(
+        `Permanently delete all ${deviceAlerts.length} alert${deviceAlerts.length === 1 ? "" : "s"} for ${device.hostname}? This removes them entirely -- it cannot be undone.`,
+        { confirmLabel: "Delete all" }
+      ))
     ) {
       return;
     }
@@ -574,7 +579,7 @@ function DeviceInlineDetails({
   };
 
   const clearGolden = async () => {
-    if (!window.confirm("Clear the golden config baseline for this device?")) return;
+    if (!(await confirm("Clear the golden config baseline for this device?"))) return;
     setGoldenBusy(true);
     setGoldenNotice(null);
     try {
@@ -1660,6 +1665,8 @@ function DeviceInlineDetails({
 
 export default function Devices() {
   const { user } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const canManage = user?.role === "network_admin";
   const [devices, setDevices] = useState<Device[]>([]);
   const [form, setForm] = useState(emptyForm);
@@ -1938,9 +1945,9 @@ export default function Devices() {
       if (err?.response?.status === 409) {
         const counts = err.response.data?.detail?.counts;
         const summary = describeBlockingCounts(counts);
-        const proceed = window.confirm(
-          `'${hostname}' has change/deployment history (${summary}) and can't be removed without confirmation.\n\n` +
-            `Permanently delete it along with this history? This cannot be undone.`
+        const proceed = await confirm(
+          `'${hostname}' has change/deployment history (${summary}) and can't be removed without confirmation.\n\nPermanently delete it along with this history? This cannot be undone.`,
+          { confirmLabel: "Delete anyway" }
         );
         if (!proceed) return { result: "blocked-declined" };
         try {
@@ -1959,9 +1966,10 @@ export default function Devices() {
     if (ids.length === 0) return;
     const hostnames = ids.map((id) => devices.find((d) => d.id === id)?.hostname || id);
     if (
-      !window.confirm(
-        `Remove ${ids.length} device${ids.length === 1 ? "" : "s"} from inventory? This cannot be undone.\n\n${hostnames.join(", ")}`
-      )
+      !(await confirm(
+        `Remove ${ids.length} device${ids.length === 1 ? "" : "s"} from inventory? This cannot be undone.\n\n${hostnames.join(", ")}`,
+        { confirmLabel: "Remove" }
+      ))
     )
       return;
 
@@ -2168,7 +2176,7 @@ export default function Devices() {
   };
 
   const removeDevice = async (id: string, hostname: string) => {
-    if (!window.confirm(`Remove ${hostname} from inventory? This cannot be undone.`)) return;
+    if (!(await confirm(`Remove ${hostname} from inventory? This cannot be undone.`, { confirmLabel: "Remove" }))) return;
     setDeletingId(id);
     setError(null);
     const { result, detail } = await deleteDeviceWithForceConfirm(id, hostname);
@@ -2189,9 +2197,10 @@ export default function Devices() {
 
   const clearUnstableFlag = async (id: string, hostname: string) => {
     if (
-      !window.confirm(
-        `Clear the unstable flag for ${hostname}? This re-enables automated deploys — only do this after reviewing why it kept failing.`
-      )
+      !(await confirm(
+        `Clear the unstable flag for ${hostname}? This re-enables automated deploys — only do this after reviewing why it kept failing.`,
+        { danger: false, confirmLabel: "Clear flag" }
+      ))
     )
       return;
     setClearingUnstableId(id);

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useConfirm } from "../lib/confirm";
 import { Device, DeviceGroup, DeviceGroupRule, DeviceGroupRuleMatch, GroupHealthRollup } from "../lib/types";
 
 interface GroupDevice {
@@ -158,6 +159,7 @@ function RackCard({
  * the management controls (GROUP_MANAGER_ROLES on the backend matches),
  * everyone else sees a read-only tree. */
 function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
+  const confirm = useConfirm();
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -270,7 +272,7 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
     const confirmMsg = hasChildren
       ? `Delete "${group.name}"? Its ${group.child_group_count} sub-group(s) will move up to its parent, and any member devices will become ungrouped.`
       : `Delete "${group.name}"? Member devices will become ungrouped.`;
-    if (!window.confirm(confirmMsg)) return;
+    if (!(await confirm(confirmMsg, { confirmLabel: "Delete" }))) return;
     try {
       await api.delete(`/device-groups/${group.id}`);
       setNotice(`Deleted group "${group.name}".`);

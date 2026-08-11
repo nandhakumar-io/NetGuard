@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useConfirm } from "../lib/confirm";
 
 interface SessionInfo {
   id: string;
@@ -30,6 +31,7 @@ interface RotationResult {
  *  devices -- backs GET/DELETE /auth/sessions. */
 export default function Security() {
   const { user, refreshMe } = useAuth();
+  const confirm = useConfirm();
   const [otpauthUri, setOtpauthUri] = useState<string | null>(null);
   const [secret, setSecret] = useState<string | null>(null);
   const [enableCode, setEnableCode] = useState("");
@@ -64,9 +66,10 @@ export default function Security() {
   }, [canRotateSecrets]);
 
   const rotateSecrets = async () => {
-    const ok = window.confirm(
+    const ok = await confirm(
       "This re-encrypts every stored SSH password, SSH private key, SNMP credential, and stored " +
-        "device config under the current encryption key. It runs immediately and cannot be undone. Continue?"
+        "device config under the current encryption key. It runs immediately and cannot be undone. Continue?",
+      { confirmLabel: "Rotate secrets" }
     );
     if (!ok) return;
     setRotating(true);
@@ -105,8 +108,9 @@ export default function Security() {
 
   const revokeSession = async (id: string, isCurrent: boolean) => {
     if (isCurrent) {
-      const ok = window.confirm(
-        "This is your current session. Revoking it will sign you out immediately. Continue?"
+      const ok = await confirm(
+        "This is your current session. Revoking it will sign you out immediately. Continue?",
+        { confirmLabel: "Sign out" }
       );
       if (!ok) return;
     }

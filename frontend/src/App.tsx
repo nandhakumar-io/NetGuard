@@ -1,32 +1,51 @@
+import { Suspense, lazy } from "react";
 import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
-import ChangeRequests from "./pages/ChangeRequests";
-import Deployments from "./pages/Deployments";
-import Jobs from "./pages/Jobs";
-import Devices from "./pages/Devices";
-import Groups from "./pages/Groups";
-import AuditLog from "./pages/AuditLog";
-import Security from "./pages/Security";
-import DriftPage from "./pages/Drift";
-import AlertCenter from "./pages/AlertCenter";
-import DeviceConfiguration from "./pages/DeviceConfiguration";
-import Lab from "./pages/Lab";
-import Topology from "./pages/Topology";
-import ConfigSearchPage from "./pages/ConfigSearch";
-import TemplatesPage from "./pages/Templates";
-import SyslogViewer from "./pages/SyslogViewer";
-import TrafficAnalysis from "./pages/TrafficAnalysis";
-import PathTracePage from "./pages/PathTrace";
-import MaintenanceWindowsPage from "./pages/MaintenanceWindows";
-import FirmwareUpgradesPage from "./pages/FirmwareUpgrades";
-import Incidents from "./pages/Incidents";
-import RbacAudit from "./pages/RbacAudit";
-import JitAccess from "./pages/JitAccess";
-import Insights from "./pages/Insights";
-import IntegrationsPage from "./pages/Integrations";
+
+// Everything but Login/Dashboard is code-split at the route level: each page
+// only downloads when the person actually navigates to it, instead of all
+// 25 pages landing in one ~1.5MB bundle up front. Biggest win is on the
+// heaviest pages (Devices, Topology, ChangeRequests, Lab) which most
+// sessions never touch.
+const ChangeRequests = lazy(() => import("./pages/ChangeRequests"));
+const Deployments = lazy(() => import("./pages/Deployments"));
+const Jobs = lazy(() => import("./pages/Jobs"));
+const Devices = lazy(() => import("./pages/Devices"));
+const Groups = lazy(() => import("./pages/Groups"));
+const AuditLog = lazy(() => import("./pages/AuditLog"));
+const Security = lazy(() => import("./pages/Security"));
+const DriftPage = lazy(() => import("./pages/Drift"));
+const AlertCenter = lazy(() => import("./pages/AlertCenter"));
+const DeviceConfiguration = lazy(() => import("./pages/DeviceConfiguration"));
+const Lab = lazy(() => import("./pages/Lab"));
+const Topology = lazy(() => import("./pages/Topology"));
+const ConfigSearchPage = lazy(() => import("./pages/ConfigSearch"));
+const TemplatesPage = lazy(() => import("./pages/Templates"));
+const SyslogViewer = lazy(() => import("./pages/SyslogViewer"));
+const TrafficAnalysis = lazy(() => import("./pages/TrafficAnalysis"));
+const PathTracePage = lazy(() => import("./pages/PathTrace"));
+const MaintenanceWindowsPage = lazy(() => import("./pages/MaintenanceWindows"));
+const FirmwareUpgradesPage = lazy(() => import("./pages/FirmwareUpgrades"));
+const Incidents = lazy(() => import("./pages/Incidents"));
+const RbacAudit = lazy(() => import("./pages/RbacAudit"));
+const JitAccess = lazy(() => import("./pages/JitAccess"));
+const Insights = lazy(() => import("./pages/Insights"));
+const IntegrationsPage = lazy(() => import("./pages/Integrations"));
+
+function RouteFallback() {
+  return (
+    <div className="flex items-center justify-center py-24">
+      <div className="w-6 h-6 border-2 border-slate-200 dark:border-slate-700 border-t-brandblue rounded-full animate-spin" />
+    </div>
+  );
+}
+
+function withSuspense(el: JSX.Element) {
+  return <Suspense fallback={<RouteFallback />}>{el}</Suspense>;
+}
 
 export default function App() {
   return (
@@ -35,30 +54,30 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<Layout />}>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/change-requests" element={<ChangeRequests />} />
-          <Route path="/deployments" element={<Deployments />} />
-          <Route path="/jobs" element={<Jobs />} />
-          <Route path="/devices" element={<Devices />} />
-          <Route path="/devices/config" element={<DeviceConfiguration />} />
-          <Route path="/groups" element={<Groups />} />
-          <Route path="/config-search" element={<ConfigSearchPage />} />
-          <Route path="/templates" element={<TemplatesPage />} />
-          <Route path="/topology" element={<Topology />} />
-          <Route path="/path-trace" element={<PathTracePage />} />
-          <Route path="/syslog" element={<SyslogViewer />} />
-          <Route path="/traffic-analysis" element={<TrafficAnalysis />} />
-          <Route path="/drift" element={<DriftPage />} />
-          <Route path="/alerts" element={<AlertCenter />} />
-          <Route path="/maintenance-windows" element={<MaintenanceWindowsPage />} />
-          <Route path="/firmware-upgrades" element={<FirmwareUpgradesPage />} />
-          <Route path="/incidents" element={<Incidents />} />
-          <Route path="/insights" element={<Insights />} />
-          <Route path="/rbac-audit" element={<RbacAudit />} />
-          <Route path="/jit-access" element={<JitAccess />} />
-          <Route path="/lab" element={<Lab />} />
-          <Route path="/audit-log" element={<AuditLog />} />
-          <Route path="/security" element={<Security />} />
-          <Route path="/integrations" element={<IntegrationsPage />} />
+          <Route path="/change-requests" element={withSuspense(<ChangeRequests />)} />
+          <Route path="/deployments" element={withSuspense(<Deployments />)} />
+          <Route path="/jobs" element={withSuspense(<Jobs />)} />
+          <Route path="/devices" element={withSuspense(<Devices />)} />
+          <Route path="/devices/config" element={withSuspense(<DeviceConfiguration />)} />
+          <Route path="/groups" element={withSuspense(<Groups />)} />
+          <Route path="/config-search" element={withSuspense(<ConfigSearchPage />)} />
+          <Route path="/templates" element={withSuspense(<TemplatesPage />)} />
+          <Route path="/topology" element={withSuspense(<Topology />)} />
+          <Route path="/path-trace" element={withSuspense(<PathTracePage />)} />
+          <Route path="/syslog" element={withSuspense(<SyslogViewer />)} />
+          <Route path="/traffic-analysis" element={withSuspense(<TrafficAnalysis />)} />
+          <Route path="/drift" element={withSuspense(<DriftPage />)} />
+          <Route path="/alerts" element={withSuspense(<AlertCenter />)} />
+          <Route path="/maintenance-windows" element={withSuspense(<MaintenanceWindowsPage />)} />
+          <Route path="/firmware-upgrades" element={withSuspense(<FirmwareUpgradesPage />)} />
+          <Route path="/incidents" element={withSuspense(<Incidents />)} />
+          <Route path="/insights" element={withSuspense(<Insights />)} />
+          <Route path="/rbac-audit" element={withSuspense(<RbacAudit />)} />
+          <Route path="/jit-access" element={withSuspense(<JitAccess />)} />
+          <Route path="/lab" element={withSuspense(<Lab />)} />
+          <Route path="/audit-log" element={withSuspense(<AuditLog />)} />
+          <Route path="/security" element={withSuspense(<Security />)} />
+          <Route path="/integrations" element={withSuspense(<IntegrationsPage />)} />
         </Route>
       </Route>
     </Routes>

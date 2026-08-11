@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useConfirm } from "../lib/confirm";
 
 // --- Types (kept local -- these two features are small enough not to
 // warrant new entries in lib/types.ts's shared type set) --------------
@@ -72,6 +73,7 @@ export default function IntegrationsPage() {
 }
 
 function ChatOpsSection({ canManage }: { canManage: boolean }) {
+  const confirm = useConfirm();
   const [links, setLinks] = useState<ChatOpsLink[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -111,7 +113,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
   };
 
   const unlink = async (link: ChatOpsLink, platform: "slack" | "teams") => {
-    if (!window.confirm(`Unlink ${platform} from ${link.user_email}?`)) return;
+    if (!(await confirm(`Unlink ${platform} from ${link.user_email}?`, { confirmLabel: "Unlink" }))) return;
     try {
       await api.delete(`/chatops/links/${link.user_id}`, { params: { platform } });
       load();
@@ -238,6 +240,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
 }
 
 function GitOpsSection({ canManage }: { canManage: boolean }) {
+  const confirm = useConfirm();
   const [repos, setRepos] = useState<GitRepoConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -283,7 +286,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
   };
 
   const removeRepo = async (r: GitRepoConfig) => {
-    if (!window.confirm(`Remove Git repo config '${r.name}'? This does not delete anything from the repo itself.`)) return;
+    if (!(await confirm(`Remove Git repo config '${r.name}'? This does not delete anything from the repo itself.`, { confirmLabel: "Remove" }))) return;
     try {
       await api.delete(`/gitops/repos/${r.id}`);
       load();

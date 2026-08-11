@@ -10,6 +10,14 @@ code, pre {
   font-family: "SF Mono", Menlo, Consolas, monospace;
 }
 
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-toast-in {
+  animation: toast-in 0.18s ease-out;
+}
+
 html.dark body {
   background: #080B10;
 }

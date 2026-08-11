@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Device, MaintenanceScope, MaintenanceWindow } from "../lib/types";
 import { useAuth } from "../lib/auth";
+import { useConfirm } from "../lib/confirm";
 
 const emptyForm = {
   name: "",
@@ -27,6 +28,7 @@ function toLocalInputValue(iso: string): string {
 
 export default function MaintenanceWindowsPage() {
   const { user } = useAuth();
+  const confirm = useConfirm();
   const canManage = user?.role === "network_admin" || user?.role === "network_engineer" || user?.role === "noc_engineer";
 
   const [windows, setWindows] = useState<MaintenanceWindow[]>([]);
@@ -89,7 +91,7 @@ export default function MaintenanceWindowsPage() {
   };
 
   const cancelWindow = async (id: string) => {
-    if (!confirm("Cancel this maintenance window? Alerts for its devices will resume paging immediately.")) return;
+    if (!(await confirm("Cancel this maintenance window? Alerts for its devices will resume paging immediately.", { confirmLabel: "Cancel window" }))) return;
     try {
       await api.post(`/maintenance-windows/${id}/cancel`);
       load();

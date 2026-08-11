@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { ConfigTemplate, TemplateVariable } from "../lib/types";
 import { useAuth } from "../lib/auth";
+import { useConfirm } from "../lib/confirm";
 
 const DEVICE_ROLES = ["", "core", "distribution", "access", "edge"];
 const VENDORS = ["", "cisco", "juniper", "arista"];
@@ -17,6 +18,7 @@ const emptyForm = {
 
 export default function TemplatesPage() {
   const { user } = useAuth();
+  const confirm = useConfirm();
   const canManage = user?.role === "network_admin";
 
   const [templates, setTemplates] = useState<ConfigTemplate[]>([]);
@@ -113,7 +115,7 @@ export default function TemplatesPage() {
   };
 
   const removeTemplate = async (t: ConfigTemplate) => {
-    if (!window.confirm(`Delete template '${t.name}'? This cannot be undone.`)) return;
+    if (!(await confirm(`Delete template '${t.name}'? This cannot be undone.`, { confirmLabel: "Delete" }))) return;
     try {
       await api.delete(`/config-templates/${t.id}`);
       load();

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
+import { useToast, errorMessage } from "../lib/toast";
+import { useConfirm } from "../lib/confirm";
 
 const SEVERITY_CONFIG = {
   critical: { color: "text-riskcrit", bg: "bg-riskcrit", bgLight: "bg-red-50", border: "border-riskcrit/20", icon: "🚨", label: "Critical" },
@@ -36,6 +38,8 @@ type Tab = "alerts" | "rules" | "escalations" | "webhooks";
 
 export default function AlertCenter() {
   const navigate = useNavigate();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [tab, setTab] = useState<Tab>("alerts");
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
@@ -297,9 +301,10 @@ export default function AlertCenter() {
   const handleClearAlerts = async () => {
     if (activeCount === 0) return;
     if (
-      !window.confirm(
-        `Permanently delete all alerts? This removes every entry -- including resolved history -- and cannot be undone.`
-      )
+      !(await confirm(
+        `Permanently delete all alerts? This removes every entry -- including resolved history -- and cannot be undone.`,
+        { confirmLabel: "Delete all" }
+      ))
     ) {
       return;
     }
@@ -354,11 +359,12 @@ export default function AlertCenter() {
   };
 
   const handleDeleteRule = async (id: string) => {
-    if (!window.confirm("Delete this alert rule?")) return;
+    if (!(await confirm("Delete this alert rule?"))) return;
     try {
       await api.delete(`/alert-rules/${id}`);
       fetchRules();
-    } catch {
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to delete alert rule."));
       // Best-effort; the surrounding list/table stays on its last good state.
     }
   };
@@ -404,11 +410,12 @@ export default function AlertCenter() {
   };
 
   const handleDeletePolicy = async (id: string) => {
-    if (!window.confirm("Delete this escalation policy?")) return;
+    if (!(await confirm("Delete this escalation policy?"))) return;
     try {
       await api.delete(`/escalation-policies/${id}`);
       fetchPolicies();
-    } catch {
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to delete escalation policy."));
       // Best-effort; the surrounding list/table stays on its last good state.
     }
   };
@@ -462,11 +469,12 @@ export default function AlertCenter() {
   };
 
   const handleDeleteWebhook = async (id: string) => {
-    if (!window.confirm("Delete this webhook endpoint?")) return;
+    if (!(await confirm("Delete this webhook endpoint?"))) return;
     try {
       await api.delete(`/webhooks/${id}`);
       fetchWebhooks();
-    } catch {
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to delete webhook endpoint."));
       // Best-effort; the surrounding list/table stays on its last good state.
     }
   };

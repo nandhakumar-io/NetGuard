@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { SyslogMessage, SyslogSummary } from "../lib/types";
+import { useDebouncedValue } from "../lib/useDebouncedValue";
+import { EmptyState } from "../components/EmptyState";
 
 // Numeric syslog severity (0=most severe) -> display config. Matches
 // app.models.syslog_message.SyslogSeverity's numeric values exactly, so
@@ -37,6 +39,7 @@ export default function SyslogViewer() {
   const [minSeverity, setMinSeverity] = useState("6"); // default: Info and worse (hide Debug noise)
   const [categoryFilter, setCategoryFilter] = useState("");
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 350);
   const [hours, setHours] = useState("24");
   const [onlyCorrelated, setOnlyCorrelated] = useState(false);
   const [liveMode, setLiveMode] = useState(true);
@@ -47,7 +50,7 @@ export default function SyslogViewer() {
     params.set("hours", hours);
     params.set("limit", "300");
     if (categoryFilter) params.set("category", categoryFilter);
-    if (search.trim()) params.set("search", search.trim());
+    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
 
     api
       .get<SyslogMessage[]>(`/syslog?${params.toString()}`)
@@ -60,7 +63,7 @@ export default function SyslogViewer() {
         setError("Could not reach the syslog feed. Make sure the backend is running.");
         setLoading(false);
       });
-  }, [minSeverity, hours, categoryFilter, search, onlyCorrelated]);
+  }, [minSeverity, hours, categoryFilter, debouncedSearch, onlyCorrelated]);
 
   const fetchSummary = useCallback(() => {
     api
