@@ -16,7 +16,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import create_index_if_missing, create_table_if_missing
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+)
 
 revision = "0047"
 down_revision = "0046"
@@ -46,7 +50,7 @@ def upgrade():
     create_index_if_missing("ix_approval_delegates_delegator_id", "approval_delegates", ["delegator_id"])
     create_index_if_missing("ix_approval_delegates_delegate_id", "approval_delegates", ["delegate_id"])
 
-    op.add_column(
+    add_column_if_missing(
         "change_request_approval_stages",
         sa.Column("acted_on_behalf_of", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
     )

@@ -39,7 +39,6 @@ def upgrade():
             server_default="pending",
         ),
         sa.Column("acted_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
-        sa.Column("acted_on_behalf_of", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
         sa.Column("acted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("notes", sa.String(), nullable=True),
     )
