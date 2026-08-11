@@ -28,7 +28,11 @@ def client():
             db.close()
 
     app.dependency_overrides[get_db] = _override_get_db
+
+    # Ensure rate limits state is completely cleared before each test
     rate_limiter._fallback_attempts.clear()
+    rate_limiter.reset_attempts("user@netguard.ai")
+    rate_limiter.reset_attempts("mfa:user@netguard.ai")
 
     with TestClient(app) as c:
         yield c
