@@ -108,7 +108,15 @@ function isGroupActive(group: NavGroup, pathname: string): boolean {
   );
 }
 
-function NavGroupSection({ group, defaultOpen }: { group: NavGroup; defaultOpen: boolean }) {
+function NavGroupSection({
+  group,
+  defaultOpen,
+  railExpanded,
+}: {
+  group: NavGroup;
+  defaultOpen: boolean;
+  railExpanded: boolean;
+}) {
   // Each group manages its own open/closed state -- click the header to
   // expand, click again to collapse, independent of the other groups.
   // Re-syncs to defaultOpen when the active route moves into/out of this
@@ -126,21 +134,22 @@ function NavGroupSection({ group, defaultOpen }: { group: NavGroup; defaultOpen:
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        title={group.label}
         className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-noc-muted hover:bg-white/5 hover:text-slate-200 dark:hover:text-noc-text transition-colors"
       >
-        <span className="text-slate-500 dark:text-noc-muted">{group.icon}</span>
-        <span className="flex-1 text-left">{group.label}</span>
+        <span className="text-slate-500 dark:text-noc-muted shrink-0">{group.icon}</span>
+        <span className={`flex-1 text-left whitespace-nowrap ${railExpanded ? "inline" : "hidden"} md:inline`}>{group.label}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-          className={`transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""} ${railExpanded ? "inline" : "hidden"} md:inline`}
         >
           <path d="M9 6l6 6-6 6" />
         </svg>
       </button>
       <div
         className={`grid overflow-hidden transition-[grid-template-rows] duration-200 ease-out ${
-          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-        }`}
+          open && railExpanded ? "max-md:grid-rows-[1fr]" : "max-md:grid-rows-[0fr]"
+        } ${open ? "md:grid-rows-[1fr]" : "md:grid-rows-[0fr]"}`}
       >
         <div className="min-h-0 overflow-hidden">
           <div className="pl-4 pt-1 pb-1 space-y-0.5">
@@ -149,8 +158,9 @@ function NavGroupSection({ group, defaultOpen }: { group: NavGroup; defaultOpen:
                 key={item.to}
                 to={item.to}
                 end={item.end}
+                title={item.label}
                 className={({ isActive }) =>
-                  `block px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  `block px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
                     isActive
                       ? "bg-brandblue text-white dark:bg-noc-cyan/15 dark:text-noc-cyan dark:border-l-2 dark:border-noc-cyan"
                       : "text-slate-300 dark:text-noc-muted hover:bg-white/5 hover:text-white dark:hover:text-noc-text"
@@ -171,59 +181,62 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  // Sidebar is a fixed 64-wide column on desktop (md and up) but an
-  // off-canvas drawer on phones/small tablets -- at w-64 it would otherwise
-  // eat most or all of a phone's viewport width with no way to reach the
-  // page content underneath it.
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  // Close the drawer automatically on navigation, so tapping a nav link
-  // doesn't leave the drawer covering the page you just navigated to.
+  // On phones/small tablets the sidebar lives as a slim, always-visible
+  // icon rail (w-16) instead of the old full-width off-canvas drawer that
+  // hid completely and covered the page with a dark backdrop when opened.
+  // The rail expands to the full w-64 layout -- overlaying the page rather
+  // than pushing it, so nothing reflows -- on hover (mouse/trackpad) and
+  // shrinks back once the pointer leaves. Touchscreens can't hover, so a
+  // tap on the rail pins it open until tapped again; content padding
+  // always reserves just the collapsed width, so the page is never fully
+  // blocked the way the old backdrop-drawer blocked it.
+  const [pinned, setPinned] = useState(false);
+  const [hovering, setHovering] = useState(false);
+  const railExpanded = pinned || hovering;
+
+  // Collapse back to the icon rail automatically on navigation.
   useEffect(() => {
-    setMobileNavOpen(false);
+    setPinned(false);
+    setHovering(false);
   }, [location.pathname]);
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100">
-      {mobileNavOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/50 md:hidden"
-          onClick={() => setMobileNavOpen(false)}
-          aria-hidden="true"
-        />
-      )}
       <aside
-        className={`w-64 bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col fixed inset-y-0 left-0 z-40 transition-transform duration-200 ease-out md:static md:translate-x-0 ${
-          mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
+        className={`bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col fixed inset-y-0 left-0 z-40 transition-[width] duration-200 ease-out overflow-hidden shadow-xl md:shadow-none md:static md:w-64 ${
+          railExpanded ? "w-64" : "w-16"
         }`}
       >
-        <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border flex items-center justify-between">
-          <div>
-            <p className="font-display text-xl font-bold tracking-widest uppercase">NetGuard</p>
-            <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider">Network Ops Console</p>
-          </div>
+        <div className="px-3 md:px-5 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-2">
           <button
-            onClick={() => setMobileNavOpen(false)}
-            aria-label="Close navigation"
-            className="md:hidden w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:bg-white/10 hover:text-white transition-colors"
+            onClick={() => setPinned((v) => !v)}
+            aria-label={pinned ? "Collapse navigation" : "Expand navigation"}
+            title={pinned ? "Collapse navigation" : "Pin navigation open"}
+            className="md:hidden w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-white/10 text-white font-display font-bold text-sm"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
+            NG
           </button>
+          <div className={`min-w-0 ${railExpanded ? "block" : "hidden"} md:block`}>
+            <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
+            <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
+          </div>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto overflow-x-hidden">
           {groups.map((group) => (
             <NavGroupSection
               key={group.label}
               group={group}
               defaultOpen={isGroupActive(group, location.pathname)}
+              railExpanded={railExpanded}
             />
           ))}
         </nav>
-        <div className="px-5 py-4 border-t border-white/10 dark:border-noc-border">
+        <div className="px-3 md:px-5 py-4 border-t border-white/10 dark:border-noc-border">
           {user && (
-            <div className="mb-3">
+            <div className={`mb-3 min-w-0 ${railExpanded ? "block" : "hidden"} md:block`}>
               <p className="text-sm font-medium truncate">{user.full_name}</p>
               <p className="text-[11px] text-accent dark:text-noc-cyan capitalize">{user.role.replace(/_/g, " ")}</p>
             </div>
@@ -233,24 +246,16 @@ export default function Layout() {
               await logout();
               navigate("/login");
             }}
-            className="text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors"
+            title="Sign out"
+            className={`text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors whitespace-nowrap ${railExpanded ? "inline" : "hidden"} md:inline`}
           >
             Sign out
           </button>
-          <p className="text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num">v1.0 · Prototype</p>
+          <p className={`text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num whitespace-nowrap ${railExpanded ? "block" : "hidden"} md:block`}>v1.0 · Prototype</p>
         </div>
       </aside>
-      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0">
+      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0 pl-16 md:pl-0">
         <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-3 sm:px-6">
-          <button
-            onClick={() => setMobileNavOpen(true)}
-            aria-label="Open navigation"
-            className="md:hidden w-9 h-9 shrink-0 flex items-center justify-center rounded-lg text-slate-500 dark:text-noc-muted hover:bg-slate-100 dark:hover:bg-noc-panel2 transition-colors"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 6h18M3 12h18M3 18h18" />
-            </svg>
-          </button>
           <button
             onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
             className="flex items-center gap-2 text-xs text-slate-400 dark:text-noc-muted border border-slate-200 dark:border-noc-border rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-noc-panel2 transition-colors w-full md:max-w-xs"
