@@ -11,7 +11,12 @@ from app.services import rate_limiter
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
+    def mock_get_client(*args, **kwargs):
+        import redis
+        raise redis.RedisError("BYPASS_REDIS")
+    monkeypatch.setattr("app.services.rate_limiter._get_client", mock_get_client)
+
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
