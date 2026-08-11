@@ -39,6 +39,7 @@ export default function SyslogViewer() {
   const [search, setSearch] = useState("");
   const [hours, setHours] = useState("24");
   const [onlyCorrelated, setOnlyCorrelated] = useState(false);
+  const [liveMode, setLiveMode] = useState(true);
 
   const fetchMessages = useCallback(() => {
     const params = new URLSearchParams();
@@ -78,12 +79,13 @@ export default function SyslogViewer() {
   useEffect(() => {
     fetchMessages();
     fetchSummary();
+    if (!liveMode) return;
     const interval = setInterval(() => {
       fetchMessages();
       fetchSummary();
     }, 15000);
     return () => clearInterval(interval);
-  }, [fetchMessages, fetchSummary]);
+  }, [fetchMessages, fetchSummary, liveMode]);
 
   const maxVolume = summary?.volume_by_hour.length
     ? Math.max(...summary.volume_by_hour.map((p) => p.count), 1)
@@ -143,6 +145,24 @@ export default function SyslogViewer() {
 
       {/* Filters */}
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 shadow-sm flex flex-wrap items-center gap-3">
+        <button
+          onClick={() => setLiveMode((v) => !v)}
+          title={liveMode ? "Pause live updates while you investigate a message" : "Resume auto-refresh"}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${
+            liveMode ? "bg-green-50 border-green-300 text-green-700" : "bg-slate-100 border-slate-300 text-slate-500"
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full ${liveMode ? "bg-green-500 animate-pulse" : "bg-slate-400"}`} />
+          {liveMode ? "Live" : "Paused"}
+        </button>
+        {!liveMode && (
+          <button
+            onClick={() => { fetchMessages(); fetchSummary(); }}
+            className="text-xs font-bold px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-900"
+          >
+            ↻ Refresh now
+          </button>
+        )}
         <select
           value={minSeverity}
           onChange={(e) => setMinSeverity(e.target.value)}

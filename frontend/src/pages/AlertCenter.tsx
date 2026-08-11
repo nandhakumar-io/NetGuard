@@ -201,6 +201,38 @@ export default function AlertCenter() {
     api.patch(`/alerts/${id}/resolve`).then(() => { fetchAlerts(); fetchSummary(); }).catch(() => {});
   };
 
+  // --- Bulk selection -- lets an admin triaging a pile of alerts after a
+  // change window or outage ack/resolve many at once instead of one click
+  // per row. Only top-level (non-suppressed) alerts are selectable, since
+  // "impacted" alerts are just noise nested under their root cause.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkWorking, setBulkWorking] = useState(false);
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+  const handleBulkAcknowledge = () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkWorking(true);
+    Promise.allSettled(ids.map((id) => api.patch(`/alerts/${id}/acknowledge`)))
+      .then(() => { fetchAlerts(); fetchSummary(); clearSelection(); })
+      .finally(() => setBulkWorking(false));
+  };
+  const handleBulkResolve = () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkWorking(true);
+    Promise.allSettled(ids.map((id) => api.patch(`/alerts/${id}/resolve`)))
+      .then(() => { fetchAlerts(); fetchSummary(); clearSelection(); })
+      .finally(() => setBulkWorking(false));
+  };
+
   // --- Snooze / mute (per-device, per-rule/category, or both) ---
   const [snoozeTarget, setSnoozeTarget] = useState<Alert | null>(null);
   const [snoozeScope, setSnoozeScope] = useState<"device" | "category" | "both">("both");
@@ -689,6 +721,31 @@ export default function AlertCenter() {
 
           {/* Alert Timeline */}
           <div className="mt-6 space-y-3">
+            {selectedIds.size > 0 && (
+              <div className="sticky top-0 z-10 flex items-center gap-3 bg-navy dark:bg-slate-950 text-white rounded-xl px-4 py-2.5 shadow-md flex-wrap">
+                <span className="text-xs font-bold">{selectedIds.size} selected</span>
+                <button
+                  onClick={handleBulkAcknowledge}
+                  disabled={bulkWorking}
+                  className="text-xs font-semibold bg-white/15 hover:bg-white/25 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {bulkWorking ? "Working…" : "Acknowledge selected"}
+                </button>
+                <button
+                  onClick={handleBulkResolve}
+                  disabled={bulkWorking}
+                  className="text-xs font-semibold bg-white/15 hover:bg-white/25 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {bulkWorking ? "Working…" : "Resolve selected"}
+                </button>
+                <button
+                  onClick={clearSelection}
+                  className="ml-auto text-xs font-semibold text-white/70 hover:text-white"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
             {loading ? (
               <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-12 text-center">
                 <div className="inline-block w-6 h-6 border-2 border-brandblue/30 border-t-brandblue rounded-full animate-spin" />
@@ -725,6 +782,17 @@ export default function AlertCenter() {
                       } ${nested ? "ml-6 border-dashed" : ""}`}
                     >
                       <div className="flex items-stretch">
+                        {!nested && !alert.resolved && (
+                          <label className="flex items-center pl-3 shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(alert.id)}
+                              onChange={() => toggleSelected(alert.id)}
+                              className="w-3.5 h-3.5 accent-brandblue cursor-pointer"
+                              aria-label={`Select alert: ${alert.category}`}
+                            />
+                          </label>
+                        )}
                         <div className={`w-1.5 ${sev.bg} shrink-0`} />
                         <div className="flex-1 px-5 py-4">
                           <div className="flex items-start justify-between gap-4">
