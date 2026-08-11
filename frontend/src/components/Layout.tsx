@@ -254,7 +254,11 @@ export default function Layout() {
           <p className={`text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num whitespace-nowrap ${railExpanded ? "block" : "hidden"} md:block`}>v1.0 · Prototype</p>
         </div>
       </aside>
-      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0 pl-16 md:pl-0">
+      <main
+        className={`flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0 transition-[padding-left] duration-200 ease-out md:pl-0 ${
+          railExpanded ? "pl-64" : "pl-16"
+        }`}
+      >
         <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-3 sm:px-6">
           <button
             onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
