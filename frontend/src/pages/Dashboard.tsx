@@ -84,6 +84,13 @@ const STAT_ICONS: Record<string, { bg: string; fg: string; icon: React.ReactNode
   cpu: { bg: "bg-cyan-50", fg: "text-cyan-500", icon: <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M7 7h10v10H7z" strokeLinecap="round" strokeLinejoin="round" /> },
   memory: { bg: "bg-violet-50", fg: "text-violet-500", icon: <path d="M4 7h16v10H4zM8 7v10M12 7v10M16 7v10" strokeLinecap="round" /> },
   alerts: { bg: "bg-amber-50", fg: "text-amber-500", icon: <path d="M12 3l9 16H3L12 3zM12 10v4M12 17h.01" strokeLinecap="round" strokeLinejoin="round" /> },
+  // NOC-priority stat cards -- these replace the old top-row CPU/RAM
+  // gauges (utilization alone rarely says "something's broken"; a down
+  // port or a flapping interface does). CPU/RAM stay visible in the
+  // Fleet Health and Fleet History widgets below for anyone who wants
+  // the trend, just not fighting for attention at the very top.
+  downports: { bg: "bg-orange-50", fg: "text-orange-500", icon: <path d="M4 12h16M4 12l4-4M4 12l4 4M20 6v12" strokeLinecap="round" strokeLinejoin="round" /> },
+  flapping: { bg: "bg-pink-50", fg: "text-pink-500", icon: <path d="M3 12h4l2-7 4 14 2-7h6" strokeLinecap="round" strokeLinejoin="round" /> },
 };
 
 function StatCard({
@@ -302,26 +309,24 @@ export default function Dashboard() {
         <StatCard iconKey="devices" value={total} label="Devices" sublabel={`${totalGroups} groups`} />
         <StatCard iconKey="online" value={online} label="Online" valueClass="text-emerald-600" sublabel={`${onlinePct.toFixed(0)}% healthy`} />
         <StatCard iconKey="offline" value={offline} label="Offline" valueClass={offline > 0 ? "text-red-600" : "text-slate-800"} sublabel={`${summary?.critical_alerts ?? 0} critical`} />
-        <Card className="p-5">
-          <div className="w-9 h-9 rounded-lg bg-cyan-50 text-cyan-500 flex items-center justify-center mb-3">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M7 7h10v10H7z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-          </div>
-          <div className="flex items-end justify-between">
-            <p className="text-2xl font-bold text-slate-800">{avgCpu.toFixed(1)}%</p>
-            <Sparkline values={cpuHistory} color="#06B6D4" width={56} height={20} />
-          </div>
-          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mt-1">Avg CPU</p>
-        </Card>
-        <Card className="p-5">
-          <div className="w-9 h-9 rounded-lg bg-violet-50 text-violet-500 flex items-center justify-center mb-3">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16v10H4zM8 7v10M12 7v10M16 7v10" strokeLinecap="round" /></svg>
-          </div>
-          <div className="flex items-end justify-between">
-            <p className="text-2xl font-bold text-slate-800">{avgMem.toFixed(0)}%</p>
-            <Sparkline values={memHistory} color="#8B5CF6" width={56} height={20} />
-          </div>
-          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mt-1">Avg RAM</p>
-        </Card>
+        <Link to="/devices" className="block">
+          <StatCard
+            iconKey="downports"
+            value={summary?.down_ports?.length ?? 0}
+            label="Down Ports"
+            valueClass={(summary?.down_ports?.length ?? 0) > 0 ? "text-orange-600" : "text-slate-800"}
+            sublabel="right now, via SNMP"
+          />
+        </Link>
+        <Link to="/topology" className="block">
+          <StatCard
+            iconKey="flapping"
+            value={summary?.flapping_interfaces?.length ?? 0}
+            label="Flapping"
+            valueClass={(summary?.flapping_interfaces?.length ?? 0) > 0 ? "text-pink-600" : "text-slate-800"}
+            sublabel="interfaces, last 24h"
+          />
+        </Link>
         <StatCard
           iconKey="alerts"
           value={(summary?.critical_alerts ?? 0) + (summary?.warning_alerts ?? 0)}

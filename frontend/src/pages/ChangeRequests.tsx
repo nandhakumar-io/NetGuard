@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain } from "../lib/types";
+import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, ImpactSimulationPreview, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
@@ -26,6 +26,100 @@ const priorityStyle: Record<ChangePriority, string> = {
   high: "bg-amber-100 text-amber-700",
   emergency: "bg-red-100 text-red-700",
 };
+
+// Pre-deployment impact simulation panel ("what-if" dry run): shared
+// between the New Change Request form (live, as the operator types) and
+// the CR detail view (re-run against the topology as it stands now). See
+// app/services/impact_simulation_service.py for what's actually computed
+// -- this just renders the result.
+function ImpactSimulationPanel({ sim, loading }: { sim: ImpactSimulationPreview | null; loading: boolean }) {
+  if (loading && !sim) {
+    return (
+      <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 text-xs bg-slate-50 dark:bg-slate-900">
+        <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">
+          Pre-Change Impact Simulation
+        </p>
+        <p className="text-slate-400">Simulating routing/reachability impact…</p>
+      </div>
+    );
+  }
+  if (!sim) return null;
+
+  const styleByClassification: Record<string, string> = {
+    danger: "border-red-300 bg-red-50 dark:bg-red-950/20 dark:border-red-800",
+    caution: "border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800",
+    safe: "border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-900",
+  };
+  const badgeByClassification: Record<string, string> = {
+    danger: "bg-red-100 text-red-700",
+    caution: "bg-amber-100 text-amber-700",
+    safe: "bg-green-100 text-green-700",
+  };
+  const badgeLabel: Record<string, string> = {
+    danger: "⛔ Would break reachability",
+    caution: "⚠ Review before deploying",
+    safe: "✓ No reachability impact",
+  };
+
+  const allImpacted = [...sim.isolated_devices, ...sim.degraded_devices];
+
+  return (
+    <div className={`border rounded-lg p-3 text-xs ${styleByClassification[sim.classification] || styleByClassification.safe}`}>
+      <div className="flex items-center justify-between mb-1">
+        <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+          Pre-Change Impact Simulation
+        </p>
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeByClassification[sim.classification] || badgeByClassification.safe}`}>
+          {badgeLabel[sim.classification] || badgeLabel.safe}
+        </span>
+      </div>
+      <p className="text-slate-700 dark:text-slate-200">{sim.summary}</p>
+
+      {sim.removed_links.length > 0 && (
+        <div className="mt-2">
+          <p className="text-slate-500 dark:text-slate-400 font-semibold mb-1">Links this change would take down:</p>
+          <ul className="space-y-0.5">
+            {sim.removed_links.map((link, i) => (
+              <li key={i} className="text-slate-600 dark:text-slate-300">
+                <span className="font-mono">{link.interface}</span>
+                {link.neighbor_hostname && (
+                  <>
+                    {" → "}
+                    <span className="font-medium">{link.neighbor_hostname}</span>
+                    {link.neighbor_port && <span className="font-mono opacity-70"> ({link.neighbor_port})</span>}
+                  </>
+                )}
+                <span className="opacity-70"> — {link.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {allImpacted.length > 0 && (
+        <div className="mt-2">
+          <p className="text-slate-500 dark:text-slate-400 font-semibold mb-1">Devices affected:</p>
+          <ul className="space-y-0.5">
+            {allImpacted.map((d) => (
+              <li key={d.device_id} className="text-slate-600 dark:text-slate-300">
+                <span className={`inline-block w-2 h-2 rounded-full mr-1.5 ${d.status === "isolated" ? "bg-red-500" : "bg-amber-500"}`} />
+                <span className="font-medium">{d.hostname}</span>
+                {d.device_role && <span className="opacity-60"> · {d.device_role}</span>}
+                {d.status === "isolated" ? (
+                  <span className="ml-1 text-red-600 dark:text-red-400">would lose all reachability — no alternate path</span>
+                ) : (
+                  <span className="ml-1 text-amber-700 dark:text-amber-400">
+                    still reachable, but via a longer path ({d.before_hop_count} → {d.after_hop_count} hops)
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const emptyForm = {
   device_id: "",
@@ -170,6 +264,74 @@ export default function ChangeRequests() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.device_id, form.additional_device_ids.join(",")]);
+
+  // Pre-deployment impact simulation ("what-if" dry run): unlike the
+  // blast-radius count above, this actually parses the proposed config
+  // for interface shutdowns / lockout ACLs, removes the matching links
+  // from the live topology graph, and re-checks reachability -- so it
+  // needs proposed_config too, not just the device selection.
+  const [impactSim, setImpactSim] = useState<ImpactSimulationPreview | null>(null);
+  const [impactSimLoading, setImpactSimLoading] = useState(false);
+
+  useEffect(() => {
+    if (!form.device_id || !form.proposed_config.trim()) {
+      setImpactSim(null);
+      return;
+    }
+    let cancelled = false;
+    setImpactSimLoading(true);
+    const timer = setTimeout(() => {
+      api
+        .post("/change-requests/simulate-impact", {
+          device_id: form.device_id,
+          proposed_config: form.proposed_config,
+        })
+        .then((res) => {
+          if (!cancelled) setImpactSim(res.data);
+        })
+        .catch(() => {
+          if (!cancelled) setImpactSim(null);
+        })
+        .finally(() => {
+          if (!cancelled) setImpactSimLoading(false);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.device_id, form.proposed_config]);
+
+  // Same dry run, re-run against an already-submitted CR's stored
+  // current/proposed config when it's opened in the detail panel -- lets
+  // a reviewer check routing impact against the topology as it stands
+  // right now, not just what it looked like at submission time.
+  const [selectedImpactSim, setSelectedImpactSim] = useState<ImpactSimulationPreview | null>(null);
+  const [selectedImpactSimLoading, setSelectedImpactSimLoading] = useState(false);
+
+  useEffect(() => {
+    if (!selected) {
+      setSelectedImpactSim(null);
+      return;
+    }
+    let cancelled = false;
+    setSelectedImpactSimLoading(true);
+    api
+      .get<ImpactSimulationPreview>(`/change-requests/${selected.id}/simulate-impact`)
+      .then((res) => {
+        if (!cancelled) setSelectedImpactSim(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedImpactSim(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSelectedImpactSimLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id]);
 
   const [availableTemplates, setAvailableTemplates] = useState<ConfigTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -582,6 +744,10 @@ export default function ChangeRequests() {
                 <p className="text-slate-400">Blast radius unavailable.</p>
               )}
             </div>
+          )}
+
+          {form.device_id && form.proposed_config.trim() && (
+            <ImpactSimulationPanel sim={impactSim} loading={impactSimLoading} />
           )}
 
           <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-50 dark:bg-slate-900">
@@ -1054,6 +1220,7 @@ export default function ChangeRequests() {
                     )}
                 </div>
               )}
+              <ImpactSimulationPanel sim={selectedImpactSim} loading={selectedImpactSimLoading} />
               <div className="space-y-3">
                 {selected.config_diff_summary && (
                   <div>

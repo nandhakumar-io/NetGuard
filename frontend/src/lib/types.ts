@@ -1344,3 +1344,33 @@ export interface BlastRadiusPreview {
   dependent_device_ids: string[];
   unknown_device_ids: string[];
 }
+
+export interface RemovedLinkPreview {
+  interface: string;
+  reason: string;
+  neighbor_device_id: string | null;
+  neighbor_hostname: string | null;
+  neighbor_port: string | null;
+}
+
+export interface DeviceImpactPreview {
+  device_id: string;
+  hostname: string;
+  device_role: string | null;
+  before_hop_count: number;
+  after_hop_count: number | null;
+  status: "isolated" | "degraded";
+}
+
+export interface ImpactSimulationPreview {
+  device_id: string;
+  hostname: string;
+  affected_interfaces: string[];
+  removed_links: RemovedLinkPreview[];
+  isolated_devices: DeviceImpactPreview[];
+  degraded_devices: DeviceImpactPreview[];
+  reachable_unaffected_count: number;
+  total_dependent_count: number;
+  classification: "safe" | "caution" | "danger";
+  summary: string;
+}

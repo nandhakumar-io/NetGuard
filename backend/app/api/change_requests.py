@@ -22,7 +22,11 @@ from app.schemas.change_request import (
     BlastRadiusPreview,
     ChangeRequestCreate,
     ChangeRequestRead,
+    DeviceImpactPreview,
+    ImpactSimulationPreview,
+    ImpactSimulationRequest,
     PendingApprovalItem,
+    RemovedLinkPreview,
     RiskAnalysisResult,
 )
 from app.services import (
@@ -30,6 +34,7 @@ from app.services import (
     audit_service,
     diff_engine,
     event_bus,
+    impact_simulation_service,
     protocol_manager,
     risk_engine,
     snapshot_service,
@@ -280,6 +285,98 @@ def preview_blast_radius(
         dependent_device_ids=result.dependent_device_ids,
         unknown_device_ids=result.unknown_device_ids,
     )
+
+
+def _impact_preview(result: impact_simulation_service.ImpactSimulationResult) -> ImpactSimulationPreview:
+    return ImpactSimulationPreview(
+        device_id=result.device_id,
+        hostname=result.hostname,
+        affected_interfaces=result.affected_interfaces,
+        removed_links=[
+            RemovedLinkPreview(
+                interface=link.interface,
+                reason=link.reason,
+                neighbor_device_id=link.neighbor_device_id,
+                neighbor_hostname=link.neighbor_hostname,
+                neighbor_port=link.neighbor_port,
+            )
+            for link in result.removed_links
+        ],
+        isolated_devices=[
+            DeviceImpactPreview(
+                device_id=d.device_id,
+                hostname=d.hostname,
+                device_role=d.device_role,
+                before_hop_count=d.before_hop_count,
+                after_hop_count=d.after_hop_count,
+                status=d.status,
+            )
+            for d in result.isolated_devices
+        ],
+        degraded_devices=[
+            DeviceImpactPreview(
+                device_id=d.device_id,
+                hostname=d.hostname,
+                device_role=d.device_role,
+                before_hop_count=d.before_hop_count,
+                after_hop_count=d.after_hop_count,
+                status=d.status,
+            )
+            for d in result.degraded_devices
+        ],
+        reachable_unaffected_count=result.reachable_unaffected_count,
+        total_dependent_count=result.total_dependent_count,
+        classification=result.classification,
+        summary=result.summary,
+    )
+
+
+@router.post("/simulate-impact", response_model=ImpactSimulationPreview)
+def simulate_impact(
+    payload: ImpactSimulationRequest,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Pre-deployment "what-if" dry run (SRS-adjacent to blast-radius, but
+    routing/reachability-aware rather than just a device-count fan-out):
+    simulates the proposed config's effect on the *live* topology graph --
+    which confirmed links would go down (interface shutdown / a
+    traffic-denying ACL), and whether every device on the far side of them
+    still has a redundant path afterwards -- before the change is ever
+    submitted, let alone pushed to a device. Called live from the New
+    Change Request form as the operator types, same pattern as
+    /blast-radius above.
+    """
+    device = db.get(Device, payload.device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    current_config = _latest_config(db, device.id)
+    result = impact_simulation_service.simulate_impact(db, device, payload.proposed_config, current_config)
+    return _impact_preview(result)
+
+
+@router.get("/{cr_id}/simulate-impact", response_model=ImpactSimulationPreview)
+def simulate_impact_for_change_request(
+    cr_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Same dry run as POST /simulate-impact above, but re-run against an
+    already-submitted change request's stored current_config/proposed_config
+    -- lets a reviewer re-check the routing impact from the CR detail page
+    without retyping the diff, and reflects whatever the topology looks
+    like *right now* (which may have drifted since submission).
+    """
+    cr = db.get(ChangeRequest, cr_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request not found")
+    device = db.get(Device, cr.device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    result = impact_simulation_service.simulate_impact(db, device, cr.proposed_config, cr.current_config)
+    return _impact_preview(result)
 
 
 @router.post("", response_model=ChangeRequestRead, status_code=201)

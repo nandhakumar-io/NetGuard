@@ -50,6 +50,52 @@ class BlastRadiusPreview(BaseModel):
     unknown_device_ids: list[uuid.UUID] = []
 
 
+class ImpactSimulationRequest(BaseModel):
+    """Pre-submission dry-run input: mirrors ChangeRequestCreate's device_id
+    + proposed_config, without needing a change request to already exist."""
+
+    device_id: uuid.UUID
+    proposed_config: str
+
+
+class RemovedLinkPreview(BaseModel):
+    interface: str
+    reason: str
+    neighbor_device_id: uuid.UUID | None = None
+    neighbor_hostname: str | None = None
+    neighbor_port: str | None = None
+
+
+class DeviceImpactPreview(BaseModel):
+    device_id: uuid.UUID
+    hostname: str
+    device_role: str | None = None
+    before_hop_count: int
+    after_hop_count: int | None = None
+    status: str
+
+
+class ImpactSimulationPreview(BaseModel):
+    """Pre-deployment "what-if" dry run (see
+    app.services.impact_simulation_service.simulate_impact): simulates the
+    proposed config's effect on the live topology graph -- which confirmed
+    links would go down, and whether every device on the far side of them
+    still has a redundant path -- before the change is ever pushed to a
+    device.
+    """
+
+    device_id: uuid.UUID
+    hostname: str
+    affected_interfaces: list[str] = []
+    removed_links: list[RemovedLinkPreview] = []
+    isolated_devices: list[DeviceImpactPreview] = []
+    degraded_devices: list[DeviceImpactPreview] = []
+    reachable_unaffected_count: int = 0
+    total_dependent_count: int = 0
+    classification: str
+    summary: str
+
+
 class TriggeringAlertSummary(BaseModel):
     """Minimal alert info embedded on ChangeRequestRead for the postmortem
     link (full alert detail lives on GET /alerts/{id} / Alert Center)."""
