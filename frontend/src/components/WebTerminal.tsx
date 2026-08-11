@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
-import { ACCESS_TOKEN_KEY } from '../lib/api';
+import { getAccessToken } from '../lib/api';
 
 interface WebTerminalProps {
   deviceId: string;
@@ -48,7 +48,7 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
       }
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const token = localStorage.getItem(ACCESS_TOKEN_KEY) || '';
+    const token = getAccessToken() || '';
     
     const wsUrl = `${protocol}//${wsHost}/api/v1/devices/${deviceId}/terminal?token=${token}`;
     const ws = new WebSocket(wsUrl);

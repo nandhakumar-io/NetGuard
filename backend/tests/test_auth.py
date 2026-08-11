@@ -58,7 +58,8 @@ def test_login_without_mfa_returns_token_pair(client):
     r = client.post("/api/v1/auth/login", json={"email": "user@netguard.ai", "password": "correct-horse-1"})
     assert r.status_code == 200
     body = r.json()
-    assert "access_token" in body and "refresh_token" in body
+    assert "access_token" in body
+    assert "netguard_refresh_token" in r.cookies
 
 
 def test_mfa_enrollment_and_challenge_flow(client):
@@ -88,7 +89,8 @@ def test_mfa_enrollment_and_challenge_flow(client):
     good_code = pyotp.TOTP(secret).now()
     verify = client.post("/api/v1/auth/mfa/verify", json={"mfa_token": mfa_token, "code": good_code})
     assert verify.status_code == 200
-    assert "access_token" in verify.json() and "refresh_token" in verify.json()
+    assert "access_token" in verify.json()
+    assert "netguard_refresh_token" in verify.cookies
 
 
 def test_mfa_challenge_token_cannot_be_used_as_access_token(client):
@@ -110,14 +112,16 @@ def test_mfa_challenge_token_cannot_be_used_as_access_token(client):
 def test_refresh_token_rotation(client):
     _register(client)
     login = client.post("/api/v1/auth/login", json={"email": "user@netguard.ai", "password": "correct-horse-1"})
-    refresh_token = login.json()["refresh_token"]
+    refresh_token = login.cookies.get("netguard_refresh_token")
 
     r1 = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert r1.status_code == 200
-    new_refresh = r1.json()["refresh_token"]
+    new_refresh = r1.cookies.get("netguard_refresh_token")
     assert new_refresh != refresh_token
 
     # Old refresh token is now revoked -- reuse must fail
+    # TestClient stores cookies automatically, so clear it to test the payload fallback with the old token
+    del client.cookies["netguard_refresh_token"]
     r2 = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert r2.status_code == 401
 
@@ -125,7 +129,7 @@ def test_refresh_token_rotation(client):
 def test_logout_revokes_refresh_token(client):
     _register(client)
     login = client.post("/api/v1/auth/login", json={"email": "user@netguard.ai", "password": "correct-horse-1"})
-    refresh_token = login.json()["refresh_token"]
+    refresh_token = login.cookies.get("netguard_refresh_token")
 
     logout = client.post("/api/v1/auth/logout", json={"refresh_token": refresh_token})
     assert logout.status_code == 204

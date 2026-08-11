@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, REFRESH_TOKEN_KEY } from "../lib/api";
+import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 interface SessionInfo {
@@ -86,10 +86,10 @@ export default function Security() {
   const loadSessions = async () => {
     setSessionsError(null);
     try {
-      const currentRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-      const res = await api.get<SessionInfo[]>("/auth/sessions", {
-        params: currentRefreshToken ? { current_refresh_token: currentRefreshToken } : {},
-      });
+      // No params needed -- the backend identifies the "current" session
+      // from the httpOnly refresh cookie it already receives with this
+      // request (see /auth/sessions).
+      const res = await api.get<SessionInfo[]>("/auth/sessions");
       // Current session first, then newest-first (API already orders
       // newest-first; current just gets pinned to the top).
       const sorted = [...res.data].sort((a, b) => Number(b.current) - Number(a.current));
@@ -117,8 +117,8 @@ export default function Security() {
       if (isCurrent) {
         // Own session was just killed server-side -- refresh will fail
         // from here on, so send the user back to Login rather than
-        // leaving a dead session in place.
-        localStorage.removeItem(REFRESH_TOKEN_KEY);
+        // leaving a dead session in place. The refresh cookie itself was
+        // already revoked server-side by DELETE /auth/sessions/{id}.
         window.location.href = "/login";
         return;
       }

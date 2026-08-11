@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from jose import JWTError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.core.security import (
@@ -26,7 +27,6 @@ from app.schemas.auth import (
     RefreshRequest,
     SessionRead,
     Token,
-    TokenPair,
     UserCreate,
     UserRoleUpdate,
 )
@@ -34,8 +34,32 @@ from app.services import mfa_service, rate_limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# The refresh token is never returned in a JSON body and never touches
+# frontend JS/localStorage -- it's set as an httpOnly cookie so that an XSS
+# bug anywhere else in the app (a compromised dependency, a future
+# dangerouslySetInnerHTML, etc.) cannot read it and mint long-lived sessions.
+# Scoped to the auth path prefix so it isn't sent on every other API call.
+REFRESH_COOKIE_NAME = "netguard_refresh_token"
+_REFRESH_COOKIE_PATH = f"{settings.API_V1_PREFIX}/auth"
 
-def _issue_token_pair(db: Session, user: User) -> TokenPair:
+
+def _set_refresh_cookie(response: Response, raw_refresh: str) -> None:
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=raw_refresh,
+        httponly=True,
+        secure=settings.ENVIRONMENT == "production",
+        samesite="lax",
+        path=_REFRESH_COOKIE_PATH,
+        max_age=60 * 60 * 24 * settings.REFRESH_TOKEN_EXPIRE_DAYS,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(key=REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
+
+
+def _issue_token_pair(db: Session, user: User, response: Response) -> Token:
     access_token = create_access_token(subject=user.email, role=user.role.value)
 
     raw_refresh = generate_refresh_token()
@@ -46,7 +70,8 @@ def _issue_token_pair(db: Session, user: User) -> TokenPair:
     ))
     db.commit()
 
-    return TokenPair(access_token=access_token, refresh_token=raw_refresh)
+    _set_refresh_cookie(response, raw_refresh)
+    return Token(access_token=access_token)
 
 
 @router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)
@@ -73,8 +98,8 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     return Token(access_token=token)
 
 
-@router.post("/login", response_model=TokenPair | MfaRequiredResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+@router.post("/login", response_model=Token | MfaRequiredResponse)
+def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
     locked_out, retry_after = rate_limiter.is_locked_out(payload.email)
     if locked_out:
         raise HTTPException(
@@ -93,11 +118,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         mfa_token = create_mfa_challenge_token(subject=user.email)
         return MfaRequiredResponse(mfa_token=mfa_token)
 
-    return _issue_token_pair(db, user)
+    return _issue_token_pair(db, user, response)
 
 
-@router.post("/mfa/verify", response_model=TokenPair)
-def mfa_verify(payload: MfaVerifyRequest, db: Session = Depends(get_db)):
+@router.post("/mfa/verify", response_model=Token)
+def mfa_verify(payload: MfaVerifyRequest, response: Response, db: Session = Depends(get_db)):
     try:
         claims = decode_mfa_challenge_token(payload.mfa_token)
     except JWTError:
@@ -123,7 +148,7 @@ def mfa_verify(payload: MfaVerifyRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
     rate_limiter.reset_attempts(f"mfa:{email}")
-    return _issue_token_pair(db, user)
+    return _issue_token_pair(db, user, response)
 
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse)
@@ -160,15 +185,29 @@ def mfa_disable(payload: MfaDisableRequest, db: Session = Depends(get_db), curre
     return {"mfa_enabled": False}
 
 
-@router.post("/refresh", response_model=TokenPair)
-def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+@router.post("/refresh", response_model=Token)
+def refresh(
+    response: Response,
+    db: Session = Depends(get_db),
+    refresh_token_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+    payload: RefreshRequest | None = None,
+):
     """Rotates a refresh token: the presented token is revoked and a new
     access/refresh pair is issued. Rotation limits the blast radius if a
     refresh token is ever leaked (it can only be used once).
+
+    Reads the refresh token from the httpOnly cookie set at login. The
+    request-body form (`payload.refresh_token`) is accepted only as a
+    fallback for non-browser API clients that can't hold cookies -- the
+    browser frontend never sends a body here.
     """
     from datetime import datetime, timezone
 
-    token_hash = hash_refresh_token(payload.refresh_token)
+    raw_refresh = refresh_token_cookie or (payload.refresh_token if payload else None)
+    if not raw_refresh:
+        raise HTTPException(status_code=401, detail="No refresh token presented")
+
+    token_hash = hash_refresh_token(raw_refresh)
     record = db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
 
     if record and record.expires_at.tzinfo is None:
@@ -177,6 +216,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
         expires_at = record.expires_at if record else None
 
     if not record or record.revoked or expires_at < datetime.now(timezone.utc):
+        _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Refresh token invalid or expired, please log in again")
 
     record.revoked = True
@@ -186,16 +226,24 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
 
-    return _issue_token_pair(db, user)
+    return _issue_token_pair(db, user, response)
 
 
 @router.post("/logout", status_code=204)
-def logout(payload: RefreshRequest, db: Session = Depends(get_db)):
-    token_hash = hash_refresh_token(payload.refresh_token)
-    record = db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
-    if record:
-        record.revoked = True
-        db.commit()
+def logout(
+    response: Response,
+    db: Session = Depends(get_db),
+    refresh_token_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+    payload: RefreshRequest | None = None,
+):
+    raw_refresh = refresh_token_cookie or (payload.refresh_token if payload else None)
+    if raw_refresh:
+        token_hash = hash_refresh_token(raw_refresh)
+        record = db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
+        if record:
+            record.revoked = True
+            db.commit()
+    _clear_refresh_cookie(response)
 
 
 @router.patch("/users/{user_id}/role")
@@ -220,14 +268,9 @@ def update_user_role(
 
 @router.get("/sessions", response_model=list[SessionRead])
 def list_sessions(
-    current_refresh_token: str | None = Query(
-        None,
-        description="Raw refresh token of the session making this request, if known. "
-        "Used only to flag which returned session is 'current' (by matching its hash) -- "
-        "never persisted or logged.",
-    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    refresh_token_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
 ):
     """Lists this user's active (non-revoked, non-expired) refresh-token
     sessions -- i.e. everywhere they're currently logged in. Backs the
@@ -236,11 +279,17 @@ def list_sessions(
     the access token used to reach this endpoint has no session identity of
     its own (see RefreshToken model), so there's nothing to list once every
     refresh token for the account has lapsed.
+
+    "Current" session is determined from the httpOnly refresh cookie on
+    this request, never from a value the frontend supplies -- the raw
+    refresh token isn't available to frontend JS at all (see the cookie
+    helpers above), and accepting it as a query param would also have put
+    it in server/proxy access logs.
     """
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
-    current_hash = hash_refresh_token(current_refresh_token) if current_refresh_token else None
+    current_hash = hash_refresh_token(refresh_token_cookie) if refresh_token_cookie else None
 
     records = (
         db.query(RefreshToken)

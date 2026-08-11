@@ -171,13 +171,46 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  // Sidebar is a fixed 64-wide column on desktop (md and up) but an
+  // off-canvas drawer on phones/small tablets -- at w-64 it would otherwise
+  // eat most or all of a phone's viewport width with no way to reach the
+  // page content underneath it.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Close the drawer automatically on navigation, so tapping a nav link
+  // doesn't leave the drawer covering the page you just navigated to.
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100">
-      <aside className="w-64 bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col">
-        <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border">
-          <p className="font-display text-xl font-bold tracking-widest uppercase">NetGuard</p>
-          <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider">Network Ops Console</p>
+      {mobileNavOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        className={`w-64 bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col fixed inset-y-0 left-0 z-40 transition-transform duration-200 ease-out md:static md:translate-x-0 ${
+          mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border flex items-center justify-between">
+          <div>
+            <p className="font-display text-xl font-bold tracking-widest uppercase">NetGuard</p>
+            <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider">Network Ops Console</p>
+          </div>
+          <button
+            onClick={() => setMobileNavOpen(false)}
+            aria-label="Close navigation"
+            className="md:hidden w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:bg-white/10 hover:text-white transition-colors"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
         </div>
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {groups.map((group) => (
@@ -207,22 +240,34 @@ export default function Layout() {
           <p className="text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num">v1.0 · Prototype</p>
         </div>
       </aside>
-      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg">
-        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-6">
+      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0">
+        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-3 sm:px-6">
+          <button
+            onClick={() => setMobileNavOpen(true)}
+            aria-label="Open navigation"
+            className="md:hidden w-9 h-9 shrink-0 flex items-center justify-center rounded-lg text-slate-500 dark:text-noc-muted hover:bg-slate-100 dark:hover:bg-noc-panel2 transition-colors"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 6h18M3 12h18M3 18h18" />
+            </svg>
+          </button>
           <button
             onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
-            className="flex items-center gap-2 text-xs text-slate-400 dark:text-noc-muted border border-slate-200 dark:border-noc-border rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-noc-panel2 transition-colors max-w-xs w-full"
+            className="flex items-center gap-2 text-xs text-slate-400 dark:text-noc-muted border border-slate-200 dark:border-noc-border rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-noc-panel2 transition-colors w-full md:max-w-xs"
           >
             <span>🔎</span>
-            <span className="flex-1 text-left">Search devices, alerts, configs…</span>
-            <span className="font-mono text-[10px] bg-slate-100 dark:bg-noc-panel2 dark:border dark:border-noc-border px-1.5 py-0.5 rounded">⌘K</span>
+            <span className="flex-1 text-left truncate">
+              <span className="hidden sm:inline">Search devices, alerts, configs…</span>
+              <span className="sm:hidden">Search…</span>
+            </span>
+            <span className="hidden sm:inline font-mono text-[10px] bg-slate-100 dark:bg-noc-panel2 dark:border dark:border-noc-border px-1.5 py-0.5 rounded">⌘K</span>
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             <ThemeToggle />
             <NotificationBell />
           </div>
         </header>
-        <div className="flex-1 p-8">
+        <div className="flex-1 p-4 sm:p-6 lg:p-8 min-w-0">
           <Outlet />
         </div>
       </main>

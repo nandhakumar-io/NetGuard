@@ -135,8 +135,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    # Bound to localhost only -- db is reached by other containers over the
+    # internal `netguard-internal` network, not via the host's published
+    # ports. Publishing 5432 on 0.0.0.0 would expose Postgres (with the
+    # default netguard/netguard credentials from .env) to anything that can
+    # reach this host's IP, including the public internet on a cloud VM
+    # without extra firewalling.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - netguard_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -150,8 +156,12 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Same reasoning as db's port binding above: internal-only traffic,
+    # bound to localhost so it's never reachable from outside this host.
+    # Redis has no auth configured here, so an open 6379 is a full
+    # read/write data-store exposure (sessions, Celery broker/results).
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
