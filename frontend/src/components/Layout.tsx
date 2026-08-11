@@ -111,11 +111,11 @@ function isGroupActive(group: NavGroup, pathname: string): boolean {
 function NavGroupSection({
   group,
   defaultOpen,
-  railExpanded,
+  onNavigate,
 }: {
   group: NavGroup;
   defaultOpen: boolean;
-  railExpanded: boolean;
+  onNavigate?: () => void;
 }) {
   // Each group manages its own open/closed state -- click the header to
   // expand, click again to collapse, independent of the other groups.
@@ -138,18 +138,18 @@ function NavGroupSection({
         className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-noc-muted hover:bg-white/5 hover:text-slate-200 dark:hover:text-noc-text transition-colors"
       >
         <span className="text-slate-500 dark:text-noc-muted shrink-0">{group.icon}</span>
-        <span className={`flex-1 text-left whitespace-nowrap ${railExpanded ? "inline" : "hidden"} md:inline`}>{group.label}</span>
+        <span className="flex-1 text-left whitespace-nowrap">{group.label}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""} ${railExpanded ? "inline" : "hidden"} md:inline`}
+          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""}`}
         >
           <path d="M9 6l6 6-6 6" />
         </svg>
       </button>
       <div
         className={`grid overflow-hidden transition-[grid-template-rows] duration-200 ease-out ${
-          open && railExpanded ? "max-md:grid-rows-[1fr]" : "max-md:grid-rows-[0fr]"
-        } ${open ? "md:grid-rows-[1fr]" : "md:grid-rows-[0fr]"}`}
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
       >
         <div className="min-h-0 overflow-hidden">
           <div className="pl-4 pt-1 pb-1 space-y-0.5">
@@ -159,6 +159,7 @@ function NavGroupSection({
                 to={item.to}
                 end={item.end}
                 title={item.label}
+                onClick={onNavigate}
                 className={({ isActive }) =>
                   `block px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
                     isActive
@@ -182,84 +183,124 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // On phones/small tablets the sidebar lives as a slim, always-visible
-  // icon rail (w-16) instead of the old full-width off-canvas drawer that
-  // hid completely and covered the page with a dark backdrop when opened.
-  // The rail expands to the full w-64 layout -- overlaying the page rather
-  // than pushing it, so nothing reflows -- on hover (mouse/trackpad) and
-  // shrinks back once the pointer leaves. Touchscreens can't hover, so a
-  // tap on the rail pins it open until tapped again; content padding
-  // always reserves just the collapsed width, so the page is never fully
-  // blocked the way the old backdrop-drawer blocked it.
-  const [pinned, setPinned] = useState(false);
-  const [hovering, setHovering] = useState(false);
-  const railExpanded = pinned || hovering;
+  // Desktop (md+): the sidebar is a normal static column, exactly as
+  // before -- always visible at w-64, taking up real space in the flex
+  // row so the page content sits beside it. This is untouched.
+  //
+  // Mobile/tablet (<md): the sidebar is a true off-canvas drawer. It is
+  // fixed + translated fully off-screen when closed, so it never
+  // occupies layout space and can never sit on top of the page. A
+  // hamburger button in the header opens it; it then slides in above a
+  // dimmed backdrop, and tapping the backdrop, a nav link, or the close
+  // button dismisses it. This replaces the previous hover/pin icon-rail,
+  // which -- because it depended on `:hover` (unavailable on touch) and
+  // kept the sidebar `fixed` with the page padded to match -- could get
+  // out of sync and leave the expanded rail sitting on top of the page.
+  const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Collapse back to the icon rail automatically on navigation.
+  // Close the drawer automatically on navigation.
   useEffect(() => {
-    setPinned(false);
-    setHovering(false);
+    setMobileOpen(false);
   }, [location.pathname]);
 
-  return (
-    <div className="min-h-screen flex bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100">
-      <aside
-        onMouseEnter={() => setHovering(true)}
-        onMouseLeave={() => setHovering(false)}
-        className={`bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex flex-col fixed inset-y-0 left-0 z-40 transition-[width] duration-200 ease-out overflow-hidden shadow-xl md:shadow-none md:static md:w-64 ${
-          railExpanded ? "w-64" : "w-16"
-        }`}
-      >
-        <div className="px-3 md:px-5 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-2">
-          <button
-            onClick={() => setPinned((v) => !v)}
-            aria-label={pinned ? "Collapse navigation" : "Expand navigation"}
-            title={pinned ? "Collapse navigation" : "Pin navigation open"}
-            className="md:hidden w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-white/10 text-white font-display font-bold text-sm"
-          >
-            NG
-          </button>
-          <div className={`min-w-0 ${railExpanded ? "block" : "hidden"} md:block`}>
-            <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
-            <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
+  // Prevent background scroll while the mobile drawer is open.
+  useEffect(() => {
+    if (mobileOpen) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prev;
+      };
+    }
+  }, [mobileOpen]);
+
+  const sidebarContent = (onNavigate?: () => void) => (
+    <>
+      <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-2">
+        <div className="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-white/10 text-white font-display font-bold text-sm">
+          NG
+        </div>
+        <div className="min-w-0">
+          <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
+          <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
+        </div>
+        <button
+          onClick={() => setMobileOpen(false)}
+          aria-label="Close navigation"
+          className="md:hidden ml-auto w-8 h-8 shrink-0 flex items-center justify-center rounded-lg text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+        </button>
+      </div>
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto overflow-x-hidden">
+        {groups.map((group) => (
+          <NavGroupSection
+            key={group.label}
+            group={group}
+            defaultOpen={isGroupActive(group, location.pathname)}
+            onNavigate={onNavigate}
+          />
+        ))}
+      </nav>
+      <div className="px-5 py-4 border-t border-white/10 dark:border-noc-border">
+        {user && (
+          <div className="mb-3 min-w-0">
+            <p className="text-sm font-medium truncate">{user.full_name}</p>
+            <p className="text-[11px] text-accent dark:text-noc-cyan capitalize">{user.role.replace(/_/g, " ")}</p>
           </div>
-        </div>
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto overflow-x-hidden">
-          {groups.map((group) => (
-            <NavGroupSection
-              key={group.label}
-              group={group}
-              defaultOpen={isGroupActive(group, location.pathname)}
-              railExpanded={railExpanded}
-            />
-          ))}
-        </nav>
-        <div className="px-3 md:px-5 py-4 border-t border-white/10 dark:border-noc-border">
-          {user && (
-            <div className={`mb-3 min-w-0 ${railExpanded ? "block" : "hidden"} md:block`}>
-              <p className="text-sm font-medium truncate">{user.full_name}</p>
-              <p className="text-[11px] text-accent dark:text-noc-cyan capitalize">{user.role.replace(/_/g, " ")}</p>
-            </div>
-          )}
-          <button
-            onClick={async () => {
-              await logout();
-              navigate("/login");
-            }}
-            title="Sign out"
-            className={`text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors whitespace-nowrap ${railExpanded ? "inline" : "hidden"} md:inline`}
-          >
-            Sign out
-          </button>
-          <p className={`text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num whitespace-nowrap ${railExpanded ? "block" : "hidden"} md:block`}>v1.0 · Prototype</p>
-        </div>
+        )}
+        <button
+          onClick={async () => {
+            await logout();
+            navigate("/login");
+          }}
+          title="Sign out"
+          className="text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors whitespace-nowrap"
+        >
+          Sign out
+        </button>
+        <p className="text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num whitespace-nowrap">v1.0 · Prototype</p>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100 md:flex">
+      {/* Desktop sidebar: static, always visible, unchanged from before */}
+      <aside className="hidden md:flex bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static md:w-64">
+        {sidebarContent()}
       </aside>
-      <main
-        className={`flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0 transition-[padding-left] duration-200 ease-out md:pl-0 ${
-          railExpanded ? "pl-64" : "pl-16"
+
+      {/* Mobile backdrop */}
+      <div
+        onClick={() => setMobileOpen(false)}
+        aria-hidden="true"
+        className={`md:hidden fixed inset-0 z-40 bg-black/50 transition-opacity duration-200 ${
+          mobileOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
         }`}
+      />
+
+      {/* Mobile off-canvas drawer */}
+      <aside
+        className={`md:hidden bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex flex-col fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] shadow-xl transition-transform duration-200 ease-out ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation menu"
       >
-        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-3 sm:px-6">
+        {sidebarContent(() => setMobileOpen(false))}
+      </aside>
+
+      <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0">
+        <header className="h-14 shrink-0 border-b border-slate-200 dark:border-noc-border bg-white dark:bg-noc-panel flex items-center justify-between gap-2 px-3 sm:px-6 sticky top-0 z-30">
+          <button
+            onClick={() => setMobileOpen(true)}
+            aria-label="Open navigation"
+            className="md:hidden w-9 h-9 shrink-0 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-navy dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white transition-colors"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
           <button
             onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
             className="flex items-center gap-2 text-xs text-slate-400 dark:text-noc-muted border border-slate-200 dark:border-noc-border rounded-lg px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-noc-panel2 transition-colors w-full md:max-w-xs"
