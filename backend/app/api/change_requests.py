@@ -8,10 +8,16 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.alert import Alert
+from app.models.approval_chain import ApprovalStageStatus, ApprovalStageType
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
+from app.schemas.approval_chain import (
+    ApprovalChainRead,
+    ApprovalStageActionRequest,
+    ApprovalStageRead,
+)
 from app.schemas.change_request import (
     BlastRadiusPreview,
     ChangeRequestCreate,
@@ -20,6 +26,7 @@ from app.schemas.change_request import (
     RiskAnalysisResult,
 )
 from app.services import (
+    approval_chain_service,
     audit_service,
     diff_engine,
     event_bus,
@@ -338,6 +345,12 @@ def create_change_request(
     db.commit()
     db.refresh(cr)
 
+    chain_decision = approval_chain_service.decide_chain(
+        risk.classification, requires_dual_approval, dual_approval_reason
+    )
+    approval_chain_service.build_chain(db, cr, chain_decision)
+    db.commit()
+
     audit_service.record_event(
         db,
         actor=current_user.email,
@@ -435,6 +448,14 @@ def rescore_change_request(
     # rather than leaving it approvable with a failing validation result.
     cr.status = ChangeStatus.PENDING_APPROVAL if validation.passed else ChangeStatus.DRAFT
 
+    # Rebuild the approval chain from scratch against the fresh risk
+    # classification -- safe because rescore is only allowed while the CR
+    # is still DRAFT/PENDING_APPROVAL, i.e. before anyone has acted on any
+    # stage of the old chain (see RESCORE_ALLOWED_STATUSES).
+    approval_chain_service.reset_chain(db, cr)
+    chain_decision = approval_chain_service.decide_chain(risk.classification, requires_dual_approval, dual_approval_reason)
+    approval_chain_service.build_chain(db, cr, chain_decision)
+
     db.commit()
     db.refresh(cr)
 
@@ -450,6 +471,99 @@ def rescore_change_request(
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
 
     return _hydrate(db, [cr])[0]
+
+
+@router.get("/{cr_id}/approval-chain", response_model=ApprovalChainRead)
+def get_approval_chain(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """The role-based approval chain (if any) attached to this change
+    request -- empty `stages` means this CR only needs the plain single
+    (or dual, see requires_dual_approval) Network Administrator approval,
+    same as before this feature existed.
+    """
+    cr = db.get(ChangeRequest, cr_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
+    stages = approval_chain_service.get_chain(db, cr_id)
+    actor_ids = {s.acted_by for s in stages if s.acted_by}
+    names = {}
+    if actor_ids:
+        for u in db.query(User).filter(User.id.in_(actor_ids)).all():
+            names[u.id] = u.full_name
+
+    stage_reads = [
+        ApprovalStageRead(
+            id=s.id, change_request_id=s.change_request_id, sequence=s.sequence,
+            stage_type=s.stage_type.value, required_role=s.required_role, status=s.status.value,
+            acted_by=s.acted_by, acted_by_name=names.get(s.acted_by), acted_at=s.acted_at, notes=s.notes,
+        )
+        for s in stages
+    ]
+    pending = approval_chain_service.current_stage(db, cr_id)
+    return ApprovalChainRead(
+        change_request_id=cr_id,
+        stages=stage_reads,
+        fully_approved=approval_chain_service.is_chain_fully_approved(db, cr_id),
+        current_stage_sequence=pending.sequence if pending else None,
+    )
+
+
+@router.post("/{cr_id}/approval-chain/act", response_model=ApprovalChainRead)
+def act_on_approval_chain(
+    cr_id: uuid.UUID,
+    payload: ApprovalStageActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Approves or rejects whatever stage is currently pending on this
+    change request's approval chain (Peer Review or Manager Sign-off --
+    the final ADMIN_APPROVAL stage is resolved by
+    POST /change-requests/{id}/approve instead, since that's also the
+    call that enqueues deployment).
+
+    Enforces segregation of duties: the actor must hold the role that
+    stage requires, cannot be the change's original submitter, and
+    cannot have already acted on an earlier stage of the same chain.
+    Rejecting immediately rejects the whole change request.
+    """
+    cr = db.get(ChangeRequest, cr_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request not found")
+    if cr.status != ChangeStatus.PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail=f"Cannot act on a request in status '{cr.status.value}'")
+
+    pending = approval_chain_service.current_stage(db, cr.id)
+    if pending is not None and pending.stage_type == ApprovalStageType.ADMIN_APPROVAL:
+        raise HTTPException(
+            status_code=409,
+            detail="The final stage of this chain is resolved via POST /change-requests/{id}/approve, not here.",
+        )
+
+    try:
+        stage = approval_chain_service.act_on_current_stage(
+            db, cr, current_user, approve=payload.approve, notes=payload.notes
+        )
+    except approval_chain_service.ApprovalChainError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    device = db.get(Device, cr.device_id)
+    if stage.status == ApprovalStageStatus.REJECTED:
+        cr.status = ChangeStatus.REJECTED
+        db.commit()
+        audit_service.record_event(
+            db, actor=current_user.email, action=f"Rejected at {stage.stage_type.value}", result="Rejected",
+            device_hostname=device.hostname if device else None, change_request_id=cr.id, detail=payload.notes,
+        )
+        event_bus.publish_event(
+            "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
+        )
+    else:
+        audit_service.record_event(
+            db, actor=current_user.email, action=f"Approved at {stage.stage_type.value}", result="Approved",
+            device_hostname=device.hostname if device else None, change_request_id=cr.id, detail=payload.notes,
+        )
+
+    return get_approval_chain(cr_id, db, current_user)
 
 
 @router.post("/{cr_id}/approve", response_model=ChangeRequestRead)
@@ -476,6 +590,40 @@ def approve_change_request(
     if cr.status != ChangeStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail=f"Cannot approve a request in status '{cr.status.value}'")
 
+    # Role-based approval chain (segregation of duties): if this CR has a
+    # chain (Peer Review -> Manager Sign-off -> Admin Approval, see
+    # approval_chain_service.decide_chain), the earlier stages must be
+    # cleared -- by other people, in their required roles -- via
+    # POST /change-requests/{id}/approval-chain/act before a Network
+    # Administrator's call here can do anything. This mirrors the
+    # ADMIN_APPROVAL stage itself, so acting on that stage and calling
+    # this endpoint are two views of the same final step, not two
+    # separate approvals to collect.
+    chain = approval_chain_service.get_chain(db, cr.id)
+    if chain:
+        pending = approval_chain_service.current_stage(db, cr.id)
+        if pending is not None and pending.stage_type != ApprovalStageType.ADMIN_APPROVAL:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This change request requires {pending.stage_type.value.replace('_', ' ')} "
+                    "before Network Administrator approval. See GET "
+                    f"/change-requests/{cr.id}/approval-chain."
+                ),
+            )
+        if any(s.status == ApprovalStageStatus.REJECTED for s in chain):
+            raise HTTPException(
+                status_code=409, detail="This change request's approval chain was rejected at an earlier stage."
+            )
+        if pending is not None and pending.stage_type == ApprovalStageType.ADMIN_APPROVAL:
+            # Acting here also resolves the chain's final stage, so the
+            # chain and cr.status/approved_by never disagree about
+            # whether this change is approved.
+            try:
+                approval_chain_service.act_on_current_stage(db, cr, current_user, approve=True)
+            except approval_chain_service.ApprovalChainError as exc:
+                raise HTTPException(status_code=403, detail=str(exc))
+
     device = db.get(Device, cr.device_id)
     reason = cr.dual_approval_reason or "Critical Risk"
 
@@ -487,7 +635,13 @@ def approve_change_request(
     # Critical Risk classification or by additional_device_ids fanning the
     # change out past RISK_BLAST_RADIUS_DUAL_APPROVAL_THRESHOLD devices --
     # see cr.dual_approval_reason / app.api.change_requests.create_change_request.
-    if cr.requires_dual_approval and cr.first_approved_by is None:
+    #
+    # Skipped entirely when a role-based approval chain exists (`chain`
+    # above): the chain already enforces two-person integrity with
+    # stronger segregation of duties (distinct *roles*, not just two
+    # people holding the same role) -- running both mechanisms would
+    # require a third person for no added safety.
+    if not chain and cr.requires_dual_approval and cr.first_approved_by is None:
         cr.first_approved_by = current_user.id
         cr.first_approved_at = datetime.now(timezone.utc)
         db.commit()
@@ -504,7 +658,7 @@ def approve_change_request(
         )
         return _hydrate(db, [cr])[0]
 
-    if cr.requires_dual_approval and cr.first_approved_by == current_user.id:
+    if not chain and cr.requires_dual_approval and cr.first_approved_by == current_user.id:
         raise HTTPException(
             status_code=400,
             detail=f"{reason}: the second approval must come from a different Network Administrator.",
@@ -516,7 +670,11 @@ def approve_change_request(
     db.commit()
     db.refresh(cr)
 
-    action = f"Approved (2nd of 2, {reason})" if cr.requires_dual_approval else "Approved"
+    action = (
+        "Approved (Peer Review + Manager Sign-off + Admin Approval chain complete)"
+        if chain
+        else (f"Approved (2nd of 2, {reason})" if cr.requires_dual_approval else "Approved")
+    )
     audit_service.record_event(
         db, actor=current_user.email, action=action, result="Approved",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
