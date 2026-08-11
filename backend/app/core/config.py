@@ -16,6 +16,7 @@ load_dotenv()
 class Settings(BaseSettings):
     APP_NAME: str = "NetGuard"
     ENVIRONMENT: str = "development"
+    DEMO_MODE: bool = False
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change-me-to-a-long-random-string"
     # Fernet key (see app.core.crypto) encrypting SNMP credentials stored
