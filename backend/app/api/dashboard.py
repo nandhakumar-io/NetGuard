@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.core.database import SessionLocal, get_db
 from app.core.deps import get_current_user, get_current_user_ws
 from app.models.alert import Alert, AlertSeverity
@@ -15,7 +16,6 @@ from app.models.config_drift import ConfigDrift, DriftStatus
 from app.models.dashboard_preference import DashboardPreference
 from app.models.deployment import Deployment, DeploymentStatus
 from app.models.device import Device, DeviceStatus
-from app.models.device_metric import DeviceMetric
 from app.models.interface_status import InterfaceStatus
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
@@ -45,17 +45,12 @@ def _metric_sparkline(db: Session, device_id, column_name: str) -> list[float]:
     complete history payload, and runs once per row on every dashboard
     summary refresh.
     """
-    column = getattr(DeviceMetric, column_name)
     since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=SPARKLINE_LOOKBACK_HOURS)
-    rows = (
-        db.query(column, DeviceMetric.polled_at)
-        .filter(DeviceMetric.device_id == device_id, DeviceMetric.polled_at >= since)
-        .order_by(DeviceMetric.polled_at.desc())
-        .limit(SPARKLINE_MAX_POINTS)
-        .all()
-    )
-    values = [r[0] for r in reversed(rows) if r[0] is not None]
-    return values
+    end = datetime.datetime.now(datetime.timezone.utc)
+    step = max(1, (SPARKLINE_LOOKBACK_HOURS * 3600) // SPARKLINE_MAX_POINTS)
+    history = vm_client.device_metric_history(device_id, since, end, step_seconds=step)
+    values = [row.get(column_name, 0) for row in history if row.get(column_name) is not None]
+    return values[-SPARKLINE_MAX_POINTS:]
 
 
 def _compute_summary(db: Session) -> dict:
@@ -96,133 +91,97 @@ def _compute_summary(db: Session) -> dict:
     # --- New Dashboard Widget Data ---
 
     # 1. Global Health Score & Top CPU/Memory
-    # Get the single latest metric row for each device using a subquery
-    latest_metrics_subq = db.query(
-        DeviceMetric.device_id,
-        func.max(DeviceMetric.polled_at).label("latest_polled_at")
-    ).group_by(DeviceMetric.device_id).subquery()
+    all_devices = {d.id: d for d in db.query(Device).all()}
+    latest_metrics = vm_client.fleet_latest_metrics()
 
-    latest_metrics_query = db.query(DeviceMetric, Device.hostname, Device.ip_address)\
-        .join(latest_metrics_subq,
-             (DeviceMetric.device_id == latest_metrics_subq.c.device_id) &
-             (DeviceMetric.polled_at == latest_metrics_subq.c.latest_polled_at))\
-        .join(Device, Device.id == DeviceMetric.device_id)\
-        .all()
+    metrics_with_device = []
+    for dev_id, row in latest_metrics.items():
+        if dev_id in all_devices:
+            metrics_with_device.append((row, all_devices[dev_id]))
 
-    top_cpu = sorted(latest_metrics_query, key=lambda x: (x[0].cpu_utilization_pct or 0), reverse=True)[:5]
-    top_memory = sorted(latest_metrics_query, key=lambda x: (x[0].memory_utilization_pct or 0), reverse=True)[:5]
-    top_bandwidth = sorted(latest_metrics_query, key=lambda x: (x[0].interface_utilization_pct or 0), reverse=True)[:5]
+    top_cpu = sorted(metrics_with_device, key=lambda x: x[0].get("cpu_utilization_pct") or 0, reverse=True)[:5]
+    top_memory = sorted(metrics_with_device, key=lambda x: x[0].get("memory_utilization_pct") or 0, reverse=True)[:5]
+    top_bandwidth = sorted(metrics_with_device, key=lambda x: x[0].get("interface_utilization_pct") or 0, reverse=True)[:5]
 
-    health_scores = [x[0].health_score for x in latest_metrics_query if x[0].health_score is not None]
+    health_scores = [x[0].get("health_score") for x in metrics_with_device if x[0].get("health_score") is not None]
     global_health_score = int(sum(health_scores) / len(health_scores)) if health_scores else 100
 
-    # Sparkline history: last-hour CPU/memory trend for just the Top-N
-    # devices (not the whole fleet), so the widget shows shape-of-trend
-    # alongside the current value instead of only a static snapshot.
-    # Scoped to the handful of top device_ids rather than fetching full
-    # metric_history per device, since this runs on every dashboard
-    # summary poll/websocket push.
     top_cpu_devices = [
         {
-            "hostname": r[1],
-            "ip_address": r[2],
-            "cpu": r[0].cpu_utilization_pct or 0,
-            "cpu_history": _metric_sparkline(db, r[0].device_id, "cpu_utilization_pct"),
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "cpu": row.get("cpu_utilization_pct") or 0,
+            "cpu_history": _metric_sparkline(db, d.id, "cpu_utilization_pct"),
         }
-        for r in top_cpu
+        for row, d in top_cpu
     ]
     top_memory_devices = [
         {
-            "hostname": r[1],
-            "ip_address": r[2],
-            "memory": r[0].memory_utilization_pct or 0,
-            "memory_history": _metric_sparkline(db, r[0].device_id, "memory_utilization_pct"),
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "memory": row.get("memory_utilization_pct") or 0,
+            "memory_history": _metric_sparkline(db, d.id, "memory_utilization_pct"),
         }
-        for r in top_memory
+        for row, d in top_memory
     ]
     top_bandwidth_devices = [
         {
-            "hostname": r[1],
-            "ip_address": r[2],
-            "bandwidth": r[0].interface_utilization_pct or 0,
-            "bandwidth_history": _metric_sparkline(db, r[0].device_id, "interface_utilization_pct"),
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "bandwidth": row.get("interface_utilization_pct") or 0,
+            "bandwidth_history": _metric_sparkline(db, d.id, "interface_utilization_pct"),
         }
-        for r in top_bandwidth
+        for row, d in top_bandwidth
     ]
 
-    # 1b. Uplinks / WAN links -- devices whose device_role marks them as
-    # the fleet's edge/uplink/WAN-facing boxes (core, distribution,
-    # wan-edge, uplink, etc.) get their own rollup distinct from the
-    # generic Top Bandwidth widget above: this is "is my WAN link
-    # saturated/down", not "which device happens to be busiest right
-    # now". Throughput is derived the same way SNMP Health Dashboard
-    # detail views do -- interface_utilization_pct against the reported
-    # interface_speed_bps -- so it lines up with what /devices shows for
-    # the same device.
     UPLINK_ROLE_PATTERNS = ["wan", "uplink", "edge", "core", "isp", "internet"]
-    uplink_role_filter = func.lower(Device.device_role).contains(UPLINK_ROLE_PATTERNS[0])
-    for pattern in UPLINK_ROLE_PATTERNS[1:]:
-        uplink_role_filter = uplink_role_filter | func.lower(Device.device_role).contains(pattern)
-
-    uplink_rows = (
-        db.query(DeviceMetric, Device.hostname, Device.ip_address, Device.device_role, Device.status)
-        .join(
-            latest_metrics_subq,
-            (DeviceMetric.device_id == latest_metrics_subq.c.device_id)
-            & (DeviceMetric.polled_at == latest_metrics_subq.c.latest_polled_at),
-        )
-        .join(Device, Device.id == DeviceMetric.device_id)
-        .filter(Device.device_role.isnot(None), uplink_role_filter)
-        .order_by(desc(DeviceMetric.interface_utilization_pct))
-        .limit(10)
-        .all()
-    )
+    uplink_tuples = [
+        (r, d) for r, d in metrics_with_device
+        if d.device_role and any(pat in d.device_role.lower() for pat in UPLINK_ROLE_PATTERNS)
+    ]
+    uplink_tuples = sorted(uplink_tuples, key=lambda x: x[0].get("interface_utilization_pct") or 0, reverse=True)[:10]
 
     uplinks = []
-    for metric, hostname, ip_address, device_role, status in uplink_rows:
-        util_pct = metric.interface_utilization_pct or 0
-        speed_bps = metric.interface_speed_bps or 0
+    for row, d in uplink_tuples:
+        util_pct = row.get("interface_utilization_pct") or 0
+        speed_bps = row.get("interface_speed_bps") or 0
         throughput_bps = (util_pct / 100.0) * speed_bps if speed_bps else None
         uplinks.append({
-            "hostname": hostname,
-            "ip_address": ip_address,
-            "role": device_role,
-            "status": status.value if hasattr(status, "value") else status,
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "role": d.device_role,
+            "status": d.status.value if hasattr(d.status, "value") else d.status,
             "utilization_pct": round(util_pct, 1),
             "throughput_bps": throughput_bps,
             "link_speed_bps": speed_bps or None,
-            "errors": metric.interface_errors,
-            "history": _metric_sparkline(db, metric.device_id, "interface_utilization_pct"),
+            "errors": row.get("interface_errors"),
+            "history": _metric_sparkline(db, d.id, "interface_utilization_pct"),
         })
 
-    # 1c. Fleet health history -- hourly-bucketed fleet-wide average
-    # CPU/memory/bandwidth utilization over the last 24h, so the
-    # dashboard has an actual trend graph rather than only point-in-time
-    # Top-N cards. Bucketed in SQL (not per-row in Python) since this
-    # scans device_metrics across the whole fleet.
     history_since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-    bucket = func.date_trunc("hour", DeviceMetric.polled_at)
-    history_rows = (
-        db.query(
-            bucket.label("bucket"),
-            func.avg(DeviceMetric.cpu_utilization_pct).label("avg_cpu"),
-            func.avg(DeviceMetric.memory_utilization_pct).label("avg_memory"),
-            func.avg(DeviceMetric.interface_utilization_pct).label("avg_bandwidth"),
-        )
-        .filter(DeviceMetric.polled_at >= history_since)
-        .group_by(bucket)
-        .order_by(bucket)
-        .all()
-    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cpu_hist = vm_client.fleet_metric_history_hourly("cpu_utilization_pct", history_since, now)
+    mem_hist = vm_client.fleet_metric_history_hourly("memory_utilization_pct", history_since, now)
+    bw_hist = vm_client.fleet_metric_history_hourly("interface_utilization_pct", history_since, now)
+
+    hist_by_ts = {}
+    for entry in cpu_hist:
+        hist_by_ts.setdefault(entry["timestamp"].isoformat(), {})["avg_cpu"] = entry["value"]
+    for entry in mem_hist:
+        hist_by_ts.setdefault(entry["timestamp"].isoformat(), {})["avg_memory"] = entry["value"]
+    for entry in bw_hist:
+        hist_by_ts.setdefault(entry["timestamp"].isoformat(), {})["avg_bandwidth"] = entry["value"]
+
     fleet_health_history = [
         {
-            "timestamp": r.bucket.isoformat() if r.bucket else None,
-            "avg_cpu": round(r.avg_cpu, 1) if r.avg_cpu is not None else None,
-            "avg_memory": round(r.avg_memory, 1) if r.avg_memory is not None else None,
-            "avg_bandwidth": round(r.avg_bandwidth, 1) if r.avg_bandwidth is not None else None,
+            "timestamp": ts,
+            "avg_cpu": round(data.get("avg_cpu"), 1) if data.get("avg_cpu") is not None else None,
+            "avg_memory": round(data.get("avg_memory"), 1) if data.get("avg_memory") is not None else None,
+            "avg_bandwidth": round(data.get("avg_bandwidth"), 1) if data.get("avg_bandwidth") is not None else None,
         }
-        for r in history_rows
+        for ts, data in sorted(hist_by_ts.items())
     ]
+#
 
     # 2. Deployment Success Rate
     deployments_successful = db.query(Deployment).filter(Deployment.status == DeploymentStatus.SUCCEEDED).count()
@@ -317,27 +276,19 @@ def _compute_summary(db: Session) -> dict:
     # Recent device reboots: devices whose latest uptime reading is under
     # 1 hour (3600s), indicating a recent restart.
     reboot_threshold = 3600
-    recent_reboot_rows = (
-        db.query(Device.hostname, Device.ip_address, DeviceMetric.uptime_seconds, DeviceMetric.polled_at)
-        .join(
-            latest_metrics_subq,
-            (DeviceMetric.device_id == latest_metrics_subq.c.device_id)
-            & (DeviceMetric.polled_at == latest_metrics_subq.c.latest_polled_at),
-        )
-        .join(Device, Device.id == DeviceMetric.device_id)
-        .filter(DeviceMetric.uptime_seconds.isnot(None), DeviceMetric.uptime_seconds < reboot_threshold)
-        .order_by(DeviceMetric.uptime_seconds)
-        .limit(10)
-        .all()
-    )
+    recent_reboots_tuples = [
+        (row, d) for row, d in metrics_with_device
+        if row.get("uptime_seconds") is not None and row["uptime_seconds"] < reboot_threshold
+    ]
+    recent_reboots_tuples = sorted(recent_reboots_tuples, key=lambda x: x[0]["uptime_seconds"])[:10]
     recent_reboots = [
         {
-            "hostname": r.hostname,
-            "ip_address": r.ip_address,
-            "uptime_seconds": r.uptime_seconds,
-            "polled_at": r.polled_at.isoformat() if r.polled_at else None,
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "uptime_seconds": row["uptime_seconds"],
+            "polled_at": row.get("polled_at").isoformat() if row.get("polled_at") else None,
         }
-        for r in recent_reboot_rows
+        for row, d in recent_reboots_tuples
     ]
 
     # --- Instant-troubleshooting additions ---
@@ -372,18 +323,18 @@ def _compute_summary(db: Session) -> dict:
     # errors climbing on a link is a classic "why is this connection
     # flaky" signal independent of raw utilization, so it deserves its
     # own instant-triage list rather than being buried inside bandwidth.
-    top_errors = sorted(
-        (r for r in latest_metrics_query if (r[0].interface_errors or 0) > 0),
-        key=lambda x: (x[0].interface_errors or 0),
-        reverse=True,
+    top_errors_tuples = sorted(
+        [x for x in metrics_with_device if (x[0].get("interface_errors") or 0) > 0],
+        key=lambda x: x[0].get("interface_errors") or 0,
+        reverse=True
     )[:5]
     top_error_devices = [
         {
-            "hostname": r[1],
-            "ip_address": r[2],
-            "interface_errors": r[0].interface_errors or 0,
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "interface_errors": row.get("interface_errors") or 0,
         }
-        for r in top_errors
+        for row, d in top_errors_tuples
     ]
 
     # 8. Flapping interfaces (last 24h) -- interface_statuses is a

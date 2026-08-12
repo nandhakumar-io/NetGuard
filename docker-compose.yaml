@@ -1,563 +1,826 @@
-# Canonical stack (see README: `docker compose -f docker/docker-compose.yml up
-# --build`, run from the repo root so the `../backend` / `../frontend`
-# build contexts resolve).
-#
-# Scale-out shape for the API tier:
-#   USERS -> Traefik -> api (N replicas, stateless) -> pgbouncer -> db
-#                     -> frontend
-# `collector`, `syslog-collector`, and `flow-collector` are singleton
-# (replicas: 1) companions that own everything the app used to run
-# in-process inside every API replica's event loop (see app/main.py's
-# lifespan): `collector` keeps the topology snapshot loop, and
-# `syslog-collector` / `flow-collector` own the syslog and NetFlow/IPFIX/
-# sFlow UDP listeners respectively (split into their own lightweight
-# processes -- see app/collectors/__init__.py -- rather than bundled into
-# `collector`, so an ingest problem in one can't be confused with the
-# others, and each can restart/redeploy independently). SNMP polling
-# itself is no longer an in-process loop at all now that the Celery
-# `beat`+`poller` services actually run it (see the job-queue-tier
-# comment below). All of these are singletons for the same reason: if
-# `api` ran them too, scaling api to N replicas would poll/ingest
-# everything N times, and only one replica would ever actually receive a
-# given UDP listener's packets (Docker only routes a published UDP port
-# to one container), silently dropping the rest. `api` replicas run with
-# all of these disabled via env. None of them sit behind Traefik (no
-# `traefik.enable` label) -- they don't serve HTTP traffic to users, just
-# a /healthz+/readyz for their own container healthcheck.
-#
-# Splitting Celery into distinct monitoring/deployment/firmware worker
-# pools (per the target architecture diagram) is a separate, later change
-# -- `worker` here still runs every task type, same as before.
+# docker/docker-compose.yml
 
 services:
+
+  # ============================================================
+  # DATABASE
+  # ============================================================
+
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-netguard}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netguard}
       POSTGRES_DB: ${POSTGRES_DB:-netguard}
-    ports:
-      - "5432:5432"
+
     volumes:
       - netguard_pgdata:/var/lib/postgresql/data
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netguard}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-netguard} -d ${POSTGRES_DB:-netguard}"
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # Connection pooler sitting between the app tier and Postgres. Without
-  # this, N api replicas + collector + worker(s), each with SQLAlchemy's
-  # own connection pool, multiply out to far more Postgres connections
-  # than a single instance ever used -- pgbouncer caps what actually
-  # reaches `db`. Transaction pooling is safe here: the codebase has no
-  # session-level Postgres features (no advisory locks, no LISTEN/NOTIFY,
-  # no named/server-side cursors) that transaction-mode pooling would
-  # break. DDL (Alembic) deliberately bypasses this and talks to `db`
-  # directly -- see the `migrate` service below.
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # PGBOUNCER
+  # ============================================================
+
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.2-p0
     restart: unless-stopped
+
     environment:
       DB_HOST: db
       DB_PORT: 5432
       DB_USER: ${POSTGRES_USER:-netguard}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-netguard}
       DB_NAME: ${POSTGRES_DB:-netguard}
+
       POOL_MODE: transaction
       MAX_CLIENT_CONN: "500"
       DEFAULT_POOL_SIZE: "25"
+
       AUTH_TYPE: scram-sha-256
+      LISTEN_PORT: "6432"
+
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "6432:6432"
+
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # REDIS
+  # ============================================================
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # NATS
+  # ============================================================
+
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
-    command: ["-js", "-sd", "/data", "-m", "8222"]
-    ports:
-      - "4222:4222"
+
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+
     volumes:
       - netguard_natsdata:/data
+
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://localhost:8222/healthz"
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
+
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # VICTORIA METRICS
+  # ============================================================
 
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.102.0
     restart: unless-stopped
+
     command:
       - "--storageDataPath=/storage"
       - "--retentionPeriod=90d"
       - "--httpListenAddr=:8428"
-    ports:
-      - "8428:8428"
+
     volumes:
       - netguard_vmdata:/storage
+
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8428/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://127.0.0.1:8428/health"
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
 
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # GRAFANA
+  # ============================================================
+
   grafana:
     image: grafana/grafana:11.1.0
     restart: unless-stopped
+
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      # Served under Traefik at /grafana rather than its own port, same
-      # pattern as api/frontend -- SERVE_FROM_SUB_PATH is required in
-      # addition to ROOT_URL or Grafana's own asset/API links break.
+
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      # Dashboards/datasources are provisioned from the mounted files
-      # below, not clicked together by hand, so they survive a
-      # `docker compose down -v` on the grafana volume.
+
       GF_AUTH_ANONYMOUS_ENABLED: "false"
+
     volumes:
       - netguard_grafanadata:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
     depends_on:
       victoriametrics:
         condition: service_healthy
+
+    networks:
+      - proxy
+      - netguard-internal
+
     labels:
       - "traefik.enable=true"
-      - "traefik.http.services.netguard-grafana.loadbalancer.server.port=3000"
-      - "traefik.http.routers.netguard-grafana.rule=PathPrefix(`/grafana`)"
-      - "traefik.http.routers.netguard-grafana.entrypoints=web"
+      - "traefik.docker.network=proxy"
+
+      - "traefik.http.routers.netguard-grafana.rule=Host(`netguard.notoriousdev.in`) && PathPrefix(`/grafana`)"
       - "traefik.http.routers.netguard-grafana.priority=10"
+      - "traefik.http.services.netguard-grafana.loadbalancer.server.port=3000"
+
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\"ok\"'"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\"ok\"'"
+        ]
       interval: 10s
       timeout: 5s
       retries: 10
 
-  # One-shot: applies Alembic migrations directly against `db` (not
-  # through pgbouncer -- transaction pooling and Alembic's own
-  # transaction/DDL handling don't mix well), then exits. `api`,
-  # `collector`, and `worker` all wait on this completing successfully
-  # instead of each racing `alembic upgrade head` themselves on startup
-  # (see entrypoint.sh's SKIP_MIGRATIONS).
+
+  # ============================================================
+  # DATABASE MIGRATIONS
+  # ============================================================
+
   migrate:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
+
     env_file:
       - .env
+
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
+
     depends_on:
       db:
         condition: service_healthy
-    command: ["python3", "-c", "print('migrations applied')"]
+
+    command:
+      [
+        "alembic",
+        "upgrade",
+        "head"
+      ]
+
     restart: "no"
 
-  traefik:
-    image: traefik:v3.1
-    restart: unless-stopped
-    command:
-      - "--providers.docker=true"
-      # Only route containers that opt in with traefik.enable=true --
-      # otherwise Traefik would also try to expose db/redis/nats/etc.
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.web.address=:80"
-      # Dashboard is unauthenticated (--api.insecure) -- fine for a
-      # self-hosted/LAN deployment behind your own firewall, matches how
-      # the rest of this stack publishes ports directly today. Don't
-      # expose 8080 publicly without putting real auth in front of it.
-      - "--api.dashboard=true"
-      - "--api.insecure=true"
-    ports:
-      - "80:80"
-      - "8080:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      - api
-      - frontend
-      - grafana
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # API
+  # ============================================================
 
   api:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
+
       NATS_URL: nats://nats:4222
+
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
       AUTO_MIGRATE_ON_STARTUP: "false"
-      # Singleton in-process loops live on `collector` only -- see the
-      # comment at the top of this file.
+
       SNMP_INPROCESS_POLLING_ENABLED: "false"
       SYSLOG_LISTENER_ENABLED: "false"
       NETFLOW_LISTENER_ENABLED: "false"
       SFLOW_LISTENER_ENABLED: "false"
       TOPOLOGY_SNAPSHOT_ENABLED: "false"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
       victoriametrics:
         condition: service_healthy
+
     deploy:
       replicas: ${API_REPLICAS:-3}
+
+    networks:
+      - proxy
+      - netguard-internal
+
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.netguard-api.rule=Host(`netguard-api.notoriousdev.in`)"
       - "traefik.http.services.netguard-api.loadbalancer.server.port=8000"
-      # /api/v1/* (all REST + the four /ws websocket endpoints, which
-      # live under this prefix) plus the un-prefixed ops/docs endpoints.
-      - "traefik.http.routers.netguard-api.rule=PathPrefix(`/api`) || Path(`/healthz`) || Path(`/readyz`) || PathPrefix(`/docs`) || PathPrefix(`/openapi.json`)"
-      - "traefik.http.routers.netguard-api.entrypoints=web"
 
-  # Singleton companion to `api` -- see the comment at the top of this
-  # file. Deliberately not given traefik.enable=true, so it never
-  # receives user HTTP traffic; it exists purely to keep the
-  # SNMP-poll/syslog/NetFlow/sFlow/topology-snapshot background loops
-  # running exactly once regardless of how many `api` replicas exist.
+
+  # ============================================================
+  # TOPOLOGY COLLECTOR
+  # ============================================================
+
   collector:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
       AUTO_MIGRATE_ON_STARTUP: "false"
-      # Now that beat + poller actually consume the `polling` queue (see
-      # the job-queue-tier comment above `beat`), the in-process SNMP
-      # fallback loop would double-poll every device on the same
-      # schedule -- the comment in app/main.py's
-      # _snmp_inprocess_poll_loop says to turn this off "once a real
-      # Celery worker + beat are deployed", which they now are.
+
       SNMP_INPROCESS_POLLING_ENABLED: "false"
-      # Syslog/NetFlow/sFlow now live in their own dedicated
-      # syslog-collector / flow-collector services below -- collector's
-      # only remaining singleton job is the topology snapshot loop
-      # (TOPOLOGY_SNAPSHOT_ENABLED, left at its default-true).
       SYSLOG_LISTENER_ENABLED: "false"
       NETFLOW_LISTENER_ENABLED: "false"
       SFLOW_LISTENER_ENABLED: "false"
+
+      TOPOLOGY_SNAPSHOT_ENABLED: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
       victoriametrics:
         condition: service_healthy
+
     deploy:
       replicas: 1
 
-  # Owns just the syslog UDP listener (app/collectors/syslog_collector.py)
-  # -- split out from `collector` so it can be scaled/restarted
-  # independently and a syslog-ingest problem can't be confused with a
-  # topology-snapshot one. Single replica: the published UDP port can only
-  # ever reach one container, so a second replica would just be a
-  # never-receiving idle process.
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # SYSLOG COLLECTOR
+  # ============================================================
+
   syslog-collector:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: uvicorn app.collectors.syslog_collector:app --host 0.0.0.0 --port 8000
+
+    command:
+      [
+        "uvicorn",
+        "app.collectors.syslog_collector:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
     deploy:
       replicas: 1
+
     ports:
       - "1514:1514/udp"
+
+    networks:
+      - netguard-internal
+
     healthcheck:
-      # python3 instead of wget/curl -- neither is installed in the
-      # backend image (see backend/Dockerfile), and python3 already is.
-      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Owns both flow listeners (app/collectors/flow_collector.py) -- see
-  # that module's docstring for why NetFlow/IPFIX and sFlow share one
-  # process instead of being split further. Single replica, same
-  # published-UDP-port reasoning as syslog-collector.
+
+  # ============================================================
+  # FLOW COLLECTOR
+  # ============================================================
+
   flow-collector:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: uvicorn app.collectors.flow_collector:app --host 0.0.0.0 --port 8000
+
+    command:
+      [
+        "uvicorn",
+        "app.collectors.flow_collector:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
     deploy:
       replicas: 1
+
     ports:
       - "2055:2055/udp"
       - "6343:6343/udp"
+
+    networks:
+      - netguard-internal
+
     healthcheck:
-      # python3 instead of wget/curl -- neither is installed in the
-      # backend image (see backend/Dockerfile), and python3 already is.
-      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # --- Job queue tier ------------------------------------------------------
-  # app/celery_app.py already routes tasks to 3 named queues (`polling`,
-  # `deploy`, `firmware`) plus Celery's implicit default `celery` queue --
-  # see its `task_routes` and the comments there referencing "the poller
-  # service" / "the deployer service" / a `docker-compose.scaled.yml` that
-  # never actually existed in this checkout. Until now, the single generic
-  # `worker` service ran with no `-Q` flag, which means it only ever
-  # consumed the default `celery` queue -- `polling`, `deploy`, and
-  # `firmware` had NO consumer at all. Concretely: SNMP-poll-sweep and
-  # reachability-sweep beat ticks fanned out snmp_poll_task/
-  # reachability_task into a queue nothing was reading (the Health
-  # Dashboard only stayed current because of the separate SNMP_INPROCESS_
-  # POLLING_ENABLED fallback loop on `collector`, which the comment in
-  # app/main.py explicitly says to turn off "once a real Celery worker +
-  # beat are deployed" -- see that env var below), and POST
-  # /change-requests/{id}/approve would queue a deployment that would
-  # simply sit there forever, never picked up. Splitting into one service
-  # per queue below is what actually makes those task_routes do anything,
-  # not just an optional scaling nicety.
+
+  # ============================================================
+  # CELERY BEAT
+  # ============================================================
 
   beat:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    # RedBeat (see app/celery_app.py) coordinates via a Redis lock, so
-    # multiple beat replicas can run for HA -- only the lock holder
-    # actually ticks; if it dies another replica takes over within
-    # redbeat_lock_timeout (90s) instead of every schedule (nightly drift,
-    # SNMP/reachability polling, compliance reports, ...) silently going
-    # quiet until someone notices a single beat container died.
-    command: celery -A app.celery_app.celery_app beat -S redbeat.RedBeatScheduler --loglevel=info
+
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app.celery_app",
+        "beat",
+        "-S",
+        "redbeat.RedBeatScheduler",
+        "--loglevel=info"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
+
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
     deploy:
       replicas: ${BEAT_REPLICAS:-2}
 
-  # Consumes the `polling` queue: snmp_poll_task + reachability_task, fanned
-  # out per-device by beat's snmp-poll-sweep / reachability-sweep. Highest
-  # task *volume* of the four (one task per device per sweep) but each task
-  # is cheap/short, so it gets its own high-concurrency pool that a slow
-  # deploy or firmware job can never queue behind.
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # CELERY POLLER
+  # ============================================================
+
   poller:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: celery -A app.celery_app.celery_app worker -Q polling --loglevel=info --concurrency=8 --hostname=poller@%h
+
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app.celery_app",
+        "worker",
+        "-Q",
+        "polling",
+        "--loglevel=info",
+        "--concurrency=8",
+        "--hostname=poller@%h"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
+
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
       victoriametrics:
         condition: service_healthy
+
     deploy:
       replicas: ${POLLER_REPLICAS:-1}
 
-  # Consumes the `deploy` queue: the full change-request pipeline
-  # (run_deployment_pipeline_task, deploy_device_task, canary_gate_task,
-  # finalize_change_request_task, retry_deployment_task). Lower
-  # concurrency than `poller` deliberately -- SRS 6.6 wants N devices on
-  # one change request deploying in parallel across the pool, not an
-  # unbounded number of simultaneous device sessions.
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # CELERY DEPLOYER
+  # ============================================================
+
   deployer:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: celery -A app.celery_app.celery_app worker -Q deploy --loglevel=info --concurrency=4 --hostname=deployer@%h
+
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app.celery_app",
+        "worker",
+        "-Q",
+        "deploy",
+        "--loglevel=info",
+        "--concurrency=4",
+        "--hostname=deployer@%h"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
+
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
       victoriametrics:
         condition: service_healthy
+
     deploy:
       replicas: ${DEPLOYER_REPLICAS:-2}
 
-  # Consumes the `firmware` queue: run_firmware_upgrade_task. Deliberately
-  # separate from `deployer` (see app/celery_app.py's task_routes comment)
-  # -- firmware flash/reboot cycles hold a device session far longer than
-  # a config deploy, so a firmware backlog can't delay in-flight change
-  # requests, and vice versa.
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # CELERY FIRMWARE
+  # ============================================================
+
   firmware:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: celery -A app.celery_app.celery_app worker -Q firmware --loglevel=info --concurrency=2 --hostname=firmware@%h
+
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app.celery_app",
+        "worker",
+        "-Q",
+        "firmware",
+        "--loglevel=info",
+        "--concurrency=2",
+        "--hostname=firmware@%h"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
+
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
       victoriametrics:
         condition: service_healthy
+
     deploy:
       replicas: ${FIRMWARE_REPLICAS:-1}
 
-  # Everything NOT explicitly routed to polling/deploy/firmware: nightly
-  # drift sweep (fans out drift_detection_task, itself unrouted -> default
-  # queue too), weekly/monthly compliance reports, snapshot retention,
-  # alert escalation sweep, and GitOps sync. All infrequent/low-volume, so
-  # one shared service is fine -- explicit `-Q celery` rather than no flag
-  # at all, so it's clear this is intentionally the catch-all and not just
-  # another copy-paste of the queue-less bug this split fixes.
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # DEFAULT CELERY WORKER
+  # ============================================================
+
   worker:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-    command: celery -A app.celery_app.celery_app worker -Q celery --loglevel=info --concurrency=4 --hostname=worker@%h
+
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app.celery_app",
+        "worker",
+        "-Q",
+        "celery",
+        "--loglevel=info",
+        "--concurrency=4",
+        "--hostname=worker@%h"
+      ]
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
       REDIS_URL: redis://redis:6379/0
+
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+
       NATS_URL: nats://nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
+
       SKIP_MIGRATIONS: "true"
+
     depends_on:
       migrate:
         condition: service_completed_successfully
+
       pgbouncer:
         condition: service_started
+
       redis:
         condition: service_healthy
+
       nats:
         condition: service_healthy
+
       victoriametrics:
         condition: service_healthy
+
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # FRONTEND
+  # ============================================================
 
   frontend:
     image: ghcr.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
     restart: unless-stopped
+
     environment:
-      VITE_API_BASE_URL: http://localhost/api/v1
+      VITE_API_BASE_URL: https://netguard-api.notoriousdev.in/api/v1
+
     depends_on:
       - api
+
+    networks:
+      - proxy
+
     labels:
       - "traefik.enable=true"
-      - "traefik.http.services.netguard-frontend.loadbalancer.server.port=5173"
-      - "traefik.http.routers.netguard-frontend.rule=PathPrefix(`/`)"
-      - "traefik.http.routers.netguard-frontend.entrypoints=web"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)"
       - "traefik.http.routers.netguard-frontend.priority=1"
-    volumes:
-      - ../frontend:/app
-      - /app/node_modules
+      - "traefik.http.services.netguard-frontend.loadbalancer.server.port=6001"
+
+
+# ================================================================
+# VOLUMES
+# ================================================================
 
 volumes:
   netguard_pgdata:
   netguard_natsdata:
   netguard_vmdata:
   netguard_grafanadata:
+
+
+# ================================================================
+# NETWORKS
+# ================================================================
+
+networks:
+
+  # Shared with Traefik and cloudflared.
+  #
+  # Traefik:
+  #   cloudflared -> traefik:80
+  #
+  # NetGuard:
+  #   traefik -> frontend
+  #   traefik -> api
+  #   traefik -> grafana
+  #
+  proxy:
+    external: true
+
+  # Private application network.
+  #
+  # PostgreSQL
+  # PgBouncer
+  # Redis
+  # NATS
+  # VictoriaMetrics
+  # API
+  # Workers
+  # Collectors
+  #
+  # are isolated here from the public/proxy network.
+  netguard-internal:
+    driver: bridge
