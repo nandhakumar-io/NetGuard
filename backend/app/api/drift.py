@@ -8,16 +8,24 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.config_drift import ConfigDrift, DriftStatus
 from app.models.device import Device
+from app.models.device_group import DeviceGroup
 from app.models.user import User, UserRole
 from app.schemas.drift import (
+    BulkApproveRequest,
+    BulkApproveResponse,
     DriftDetail,
     DriftFleetSummary,
     DriftRead,
     DriftScanRequest,
     DriftScanResponse,
     DriftStatusUpdate,
+    DriftTrendResponse,
+    FlappingDeviceEntry,
+    FlappingDevicesResponse,
+    LowRiskDriftCandidate,
     RollbackRecommendationResponse,
     WeeklyGoldenDriftEntry,
+    WeeklyGoldenDriftGroup,
     WeeklyGoldenDriftReport,
 )
 from app.services import audit_service, drift_service
@@ -33,6 +41,48 @@ DRIFT_REVIEW_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 def get_fleet_drift_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
     """Powers the Drift Dashboard Widget (fleet-wide drift posture)."""
     return drift_service.fleet_summary(db)
+
+
+@router.get("/drift/trends", response_model=DriftTrendResponse)
+def get_drift_trends(
+    days: int = 90,
+    bucket_days: int = 7,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Fleet-wide drift event volume bucketed over time — powers the
+    Drift Trend bar-chart on the Drift page. A rising trend means
+    devices are drifting more often, not just that more scans ran."""
+    points = drift_service.drift_trend(db, days=days, bucket_days=bucket_days)
+    return DriftTrendResponse(days=days, bucket_days=bucket_days, points=points)
+
+
+@router.get("/drift/flapping", response_model=FlappingDevicesResponse)
+def get_flapping_devices(
+    days: int = 30,
+    min_events: int = 3,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Devices whose config keeps drifting — a sign of repeated
+    hand-edits. Powers the Flapping Devices panel on the Drift page."""
+    raw = drift_service.flapping_devices(db, days=days, min_events=min_events)
+    device_ids = [e["device_id"] for e in raw]
+    hostnames = {
+        d.id: d.hostname
+        for d in db.query(Device).filter(Device.id.in_(device_ids)).all()
+    } if device_ids else {}
+    entries = [
+        FlappingDeviceEntry(
+            device_id=e["device_id"],
+            hostname=hostnames.get(e["device_id"], str(e["device_id"])),
+            event_count=e["event_count"],
+            last_detected_at=e["last_detected_at"],
+            max_severity=e["max_severity"],
+        )
+        for e in raw
+    ]
+    return FlappingDevicesResponse(days=days, min_events=min_events, devices=entries)
 
 
 @router.get("/drift", response_model=list[DriftRead])
@@ -60,21 +110,90 @@ def weekly_golden_config_drift_report(
     device rather than the raw per-scan drift feed. Complements GET /drift
     (which is the full per-event feed, filterable by device/severity but
     not deduplicated per device or scoped to a time window).
+
+    Also bucketed by DeviceGroup (`groups`) -- a NOC digest read per-team
+    or per-fleet ("who on Edge Firewalls drifted this week") rather than
+    one long undifferentiated table. Devices with no DeviceGroup assigned
+    land in a synthetic "Ungrouped" bucket (group_id=None).
     """
     since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
     drifts = drift_service.weekly_golden_config_drift(db, days=days)
 
     device_ids = {d.device_id for d in drifts}
-    hostnames = {d.id: d.hostname for d in db.query(Device).filter(Device.id.in_(device_ids)).all()} if device_ids else {}
+    devices = db.query(Device).filter(Device.id.in_(device_ids)).all() if device_ids else []
+    devices_by_id = {d.id: d for d in devices}
+
+    group_ids = {d.group_id for d in devices if d.group_id is not None}
+    group_names = {g.id: g.name for g in db.query(DeviceGroup).filter(DeviceGroup.id.in_(group_ids)).all()} if group_ids else {}
 
     entries = [
         WeeklyGoldenDriftEntry(
             **DriftRead.model_validate(d).model_dump(),
-            hostname=hostnames.get(d.device_id, str(d.device_id)),
+            hostname=devices_by_id[d.device_id].hostname if d.device_id in devices_by_id else str(d.device_id),
         )
         for d in drifts
     ]
-    return WeeklyGoldenDriftReport(since=since, days=days, devices=entries)
+
+    entries_by_group: dict[uuid.UUID | None, list[WeeklyGoldenDriftEntry]] = {}
+    for entry, drift_row in zip(entries, drifts):
+        device = devices_by_id.get(drift_row.device_id)
+        group_key = device.group_id if device else None
+        entries_by_group.setdefault(group_key, []).append(entry)
+
+    # Named groups first (alphabetical), "Ungrouped" last -- matches how
+    # the Groups page orders things elsewhere in the app.
+    ordered_group_ids = sorted(
+        (gid for gid in entries_by_group if gid is not None),
+        key=lambda gid: group_names.get(gid, ""),
+    )
+    groups = [
+        WeeklyGoldenDriftGroup(
+            group_id=gid,
+            group_name=group_names.get(gid, "Unnamed group"),
+            devices=entries_by_group[gid],
+        )
+        for gid in ordered_group_ids
+    ]
+    if None in entries_by_group:
+        groups.append(
+            WeeklyGoldenDriftGroup(group_id=None, group_name="Ungrouped", devices=entries_by_group[None])
+        )
+
+    return WeeklyGoldenDriftReport(since=since, days=days, devices=entries, groups=groups)
+
+
+@router.get("/drift/low-risk-candidates", response_model=list[LowRiskDriftCandidate])
+def get_low_risk_drift_candidates(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Preview list behind "Bulk-approve low-risk drift": every OPEN,
+    LOW-severity drift where every changed line is a cosmetic
+    description/remark edit -- e.g. someone updated an interface
+    description, nothing that changes device behavior.
+    """
+    candidates = drift_service.list_low_risk_candidates(db)
+    device_ids = {d.device_id for d in candidates}
+    hostnames = {d.id: d.hostname for d in db.query(Device).filter(Device.id.in_(device_ids)).all()} if device_ids else {}
+    return [
+        LowRiskDriftCandidate(
+            **DriftRead.model_validate(d).model_dump(),
+            hostname=hostnames.get(d.device_id, str(d.device_id)),
+        )
+        for d in candidates
+    ]
+
+
+@router.post("/drift/bulk-approve", response_model=BulkApproveResponse)
+def bulk_approve_drift(
+    payload: BulkApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(DRIFT_REVIEW_ROLES),
+):
+    """Approve a batch of low-risk-cosmetic drift in one action, instead of
+    reviewing each description/remark-only drift one at a time. Only ever
+    touches drift that independently qualifies as low-risk-cosmetic (see
+    drift_service.is_low_risk_bulk_approvable) -- passing drift_ids doesn't
+    bypass that check, it just narrows the candidate set.
+    """
+    return drift_service.bulk_approve_drift(db, payload.drift_ids, current_user)
 
 
 @router.get("/drift/{drift_id}", response_model=DriftDetail)
