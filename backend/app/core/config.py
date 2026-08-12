@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # in the database (Device.snmp_*_encrypted). Falls back to a fixed
     # dev-only key if unset -- production deployments should set this.
     SECRET_ENCRYPTION_KEY: str | None = None
+    SECRET_ENCRYPTION_KEYS: str | None = None
     # Comma-separated list of exact frontend origins allowed to call this
     # API with credentials, e.g. "https://netguard.example.com". Never
     # use "*" here together with allow_credentials=True (see main.py) --
