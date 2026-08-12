@@ -294,6 +294,21 @@ _PRIV_PROTOCOL_NAMES = {
 }
 
 
+def _format_snmp_value(value) -> str:
+    """Safely decodes PySNMP values. Raw bytes/OctetStrings that contain
+    non-printable characters are formatted as '0x...' hex strings so that
+    downstream MAC address / chassis ID parsers can safely extract them
+    instead of receiving garbled text."""
+    if hasattr(value, "asOctets"):
+        try:
+            raw = value.asOctets()
+            if any((b < 32 and b not in (9, 10, 13)) or b > 126 for b in raw):
+                return "0x" + raw.hex()
+        except Exception:
+            pass
+    return str(value)
+
+
 def _build_usm_user_data(auth: "SnmpAuthConfig", pysnmp_asyncio_module):
     """Builds a pysnmp UsmUserData for SNMPv3, honoring security_level:
     noAuthNoPriv (username only), authNoPriv (+ auth), authPriv (+ priv).
@@ -355,7 +370,7 @@ def _get_via_pysnmp(ip_address: str, auth: "SnmpAuthConfig", oid: str, timeout: 
             )
             if error_indication or error_status or not var_binds:
                 return None
-            return str(var_binds[0][1])
+            return _format_snmp_value(var_binds[0][1])
 
         return asyncio.run(_run())
     except Exception:  # noqa: BLE001
@@ -414,7 +429,7 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                     # local interface index -- exactly the "CDP half-works,
                     # ARP/routes are empty" symptom this fixes.
                     index = oid_str[len(base_oid) + 1:]
-                    results[index] = str(value)
+                    results[index] = _format_snmp_value(value)
                     if len(results) >= MAX_INTERFACES_WALKED:
                         break
                     var_bind = ObjectType(ObjectIdentity(oid))
@@ -468,7 +483,7 @@ def _walk_via_pysnmp(ip_address: str, community: str, base_oid: str, version: st
                     if not oid_str.startswith(base_oid + "."):
                         break
                     index = oid_str[len(base_oid) + 1:]
-                    results[index] = str(value)
+                    results[index] = _format_snmp_value(value)
                     if len(results) >= MAX_INTERFACES_WALKED:
                         break
                     var_bind = m.ObjectType(m.ObjectIdentity(oid))
@@ -526,7 +541,7 @@ def _walk_via_pysnmp_v3(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, 
                 if not oid_str.startswith(base_oid + "."):
                     break
                 index = oid_str[len(base_oid) + 1:]
-                results[index] = str(value)
+                results[index] = _format_snmp_value(value)
                 if len(results) >= MAX_INTERFACES_WALKED:
                     break
                 var_bind = m.ObjectType(m.ObjectIdentity(oid))
