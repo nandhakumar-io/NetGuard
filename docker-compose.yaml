@@ -57,7 +57,7 @@ services:
   # break. DDL (Alembic) deliberately bypasses this and talks to `db`
   # directly -- see the `migrate` service below.
   pgbouncer:
-    image: edoburu/pgbouncer:1.21.0
+    image: edoburu/pgbouncer:v1.25.2-p0
     restart: unless-stopped
     environment:
       DB_HOST: db
@@ -158,13 +158,11 @@ services:
   # instead of each racing `alembic upgrade head` themselves on startup
   # (see entrypoint.sh's SKIP_MIGRATIONS).
   migrate:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
     env_file:
-      - ../.env
+      - .env
     depends_on:
       db:
         condition: service_healthy
@@ -197,12 +195,10 @@ services:
       - grafana
 
   api:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -244,12 +240,10 @@ services:
   # SNMP-poll/syslog/NetFlow/sFlow/topology-snapshot background loops
   # running exactly once regardless of how many `api` replicas exist.
   collector:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -292,13 +286,11 @@ services:
   # ever reach one container, so a second replica would just be a
   # never-receiving idle process.
   syslog-collector:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     command: uvicorn app.collectors.syslog_collector:app --host 0.0.0.0 --port 8000
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -331,13 +323,11 @@ services:
   # process instead of being split further. Single replica, same
   # published-UDP-port reasoning as syslog-collector.
   flow-collector:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     command: uvicorn app.collectors.flow_collector:app --host 0.0.0.0 --port 8000
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -387,9 +377,7 @@ services:
   # not just an optional scaling nicety.
 
   beat:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     # RedBeat (see app/celery_app.py) coordinates via a Redis lock, so
     # multiple beat replicas can run for HA -- only the lock holder
@@ -399,7 +387,7 @@ services:
     # quiet until someone notices a single beat container died.
     command: celery -A app.celery_app.celery_app beat -S redbeat.RedBeatScheduler --loglevel=info
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -424,13 +412,11 @@ services:
   # is cheap/short, so it gets its own high-concurrency pool that a slow
   # deploy or firmware job can never queue behind.
   poller:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     command: celery -A app.celery_app.celery_app worker -Q polling --loglevel=info --concurrency=8 --hostname=poller@%h
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -460,13 +446,11 @@ services:
   # one change request deploying in parallel across the pool, not an
   # unbounded number of simultaneous device sessions.
   deployer:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     command: celery -A app.celery_app.celery_app worker -Q deploy --loglevel=info --concurrency=4 --hostname=deployer@%h
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -495,13 +479,11 @@ services:
   # a config deploy, so a firmware backlog can't delay in-flight change
   # requests, and vice versa.
   firmware:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     command: celery -A app.celery_app.celery_app worker -Q firmware --loglevel=info --concurrency=2 --hostname=firmware@%h
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -532,13 +514,11 @@ services:
   # at all, so it's clear this is intentionally the catch-all and not just
   # another copy-paste of the queue-less bug this split fixes.
   worker:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
     command: celery -A app.celery_app.celery_app worker -Q celery --loglevel=info --concurrency=4 --hostname=worker@%h
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
@@ -560,9 +540,7 @@ services:
         condition: service_healthy
 
   frontend:
-    build:
-      context: ../frontend
-      dockerfile: Dockerfile
+    image: ghcr.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
     restart: unless-stopped
     environment:
       VITE_API_BASE_URL: http://localhost/api/v1
