@@ -16,13 +16,61 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_roles
+from app.core.deps import get_current_user, require_roles
 from app.models.user import User, UserRole
-from app.schemas.chatops import ChatOpsLinkCreate, ChatOpsLinkRead
+from app.schemas.chatops import (
+    ChatOpsCommandResponse,
+    ChatOpsLinkCreate,
+    ChatOpsLinkRead,
+)
 from app.services import audit_service, chatops_service
 
 router = APIRouter(prefix="/chatops", tags=["chatops"])
 logger = logging.getLogger(__name__)
+
+# Slack attachment sidebar color per severity, matching the app's existing
+# critical/warning/info palette (see app.models.alert.AlertSeverity).
+_SEVERITY_COLOR = {
+    "critical": "#DC2626",  # red
+    "warning": "#F97316",  # orange
+    "info": "#2563EB",  # blue
+}
+
+
+def _slack_blocks(result: chatops_service.ChatOpsResult) -> dict:
+    """Renders a ChatOpsResult as a Slack Block Kit message: a markdown
+    section block, optionally wrapped in a color-coded attachment when the
+    result carries a severity, plus one 'Acknowledge' button per item that
+    has an alert_id (e.g. the `alerts` command).
+    """
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": result.text}}]
+
+    for item in result.items:
+        alert_id = item.get("alert_id")
+        if not alert_id:
+            continue
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"alert_{alert_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Acknowledge"},
+                        "action_id": "ack",
+                        "value": alert_id,
+                        "style": "primary",
+                    }
+                ],
+            }
+        )
+
+    if result.severity in _SEVERITY_COLOR:
+        return {
+            "response_type": "ephemeral",
+            "attachments": [{"color": _SEVERITY_COLOR[result.severity], "blocks": blocks}],
+        }
+    return {"response_type": "ephemeral", "blocks": blocks}
 
 # Linking a Slack/Teams identity to a NetGuard user grants that chat
 # account the ability to approve changes and trigger rollbacks -- same
@@ -65,7 +113,7 @@ async def slack_slash_command(
         }
 
     result = chatops_service.execute_command(db, user, text)
-    return {"response_type": "ephemeral", "text": result.text}
+    return _slack_blocks(result)
 
 
 @router.post("/slack/interactive")
@@ -107,7 +155,9 @@ async def slack_interactive(
     command_text = f"{action_id} {value}".strip()
 
     result = chatops_service.execute_command(db, user, command_text)
-    return {"response_type": "ephemeral", "text": result.text, "replace_original": False}
+    response = _slack_blocks(result)
+    response["replace_original"] = False
+    return response
 
 
 # --- Microsoft Teams -----------------------------------------------------
@@ -145,6 +195,25 @@ async def teams_outgoing_webhook(
 
     result = chatops_service.execute_command(db, user, text)
     return {"type": "message", "text": result.text}
+
+
+# --- Ad-hoc testing (any authenticated user, runs as themselves) ----------
+
+
+@router.post("/test-command", response_model=ChatOpsCommandResponse)
+def test_command(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Runs a ChatOps command through the exact same parser/executor Slack
+    and Teams hit, as the calling NetGuard user -- lets an engineer verify
+    a command (and its RBAC) from the API/UI before wiring it into a chat
+    platform. Body: {"text": "fleet"}.
+    """
+    text = payload.get("text", "")
+    result = chatops_service.execute_command(db, current_user, text)
+    return ChatOpsCommandResponse(ok=result.ok, text=result.text, severity=result.severity, items=result.items)
 
 
 # --- Link management (Network Admin only) ---------------------------------
