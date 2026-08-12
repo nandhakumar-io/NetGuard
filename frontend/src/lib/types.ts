@@ -384,10 +384,27 @@ export interface WeeklyGoldenDriftEntry extends Drift {
   hostname: string;
 }
 
+export interface WeeklyGoldenDriftGroup {
+  group_id: string | null;
+  group_name: string;
+  devices: WeeklyGoldenDriftEntry[];
+}
+
 export interface WeeklyGoldenDriftReport {
   since: string;
   days: number;
   devices: WeeklyGoldenDriftEntry[];
+  groups: WeeklyGoldenDriftGroup[];
+}
+
+export interface LowRiskDriftCandidate extends Drift {
+  hostname: string;
+}
+
+export interface BulkApproveResponse {
+  approved_count: number;
+  approved_ids: string[];
+  skipped_ids: string[];
 }
 
 // --- Drift trending / flapping ---
@@ -1360,6 +1377,33 @@ export interface DeviceImpactPreview {
   before_hop_count: number;
   after_hop_count: number | null;
   status: "isolated" | "degraded";
+}
+
+// --- Unified device detail / "why is this device unhealthy" view ---
+// Backs GET /devices/{id}/overview (app.services.device_overview_service).
+export interface DeviceTimelineEvent {
+  kind: "alert_raised" | "alert_resolved" | "config_drift" | "syslog" | "deployment";
+  occurred_at: string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  detail: string;
+  ref_id: string;
+  meta: Record<string, unknown>;
+}
+
+export interface DeviceOverview {
+  device_id: string;
+  hostname: string;
+  ip_address: string;
+  vendor: string;
+  status: string;
+  window_hours: number;
+  health: DeviceHealthSummary;
+  active_alert_count: number;
+  drift_count: number;
+  notable_syslog_count: number;
+  deployment_count: number;
+  timeline: DeviceTimelineEvent[];
 }
 
 export interface ImpactSimulationPreview {

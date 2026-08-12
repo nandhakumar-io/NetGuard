@@ -847,7 +847,15 @@ export default function AlertCenter() {
                               <p className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">{alert.message}</p>
                               <div className="flex items-center gap-3 mt-2 text-[11px] text-slate-400 dark:text-slate-500">
                                 <span>{timeAgo(alert.created_at)}</span>
-                                {alert.device_id && <span>Device: {alert.device_id.slice(0, 8)}…</span>}
+                                {alert.device_id && (
+                                  <button
+                                    onClick={() => navigate(`/devices/${alert.device_id}`)}
+                                    title="Open unified device view — health, drift, syslog, and config-change timeline"
+                                    className="hover:text-brandblue hover:underline"
+                                  >
+                                    Device: {alert.device_id.slice(0, 8)}…
+                                  </button>
+                                )}
                                 {alert.acknowledged_by && <span>Ack'd by {alert.acknowledged_by}</span>}
                                 {alert.resolved_by && <span>Resolved by {alert.resolved_by}</span>}
                               </div>

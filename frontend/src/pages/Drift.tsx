@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus, DriftTrendResponse, FlappingDevicesResponse, WeeklyGoldenDriftReport } from "../lib/types";
+import { BulkApproveResponse, ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus, DriftTrendResponse, FlappingDevicesResponse, LowRiskDriftCandidate, WeeklyGoldenDriftReport } from "../lib/types";
 import ConfigDiff from "../components/ConfigDiff";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
@@ -65,6 +65,60 @@ export default function DriftPage() {
   const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [weeklyError, setWeeklyError] = useState<string | null>(null);
   const [weeklyOpen, setWeeklyOpen] = useState(false);
+
+  // "Bulk-approve low-risk drift" -- one-click approval for OPEN, LOW
+  // severity drift where every changed line is a cosmetic
+  // description/remark edit (see drift_service.is_low_risk_bulk_approvable).
+  const [lowRiskCandidates, setLowRiskCandidates] = useState<LowRiskDriftCandidate[] | null>(null);
+  const [lowRiskLoading, setLowRiskLoading] = useState(false);
+  const [lowRiskError, setLowRiskError] = useState<string | null>(null);
+  const [lowRiskOpen, setLowRiskOpen] = useState(false);
+  const [lowRiskSelected, setLowRiskSelected] = useState<Set<string>>(new Set());
+  const [bulkApproving, setBulkApproving] = useState(false);
+  const [bulkApproveNotice, setBulkApproveNotice] = useState<string | null>(null);
+
+  const loadLowRiskCandidates = () => {
+    setLowRiskOpen(true);
+    setLowRiskLoading(true);
+    setLowRiskError(null);
+    setBulkApproveNotice(null);
+    api
+      .get<LowRiskDriftCandidate[]>("/drift/low-risk-candidates")
+      .then((res) => {
+        setLowRiskCandidates(res.data);
+        setLowRiskSelected(new Set(res.data.map((d) => d.id)));
+      })
+      .catch((err) => setLowRiskError(errorMessage(err, "Failed to load low-risk drift candidates.")))
+      .finally(() => setLowRiskLoading(false));
+  };
+
+  const toggleLowRiskSelected = (id: string) => {
+    setLowRiskSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const runBulkApprove = async () => {
+    if (lowRiskSelected.size === 0) return;
+    setBulkApproving(true);
+    setLowRiskError(null);
+    try {
+      const res = await api.post<BulkApproveResponse>("/drift/bulk-approve", {
+        drift_ids: Array.from(lowRiskSelected),
+      });
+      setBulkApproveNotice(`Approved ${res.data.approved_count} low-risk drift record(s).`);
+      setLowRiskCandidates((prev) => (prev ? prev.filter((d) => !res.data.approved_ids.includes(d.id)) : prev));
+      setLowRiskSelected(new Set());
+      load();
+    } catch (err) {
+      setLowRiskError(errorMessage(err, "Bulk approve failed."));
+    } finally {
+      setBulkApproving(false);
+    }
+  };
 
   // Drift trending / flapping-device detection.
   const [trend, setTrend] = useState<DriftTrendResponse | null>(null);

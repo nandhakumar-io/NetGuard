@@ -28,6 +28,7 @@ Called by:
     celery beat schedule in app.celery_app)
 """
 import datetime
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -448,6 +449,110 @@ _SEVERITY_RANK = {
     DriftSeverity.MEDIUM: 1,
     DriftSeverity.LOW: 0,
 }
+
+# Matches a changed diff line (with the leading +/- already stripped) that
+# is purely a cosmetic label edit -- an interface/ACL description or a
+# remark/comment -- as opposed to anything that changes device behavior
+# (an ACL entry, an interface's shutdown state, a routing statement, etc).
+# Covers both CLI-style ("description WAN uplink", "! updated 2026-08",
+# "remark allow-vpn") and structural-diff-derived cli_diff lines, which use
+# the same vocabulary (see config_format_service.to_cli_commands).
+_COSMETIC_LINE_RE = re.compile(r"^(no\s+)?(description|remark)\b|^!", re.IGNORECASE)
+
+
+def _is_cosmetic_only_diff(diff_text: str) -> bool:
+    """True if every added/removed line in a unified diff is a cosmetic
+    description/remark/comment edit and at least one such line exists.
+    Used to gate one-click bulk approval -- see is_low_risk_bulk_approvable.
+    """
+    saw_change = False
+    for line in diff_text.splitlines():
+        if not line or line[0] not in "+-" or line.startswith("+++") or line.startswith("---"):
+            continue
+        content = line[1:].strip()
+        if not content:
+            continue
+        saw_change = True
+        if not _COSMETIC_LINE_RE.match(content):
+            return False
+    return saw_change
+
+
+def is_low_risk_bulk_approvable(drift: ConfigDrift) -> bool:
+    """Eligible for the "Bulk-approve low-risk drift" one-click action:
+    still OPEN, LOW severity, and every changed line is a cosmetic
+    description/remark edit -- nothing that touches actual device behavior.
+    Deliberately conservative: a LOW-severity drift that also touches real
+    config (even one non-cosmetic line) is excluded, so the bulk path can
+    never rubber-stamp a behavior change alongside a label change.
+    """
+    return (
+        drift.status == DriftStatus.OPEN
+        and drift.severity == DriftSeverity.LOW
+        and _is_cosmetic_only_diff(drift.diff_text)
+    )
+
+
+def list_low_risk_candidates(db: Session, limit: int = 200) -> list[ConfigDrift]:
+    """Every currently-open, cosmetic-only LOW drift -- the preview list
+    behind GET /drift/low-risk-candidates and the default target set for
+    POST /drift/bulk-approve when no explicit drift_ids are given."""
+    open_low = (
+        db.query(ConfigDrift)
+        .filter(ConfigDrift.status == DriftStatus.OPEN, ConfigDrift.severity == DriftSeverity.LOW)
+        .order_by(ConfigDrift.detected_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [d for d in open_low if _is_cosmetic_only_diff(d.diff_text)]
+
+
+def bulk_approve_drift(db: Session, drift_ids: list[uuid.UUID] | None, actor: "User") -> dict:
+    """Approve a batch of low-risk-cosmetic drift records in one action.
+    With drift_ids=None, approves every current candidate from
+    list_low_risk_candidates (fleet-wide "approve everything safe" case).
+    With explicit drift_ids, only the ones that still pass
+    is_low_risk_bulk_approvable are approved -- anything else (already
+    reviewed, or not actually cosmetic-only) is reported back as skipped
+    rather than silently approved.
+    """
+    if drift_ids is not None:
+        candidates = db.query(ConfigDrift).filter(ConfigDrift.id.in_(drift_ids)).all()
+    else:
+        candidates = list_low_risk_candidates(db)
+
+    approved: list[ConfigDrift] = []
+    skipped_ids: list[uuid.UUID] = []
+    for d in candidates:
+        if is_low_risk_bulk_approvable(d):
+            d.status = DriftStatus.APPROVED
+            approved.append(d)
+        else:
+            skipped_ids.append(d.id)
+
+    if approved:
+        db.commit()
+        audit_service.record_event(
+            db,
+            actor=actor.email,
+            action="Drift Bulk-Approved (low-risk cosmetic)",
+            result=f"{len(approved)} approved",
+            detail="drift_ids=" + ",".join(str(d.id) for d in approved),
+        )
+        for d in approved:
+            event_bus.publish_event(
+                "drift_detected",
+                device_id=str(d.device_id),
+                drift_id=str(d.id),
+                severity=d.severity.value,
+                compliance_score=d.compliance_score,
+            )
+
+    return {
+        "approved_count": len(approved),
+        "approved_ids": [d.id for d in approved],
+        "skipped_ids": skipped_ids,
+    }
 
 
 def weekly_golden_config_drift(db: Session, days: int = 7) -> list[ConfigDrift]:

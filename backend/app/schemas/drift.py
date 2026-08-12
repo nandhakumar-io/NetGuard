@@ -60,10 +60,51 @@ class WeeklyGoldenDriftEntry(DriftRead):
     hostname: str
 
 
+class WeeklyGoldenDriftGroup(BaseModel):
+    """One device-group's slice of the weekly digest -- e.g. "Edge
+    Firewalls" or "Branch Routers - East Region" (app.models.device_group.
+    DeviceGroup). group_id is None for the "Ungrouped" bucket (devices with
+    no DeviceGroup assigned)."""
+
+    group_id: uuid.UUID | None
+    group_name: str
+    devices: list[WeeklyGoldenDriftEntry]
+
+
 class WeeklyGoldenDriftReport(BaseModel):
     since: datetime.datetime
     days: int
     devices: list[WeeklyGoldenDriftEntry]
+    # Same devices as `devices` above, bucketed by DeviceGroup -- the NOC
+    # digest view groups by fleet/team ownership rather than showing one
+    # long flat table. `devices` is kept for backward compatibility /
+    # callers that just want the flat list.
+    groups: list[WeeklyGoldenDriftGroup]
+
+
+class LowRiskDriftCandidate(DriftRead):
+    """An OPEN, LOW-severity drift where every changed line is a cosmetic
+    description/remark edit -- eligible for one-click bulk approval via
+    POST /drift/bulk-approve. See drift_service.is_low_risk_bulk_approvable."""
+
+    hostname: str
+
+
+class BulkApproveRequest(BaseModel):
+    # None = approve every current low-risk candidate fleet-wide (same set
+    # GET /drift/low-risk-candidates returns). Pass explicit IDs to approve
+    # a hand-picked subset instead (e.g. after the user deselected a few
+    # rows in the preview table).
+    drift_ids: list[uuid.UUID] | None = None
+
+
+class BulkApproveResponse(BaseModel):
+    approved_count: int
+    approved_ids: list[uuid.UUID]
+    # Requested (via drift_ids) but not eligible -- already reviewed, or no
+    # longer qualifies as low-risk-cosmetic. Never populated when drift_ids
+    # is omitted, since the candidate set is by definition all-eligible.
+    skipped_ids: list[uuid.UUID]
 
 
 class DriftTrendPoint(BaseModel):

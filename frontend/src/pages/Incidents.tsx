@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 
 interface Incident {
@@ -9,6 +9,7 @@ interface Incident {
   severity: string;
   status: string;
   alert_ids: string[];
+  root_cause_alert_id: string | null;
   detected_at: string | null;
   resolved_at: string | null;
   root_cause_summary: string | null;
@@ -94,6 +95,7 @@ export default function Incidents() {
 
   const openDetail = (id: string) => {
     setSelectedId(id);
+    setRootDeviceId(null);
     api.get(`/incidents/${id}`).then((res) => {
       setDetail(res.data);
       setTimeline(res.data.timeline || []);
@@ -102,6 +104,16 @@ export default function Incidents() {
         impact_summary: res.data.impact_summary || "",
         action_items: res.data.action_items || "",
       });
+      // Best-effort: resolve the root-cause alert's device so the panel
+      // can link straight into the unified device view (health, drift,
+      // syslog, config-change timeline) instead of leaving the person to
+      // go find the device on their own.
+      if (res.data.root_cause_alert_id) {
+        api
+          .get(`/alerts/${res.data.root_cause_alert_id}`)
+          .then((alertRes) => setRootDeviceId(alertRes.data.device_id || null))
+          .catch(() => setRootDeviceId(null));
+      }
     });
   };
 

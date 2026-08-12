@@ -14,6 +14,7 @@ const ChangeRequests = lazy(() => import("./pages/ChangeRequests"));
 const Deployments = lazy(() => import("./pages/Deployments"));
 const Jobs = lazy(() => import("./pages/Jobs"));
 const Devices = lazy(() => import("./pages/Devices"));
+const DeviceDetail = lazy(() => import("./pages/DeviceDetail"));
 const Groups = lazy(() => import("./pages/Groups"));
 const AuditLog = lazy(() => import("./pages/AuditLog"));
 const Security = lazy(() => import("./pages/Security"));
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/jobs" element={withSuspense(<Jobs />)} />
           <Route path="/devices" element={withSuspense(<Devices />)} />
           <Route path="/devices/config" element={withSuspense(<DeviceConfiguration />)} />
+          <Route path="/devices/:deviceId" element={withSuspense(<DeviceDetail />)} />
           <Route path="/groups" element={withSuspense(<Groups />)} />
           <Route path="/config-search" element={withSuspense(<ConfigSearchPage />)} />
           <Route path="/templates" element={withSuspense(<TemplatesPage />)} />
