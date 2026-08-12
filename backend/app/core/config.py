@@ -290,11 +290,10 @@ class Settings(BaseSettings):
     # When true, the FastAPI process itself runs a lightweight asyncio loop
     # that polls every SNMP-enabled device every SNMP_POLL_INTERVAL_SECONDS
     # -- functionally the same as app.tasks.run_snmp_poll_sweep_task, but
-    # without needing Redis/a Celery worker/beat running. This is what
-    # makes SNMP monitoring work out of the box for local dev / demos.
+    # without needing Redis/a Celery worker/beat running.    # This is what makes SNMP monitoring work out of the box for local dev / demos.
     # Set to False once Celery worker + beat are actually running (e.g. in
     # production) so devices aren't polled twice on the same interval.
-    SNMP_INPROCESS_POLLING_ENABLED: bool = True
+    SNMP_INPROCESS_POLLING_ENABLED: bool = False
 
     # When true, every Celery task (.delay()/.apply_async(), including
     # chain()/chord() used by the multi-device deployment pipeline) runs
@@ -306,7 +305,7 @@ class Settings(BaseSettings):
     # normal case for this prototype. Turn it off once a real worker +
     # Redis are deployed, so deploys go through the proper async queue
     # and don't block the approving admin's HTTP request.
-    CELERY_TASK_ALWAYS_EAGER: bool = True
+    CELERY_TASK_ALWAYS_EAGER: bool = False
 
     # GNS3 Lab Integration: lets change requests be validated end-to-end
     # (deploy -> health monitor -> rollback) against real virtual routers

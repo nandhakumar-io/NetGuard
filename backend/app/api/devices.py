@@ -68,25 +68,14 @@ INVENTORY_MANAGER_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 
 
 def _poll_snmp_best_effort(db: Session, device: Device) -> None:
-    """Fire an immediate SNMP poll synchronously (instead of queuing a
-    Celery task) so the dashboard/health tab has telemetry right away even
-    when no Celery worker/Redis is running -- see also the in-process
-    polling loop in app.main for the recurring sweep. Best-effort: an
-    unreachable device or missing credential must not block the device
-    create/update response.
+    """Fire an immediate SNMP poll via the Celery worker (instead of
+    blocking the API thread). This ensures that dashboard telemetry is
+    updated smoothly without delaying the device create/update response.
     """
     try:
-        metrics_service.poll_device(db, device)
-        db.commit()
-    except metrics_service.SnmpNotConfiguredError:
-        pass
-    except metrics_service.credential_service.CredentialNotFoundError:
-        pass
-    except SQLAlchemyError:
-        # A DB error (e.g. enum validation) aborts the transaction in Postgres.
-        # We must rollback so the caller can still db.refresh/write audit logs.
-        db.rollback()
-    except Exception:  # noqa: BLE001 - best-effort only
+        from app.tasks import snmp_poll_task
+        snmp_poll_task.delay(str(device.id))
+    except Exception:
         pass
 
 # Rollback carries the same authority as approving a change (both bypass
