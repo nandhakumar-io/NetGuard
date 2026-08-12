@@ -47,7 +47,9 @@ netguard/
 │   │   └── lib/           API client, types
 │   └── Dockerfile
 ├── docker/
-│   └── docker-compose.yml Full local stack (Postgres, Redis, backend, frontend)
+│   └── docker-compose.yml Full local stack (Postgres, PgBouncer, Redis, NATS,
+│                           VictoriaMetrics, Traefik, api×N, collector, worker,
+│                           frontend)
 ├── docs/                   SRS and design docs
 └── .env.example
 ```
@@ -59,8 +61,37 @@ cp .env.example .env
 docker compose -f docker/docker-compose.yml up --build
 ```
 
-- Backend API: http://localhost:8000/docs
-- Frontend:    http://localhost:5173
+Everything is reached through Traefik on :80 now, not by hitting container
+ports directly:
+
+- App (frontend + API):  http://localhost/
+- API docs:              http://localhost/docs
+- Traefik dashboard:     http://localhost:8080
+
+`api` is a stateless, horizontally-scaled service (`API_REPLICAS` in `.env`,
+default 3) sitting behind Traefik. Everything that has to run exactly once
+regardless of API replica count lives in its own singleton service instead
+of `api`'s event loop: `collector` (topology snapshots), `syslog-collector`
+(syslog UDP, port 1514/udp), and `flow-collector` (NetFlow/IPFIX + sFlow
+UDP, ports 2055/udp and 6343/udp). SNMP polling itself no longer runs
+in-process anywhere -- it's driven by the Celery `beat`+`poller` services
+below. A one-shot `migrate` service applies Alembic migrations before any
+of the above start, instead of each of them racing `alembic upgrade head`
+against the DB independently. `pgbouncer` pools Postgres connections across
+all of the above so N `api` replicas don't multiply out to N times as many
+Postgres connections.
+
+To scale the API tier: `API_REPLICAS=6 docker compose -f docker/docker-compose.yml up --build -d`.
+
+The Celery job-queue tier is split by queue rather than one generic
+`worker`: `beat` (RedBeat-scheduled, HA via a Redis lock -- any number of
+replicas can run, only the lock holder ticks), `poller` (SNMP + reachability
+polling, high concurrency), `deployer` (the change-request deploy pipeline),
+`firmware` (firmware upgrade jobs, isolated so a long flash/reboot can't
+block deploys), and `worker` (the low-volume catch-all: drift sweeps,
+compliance reports, snapshot retention, escalation, GitOps sync). Scale any
+of them independently via `BEAT_REPLICAS` / `POLLER_REPLICAS` /
+`DEPLOYER_REPLICAS` / `FIRMWARE_REPLICAS` in `.env`.
 
 ## Quick Start (Local, without Docker)
 

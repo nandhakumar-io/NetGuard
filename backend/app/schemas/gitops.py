@@ -1,7 +1,25 @@
 import datetime
 import uuid
+from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+
+def _validate_template_path(v: str) -> str:
+    """Reject absolute paths and any '..' segment at save-time -- fails
+    fast in the create/update response instead of only surfacing as a
+    sync error later. This is a UX/fail-fast check, not the actual
+    security boundary: git_sync_service._resolve_template_dir re-checks
+    containment against the real clone directory at use-time regardless,
+    since a string-level check here can't account for symlinks inside
+    the cloned repo itself.
+    """
+    if not v:
+        return v
+    pure = PurePosixPath(v.replace("\\", "/"))
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ValueError("template_path must be a relative path within the repo, with no '..' segments")
+    return v
 
 
 class GitRepoConfigCreate(BaseModel):
@@ -21,6 +39,11 @@ class GitRepoConfigCreate(BaseModel):
             raise ValueError("direction must be 'pull', 'push', or 'bidirectional'")
         return v
 
+    @field_validator("template_path")
+    @classmethod
+    def _valid_template_path(cls, v: str) -> str:
+        return _validate_template_path(v)
+
 
 class GitRepoConfigUpdate(BaseModel):
     name: str | None = None
@@ -31,6 +54,11 @@ class GitRepoConfigUpdate(BaseModel):
     auto_sync_enabled: bool | None = None
     access_token: str | None = None
     webhook_secret: str | None = None
+
+    @field_validator("template_path")
+    @classmethod
+    def _valid_template_path(cls, v: str | None) -> str | None:
+        return v if v is None else _validate_template_path(v)
 
 
 class GitRepoConfigRead(BaseModel):

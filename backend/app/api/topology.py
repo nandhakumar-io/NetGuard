@@ -13,7 +13,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_current_user_ws
 from app.models.topology_snapshot import TopologySnapshot
 from app.schemas.topology import (
     TopologyDiffResponse,
@@ -98,7 +98,7 @@ async def _topology_heartbeat_loop(websocket: WebSocket):
 
 
 @router.websocket("/ws")
-async def topology_ws(websocket: WebSocket):
+async def topology_ws(websocket: WebSocket, token: str = Query("")):
     """Live feed for the Topology page's NOC-wall-display mode: pushes the
     full graph on connect, then again every time a device is added,
     removed, updated (incl. moved to a new data center/rack), or changes
@@ -111,6 +111,19 @@ async def topology_ws(websocket: WebSocket):
     trivially simple -- no incremental-patch state machine to get out of
     sync.
     """
+    # Was accepting every connection unauthenticated -- handing out live
+    # hostname+IP topology for the whole fleet (see _build_topology_payload)
+    # to anyone who could reach the API, no login required. See
+    # app.api.dashboard.dashboard_ws for the same fix and why.
+    db = SessionLocal()
+    try:
+        user = get_current_user_ws(token, db)
+    finally:
+        db.close()
+    if not user:
+        await websocket.close(code=1008)  # Policy Violation
+        return
+
     await websocket.accept()
 
     db = SessionLocal()

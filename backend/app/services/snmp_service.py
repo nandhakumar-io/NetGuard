@@ -263,7 +263,7 @@ class SnmpMetrics:
     # Raw cumulative counters (SNMP counters are cumulative-since-boot, not
     # instantaneous) -- utilization is derived from the *delta* between two
     # polls, so these are carried alongside interface_utilization_pct and
-    # persisted on DeviceMetric for the next poll to diff against.
+    # persisted to VictoriaMetrics for the next poll to diff against.
     interface_octets_total: int | None = None
     interface_speed_bps: int | None = None
     interface_count: int | None = None
@@ -582,7 +582,7 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
     Also returns ``per_interface``: the same walk, kept as individual
     per-interface rows (index, descr, octets, speed, errors) rather than
     only the fleet-rolled-up totals above. metrics_service persists these
-    as InterfaceMetric rows so the Bandwidth Top-N panel can rank
+    to VictoriaMetrics so the Bandwidth Top-N panel can rank
     individual *links* fleet-wide, not just whole devices -- the rollup
     above collapses exactly that per-link detail, which is fine for the
     device-level health score but not enough for a "top 10 congested
@@ -1307,7 +1307,7 @@ def _parse_snmp_enum_int(raw: str | None) -> int | None:
 def _envmon_status(raw: str | None) -> str:
     """Maps a ciscoEnvMonFanState/ciscoEnvMonSupplyState reading to the
     fan_status/power_supply_status vocabulary the rest of the app already
-    keys off of (DeviceMetric column comment, compute_health_score,
+    keys off of (see app.core.vm_client, compute_health_score,
     evaluate_thresholds all expect "ok" / "failed" / "unknown" -- "warning"
     is additionally surfaced for the not-yet-critical case rather than
     being silently rounded up to "ok").

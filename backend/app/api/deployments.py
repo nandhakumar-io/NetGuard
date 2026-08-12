@@ -1,11 +1,18 @@
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.database import SessionLocal, get_db
+from app.core.deps import get_current_user, get_current_user_ws
 from app.models.change_request import ChangeRequest
 from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResult
 from app.models.device import Device
@@ -251,10 +258,21 @@ def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db),
 
 
 @router.websocket("/ws")
-async def deployments_ws(websocket: WebSocket):
+async def deployments_ws(websocket: WebSocket, token: str = Query("")):
     """
     Dedicated websocket for real-time deployment logs and status updates.
     """
+    # Was accepting every connection unauthenticated -- see
+    # app.api.dashboard.dashboard_ws for the same fix and why.
+    db = SessionLocal()
+    try:
+        user = get_current_user_ws(token, db)
+    finally:
+        db.close()
+    if not user:
+        await websocket.close(code=1008)  # Policy Violation
+        return
+
     await websocket.accept()
     client = event_bus.get_async_client()
     ps = client.pubsub()

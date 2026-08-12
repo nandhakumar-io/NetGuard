@@ -37,7 +37,6 @@ from app.models.device import (  # noqa: F401
     SnmpVersion,
 )
 from app.models.device_group import DeviceGroup  # noqa: F401
-from app.models.device_metric import DeviceMetric, HealthColor  # noqa: F401
 from app.models.device_status_history import DeviceStatusHistory  # noqa: F401
 from app.models.discovered_neighbor import DiscoveredNeighbor  # noqa: F401
 from app.models.escalation_policy import (  # noqa: F401
@@ -55,7 +54,7 @@ from app.models.git_repo_config import (  # noqa: F401
     GitSyncStatus,
 )
 from app.models.golden_config import GoldenConfig  # noqa: F401
-from app.models.interface_metric import InterfaceMetric  # noqa: F401
+from app.models.health_color import HealthColor  # noqa: F401
 from app.models.interface_status import (  # noqa: F401
     InterfaceOperStatus,
     InterfaceStatus,

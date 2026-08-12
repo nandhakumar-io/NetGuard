@@ -23,9 +23,10 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.models.device import Device
 from app.models.device_group import DeviceGroup
-from app.models.device_metric import DeviceMetric, HealthColor
+from app.models.health_color import HealthColor
 
 RULE_FIELDS = ("hostname", "tag", "site", "device_type", "device_role")
 
@@ -145,33 +146,26 @@ def health_rollup(db: Session, group: DeviceGroup, include_descendants: bool = F
 
     if devices:
         device_ids = [d.id for d in devices]
-        # Latest metric row per device -- same "most recent DeviceMetric"
-        # pattern used elsewhere (see topology_service._latest_metrics_by_device),
-        # reimplemented locally to avoid a circular import.
-        rows = (
-            db.query(DeviceMetric)
-            .filter(DeviceMetric.device_id.in_(device_ids))
-            .order_by(DeviceMetric.device_id, DeviceMetric.polled_at.desc())
-            .all()
-        )
-        latest_by_device: dict[uuid.UUID, DeviceMetric] = {}
-        for row in rows:
-            if row.device_id not in latest_by_device:
-                latest_by_device[row.device_id] = row
+        # One fleet-wide VictoriaMetrics query (see vm_client.fleet_latest_health),
+        # filtered down to this group's devices, rather than an N-device
+        # query loop.
+        fleet_latest = vm_client.fleet_latest_health()
 
         hostnames = {d.id: d.hostname for d in devices}
         for device_id in device_ids:
-            metric = latest_by_device.get(device_id)
-            if metric is None or metric.health_color is None:
+            metric = fleet_latest.get(device_id)
+            if metric is None or metric.get("health_color") is None:
                 unmonitored += 1
                 continue
-            color = metric.health_color.value if isinstance(metric.health_color, HealthColor) else metric.health_color
+            color = metric["health_color"].value if isinstance(metric["health_color"], HealthColor) else metric["health_color"]
             if color in counts:
                 counts[color] += 1
-            if metric.health_score is not None:
-                scores.append(metric.health_score)
-                if worst_score is None or metric.health_score < worst_score:
-                    worst_score = metric.health_score
+            score = metric.get("health_score")
+            if score is not None:
+                score = int(score)
+                scores.append(score)
+                if worst_score is None or score < worst_score:
+                    worst_score = score
                     worst_hostname = hostnames.get(device_id)
 
     return {

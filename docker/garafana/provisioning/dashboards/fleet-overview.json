@@ -1,0 +1,118 @@
+{
+  "title": "NetGuard Fleet Overview",
+  "uid": "netguard-fleet-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Devices Reporting Health",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "targets": [
+        { "expr": "count(netguard_device_health_score)", "legendFormat": "devices" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Fleet Avg Health Score",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        { "expr": "avg(netguard_device_health_score)", "legendFormat": "health" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Fleet Avg CPU Utilization %",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 100, "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "expr": "avg(netguard_device_cpu_utilization_pct)", "legendFormat": "cpu" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Fleet Avg Memory Utilization %",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 100, "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "expr": "avg(netguard_device_memory_utilization_pct)", "legendFormat": "mem" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "CPU Utilization by Device",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "expr": "netguard_device_cpu_utilization_pct", "legendFormat": "{{hostname}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Memory Utilization by Device",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "expr": "netguard_device_memory_utilization_pct", "legendFormat": "{{hostname}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Interface Utilization %",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "expr": "netguard_interface_utilization_pct", "legendFormat": "{{hostname}} - {{if_descr}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Interface Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "targets": [
+        { "expr": "netguard_interface_error_delta", "legendFormat": "{{hostname}} - {{if_descr}}" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Device Temperature (C)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "targets": [
+        { "expr": "netguard_device_temperature_celsius", "legendFormat": "{{hostname}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Device Uptime",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "netguard_device_uptime_seconds", "legendFormat": "{{hostname}}" }
+      ]
+    }
+  ]
+}

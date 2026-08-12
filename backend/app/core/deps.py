@@ -40,6 +40,44 @@ def get_current_user(
     return user
 
 
+def get_current_user_ws(token: str, db: Session, roles: tuple[UserRole, ...] = ()) -> User | None:
+    """WebSocket counterpart to get_current_user.
+
+    WebSocket handlers can't use a normal HTTPException-raising Depends()
+    for auth -- there's no HTTP response to attach a 401 to once the
+    handshake has already accepted -- so every `/ws` route in this app is
+    responsible for calling this *before* `websocket.accept()` and closing
+    with code 1008 (Policy Violation) itself if it returns None. See
+    app.api.terminal.device_terminal for the original of this pattern;
+    this is the shared version so dashboard/notification/topology/alerts/
+    deployments don't each carry their own copy (and don't each need their
+    own reminder to actually call it -- see the incident this fixed).
+
+    `roles`, if given, additionally requires the resolved user's *base*
+    User.role to be one of them (JIT elevation is deliberately NOT
+    consulted here, matching jit_access.py's approve/reject/revoke
+    endpoints -- a websocket session is exactly the kind of long-lived
+    grant a JIT elevation is meant to be time-boxed against, so gate it on
+    the standing role only).
+    """
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+        email: str | None = payload.get("sub")
+        if not email:
+            return None
+    except JWTError:
+        return None
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        return None
+    if roles and user.role not in roles:
+        return None
+    return user
+
+
 def require_roles(*roles: UserRole):
     """Dependency factory for Role-Based Access Control (RBAC).
 

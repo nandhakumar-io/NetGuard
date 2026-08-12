@@ -218,6 +218,22 @@ def render_intent_for_all_vendors(intent: ConfigIntent) -> dict[str, str | None]
     return result
 
 
+# Comment-line prefix per vendor, used only by build_proposed_config's
+# separator below. Junos config text uses "#" for comments, not "!" --
+# stamping the same "!" line used for Cisco/Arista onto a Junos payload
+# means every intent appended this way would carry an invalid line
+# straight into netconf_service.push_config's Junos `set`-mode path,
+# which sends this text to the device close to verbatim (see
+# _push_once_junos_set) and has no reason to expect or strip Cisco-style
+# comments.
+_COMMENT_PREFIX = {
+    Vendor.CISCO_IOS: "!",
+    Vendor.CISCO_NXOS: "!",
+    Vendor.ARISTA_EOS: "!",
+    Vendor.JUNIPER_JUNOS: "#",
+}
+
+
 def build_proposed_config(current_config: str | None, intent: ConfigIntent, vendor: Vendor) -> str:
     """Appends the rendered intent snippet to the device's current
     config, the same shape ChangeRequest.proposed_config expects
@@ -230,6 +246,8 @@ def build_proposed_config(current_config: str | None, intent: ConfigIntent, vend
     """
     rendered = render_intent(intent, vendor)
     base = (current_config or "").rstrip("\n")
+    comment = _COMMENT_PREFIX[vendor]
+    separator = f"{comment} --- NetGuard config intent: {intent.kind.value} ---"
     if not base:
         return rendered
-    return f"{base}\n\n! --- NetGuard config intent: {intent.kind.value} ---\n{rendered}"
+    return f"{base}\n\n{separator}\n{rendered}"

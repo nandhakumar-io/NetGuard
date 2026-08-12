@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: VictoriaMetrics
+    type: prometheus
+    access: proxy
+    # VictoriaMetrics speaks the Prometheus HTTP API on its normal port --
+    # no separate exporter/adapter needed. Reached over the compose network,
+    # not through Traefik.
+    url: http://victoriametrics:8428
+    isDefault: true
+    jsonData:
+      httpMethod: GET
+      # VM's query engine has a longer default lookback/step tolerance than
+      # Prometheus; 90s matches the retentionPeriod-independent scrape/poll
+      # cadence (SNMP sweeps run on the order of tens of seconds to a
+      # couple of minutes) without hammering VM on every panel refresh.
+      timeInterval: 30s
+    editable: false

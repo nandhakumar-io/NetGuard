@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.alert import Alert
@@ -16,7 +17,6 @@ from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
 from app.models.golden_config import GoldenConfig
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
@@ -665,7 +665,7 @@ def delete_device(
         # Pure telemetry: no compliance value — always purged.
         db.query(Alert).filter(Alert.device_id == device_id).delete(synchronize_session=False)
         db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
-        db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
+        vm_client.delete_device_series(device_id)
         db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
 
         # Compliance-relevant records (only reached when force=true or counts are 0).

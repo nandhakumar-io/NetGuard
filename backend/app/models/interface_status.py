@@ -23,7 +23,7 @@ class InterfaceOperStatus(str, enum.Enum):
 class InterfaceStatus(Base):
     """One row per detected interface (port) status *change*, not one row
     per poll -- this is a transition log, not a metric timeseries (see
-    app.models.device_metric.DeviceMetric for the per-poll aggregate
+    VictoriaMetrics, via app.core.vm_client, for the per-poll aggregate
     numbers). Written by app.services.metrics_service._sync_interface_status
     whenever a poll's ifOperStatus for a given ifIndex differs from the
     most recent row on file for that (device_id, if_index) pair.

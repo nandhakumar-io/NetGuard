@@ -166,6 +166,30 @@ def _slug_filename(name: str) -> str:
     return f"{slug}.j2"
 
 
+def _resolve_template_dir(work_dir: Path, template_path: str) -> Path:
+    """Joins `template_path` onto the repo's clone dir and refuses to
+    return anything outside it.
+
+    `template_path` is admin-supplied (GitRepoConfig, gated behind
+    NETWORK_ADMIN in app/api/gitops.py) and Path's `/` operator doesn't
+    care whether the result stays under `work_dir` -- a value like
+    `../../../../etc` or an absolute `/etc` resolves straight out of the
+    clone. Read-only (sync_repo) that's a fleet-config info leak; on the
+    write side (push_template_version, which does `mkdir(parents=True)`
+    then writes a file into it) it's an arbitrary-file-write as whatever
+    user the backend/worker container runs as. Trusting the field because
+    only an admin can set it is a weaker guarantee than actually
+    containing the resulting path -- an admin account being phished or a
+    future caller reusing this helper with less-trusted input shouldn't
+    turn into a filesystem escape.
+    """
+    resolved = (work_dir / template_path).resolve()
+    work_dir_resolved = work_dir.resolve()
+    if resolved != work_dir_resolved and work_dir_resolved not in resolved.parents:
+        raise GitSyncError(f"template_path '{template_path}' resolves outside the repo checkout")
+    return resolved
+
+
 # --- Pull: repo -> ConfigTemplate versions ----------------------------------
 
 
@@ -184,7 +208,7 @@ def sync_repo(db: Session, repo: GitRepoConfig) -> dict:
     created, updated, unchanged, errors = 0, 0, 0, []
     try:
         work_dir = _ensure_clone(repo)
-        template_dir = work_dir / repo.template_path
+        template_dir = _resolve_template_dir(work_dir, repo.template_path)
         if not template_dir.exists():
             raise GitSyncError(f"template_path '{repo.template_path}' does not exist in the repo")
 
@@ -289,7 +313,7 @@ def push_template_version(db: Session, repo: GitRepoConfig, template: ConfigTemp
     NetGuard is the source of truth regardless of whether the mirror
     commit succeeds."""
     work_dir = _ensure_clone(repo)
-    template_dir = work_dir / repo.template_path
+    template_dir = _resolve_template_dir(work_dir, repo.template_path)
     template_dir.mkdir(parents=True, exist_ok=True)
     file_path = template_dir / _slug_filename(template.name)
 

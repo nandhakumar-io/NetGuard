@@ -32,9 +32,9 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.core.config import settings
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -209,20 +209,16 @@ def _status(db: Session, arg: str) -> ChatOpsResult:
     if not device:
         return ChatOpsResult(ok=False, text=f"No device found with hostname `{arg}`.")
 
-    latest_metric = (
-        db.query(DeviceMetric)
-        .filter(DeviceMetric.device_id == device.id)
-        .order_by(DeviceMetric.polled_at.desc())
-        .first()
-    )
+    latest_metric = vm_client.latest_device_metrics(device.id)
     status_value = device.status.value if hasattr(device.status, "value") else device.status
     lines = [
         f"*{device.hostname}* ({device.ip_address})",
         f"Status: *{status_value}*",
     ]
     if latest_metric:
-        health = latest_metric.health_color.value if hasattr(latest_metric.health_color, "value") else latest_metric.health_color
-        lines.append(f"Health: *{health}* (polled {latest_metric.polled_at.isoformat() if latest_metric.polled_at else 'unknown'})")
+        health = latest_metric.get("health_color")
+        polled_at = latest_metric.get("polled_at")
+        lines.append(f"Health: *{health}* (polled {polled_at.isoformat() if polled_at else 'unknown'})")
     if device.last_snmp_poll_at:
         lines.append(f"Last SNMP poll: {device.last_snmp_poll_at.isoformat()}")
     return ChatOpsResult(text="\n".join(lines))

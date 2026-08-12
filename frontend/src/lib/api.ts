@@ -1,6 +1,6 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:7001/api/v1";
+const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
 
 // The access token lives in memory only (module-level variable), never in
 // localStorage/sessionStorage -- either one is readable by any script that

@@ -9,14 +9,12 @@ device over the network.
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
-from app.models.interface_metric import InterfaceMetric
 from app.models.user import User, UserRole
 from app.schemas.metrics import (
     DeviceHealthSummary,
@@ -114,12 +112,7 @@ def get_device_health(device_id: uuid.UUID, db: Session = Depends(get_db), _=Dep
 @router.get("/devices/{device_id}/metrics/latest", response_model=DeviceMetricRead)
 def get_latest_metric(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
     device = _get_device(db, device_id)
-    latest = (
-        db.query(DeviceMetric)
-        .filter(DeviceMetric.device_id == device.id)
-        .order_by(DeviceMetric.polled_at.desc())
-        .first()
-    )
+    latest = vm_client.latest_device_metrics(device.id)
     if latest is None:
         raise HTTPException(status_code=404, detail="No metrics recorded yet for this device")
     return latest
@@ -153,24 +146,7 @@ def get_latest_interface_metrics(device_id: uuid.UUID, db: Session = Depends(get
     an error.
     """
     device = _get_device(db, device_id)
-
-    latest_subq = (
-        db.query(InterfaceMetric.if_index, func.max(InterfaceMetric.polled_at).label("latest_polled_at"))
-        .filter(InterfaceMetric.device_id == device.id)
-        .group_by(InterfaceMetric.if_index)
-        .subquery()
-    )
-    rows = (
-        db.query(InterfaceMetric)
-        .join(
-            latest_subq,
-            (InterfaceMetric.if_index == latest_subq.c.if_index)
-            & (InterfaceMetric.polled_at == latest_subq.c.latest_polled_at),
-        )
-        .filter(InterfaceMetric.device_id == device.id)
-        .order_by(InterfaceMetric.if_descr)
-        .all()
-    )
+    rows = vm_client.latest_interface_metrics(device.id)
     return rows
 
 

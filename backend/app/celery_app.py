@@ -68,12 +68,40 @@ celery_app.conf.update(
     redbeat_lock_timeout=90,
     # Discovery at Scale: keep polling traffic off the default queue so it
     # can be capacity-limited independently of deployment/drift/report
-    # tasks -- see the `poller` service in docker-compose.yaml, which is
+    # tasks -- see the `poller` service in docker/docker-compose.yml, which is
     # the only consumer of this queue and runs with its own
     # --concurrency limit distinct from the general `worker` service.
     task_routes={
         "app.tasks.snmp_poll_task": {"queue": "polling"},
         "app.tasks.reachability_task": {"queue": "polling"},
+        # Deployment Pipeline (Approved -> Snapshot -> Deploy -> Health
+        # Monitor -> Success | Rollback -> Notify), SRS 6.6/6.8. This is
+        # every task actually dispatched by POST /change-requests/{id}/approve
+        # and POST /deployments/{id}/retry -- the per-device work
+        # (deploy_device_task, retry_deployment_task), the canary gate
+        # that runs between the first device and the rest of the fleet
+        # (canary_gate_task), and the chord callback that finalizes the
+        # change request once every device is done (finalize_change_request_task).
+        # run_deployment_pipeline_task itself is just the lightweight
+        # dispatcher that fans these out -- routing it too keeps the
+        # whole pipeline off the shared `celery` queue, so a large
+        # multi-device change request can't queue behind (or get queued
+        # behind by) a slow compliance report, and vice versa. All
+        # consumed only by the `deployer` service (see
+        # docker/docker-compose.yml's `deployer` service).
+        "app.tasks.run_deployment_pipeline_task": {"queue": "deploy"},
+        "app.tasks.deploy_device_task": {"queue": "deploy"},
+        "app.tasks.retry_deployment_task": {"queue": "deploy"},
+        "app.tasks.canary_gate_task": {"queue": "deploy"},
+        "app.tasks.finalize_change_request_task": {"queue": "deploy"},
+        # Firmware upgrades hold a device session for the duration of a
+        # flash/reboot cycle, same shape as a deployment -- keep it off
+        # the shared queue too so a firmware job can't block drift/report
+        # tasks, or vice versa. Not routed to `deploy` itself: firmware
+        # upgrades are rarer and longer-running than config deploys, so
+        # giving them their own queue keeps a firmware backlog from
+        # delaying in-flight change requests.
+        "app.tasks.run_firmware_upgrade_task": {"queue": "firmware"},
     },
     beat_schedule={
         # Nightly configuration drift sweep (SRS: automated drift detection).

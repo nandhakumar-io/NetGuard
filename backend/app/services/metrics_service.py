@@ -15,11 +15,11 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
-from app.models.device_metric import DeviceMetric, HealthColor
 from app.models.device_status_history import DeviceStatusHistory
-from app.models.interface_metric import InterfaceMetric
+from app.models.health_color import HealthColor
 from app.models.interface_status import InterfaceOperStatus, InterfaceStatus
 from app.services import (
     alert_service,
@@ -28,6 +28,10 @@ from app.services import (
     snmp_service,
 )
 from app.services.snmp_service import SnmpMetrics
+
+__all__ = ["HealthColor"]  # re-exported: callers used to import this off
+# device_metric, then off this module during the VM cutover -- kept
+# importable from here too so nothing downstream had to change twice.
 
 
 class SnmpNotConfiguredError(Exception):
@@ -100,7 +104,7 @@ def _build_snmp_auth(device: Device) -> "snmp_service.SnmpAuthConfig":
 
 
 def _compute_interface_utilization(
-    metrics: SnmpMetrics, previous: DeviceMetric | None, interval_seconds: float
+    metrics: SnmpMetrics, previous: dict | None, interval_seconds: float
 ) -> float | None:
     """Interface Statistics panel: SNMP octet counters are cumulative
     since boot, not instantaneous, so utilization has to be derived from
@@ -111,17 +115,20 @@ def _compute_interface_utilization(
     against, when the counters reset (device rebooted -- delta negative),
     or when speed is unknown -- all of these mean "can't compute yet", not
     "0% utilized".
+
+    `previous` is the dict returned by vm_client.latest_device_metrics
+    (was a DeviceMetric ORM row before the VictoriaMetrics cutover).
     """
     if metrics.interface_octets_total is None or metrics.interface_speed_bps is None:
         return None
     if metrics.interface_speed_bps <= 0:
         return None
-    if previous is None or previous.interface_octets_total is None:
+    if previous is None or previous.get("interface_octets_total") is None:
         return None
     if interval_seconds <= 0:
         return None
 
-    delta_octets = metrics.interface_octets_total - previous.interface_octets_total
+    delta_octets = metrics.interface_octets_total - previous["interface_octets_total"]
     if delta_octets < 0:
         # Counter reset (reboot, counter wrap) -- not a valid delta.
         return None
@@ -247,11 +254,11 @@ def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) ->
 
 def _sync_interface_metrics(db: Session, device: Device, metrics: SnmpMetrics, poll_interval_seconds: float) -> None:
     """Per-interface counterpart to DeviceMetric's whole-device
-    interface_utilization_pct: writes one InterfaceMetric row per
-    currently-up interface in this poll, with utilization_pct computed
-    the same delta-against-previous-poll way as
-    _compute_interface_utilization, just scoped to a single ifIndex
-    instead of the device-wide sum.
+    interface_utilization_pct: writes one InterfaceMetric sample per
+    currently-up interface in this poll (to VictoriaMetrics -- see
+    vm_client.write_interface_polls), with utilization_pct computed the
+    same delta-against-previous-poll way as _compute_interface_utilization,
+    just scoped to a single ifIndex instead of the device-wide sum.
 
     Vendor-neutral: metrics.per_interface already comes from IF-MIB
     ifTable/ifXTable (see snmp_service.walk_interface_stats), which
@@ -269,28 +276,12 @@ def _sync_interface_metrics(db: Session, device: Device, metrics: SnmpMetrics, p
     if not up_entries:
         return
 
-    if_indexes = [str(e.get("if_index")) for e in up_entries]
+    # Latest prior sample per if_index, in one VM query rather than N --
+    # same "latest per key" shape the old Postgres subquery used.
+    previous_by_index = {row["if_index"]: row for row in vm_client.latest_interface_metrics(device.id)}
 
-    # Latest prior InterfaceMetric row per if_index, in one query rather
-    # than N -- same "latest per key" subquery shape used elsewhere in
-    # this module/topology_service for device-level lookups.
-    latest_subq = (
-        db.query(InterfaceMetric.if_index, func.max(InterfaceMetric.polled_at).label("latest_polled_at"))
-        .filter(InterfaceMetric.device_id == device.id, InterfaceMetric.if_index.in_(if_indexes))
-        .group_by(InterfaceMetric.if_index)
-        .subquery()
-    )
-    previous_rows = (
-        db.query(InterfaceMetric)
-        .join(
-            latest_subq,
-            (InterfaceMetric.if_index == latest_subq.c.if_index)
-            & (InterfaceMetric.polled_at == latest_subq.c.latest_polled_at),
-        )
-        .all()
-    )
-    previous_by_index = {row.if_index: row for row in previous_rows}
-
+    now = datetime.datetime.now(datetime.timezone.utc)
+    write_entries = []
     for entry in up_entries:
         if_index = str(entry.get("if_index"))
         if_descr = entry.get("if_descr") or f"if{if_index}"
@@ -306,34 +297,35 @@ def _sync_interface_metrics(db: Session, device: Device, metrics: SnmpMetrics, p
             octets_total is not None
             and speed_bps
             and previous is not None
-            and previous.octets_total is not None
+            and previous.get("octets_total") is not None
             and poll_interval_seconds > 0
         ):
-            delta_octets = octets_total - previous.octets_total
+            delta_octets = octets_total - previous["octets_total"]
             if delta_octets >= 0:  # negative delta = counter reset/reboot -- not a valid rate
                 bps = (delta_octets * 8) / poll_interval_seconds
                 utilization_pct = max(0.0, min(100.0, round((bps / speed_bps) * 100, 1)))
 
-        if errors is not None and previous is not None and previous.errors is not None:
-            delta_errors = errors - previous.errors
+        if errors is not None and previous is not None and previous.get("errors") is not None:
+            delta_errors = errors - previous["errors"]
             if delta_errors >= 0:
                 error_delta = delta_errors
 
-        db.add(
-            InterfaceMetric(
-                device_id=device.id,
-                if_index=if_index,
-                if_descr=if_descr,
-                octets_total=octets_total,
-                speed_bps=speed_bps,
-                errors=errors,
-                utilization_pct=utilization_pct,
-                error_delta=error_delta,
-            )
+        write_entries.append(
+            {
+                "if_index": if_index,
+                "if_descr": if_descr,
+                "octets_total": octets_total,
+                "speed_bps": speed_bps,
+                "errors": errors,
+                "utilization_pct": utilization_pct,
+                "error_delta": error_delta,
+            }
         )
 
+    vm_client.write_interface_polls(device.id, device.hostname, now, write_entries)
 
-def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, previous: DeviceMetric | None) -> None:
+
+def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, previous: dict | None) -> None:
     """Detects a reboot (sysUpTime counter reset to a value lower than
     the previous poll's) and raises a "Device Restart" alert -- the same
     category name app.services.snmp_service.classify_trap already uses
@@ -344,10 +336,12 @@ def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, pre
     alerts firing again on every subsequent poll after the real one --
     without it, a device that stays freshly-booted across two polls (poll
     interval shorter than 5 minutes) would look like it rebooted twice.
+
+    `previous` is the dict returned by vm_client.latest_device_metrics.
     """
-    if metrics.uptime_seconds is None or previous is None or previous.uptime_seconds is None:
+    if metrics.uptime_seconds is None or previous is None or previous.get("uptime_seconds") is None:
         return
-    if metrics.uptime_seconds < previous.uptime_seconds and metrics.uptime_seconds < 300:
+    if metrics.uptime_seconds < previous["uptime_seconds"] and metrics.uptime_seconds < 300:
         alert, is_new = alert_service.raise_alert(
             db,
             device_id=device.id,
@@ -459,10 +453,11 @@ def has_stale_metric(device: Device) -> bool:
     return bool(stale_metric_names(device))
 
 
-def poll_device(db: Session, device: Device) -> DeviceMetric:
+def poll_device(db: Session, device: Device) -> dict:
     """Runs one SNMP health poll for `device`, persists the result as a new
-    DeviceMetric row, raises any threshold-breach Alerts, and returns the
-    row. This is the single entry point both the Celery poll task and the
+    sample in VictoriaMetrics (see app.core.vm_client), raises any
+    threshold-breach Alerts, and returns the sample as a dict (mirrors the
+    old DeviceMetric row's columns). This is the single entry point both the Celery poll task and the
     on-demand "poll now" API call go through, so both paths get identical
     behavior (same alerting, same interface-utilization math).
 
@@ -490,14 +485,9 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
         db.commit()
         raise
 
-    previous = (
-        db.query(DeviceMetric)
-        .filter(DeviceMetric.device_id == device.id)
-        .order_by(DeviceMetric.polled_at.desc())
-        .first()
-    )
+    previous = vm_client.latest_device_metrics(device.id)
     interval_seconds = (
-        (datetime.datetime.now(datetime.timezone.utc) - previous.polled_at).total_seconds()
+        (datetime.datetime.now(datetime.timezone.utc) - previous["polled_at"]).total_seconds()
         if previous is not None
         else 0.0
     )
@@ -519,7 +509,7 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     # answers, so its absence means nothing came back at all) and lets
     # evaluate_thresholds() below turn that into an Alert. That's still a
     # real, worth-surfacing failure for last_snmp_poll_error even though
-    # poll_device itself completes "successfully" (a DeviceMetric row is
+    # poll_device itself completes "successfully" (a metric sample is
     # still written, just an empty one).
     device.last_snmp_poll_error = (
         None if metrics.uptime_seconds is not None else "Device did not respond to SNMP GET (sysUpTime)"
@@ -545,22 +535,25 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
 
     _stamp_metric_freshness(device, metrics)
 
-    row = DeviceMetric(
-        device_id=device.id,
-        cpu_utilization_pct=metrics.cpu_utilization_pct,
-        memory_utilization_pct=metrics.memory_utilization_pct,
-        interface_utilization_pct=metrics.interface_utilization_pct,
-        interface_errors=metrics.interface_errors,
-        temperature_celsius=metrics.temperature_celsius,
-        fan_status=metrics.fan_status,
-        power_supply_status=metrics.power_supply_status,
-        uptime_seconds=metrics.uptime_seconds,
-        health_score=score,
-        health_color=HealthColor(color),
-        interface_octets_total=metrics.interface_octets_total,
-        interface_speed_bps=metrics.interface_speed_bps,
-    )
-    db.add(row)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    row = {
+        "id": uuid.uuid5(uuid.NAMESPACE_URL, f"netguard-metric:{device.id}:{int(now.timestamp() * 1000)}"),
+        "device_id": device.id,
+        "cpu_utilization_pct": metrics.cpu_utilization_pct,
+        "memory_utilization_pct": metrics.memory_utilization_pct,
+        "interface_utilization_pct": metrics.interface_utilization_pct,
+        "interface_errors": metrics.interface_errors,
+        "temperature_celsius": metrics.temperature_celsius,
+        "fan_status": metrics.fan_status,
+        "power_supply_status": metrics.power_supply_status,
+        "uptime_seconds": metrics.uptime_seconds,
+        "health_score": score,
+        "health_color": color,
+        "interface_octets_total": metrics.interface_octets_total,
+        "interface_speed_bps": metrics.interface_speed_bps,
+        "polled_at": now,
+    }
+    vm_client.write_device_poll(device.id, device.hostname, now, row)
 
     _raise_alerts(db, device, metrics)
     _check_device_restart(db, device, metrics, previous)
@@ -568,18 +561,12 @@ def poll_device(db: Session, device: Device) -> DeviceMetric:
     _sync_interface_metrics(db, device, metrics, interval_seconds)
 
     db.commit()
-    db.refresh(row)
     return row
 
 
 def device_health(db: Session, device: Device) -> dict:
     """Latest health snapshot for one device (Health Dashboard card)."""
-    latest = (
-        db.query(DeviceMetric)
-        .filter(DeviceMetric.device_id == device.id)
-        .order_by(DeviceMetric.polled_at.desc())
-        .first()
-    )
+    latest = vm_client.latest_device_metrics(device.id)
     if latest is None:
         return {
             "device_id": device.id,
@@ -594,9 +581,9 @@ def device_health(db: Session, device: Device) -> dict:
     return {
         "device_id": device.id,
         "hostname": device.hostname,
-        "health_score": latest.health_score,
-        "health_color": latest.health_color.value if latest.health_color else "unknown",
-        "reachable": latest.health_score is not None and latest.health_score > 0,
+        "health_score": latest["health_score"],
+        "health_color": latest.get("health_color") or "unknown",
+        "reachable": latest["health_score"] is not None and latest["health_score"] > 0,
         "latest_metric": latest,
         "metric_freshness": metric_freshness(device),
         "stale_metrics": stale_metric_names(device),
@@ -606,7 +593,7 @@ def device_health(db: Session, device: Device) -> dict:
 def fleet_health_summary(db: Session, vendor: str | None = None) -> dict:
     """Fleet-wide rollup for the top of the Health Dashboard: how many
     devices are green/yellow/red right now, based on each device's most
-    recent DeviceMetric row (one row per device, not one per poll).
+    recent metric sample (one per device, not one per poll).
 
     ``vendor`` optionally scopes the rollup to a single vendor (e.g.
     "juniper") so the Device Inventory page's vendor filter can turn this
@@ -626,24 +613,22 @@ def fleet_health_summary(db: Session, vendor: str | None = None) -> dict:
             pass  # unknown vendor string -- fall through to an empty summary below
     snmp_devices = query.all()
 
+    # One fleet-wide VM query instead of an N-device query loop.
+    fleet_latest = vm_client.fleet_latest_health()
+
     counts = {"green": 0, "yellow": 0, "red": 0, "unknown": 0}
     scores: list[int] = []
     stale_count = 0
     for device in snmp_devices:
-        latest = (
-            db.query(DeviceMetric)
-            .filter(DeviceMetric.device_id == device.id)
-            .order_by(DeviceMetric.polled_at.desc())
-            .first()
-        )
+        latest = fleet_latest.get(device.id)
         if has_stale_metric(device):
             stale_count += 1
-        if latest is None or latest.health_color is None:
+        if latest is None or latest.get("health_color") is None:
             counts["unknown"] += 1
             continue
-        counts[latest.health_color.value] += 1
-        if latest.health_score is not None:
-            scores.append(latest.health_score)
+        counts[latest["health_color"]] += 1
+        if latest.get("health_score") is not None:
+            scores.append(int(latest["health_score"]))
 
     return {
         "devices_monitored": len(snmp_devices),
@@ -859,28 +844,26 @@ def unstable_devices(db: Session, hours: int = 24, limit: int = 10) -> list[dict
 
 def metric_history(
     db: Session, device_id: uuid.UUID, hours: int = 24, limit: int = 500
-) -> list[DeviceMetric]:
+) -> list[dict]:
     """Historical Charts: chronological (oldest-first, so charting
-    libraries don't need to reverse it) DeviceMetric rows for one device
+    libraries don't need to reverse it) metric samples for one device
     over the last `hours` hours, capped at `limit` points so a device
-    polled every minute for weeks doesn't blow up one response payload.
+    polled every minute for weeks doesn't blow up one response payload
+    (enforced here via `step`, since VictoriaMetrics' query_range returns
+    one point per step across the whole window rather than a row count).
     """
-    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
-    rows = (
-        db.query(DeviceMetric)
-        .filter(DeviceMetric.device_id == device_id, DeviceMetric.polled_at >= since)
-        .order_by(DeviceMetric.polled_at.desc())
-        .limit(limit)
-        .all()
-    )
-    return list(reversed(rows))
+    end = datetime.datetime.now(datetime.timezone.utc)
+    start = end - datetime.timedelta(hours=hours)
+    step_seconds = max(60, int((hours * 3600) / max(limit, 1)))
+    rows = vm_client.device_metric_history(device_id, start, end, step_seconds)
+    return rows[-limit:]
 
 
 def purge_old_metrics(db: Session, retention_days: int) -> int:
-    """Housekeeping: deletes DeviceMetric rows older than the retention
-    window so history tables don't grow unbounded. Returns rows deleted.
+    """No-op now that DeviceMetric/InterfaceMetric live in VictoriaMetrics:
+    retention there is enforced by the `-retentionPeriod` flag on the
+    victoriametrics container (see docker-compose.yaml), not by an
+    application-level sweep. Kept as a callable (returning 0) so any
+    existing scheduled call site doesn't need to be torn out separately.
     """
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=retention_days)
-    deleted = db.query(DeviceMetric).filter(DeviceMetric.polled_at < cutoff).delete(synchronize_session=False)
-    db.commit()
-    return deleted
+    return 0

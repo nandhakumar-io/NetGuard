@@ -3,7 +3,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.device_metric import HealthColor
+from app.models.health_color import HealthColor
 
 
 class DeviceMetricRead(BaseModel):

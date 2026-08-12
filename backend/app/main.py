@@ -24,7 +24,8 @@ _topology_snapshot_loop_task: asyncio.Task | None = None
 async def _snmp_inprocess_poll_loop() -> None:
     """Celery/Redis-free equivalent of app.tasks.run_snmp_poll_sweep_task +
     snmp_poll_task: every SNMP_POLL_INTERVAL_SECONDS, polls every
-    SNMP-enabled device and records a DeviceMetric for it. Runs directly in
+    SNMP-enabled device and records a health sample for it in
+    VictoriaMetrics. Runs directly in
     the FastAPI event loop (each poll offloaded to a worker thread via
     asyncio.to_thread since metrics_service/SNMP I/O and the DB session are
     synchronous), so the Health Dashboard / device Health tab work without
@@ -117,24 +118,25 @@ async def lifespan(app: FastAPI):
     # exactly what caused `relation "golden_configs" does not exist`, etc.
     # Apply any pending migrations here too so local/dev runs stay in sync
     # automatically. This is idempotent -- alembic no-ops if already at head.
-    try:
-        from alembic.config import Config as AlembicConfig
+    if settings.AUTO_MIGRATE_ON_STARTUP:
+        try:
+            from alembic.config import Config as AlembicConfig
 
-        from alembic import command
+            from alembic import command
 
-        backend_dir = Path(__file__).resolve().parent.parent
-        alembic_cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
-        alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
-        await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
-        logger.info("Alembic migrations applied (upgrade head).")
-    except Exception:
-        logger.exception(
-            "Auto-migration on startup FAILED -- the app is very likely running "
-            "against an out-of-date schema right now (missing tables/columns "
-            "will surface as 500s on random endpoints, e.g. device delete or "
-            "SNMP setup). Run `alembic upgrade head` manually from backend/ "
-            "and restart."
-        )
+            backend_dir = Path(__file__).resolve().parent.parent
+            alembic_cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
+            alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+            await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+            logger.info("Alembic migrations applied (upgrade head).")
+        except Exception:
+            logger.exception(
+                "Auto-migration on startup FAILED -- the app is very likely running "
+                "against an out-of-date schema right now (missing tables/columns "
+                "will surface as 500s on random endpoints, e.g. device delete or "
+                "SNMP setup). Run `alembic upgrade head` manually from backend/ "
+                "and restart."
+            )
 
     global _snmp_poll_loop_task
     if settings.SNMP_INPROCESS_POLLING_ENABLED and _snmp_poll_loop_task is None:

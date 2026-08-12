@@ -27,11 +27,10 @@ import ipaddress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
 from app.services import gns3_service, risk_engine, snapshot_service
@@ -78,7 +77,7 @@ class TopologyEdge:
     neighbor_port: str | None = None  # target device's port, as reported by the source device
     # Best-effort link utilization for coloring, 0-100 or None if neither
     # endpoint has a recent SNMP poll. This is the *device's* aggregate
-    # interface_utilization_pct (app.models.device_metric.DeviceMetric),
+    # interface_utilization_pct (see app.core.vm_client),
     # not a true per-port figure -- NetGuard doesn't persist per-ifIndex
     # utilization today, only the whole-device figure computed from
     # whichever interface counters metrics_service last polled. We take
@@ -230,30 +229,21 @@ def _interface_networks(config_text: str) -> list[ipaddress.IPv4Network]:
     return networks
 
 
-def _latest_metrics_by_device(db: Session) -> dict[str, DeviceMetric]:
-    """device_id -> its most recent DeviceMetric row (full row, not just
-    health), so callers can pull health_color/health_score *and*
-    interface_utilization_pct off one query instead of two near-identical
-    ones. Same "latest row per device" subquery shape as
-    app.api.dashboard._compute_summary's Top CPU/Memory widget, so a
+def _latest_metrics_by_device(devices: list[Device]) -> dict[str, dict]:
+    """device_id -> its most recent VictoriaMetrics sample (full dict, not
+    just health), so callers can pull health_color/health_score *and*
+    interface_utilization_pct off one lookup instead of two near-identical
+    ones. One vm_client call per device -- fine at prototype fleet sizes
+    (same O(devices) tradeoff build_topology already accepts below); a
     device the map has never polled simply isn't in the returned dict
     (caller treats that as unknown/gray, not an error).
     """
-    latest_subq = (
-        db.query(DeviceMetric.device_id, func.max(DeviceMetric.polled_at).label("latest_polled_at"))
-        .group_by(DeviceMetric.device_id)
-        .subquery()
-    )
-    rows = (
-        db.query(DeviceMetric)
-        .join(
-            latest_subq,
-            (DeviceMetric.device_id == latest_subq.c.device_id)
-            & (DeviceMetric.polled_at == latest_subq.c.latest_polled_at),
-        )
-        .all()
-    )
-    return {str(row.device_id): row for row in rows}
+    out: dict[str, dict] = {}
+    for device in devices:
+        latest = vm_client.latest_device_metrics(device.id)
+        if latest is not None:
+            out[str(device.id)] = latest
+    return out
 
 
 def build_topology(db: Session) -> TopologyGraph:
@@ -263,7 +253,7 @@ def build_topology(db: Session) -> TopologyGraph:
     sizes; revisit (e.g. index by subnet first) if this becomes hot.
     """
     devices = db.query(Device).order_by(Device.hostname).all()
-    metrics_by_device = _latest_metrics_by_device(db)
+    metrics_by_device = _latest_metrics_by_device(devices)
 
     nodes: list[TopologyNode] = []
     # device_id -> list of (network, original_ip) so edges can report which
@@ -273,9 +263,9 @@ def build_topology(db: Session) -> TopologyGraph:
     for device in devices:
         config_text = _latest_config(db, device.id)
         metric = metrics_by_device.get(str(device.id))
-        health_color = metric.health_color.value if metric and metric.health_color else None
-        health_score = metric.health_score if metric else None
-        interface_error_rate = metric.interface_errors if metric else None
+        health_color = metric.get("health_color") if metric else None
+        health_score = metric.get("health_score") if metric else None
+        interface_error_rate = metric.get("interface_errors") if metric else None
         nodes.append(
             TopologyNode(
                 id=str(device.id),
@@ -393,9 +383,9 @@ def build_topology(db: Session) -> TopologyGraph:
         src_metric = metrics_by_device.get(edge.source)
         tgt_metric = metrics_by_device.get(edge.target)
         readings = [
-            m.interface_utilization_pct
+            m.get("interface_utilization_pct")
             for m in (src_metric, tgt_metric)
-            if m is not None and m.interface_utilization_pct is not None
+            if m is not None and m.get("interface_utilization_pct") is not None
         ]
         edge.utilization_pct = round(max(readings)) if readings else None
 

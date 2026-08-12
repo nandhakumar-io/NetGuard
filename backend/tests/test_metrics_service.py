@@ -1,15 +1,13 @@
 import datetime
 
-from app.models.device_metric import DeviceMetric
 from app.services.metrics_service import _compute_interface_utilization
 from app.services.snmp_service import SnmpMetrics, compute_health_score
 
 
 def _metric(octets_total, polled_at):
-    row = DeviceMetric()
-    row.interface_octets_total = octets_total
-    row.polled_at = polled_at
-    return row
+    # previous is the dict returned by vm_client.latest_device_metrics
+    # (was a DeviceMetric ORM row before the VictoriaMetrics cutover).
+    return {"interface_octets_total": octets_total, "polled_at": polled_at}
 
 
 def test_interface_utilization_none_without_previous_sample():

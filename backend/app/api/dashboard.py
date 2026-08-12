@@ -3,12 +3,12 @@ import contextlib
 import datetime
 import json
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_current_user_ws
 from app.models.alert import Alert, AlertSeverity
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.config_drift import ConfigDrift, DriftStatus
@@ -525,7 +525,20 @@ async def _heartbeat_loop(websocket: WebSocket):
 
 
 @router.websocket("/ws")
-async def dashboard_ws(websocket: WebSocket):
+async def dashboard_ws(websocket: WebSocket, token: str = Query("")):
+    # Was accepting every connection unauthenticated -- this pushes the
+    # live fleet summary (device counts, health, alert volume) to anyone
+    # who could reach the API at all, no login required. Same fix as
+    # app.api.terminal.device_terminal: resolve+check before accept().
+    db = SessionLocal()
+    try:
+        user = get_current_user_ws(token, db)
+    finally:
+        db.close()
+    if not user:
+        await websocket.close(code=1008)  # Policy Violation
+        return
+
     await websocket.accept()
 
     db = SessionLocal()

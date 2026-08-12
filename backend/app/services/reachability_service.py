@@ -21,11 +21,12 @@ import subprocess
 
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.core.config import settings
 from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
-from app.models.device_metric import DeviceMetric, HealthColor
 from app.models.device_status_history import DeviceStatusHistory
+from app.models.health_color import HealthColor
 from app.services import alert_service, event_bus, notification_service
 
 # Ports tried, in order, for the TCP-connect reachability check -- this is
@@ -118,13 +119,13 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
             freshness_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
                 seconds=settings.SNMP_POLL_INTERVAL_SECONDS * 2
             )
-            latest = (
-                db.query(DeviceMetric)
-                .filter(DeviceMetric.device_id == device.id, DeviceMetric.polled_at >= freshness_cutoff)
-                .order_by(DeviceMetric.polled_at.desc())
-                .first()
-            )
-            if latest is not None and latest.health_color in (HealthColor.YELLOW, HealthColor.RED):
+            latest = vm_client.latest_device_metrics(device.id)
+            if (
+                latest is not None
+                and latest.get("polled_at") is not None
+                and latest["polled_at"] >= freshness_cutoff
+                and latest.get("health_color") in (HealthColor.YELLOW.value, HealthColor.RED.value)
+            ):
                 new_status = DeviceStatus.DEGRADED
 
     if device.status != new_status:

@@ -5,8 +5,22 @@
   PUT     /webhooks/{id}     — update an endpoint
   DELETE  /webhooks/{id}     — delete an endpoint
   POST    /webhooks/{id}/test — send a test payload to an endpoint
+
+Write access (create/update/delete/test) is restricted to NETWORK_ADMIN.
+Every write here makes the server issue an outbound HTTP request to a
+URL the caller supplies (delivery on real events, or immediately via
+/test) -- letting any authenticated user configure that is a
+server-side-request-forgery hole against the backend's own network
+position (cloud metadata endpoints, internal-only services, other
+containers on this compose network), not just an notification feature.
+_reject_unsafe_webhook_url below adds defense-in-depth validation on top
+of the role restriction -- the role check keeps this to trusted
+operators, the URL check keeps a trusted operator's typo or a leaked
+admin token from turning into an internal-network prober.
 """
+import ipaddress
 import json
+import socket
 import uuid
 
 import httpx
@@ -14,8 +28,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
-from app.models.user import User
+from app.core.deps import get_current_user, require_roles
+from app.models.user import User, UserRole
 from app.models.webhook import WebhookDeliveryAttempt, WebhookEndpoint
 from app.schemas.webhook import (
     WebhookCreate,
@@ -28,9 +42,64 @@ from app.services.notification_service import deliver_webhook
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
+_webhook_admin = require_roles(UserRole.NETWORK_ADMIN)
+
+
+def _reject_unsafe_webhook_url(url: str) -> None:
+    """Best-effort SSRF guard: only http(s), and every A/AAAA record the
+    hostname resolves to must be a public, routable address -- no
+    loopback, link-local (this blocks the 169.254.169.254 cloud metadata
+    endpoint specifically), private RFC1918/ULA, or multicast range.
+
+    This is resolve-time validation, not connection-time -- a DNS answer
+    that changes between this check and httpx actually connecting (DNS
+    rebinding) isn't caught here. That's an accepted gap for a
+    NETWORK_ADMIN-only feature; closing it fully needs pinning the
+    resolved IP through to the actual connection (e.g. a custom httpx
+    transport), which is a larger change than this endpoint warrants on
+    its own.
+    """
+    try:
+        parsed = httpx.URL(url)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid webhook URL")
+
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=422, detail="Webhook URL must be http or https")
+    if not parsed.host:
+        raise HTTPException(status_code=422, detail="Webhook URL must include a host")
+
+    try:
+        infos = socket.getaddrinfo(parsed.host, None)
+    except socket.gaierror as exc:
+        raise HTTPException(status_code=422, detail=f"Could not resolve webhook host: {exc}")
+
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_multicast
+            or addr.is_reserved
+            or addr.is_unspecified
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Webhook URL resolves to a non-public address ({addr}) -- not allowed",
+            )
+
 
 def _webhook_to_read(wh: WebhookEndpoint) -> WebhookRead:
-    """Convert a WebhookEndpoint ORM row to a WebhookRead, parsing events JSON."""
+    """Convert a WebhookEndpoint ORM row to a WebhookRead, parsing events JSON.
+
+    Deliberately never puts wh.secret on the response -- it's the HMAC
+    signing secret for this endpoint's deliveries (same write-only
+    pattern as GitRepoConfig.access_token in app/api/gitops.py); echoing
+    it back on every GET/POST/PUT let any authenticated user who could
+    reach this list (previously: anyone logged in at all, see the role
+    fix above) read every configured webhook's secret in plaintext.
+    """
     events = None
     if wh.events:
         try:
@@ -42,7 +111,7 @@ def _webhook_to_read(wh: WebhookEndpoint) -> WebhookRead:
         name=wh.name,
         url=wh.url,
         webhook_type=wh.webhook_type.value if hasattr(wh.webhook_type, "value") else wh.webhook_type,
-        secret=wh.secret,
+        secret=None,
         events=events,
         telegram_chat_id=wh.telegram_chat_id,
         enabled=wh.enabled,
@@ -66,8 +135,9 @@ def list_webhooks(
 def create_webhook(
     body: WebhookCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(_webhook_admin),
 ):
+    _reject_unsafe_webhook_url(body.url)
     wh = WebhookEndpoint(
         name=body.name,
         url=body.url,
@@ -89,12 +159,14 @@ def update_webhook(
     webhook_id: uuid.UUID,
     body: WebhookUpdate,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(_webhook_admin),
 ):
     wh = db.get(WebhookEndpoint, webhook_id)
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
     updates = body.model_dump(exclude_unset=True)
+    if updates.get("url"):
+        _reject_unsafe_webhook_url(updates["url"])
     if "events" in updates:
         updates["events"] = json.dumps(updates["events"]) if updates["events"] else None
     for field, value in updates.items():
@@ -108,7 +180,7 @@ def update_webhook(
 def delete_webhook(
     webhook_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(_webhook_admin),
 ):
     wh = db.get(WebhookEndpoint, webhook_id)
     if not wh:
@@ -121,11 +193,18 @@ def delete_webhook(
 def test_webhook(
     webhook_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(_webhook_admin),
 ):
     wh = db.get(WebhookEndpoint, webhook_id)
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    # Re-validated here too, not just at create/update -- covers rows
+    # written before this check existed, and closes most of the DNS-
+    # rebinding gap called out in _reject_unsafe_webhook_url's docstring
+    # for the common case (rebinding between save-time and this
+    # button-click, rather than between this check and httpx.post two
+    # lines below).
+    _reject_unsafe_webhook_url(wh.url)
 
     test_payload = {
         "event": "webhook_test",

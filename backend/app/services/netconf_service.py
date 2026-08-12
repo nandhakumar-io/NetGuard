@@ -13,6 +13,7 @@ directly.
 import logging
 import time
 from dataclasses import dataclass
+from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.config_format_service import (
     cli_to_netconf_config,
@@ -239,21 +240,46 @@ def push_config(
     # before it goes over the wire, rather than pushing the conversion
     # requirement onto every caller of push_config.
     used_cli_config_data = False
+    # True when this push goes over Junos's <load-configuration
+    # action="set"> RPC instead of the generic <edit-config> path -- see
+    # _push_once_junos_set below. Kept separate from used_cli_config_data
+    # (which gates the Cisco-specific cli-config-data capability check
+    # further down) since the two paths have nothing in common besides
+    # both starting from plain-text input.
+    junos_set_push = False
     if not looks_like_xml(config_xml):
-        if (vendor or "cisco").lower() != "cisco":
+        vendor_lower = (vendor or "cisco").lower()
+        if vendor_lower == "cisco":
+            config_xml = cli_to_netconf_config(config_xml)
+            used_cli_config_data = True
+        elif vendor_lower == "juniper":
+            # Junos takes plain `set ...` configuration-mode commands
+            # directly via <load-configuration action="set">, no XML
+            # wrapping needed -- config_xml is left as raw text and
+            # pushed via _push_once_junos_set below instead of
+            # edit-config. IMPORTANT: this assumes config_xml is already
+            # Junos `set` syntax (e.g. "set interfaces ge-0/0/1 disable"),
+            # NOT the IOS-style CLI text ("interface Gi0/1" / "shutdown")
+            # that validation_engine/risk_engine currently author every
+            # change request in. Translating IOS syntax to Junos `set`
+            # syntax is a separate, unimplemented step -- callers
+            # targeting Juniper devices must supply Junos `set` commands
+            # in proposed_config today, or this will fail at
+            # load-configuration with a Junos parse error rather than
+            # silently doing the wrong thing.
+            junos_set_push = True
+        else:
             elapsed = (time.perf_counter() - start) * 1000
             return NetconfResult(
                 False, config_xml, "", elapsed,
                 error=(
                     f"proposed_config is plain CLI text, not XML, and vendor="
                     f"'{vendor}' has no CLI-to-NETCONF translation configured "
-                    "(only Cisco IOS-XE's cli-config-data extension is "
-                    "supported today) -- NETCONF push needs an XML <config> "
-                    "payload for this vendor."
+                    "(only Cisco IOS-XE's cli-config-data extension and "
+                    "Junos 'set' commands are supported today) -- NETCONF "
+                    "push needs an XML <config> payload for this vendor."
                 ),
             )
-        config_xml = cli_to_netconf_config(config_xml)
-        used_cli_config_data = True
     else:
         stripped = strip_rpc_envelope(config_xml)
         if stripped is not None and stripped != config_xml:
@@ -301,7 +327,58 @@ def push_config(
                 except Exception:  # noqa: BLE001 - best-effort cleanup
                     pass
 
-    request_xml = f'<edit-config><target><{target}/></target>{config_xml}</edit-config>'
+    def _push_once_junos_set(conn, push_target: str, caps) -> tuple[str, list[str]]:
+        """Junos equivalent of _push_once above: lock -> load-configuration
+        (action="set") -> validate -> commit -> unlock. Junos's
+        <load-configuration action="set"> RPC takes raw `set` command
+        text directly and loads it into the candidate database in one
+        step -- there's no separate edit-config call the way there is
+        for XML-shaped config, so this is a distinct function rather
+        than a branch inside _push_once.
+        """
+        responses: list[str] = []
+        request_xml = (
+            f'<load-configuration action="set">'
+            f'<configuration-set>{_xml_escape(config_xml)}</configuration-set>'
+            f'</load-configuration>'
+        )
+        if use_lock:
+            conn.lock(target=push_target)
+        try:
+            load_reply = conn.load_configuration(action="set", config=config_xml)
+            responses.append(_pretty_xml(str(load_reply)))
+
+            if any("validate" in c for c in caps):
+                validate_reply = conn.validate(source=push_target)
+                responses.append(_pretty_xml(str(validate_reply)))
+
+            if push_target == "candidate":
+                commit_reply = conn.commit()
+                responses.append(_pretty_xml(str(commit_reply)))
+
+            return request_xml, responses
+        except Exception:
+            try:
+                if push_target == "candidate":
+                    conn.discard_changes()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+            raise
+        finally:
+            if use_lock:
+                try:
+                    conn.unlock(target=push_target)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
+
+    if junos_set_push:
+        request_xml = (
+            f'<load-configuration action="set">'
+            f'<configuration-set>{_xml_escape(config_xml)}</configuration-set>'
+            f'</load-configuration>'
+        )
+    else:
+        request_xml = f'<edit-config><target><{target}/></target>{config_xml}</edit-config>'
     try:
         with _connect(ip_address, port, username, password, vendor=vendor) as conn:
             caps = list(conn.server_capabilities or [])
@@ -339,8 +416,9 @@ def push_config(
                 )
                 effective_target = "running"
 
+            push_once = _push_once_junos_set if junos_set_push else _push_once
             try:
-                request_xml, responses = _push_once(conn, effective_target, caps)
+                request_xml, responses = push_once(conn, effective_target, caps)
             except Exception as first_exc:
                 is_candidate_capability_error = (
                     effective_target == "candidate" and "candidate" in str(first_exc).lower()
@@ -352,7 +430,7 @@ def push_config(
                     "retrying against :running",
                     ip_address, first_exc,
                 )
-                request_xml, responses = _push_once(conn, "running", caps)
+                request_xml, responses = push_once(conn, "running", caps)
                 effective_target = "running"
 
             elapsed = (time.perf_counter() - start) * 1000

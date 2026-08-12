@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     # "*", becomes a full credential-theft CSRF hole on every endpoint.
     # Defaults to the Vite dev server origin so local development keeps
     # working without extra setup.
-    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,https://netguard.notoriousdev.in"
+    # http://localhost (no port) covers the docker-compose stack, where
+    # the frontend is now reached through Traefik on :80 rather than the
+    # Vite dev server's :5173 directly -- see docker/docker-compose.yml.
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost,https://netguard.notoriousdev.in"
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:
@@ -75,9 +78,25 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+psycopg2://netguard:netguard@localhost:5432/netguard"
 
+    # Redundant safety net in app.main's lifespan (see comment there) for
+    # local `uvicorn app.main:app` runs that bypass entrypoint.sh. Set to
+    # False on every scaled-out container (api replicas, collector, worker)
+    # alongside entrypoint.sh's SKIP_MIGRATIONS=true, so N replicas don't
+    # also race each other via this fallback path.
+    AUTO_MIGRATE_ON_STARTUP: bool = True
+
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+
+    # Event bus (dashboard/topology/alerts/notifications live-update fan-out).
+    # Replaces the old Redis pub/sub channels -- see app/services/event_bus.py.
+    NATS_URL: str = "nats://localhost:4222"
+
+    # Time-series store backing the SNMP Health Dashboard (device/interface
+    # metrics) -- replaces the old device_metrics/interface_metrics Postgres
+    # tables. See app/core/vm_client.py.
+    VICTORIAMETRICS_URL: str = "http://localhost:8428"
 
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None

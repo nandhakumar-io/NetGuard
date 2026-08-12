@@ -12,13 +12,11 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import require_roles
-from app.core.security import decode_access_token
+from app.core.deps import get_current_user_ws, require_roles
 from app.models.device import Device
 from app.models.user import User, UserRole
 from app.services import audit_service, command_guard, credential_service
@@ -27,6 +25,15 @@ router = APIRouter(prefix="/devices", tags=["terminal"])
 
 SSH_CONNECT_TIMEOUT_SECONDS = 8
 TELNET_CONNECT_TIMEOUT_SECONDS = 8
+
+# Interactive shell access to real network gear -- deliberately narrower
+# than "any authenticated user". AUDITOR and SECURITY exist to *review*
+# device state (RBAC matrix in app/api/rbac.py lists them as read-only
+# roles across the fleet), not drive a live CLI session; this endpoint
+# used to accept any valid token with no role check at all, which handed
+# every auditor account de facto full device control regardless of what
+# the rest of the app told them they could do.
+TERMINAL_ALLOWED_ROLES = (UserRole.NETWORK_ADMIN, UserRole.NETWORK_ENGINEER, UserRole.NOC_ENGINEER)
 
 
 async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket) -> None:
@@ -212,19 +219,6 @@ async def _run_pumped_session(
         await websocket.send_text(f"\r\n\x1b[33m*** {reason} ***\x1b[0m\r\n")
     with contextlib.suppress(Exception):
         await websocket.close(code=1000, reason=reason[:120])
-
-
-def get_current_user_ws(token: str, db: Session) -> User | None:
-    if not token:
-        return None
-    try:
-        payload = decode_access_token(token)
-        email: str | None = payload.get("sub")
-        if not email:
-            return None
-        return db.query(User).filter(User.email == email).first()
-    except JWTError:
-        return None
 
 
 class _HostKeyMismatchError(Exception):
@@ -521,9 +515,16 @@ async def device_terminal(
     SSH server until they've been bootstrapped over their console, but
     also covers older/physical gear that was never configured for SSH.
     """
+    # Two-step so an authenticated-but-unauthorized user (e.g. AUDITOR)
+    # gets a distinct close reason from an invalid/missing token, instead
+    # of both looking like "not logged in" -- helps the frontend show the
+    # right message and helps us tell the two cases apart in logs.
     user = get_current_user_ws(token, db)
     if not user:
         await websocket.close(code=1008)  # Policy Violation
+        return
+    if user.role not in TERMINAL_ALLOWED_ROLES:
+        await websocket.close(code=1008, reason="Role not permitted to open a device terminal")
         return
 
     await websocket.accept()

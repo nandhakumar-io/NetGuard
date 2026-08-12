@@ -29,7 +29,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_current_user_ws
 from app.models.notification import (
     Notification,
     NotificationEventType,
@@ -136,7 +136,18 @@ async def _heartbeat_loop(websocket: WebSocket):
 
 
 @router.websocket("/ws")
-async def notifications_ws(websocket: WebSocket):
+async def notifications_ws(websocket: WebSocket, token: str = Query("")):
+    # Was accepting every connection unauthenticated -- see
+    # app.api.dashboard.dashboard_ws for the same fix and why.
+    db = SessionLocal()
+    try:
+        user = get_current_user_ws(token, db)
+    finally:
+        db.close()
+    if not user:
+        await websocket.close(code=1008)  # Policy Violation
+        return
+
     await websocket.accept()
 
     db = SessionLocal()
