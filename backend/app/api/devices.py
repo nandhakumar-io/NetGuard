@@ -49,6 +49,7 @@ from app.services import (
     audit_service,
     credential_service,
     device_csv_service,
+    device_overview_service,
     eol_service,
     event_bus,
     metrics_service,
@@ -514,6 +515,27 @@ def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(ge
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     return DeviceRead.from_device(device)
+
+
+@router.get("/{device_id}/overview")
+def get_device_overview(
+    device_id: uuid.UUID,
+    hours: int = Query(72, ge=1, le=24 * 30, description="Lookback window for counts + timeline"),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Unified "why is this device unhealthy" payload for the device
+    detail panel: live health, recent per-source counts (alerts, drift,
+    notable syslog, deployments), and a single merged timeline built by
+    app.services.device_overview_service. Exists so the frontend doesn't
+    have to make four separate calls (Health, Drift, Syslog Viewer,
+    Deployments) and stitch them together client-side just to answer
+    "what happened to this device recently".
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return device_overview_service.build_device_overview(db, device, hours=hours)
 
 
 @router.patch("/{device_id}", response_model=DeviceRead)
