@@ -17,8 +17,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import create_table_if_missing
 
-# revision identifiers, used by Alembic.
 revision = "0049"
 down_revision = "0048"
 branch_labels = None
@@ -57,7 +57,7 @@ def downgrade() -> None:
         bind.execute(sa.text("ROLLBACK TO SAVEPOINT _create_healthcolor"))
         bind.execute(sa.text("RELEASE SAVEPOINT _create_healthcolor"))
 
-    op.create_table(
+    create_table_if_missing(
         "device_metrics",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False, index=True),
@@ -75,7 +75,7 @@ def downgrade() -> None:
         sa.Column("health_color", postgresql.ENUM("GREEN", "YELLOW", "RED", "GRAY", name="healthcolor", create_type=False), nullable=True),
         sa.Column("polled_at", sa.DateTime(timezone=True), server_default=sa.func.now(), index=True),
     )
-    op.create_table(
+    create_table_if_missing(
         "interface_metrics",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False, index=True),

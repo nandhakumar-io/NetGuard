@@ -18,9 +18,10 @@ happens to redeploy a prior ConfigSnapshot, rather than an untracked
 side-effect.
 """
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0004"
 down_revision = "0003"
@@ -34,33 +35,33 @@ def upgrade() -> None:
 
     hcr_columns = {c["name"] for c in inspector.get_columns("health_check_results")}
     if "poll_round" not in hcr_columns:
-        op.add_column(
+        add_column_if_missing(
             "health_check_results",
             sa.Column("poll_round", sa.Integer(), nullable=False, server_default="1"),
         )
     if "elapsed_seconds" not in hcr_columns:
-        op.add_column(
+        add_column_if_missing(
             "health_check_results",
             sa.Column("elapsed_seconds", sa.Integer(), nullable=False, server_default="0"),
         )
 
     cr_columns = {c["name"] for c in inspector.get_columns("change_requests")}
     if "is_rollback" not in cr_columns:
-        op.add_column(
+        add_column_if_missing(
             "change_requests",
             sa.Column("is_rollback", sa.String(), nullable=False, server_default="false"),
         )
     if "rollback_snapshot_id" not in cr_columns:
-        op.add_column(
+        add_column_if_missing(
             "change_requests",
             sa.Column(
-                "rollback_snapshot_id", UUID(as_uuid=True), sa.ForeignKey("config_snapshots.id"), nullable=True
+                "rollback_snapshot_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("config_snapshots.id"), nullable=True
             ),
         )
 
 
 def downgrade() -> None:
-    op.drop_column("change_requests", "rollback_snapshot_id")
-    op.drop_column("change_requests", "is_rollback")
-    op.drop_column("health_check_results", "elapsed_seconds")
-    op.drop_column("health_check_results", "poll_round")
+    drop_column_if_exists("change_requests", "rollback_snapshot_id")
+    drop_column_if_exists("change_requests", "is_rollback")
+    drop_column_if_exists("health_check_results", "elapsed_seconds")
+    drop_column_if_exists("health_check_results", "poll_round")

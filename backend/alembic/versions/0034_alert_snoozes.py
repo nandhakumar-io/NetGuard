@@ -17,6 +17,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_index_if_missing,
     create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0034"
@@ -45,10 +47,10 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_alerts_muted_by_snooze_id", table_name="alerts")
-    op.drop_column("alerts", "muted_by_snooze_id")
+    drop_index_if_exists("ix_alerts_muted_by_snooze_id", table_name="alerts")
+    drop_column_if_exists("alerts", "muted_by_snooze_id")
 
-    op.drop_index("ix_alert_snoozes_expires_at", table_name="alert_snoozes")
-    op.drop_index("ix_alert_snoozes_category", table_name="alert_snoozes")
-    op.drop_index("ix_alert_snoozes_device_id", table_name="alert_snoozes")
+    drop_index_if_exists("ix_alert_snoozes_expires_at", table_name="alert_snoozes")
+    drop_index_if_exists("ix_alert_snoozes_category", table_name="alert_snoozes")
+    drop_index_if_exists("ix_alert_snoozes_device_id", table_name="alert_snoozes")
     op.drop_table("alert_snoozes")

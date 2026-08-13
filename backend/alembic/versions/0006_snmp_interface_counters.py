@@ -13,6 +13,7 @@ poll has something to diff against. These two columns are that storage.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0006"
 down_revision = "0005"
@@ -32,11 +33,11 @@ def upgrade() -> None:
 
     columns = {c["name"] for c in inspector.get_columns("device_metrics")}
     if "interface_octets_total" not in columns:
-        op.add_column("device_metrics", sa.Column("interface_octets_total", sa.BigInteger(), nullable=True))
+        add_column_if_missing("device_metrics", sa.Column("interface_octets_total", sa.BigInteger(), nullable=True))
     if "interface_speed_bps" not in columns:
-        op.add_column("device_metrics", sa.Column("interface_speed_bps", sa.BigInteger(), nullable=True))
+        add_column_if_missing("device_metrics", sa.Column("interface_speed_bps", sa.BigInteger(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("device_metrics", "interface_speed_bps")
-    op.drop_column("device_metrics", "interface_octets_total")
+    drop_column_if_exists("device_metrics", "interface_speed_bps")
+    drop_column_if_exists("device_metrics", "interface_octets_total")

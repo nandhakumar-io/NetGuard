@@ -11,9 +11,8 @@ app.services.credential_service.credential_expiry.
 """
 import sqlalchemy as sa
 
-from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
-# revision identifiers, used by Alembic.
 revision = "0052"
 down_revision = "0051"
 branch_labels = None
@@ -21,10 +20,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "devices", sa.Column("credentials_rotated_at", sa.DateTime(timezone=True), nullable=True)
     )
 
 
 def downgrade() -> None:
-    op.drop_column("devices", "credentials_rotated_at")
+    drop_column_if_exists("devices", "credentials_rotated_at")

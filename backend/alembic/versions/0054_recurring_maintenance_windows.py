@@ -14,8 +14,14 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
-# revision identifiers, used by Alembic.
 revision = "0054"
 down_revision = "0053"
 branch_labels = None
@@ -29,7 +35,7 @@ recurrence_frequency_enum = postgresql.ENUM(
 def upgrade() -> None:
     recurrence_frequency_enum.create(op.get_bind(), checkfirst=True)
 
-    op.create_table(
+    create_table_if_missing(
         "recurring_maintenance_schedules",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("name", sa.String(), nullable=False),
@@ -51,7 +57,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
 
-    op.add_column(
+    add_column_if_missing(
         "maintenance_windows",
         sa.Column(
             "recurrence_id",
@@ -60,13 +66,13 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
-    op.create_index(
+    create_index_if_missing(
         "ix_maintenance_windows_recurrence_id", "maintenance_windows", ["recurrence_id"]
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_maintenance_windows_recurrence_id", table_name="maintenance_windows")
-    op.drop_column("maintenance_windows", "recurrence_id")
+    drop_index_if_exists("ix_maintenance_windows_recurrence_id", table_name="maintenance_windows")
+    drop_column_if_exists("maintenance_windows", "recurrence_id")
     op.drop_table("recurring_maintenance_schedules")
     recurrence_frequency_enum.drop(op.get_bind(), checkfirst=True)

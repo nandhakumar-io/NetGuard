@@ -12,7 +12,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import create_index_if_missing, create_table_if_missing
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+)
 
 revision = "0008"
 down_revision = "0007"
@@ -59,7 +63,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_notifications_created_at", table_name="notifications")
+    drop_index_if_exists("ix_notifications_created_at", table_name="notifications")
     op.drop_table("notifications")
     notification_severity.drop(op.get_bind(), checkfirst=True)
     notification_event_type.drop(op.get_bind(), checkfirst=True)

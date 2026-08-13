@@ -12,6 +12,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+)
 
 revision = '0030'
 down_revision = '0029'
@@ -38,7 +43,7 @@ def upgrade() -> None:
     _create_enum_if_not_exists(bind, 'netflow_v5', 'netflow_v9', 'ipfix', 'sflow', name='flowprotocolversion')
 
     if 'flow_records' not in existing_tables:
-        op.create_table(
+        create_table_if_missing(
             'flow_records',
             sa.Column('id', sa.UUID(), nullable=False),
             sa.Column('device_id', sa.UUID(), nullable=True),
@@ -68,14 +73,14 @@ def upgrade() -> None:
             sa.ForeignKeyConstraint(['device_id'], ['devices.id']),
             sa.PrimaryKeyConstraint('id'),
         )
-        op.create_index(op.f('ix_flow_records_device_id'), 'flow_records', ['device_id'], unique=False)
-        op.create_index(op.f('ix_flow_records_exporter_ip'), 'flow_records', ['exporter_ip'], unique=False)
-        op.create_index(op.f('ix_flow_records_src_ip'), 'flow_records', ['src_ip'], unique=False)
-        op.create_index(op.f('ix_flow_records_dst_ip'), 'flow_records', ['dst_ip'], unique=False)
-        op.create_index(op.f('ix_flow_records_received_at'), 'flow_records', ['received_at'], unique=False)
+        create_index_if_missing(op.f('ix_flow_records_device_id'), 'flow_records', ['device_id'], unique=False)
+        create_index_if_missing(op.f('ix_flow_records_exporter_ip'), 'flow_records', ['exporter_ip'], unique=False)
+        create_index_if_missing(op.f('ix_flow_records_src_ip'), 'flow_records', ['src_ip'], unique=False)
+        create_index_if_missing(op.f('ix_flow_records_dst_ip'), 'flow_records', ['dst_ip'], unique=False)
+        create_index_if_missing(op.f('ix_flow_records_received_at'), 'flow_records', ['received_at'], unique=False)
 
     if 'topology_snapshots' not in existing_tables:
-        op.create_table(
+        create_table_if_missing(
             'topology_snapshots',
             sa.Column('id', sa.UUID(), nullable=False),
             sa.Column('nodes_json', sa.Text(), nullable=False),
@@ -85,17 +90,17 @@ def upgrade() -> None:
             sa.Column('captured_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
             sa.PrimaryKeyConstraint('id'),
         )
-        op.create_index(
+        create_index_if_missing(
             op.f('ix_topology_snapshots_captured_at'), 'topology_snapshots', ['captured_at'], unique=False
         )
 
 
 def downgrade() -> None:
-    op.drop_index(op.f('ix_topology_snapshots_captured_at'), table_name='topology_snapshots')
+    drop_index_if_exists(op.f('ix_topology_snapshots_captured_at'), table_name='topology_snapshots')
     op.drop_table('topology_snapshots')
-    op.drop_index(op.f('ix_flow_records_received_at'), table_name='flow_records')
-    op.drop_index(op.f('ix_flow_records_dst_ip'), table_name='flow_records')
-    op.drop_index(op.f('ix_flow_records_src_ip'), table_name='flow_records')
-    op.drop_index(op.f('ix_flow_records_exporter_ip'), table_name='flow_records')
-    op.drop_index(op.f('ix_flow_records_device_id'), table_name='flow_records')
+    drop_index_if_exists(op.f('ix_flow_records_received_at'), table_name='flow_records')
+    drop_index_if_exists(op.f('ix_flow_records_dst_ip'), table_name='flow_records')
+    drop_index_if_exists(op.f('ix_flow_records_src_ip'), table_name='flow_records')
+    drop_index_if_exists(op.f('ix_flow_records_exporter_ip'), table_name='flow_records')
+    drop_index_if_exists(op.f('ix_flow_records_device_id'), table_name='flow_records')
     op.drop_table('flow_records')

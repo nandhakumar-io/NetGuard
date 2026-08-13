@@ -5,7 +5,10 @@ from app.models.alert_rule import (  # noqa: F401
     AlertRuleMetric,
     AlertRuleOperator,
 )
+from app.models.alert_runbook import AlertRunbook  # noqa: F401
 from app.models.alert_snooze import AlertSnooze  # noqa: F401
+from app.models.approval_chain import ChangeRequestApprovalStage  # noqa: F401
+from app.models.approval_delegate import ApprovalDelegate  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
 from app.models.change_request import (  # noqa: F401
     ChangePriority,
@@ -37,6 +40,7 @@ from app.models.device import (  # noqa: F401
     SnmpVersion,
 )
 from app.models.device_group import DeviceGroup  # noqa: F401
+from app.models.device_metric import DeviceMetric  # noqa: F401
 from app.models.device_status_history import DeviceStatusHistory  # noqa: F401
 from app.models.discovered_neighbor import DiscoveredNeighbor  # noqa: F401
 from app.models.escalation_policy import (  # noqa: F401
@@ -48,6 +52,7 @@ from app.models.firmware_upgrade import (  # noqa: F401
     FirmwareUpgrade,
     FirmwareUpgradeStatus,
 )
+from app.models.flow_record import FlowRecord  # noqa: F401
 from app.models.git_repo_config import (  # noqa: F401
     GitRepoConfig,
     GitSyncDirection,
@@ -55,7 +60,9 @@ from app.models.git_repo_config import (  # noqa: F401
 )
 from app.models.golden_config import GoldenConfig  # noqa: F401
 from app.models.health_color import HealthColor  # noqa: F401
+from app.models.incident import Incident, IncidentTimelineEvent  # noqa: F401
 from app.models.interface_alert_config import InterfaceAlertConfig  # noqa: F401
+from app.models.interface_metric import InterfaceMetric  # noqa: F401
 from app.models.interface_status import (  # noqa: F401
     InterfaceOperStatus,
     InterfaceStatus,
@@ -77,8 +84,12 @@ from app.models.path_trace import (  # noqa: F401
     PathTraceStatus,
 )
 from app.models.protocol_operation import ProtocolName, ProtocolOperation  # noqa: F401
+from app.models.recurring_maintenance_schedule import (  # noqa: F401
+    RecurringMaintenanceSchedule,
+)
 from app.models.refresh_token import RefreshToken  # noqa: F401
 from app.models.snapshot import ConfigSnapshot  # noqa: F401
 from app.models.syslog_message import SyslogMessage, SyslogSeverity  # noqa: F401
+from app.models.topology_snapshot import TopologySnapshot  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401
 from app.models.webhook import WebhookEndpoint, WebhookType  # noqa: F401

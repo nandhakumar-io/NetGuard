@@ -33,7 +33,11 @@ recomputes them.
 """
 import sqlalchemy as sa
 
-from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    column_exists,
+    drop_column_if_exists,
+)
 
 revision = "0020"
 down_revision = "0019"
@@ -41,34 +45,30 @@ branch_labels = None
 depends_on = None
 
 
-def column_exists(table_name: str, column_name: str) -> bool:
-    bind = op.get_bind()
-    insp = sa.inspect(bind)
-    return any(c["name"] == column_name for c in insp.get_columns(table_name))
 
 def upgrade() -> None:
     if not column_exists("devices", "last_snmp_poll_at"):
-        op.add_column("devices", sa.Column("last_snmp_poll_at", sa.DateTime(timezone=True), nullable=True))
+        add_column_if_missing("devices", sa.Column("last_snmp_poll_at", sa.DateTime(timezone=True), nullable=True))
     if not column_exists("devices", "last_snmp_poll_error"):
-        op.add_column("devices", sa.Column("last_snmp_poll_error", sa.Text(), nullable=True))
+        add_column_if_missing("devices", sa.Column("last_snmp_poll_error", sa.Text(), nullable=True))
 
     if not column_exists("config_drifts", "cli_diff"):
-        op.add_column("config_drifts", sa.Column("cli_diff", sa.Text(), nullable=True))
+        add_column_if_missing("config_drifts", sa.Column("cli_diff", sa.Text(), nullable=True))
 
     if not column_exists("change_requests", "config_diff_cli"):
-        op.add_column("change_requests", sa.Column("config_diff_cli", sa.Text(), nullable=True))
+        add_column_if_missing("change_requests", sa.Column("config_diff_cli", sa.Text(), nullable=True))
     if not column_exists("change_requests", "config_diff_summary"):
-        op.add_column("change_requests", sa.Column("config_diff_summary", sa.Text(), nullable=True))
+        add_column_if_missing("change_requests", sa.Column("config_diff_summary", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
     if column_exists("change_requests", "config_diff_summary"):
-        op.drop_column("change_requests", "config_diff_summary")
+        drop_column_if_exists("change_requests", "config_diff_summary")
     if column_exists("change_requests", "config_diff_cli"):
-        op.drop_column("change_requests", "config_diff_cli")
+        drop_column_if_exists("change_requests", "config_diff_cli")
     if column_exists("config_drifts", "cli_diff"):
-        op.drop_column("config_drifts", "cli_diff")
+        drop_column_if_exists("config_drifts", "cli_diff")
     if column_exists("devices", "last_snmp_poll_error"):
-        op.drop_column("devices", "last_snmp_poll_error")
+        drop_column_if_exists("devices", "last_snmp_poll_error")
     if column_exists("devices", "last_snmp_poll_at"):
-        op.drop_column("devices", "last_snmp_poll_at")
+        drop_column_if_exists("devices", "last_snmp_poll_at")

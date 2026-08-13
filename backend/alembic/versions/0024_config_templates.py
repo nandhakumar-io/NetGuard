@@ -13,6 +13,12 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+    table_exists,
+)
 
 revision = "0024"
 down_revision = "0023"
@@ -20,14 +26,10 @@ branch_labels = None
 depends_on = None
 
 
-def table_exists(table_name: str) -> bool:
-    bind = op.get_bind()
-    insp = sa.inspect(bind)
-    return insp.has_table(table_name)
 
 def upgrade() -> None:
     if not table_exists("config_templates"):
-        op.create_table(
+        create_table_if_missing(
             "config_templates",
             sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
             sa.Column("name", sa.String(), nullable=False, unique=True),
@@ -40,12 +42,12 @@ def upgrade() -> None:
             sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
             sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         )
-        op.create_index("ix_config_templates_device_role", "config_templates", ["device_role"])
-        op.create_index("ix_config_templates_vendor", "config_templates", ["vendor"])
+        create_index_if_missing("ix_config_templates_device_role", "config_templates", ["device_role"])
+        create_index_if_missing("ix_config_templates_vendor", "config_templates", ["vendor"])
 
 
 def downgrade() -> None:
     if table_exists("config_templates"):
-        op.drop_index("ix_config_templates_vendor", table_name="config_templates")
-        op.drop_index("ix_config_templates_device_role", table_name="config_templates")
+        drop_index_if_exists("ix_config_templates_vendor", table_name="config_templates")
+        drop_index_if_exists("ix_config_templates_device_role", table_name="config_templates")
         op.drop_table("config_templates")

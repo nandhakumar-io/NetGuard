@@ -20,7 +20,7 @@ safe to run against a database where some other process already created
 either table by hand while debugging.
 """
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects import postgresql
 
 from alembic import op
 from migration_helpers import create_index_if_missing, create_table_if_missing
@@ -34,8 +34,8 @@ depends_on = None
 def upgrade() -> None:
     create_table_if_missing(
         "golden_configs",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("device_id", UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False, unique=True),
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False, unique=True),
         sa.Column("config_encrypted", sa.Text(), nullable=False),
         sa.Column("checksum", sa.String(), nullable=False),
         sa.Column("set_by", sa.String(), nullable=False, server_default="system"),
@@ -46,14 +46,14 @@ def upgrade() -> None:
 
     create_table_if_missing(
         "discovered_neighbors",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("device_id", UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False),
         sa.Column("protocol", sa.String(length=8), nullable=False),
         sa.Column("local_port", sa.String(length=64), nullable=True),
         sa.Column("neighbor_name", sa.String(length=255), nullable=True),
         sa.Column("neighbor_port", sa.String(length=255), nullable=True),
         sa.Column("neighbor_platform", sa.String(length=255), nullable=True),
-        sa.Column("neighbor_device_id", UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=True),
+        sa.Column("neighbor_device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=True),
         sa.Column("discovered_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
     create_index_if_missing("ix_discovered_neighbors_device_id", "discovered_neighbors", ["device_id"])

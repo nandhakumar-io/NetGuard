@@ -28,6 +28,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_index_if_missing,
     create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0031"
@@ -113,17 +115,17 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_firmware_upgrades_created_at", table_name="firmware_upgrades")
-    op.drop_index("ix_firmware_upgrades_device_id", table_name="firmware_upgrades")
-    op.drop_index("ix_firmware_upgrades_batch_id", table_name="firmware_upgrades")
+    drop_index_if_exists("ix_firmware_upgrades_created_at", table_name="firmware_upgrades")
+    drop_index_if_exists("ix_firmware_upgrades_device_id", table_name="firmware_upgrades")
+    drop_index_if_exists("ix_firmware_upgrades_batch_id", table_name="firmware_upgrades")
     op.drop_table("firmware_upgrades")
     sa.Enum(name="firmwareupgradestatus").drop(op.get_bind(), checkfirst=True)
 
-    op.drop_index("ix_alerts_suppressed_by_window_id", table_name="alerts")
-    op.drop_column("alerts", "suppressed_by_window_id")
+    drop_index_if_exists("ix_alerts_suppressed_by_window_id", table_name="alerts")
+    drop_column_if_exists("alerts", "suppressed_by_window_id")
 
-    op.drop_index("ix_maintenance_windows_starts_ends", table_name="maintenance_windows")
-    op.drop_index("ix_maintenance_windows_site", table_name="maintenance_windows")
-    op.drop_index("ix_maintenance_windows_device_id", table_name="maintenance_windows")
+    drop_index_if_exists("ix_maintenance_windows_starts_ends", table_name="maintenance_windows")
+    drop_index_if_exists("ix_maintenance_windows_site", table_name="maintenance_windows")
+    drop_index_if_exists("ix_maintenance_windows_device_id", table_name="maintenance_windows")
     op.drop_table("maintenance_windows")
     sa.Enum(name="maintenancescope").drop(op.get_bind(), checkfirst=True)

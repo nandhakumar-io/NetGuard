@@ -24,7 +24,11 @@ app.services.group_membership_service.
 import sqlalchemy as sa
 
 from alembic import op
-from migration_helpers import add_column_if_missing, enum_type_exists
+from migration_helpers import (
+    add_column_if_missing,
+    drop_column_if_exists,
+    enum_type_exists,
+)
 
 revision = "0037"
 down_revision = "0036"
@@ -57,9 +61,9 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_column("device_groups", "membership_rules")
-    op.drop_column("device_groups", "is_dynamic")
-    op.drop_column("devices", "custom_fields")
-    op.drop_column("devices", "tags")
-    op.drop_column("devices", "lifecycle_state")
+    drop_column_if_exists("device_groups", "membership_rules")
+    drop_column_if_exists("device_groups", "is_dynamic")
+    drop_column_if_exists("devices", "custom_fields")
+    drop_column_if_exists("devices", "tags")
+    drop_column_if_exists("devices", "lifecycle_state")
     op.execute("DROP TYPE IF EXISTS devicelifecyclestate")

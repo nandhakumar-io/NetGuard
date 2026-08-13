@@ -17,6 +17,7 @@ pipeline_service.target_device_ids.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0003"
 down_revision = "0002"
@@ -31,8 +32,8 @@ def upgrade() -> None:
     if "additional_device_ids" in existing_columns:
         return  # already present (e.g. fresh install via create_all)
 
-    op.add_column("change_requests", sa.Column("additional_device_ids", sa.Text(), nullable=True))
+    add_column_if_missing("change_requests", sa.Column("additional_device_ids", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("change_requests", "additional_device_ids")
+    drop_column_if_exists("change_requests", "additional_device_ids")

@@ -24,6 +24,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_foreign_key_if_missing,
     create_index_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0029"
@@ -43,6 +45,6 @@ def upgrade():
 
 def downgrade():
     op.drop_constraint("fk_alerts_root_cause_alert_id", "alerts", type_="foreignkey")
-    op.drop_index("ix_alerts_root_cause_alert_id", table_name="alerts")
-    op.drop_column("alerts", "suppressed")
-    op.drop_column("alerts", "root_cause_alert_id")
+    drop_index_if_exists("ix_alerts_root_cause_alert_id", table_name="alerts")
+    drop_column_if_exists("alerts", "suppressed")
+    drop_column_if_exists("alerts", "root_cause_alert_id")

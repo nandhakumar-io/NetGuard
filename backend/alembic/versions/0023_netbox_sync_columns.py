@@ -12,8 +12,12 @@ no NetBox counterpart) are unaffected.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing, create_index_if_missing
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0023"
 down_revision = "0022"
@@ -28,6 +32,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_devices_netbox_id", table_name="devices")
-    op.drop_column("devices", "netbox_last_synced_at")
-    op.drop_column("devices", "netbox_id")
+    drop_index_if_exists("ix_devices_netbox_id", table_name="devices")
+    drop_column_if_exists("devices", "netbox_last_synced_at")
+    drop_column_if_exists("devices", "netbox_id")

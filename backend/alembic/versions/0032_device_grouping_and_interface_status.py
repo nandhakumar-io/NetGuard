@@ -26,6 +26,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_index_if_missing,
     create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0032"
@@ -60,14 +62,14 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_interface_statuses_device_ifindex", table_name="interface_statuses")
-    op.drop_index("ix_interface_statuses_changed_at", table_name="interface_statuses")
-    op.drop_index("ix_interface_statuses_device_id", table_name="interface_statuses")
+    drop_index_if_exists("ix_interface_statuses_device_ifindex", table_name="interface_statuses")
+    drop_index_if_exists("ix_interface_statuses_changed_at", table_name="interface_statuses")
+    drop_index_if_exists("ix_interface_statuses_device_id", table_name="interface_statuses")
     op.drop_table("interface_statuses")
     sa.Enum(name="interfaceoperstatus").drop(op.get_bind(), checkfirst=True)
 
-    op.drop_index("ix_devices_rack", table_name="devices")
-    op.drop_index("ix_devices_data_center", table_name="devices")
-    op.drop_column("devices", "rack_position")
-    op.drop_column("devices", "rack")
-    op.drop_column("devices", "data_center")
+    drop_index_if_exists("ix_devices_rack", table_name="devices")
+    drop_index_if_exists("ix_devices_data_center", table_name="devices")
+    drop_column_if_exists("devices", "rack_position")
+    drop_column_if_exists("devices", "rack")
+    drop_column_if_exists("devices", "data_center")

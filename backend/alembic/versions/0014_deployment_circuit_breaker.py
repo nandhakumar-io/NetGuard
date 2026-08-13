@@ -20,7 +20,7 @@ app.services.pipeline_service._check_circuit_breaker).
 """
 import sqlalchemy as sa
 
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0014"
 down_revision = "0013"
@@ -36,7 +36,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    from alembic import op
 
-    op.drop_column("devices", "unstable_since")
-    op.drop_column("devices", "flagged_unstable")
+    drop_column_if_exists("devices", "unstable_since")
+    drop_column_if_exists("devices", "flagged_unstable")

@@ -16,6 +16,7 @@ full rebuild, but ADD VALUE is safe and cheap; this only adds GRAY.
 Note ADD VALUE cannot run inside a transaction block in older Postgres
 versions, hence autocommit here.
 """
+
 from alembic import op
 
 revision = "0026"

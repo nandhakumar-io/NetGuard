@@ -14,6 +14,7 @@ retry action.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0015"
 down_revision = "0014"
@@ -33,20 +34,20 @@ def upgrade() -> None:
     columns = {c["name"] for c in inspector.get_columns("change_requests")}
 
     if "config_source" not in columns:
-        op.add_column("change_requests", sa.Column("config_source", sa.String(), nullable=True))
+        add_column_if_missing("change_requests", sa.Column("config_source", sa.String(), nullable=True))
     if "risk_engine_backend" not in columns:
-        op.add_column("change_requests", sa.Column("risk_engine_backend", sa.String(), nullable=True))
+        add_column_if_missing("change_requests", sa.Column("risk_engine_backend", sa.String(), nullable=True))
     if "risk_llm_applied" not in columns:
-        op.add_column(
+        add_column_if_missing(
             "change_requests",
             sa.Column("risk_llm_applied", sa.Boolean(), nullable=False, server_default="false"),
         )
     if "risk_llm_error" not in columns:
-        op.add_column("change_requests", sa.Column("risk_llm_error", sa.Text(), nullable=True))
+        add_column_if_missing("change_requests", sa.Column("risk_llm_error", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("change_requests", "risk_llm_error")
-    op.drop_column("change_requests", "risk_llm_applied")
-    op.drop_column("change_requests", "risk_engine_backend")
-    op.drop_column("change_requests", "config_source")
+    drop_column_if_exists("change_requests", "risk_llm_error")
+    drop_column_if_exists("change_requests", "risk_llm_applied")
+    drop_column_if_exists("change_requests", "risk_engine_backend")
+    drop_column_if_exists("change_requests", "config_source")

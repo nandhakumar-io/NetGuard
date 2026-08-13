@@ -10,9 +10,14 @@ default when the Python type is a str-mixin enum), so no PostgreSQL native
 enum type is created here.
 """
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+)
 
 revision = "0002"
 down_revision = "0001"
@@ -26,10 +31,10 @@ def upgrade() -> None:
     if "config_drifts" in inspector.get_table_names():
         return  # already created by baseline's create_all(checkfirst=True) on a fresh install
 
-    op.create_table(
+    create_table_if_missing(
         "config_drifts",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("device_id", UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False),
         # DriftBaseline: 'golden_config' | 'previous_backup'
         sa.Column("baseline", sa.String(length=15), nullable=False, server_default="previous_backup"),
         sa.Column("diff_text", sa.Text(), nullable=False, server_default=""),
@@ -45,11 +50,11 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=11), nullable=False, server_default="open"),
         sa.Column("detected_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_config_drifts_device_id", "config_drifts", ["device_id"])
-    op.create_index("ix_config_drifts_detected_at", "config_drifts", ["detected_at"])
+    create_index_if_missing("ix_config_drifts_device_id", "config_drifts", ["device_id"])
+    create_index_if_missing("ix_config_drifts_detected_at", "config_drifts", ["detected_at"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_config_drifts_detected_at", table_name="config_drifts")
-    op.drop_index("ix_config_drifts_device_id", table_name="config_drifts")
+    drop_index_if_exists("ix_config_drifts_detected_at", table_name="config_drifts")
+    drop_index_if_exists("ix_config_drifts_device_id", table_name="config_drifts")
     op.drop_table("config_drifts")

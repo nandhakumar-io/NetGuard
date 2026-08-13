@@ -13,6 +13,7 @@ credential_service all assume these columns exist.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0013"
 down_revision = "0012"
@@ -40,29 +41,29 @@ def upgrade() -> None:
     _PRIV_PROTOCOL_ENUM.create(bind, checkfirst=True)
 
     if "snmp_port" not in columns:
-        op.add_column("devices", sa.Column("snmp_port", sa.Integer(), nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_port", sa.Integer(), nullable=True))
     if "snmp_security_level" not in columns:
-        op.add_column("devices", sa.Column("snmp_security_level", _SECURITY_LEVEL_ENUM, nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_security_level", _SECURITY_LEVEL_ENUM, nullable=True))
     if "snmp_auth_protocol" not in columns:
-        op.add_column("devices", sa.Column("snmp_auth_protocol", _AUTH_PROTOCOL_ENUM, nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_auth_protocol", _AUTH_PROTOCOL_ENUM, nullable=True))
     if "snmp_priv_protocol" not in columns:
-        op.add_column("devices", sa.Column("snmp_priv_protocol", _PRIV_PROTOCOL_ENUM, nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_priv_protocol", _PRIV_PROTOCOL_ENUM, nullable=True))
     if "snmp_community_encrypted" not in columns:
-        op.add_column("devices", sa.Column("snmp_community_encrypted", sa.Text(), nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_community_encrypted", sa.Text(), nullable=True))
     if "snmp_auth_key_encrypted" not in columns:
-        op.add_column("devices", sa.Column("snmp_auth_key_encrypted", sa.Text(), nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_auth_key_encrypted", sa.Text(), nullable=True))
     if "snmp_priv_key_encrypted" not in columns:
-        op.add_column("devices", sa.Column("snmp_priv_key_encrypted", sa.Text(), nullable=True))
+        add_column_if_missing("devices", sa.Column("snmp_priv_key_encrypted", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("devices", "snmp_priv_key_encrypted")
-    op.drop_column("devices", "snmp_auth_key_encrypted")
-    op.drop_column("devices", "snmp_community_encrypted")
-    op.drop_column("devices", "snmp_priv_protocol")
-    op.drop_column("devices", "snmp_auth_protocol")
-    op.drop_column("devices", "snmp_security_level")
-    op.drop_column("devices", "snmp_port")
+    drop_column_if_exists("devices", "snmp_priv_key_encrypted")
+    drop_column_if_exists("devices", "snmp_auth_key_encrypted")
+    drop_column_if_exists("devices", "snmp_community_encrypted")
+    drop_column_if_exists("devices", "snmp_priv_protocol")
+    drop_column_if_exists("devices", "snmp_auth_protocol")
+    drop_column_if_exists("devices", "snmp_security_level")
+    drop_column_if_exists("devices", "snmp_port")
 
     bind = op.get_bind()
     _PRIV_PROTOCOL_ENUM.drop(bind, checkfirst=True)

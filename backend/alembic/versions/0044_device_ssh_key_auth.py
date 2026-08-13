@@ -15,8 +15,7 @@ opted in.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0044"
 down_revision = "0043"
@@ -34,6 +33,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("devices", "ssh_auth_method")
-    op.drop_column("devices", "ssh_private_key_passphrase_encrypted")
-    op.drop_column("devices", "ssh_private_key_encrypted")
+    drop_column_if_exists("devices", "ssh_auth_method")
+    drop_column_if_exists("devices", "ssh_private_key_passphrase_encrypted")
+    drop_column_if_exists("devices", "ssh_private_key_encrypted")

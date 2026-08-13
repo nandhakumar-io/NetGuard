@@ -22,6 +22,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_index_if_missing,
     create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0038"
@@ -70,12 +72,12 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_alerts_escalation_policy_id", table_name="alerts")
-    op.drop_column("alerts", "escalation_count")
-    op.drop_column("alerts", "escalation_policy_id")
-    op.drop_column("alerts", "last_escalated_at")
-    op.drop_column("alerts", "escalated_at")
-    op.drop_column("alerts", "escalated")
+    drop_index_if_exists("ix_alerts_escalation_policy_id", table_name="alerts")
+    drop_column_if_exists("alerts", "escalation_count")
+    drop_column_if_exists("alerts", "escalation_policy_id")
+    drop_column_if_exists("alerts", "last_escalated_at")
+    drop_column_if_exists("alerts", "escalated_at")
+    drop_column_if_exists("alerts", "escalated")
     op.drop_table("escalation_policies")
     sa.Enum(name="escalationchannel").drop(op.get_bind(), checkfirst=True)
     sa.Enum(name="escalationseverityscope").drop(op.get_bind(), checkfirst=True)

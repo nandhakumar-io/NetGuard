@@ -14,8 +14,12 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+)
 
-# revision identifiers, used by Alembic.
 revision = "0051"
 down_revision = "0050"
 branch_labels = None
@@ -28,10 +32,10 @@ alert_source_enum = postgresql.ENUM(
 
 
 def upgrade() -> None:
-    op.add_column("alert_rules", sa.Column("runbook_url", sa.String(), nullable=True))
-    op.add_column("alert_rules", sa.Column("runbook_title", sa.String(), nullable=True))
+    add_column_if_missing("alert_rules", sa.Column("runbook_url", sa.String(), nullable=True))
+    add_column_if_missing("alert_rules", sa.Column("runbook_title", sa.String(), nullable=True))
 
-    op.create_table(
+    create_table_if_missing(
         "alert_runbooks",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("category", sa.String(), nullable=False, index=True),
@@ -48,5 +52,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("alert_runbooks")
-    op.drop_column("alert_rules", "runbook_title")
-    op.drop_column("alert_rules", "runbook_url")
+    drop_column_if_exists("alert_rules", "runbook_title")
+    drop_column_if_exists("alert_rules", "runbook_url")

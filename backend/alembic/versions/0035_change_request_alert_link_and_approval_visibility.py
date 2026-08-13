@@ -16,8 +16,14 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import (
+    add_column_if_missing,
+    create_foreign_key_if_missing,
+    create_index_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
-# revision identifiers, used by Alembic.
 revision = "0035"
 down_revision = "0034"
 branch_labels = None
@@ -32,25 +38,25 @@ def _has_column(table: str, column: str) -> bool:
 
 def upgrade() -> None:
     if not _has_column("change_requests", "triggering_alert_id"):
-        op.add_column(
+        add_column_if_missing(
             "change_requests",
             sa.Column("triggering_alert_id", postgresql.UUID(as_uuid=True), nullable=True),
         )
-        op.create_foreign_key(
+        create_foreign_key_if_missing(
             "fk_change_requests_triggering_alert_id",
             "change_requests",
             "alerts",
             ["triggering_alert_id"],
             ["id"],
         )
-        op.create_index(
+        create_index_if_missing(
             "ix_change_requests_triggering_alert_id",
             "change_requests",
             ["triggering_alert_id"],
         )
 
     if not _has_column("change_requests", "approved_at"):
-        op.add_column(
+        add_column_if_missing(
             "change_requests",
             sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
         )
@@ -58,10 +64,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if _has_column("change_requests", "approved_at"):
-        op.drop_column("change_requests", "approved_at")
+        drop_column_if_exists("change_requests", "approved_at")
     if _has_column("change_requests", "triggering_alert_id"):
-        op.drop_index("ix_change_requests_triggering_alert_id", table_name="change_requests")
+        drop_index_if_exists("ix_change_requests_triggering_alert_id", table_name="change_requests")
         op.drop_constraint(
             "fk_change_requests_triggering_alert_id", "change_requests", type_="foreignkey"
         )
-        op.drop_column("change_requests", "triggering_alert_id")
+        drop_column_if_exists("change_requests", "triggering_alert_id")

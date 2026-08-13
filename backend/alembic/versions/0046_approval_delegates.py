@@ -20,6 +20,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_index_if_missing,
     create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0047"
@@ -57,7 +59,7 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_column("change_request_approval_stages", "acted_on_behalf_of")
-    op.drop_index("ix_approval_delegates_delegate_id", table_name="approval_delegates")
-    op.drop_index("ix_approval_delegates_delegator_id", table_name="approval_delegates")
+    drop_column_if_exists("change_request_approval_stages", "acted_on_behalf_of")
+    drop_index_if_exists("ix_approval_delegates_delegate_id", table_name="approval_delegates")
+    drop_index_if_exists("ix_approval_delegates_delegator_id", table_name="approval_delegates")
     op.drop_table("approval_delegates")

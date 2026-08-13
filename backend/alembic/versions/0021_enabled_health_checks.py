@@ -16,8 +16,7 @@ before this column was added.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0021"
 down_revision = "0020"
@@ -30,4 +29,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("devices", "enabled_health_checks")
+    drop_column_if_exists("devices", "enabled_health_checks")

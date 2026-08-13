@@ -13,8 +13,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import create_table_if_missing
 
-# revision identifiers, used by Alembic.
 revision = "0050"
 down_revision = "0049"
 branch_labels = None
@@ -22,7 +22,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
+    create_table_if_missing(
         "interface_alert_configs",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("device_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("devices.id"), nullable=False, index=True),

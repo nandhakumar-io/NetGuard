@@ -15,7 +15,7 @@ existing requires_dual_approval boolean.
 """
 import sqlalchemy as sa
 
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0012"
 down_revision = "0011"
@@ -28,6 +28,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    from alembic import op
-
-    op.drop_column("change_requests", "dual_approval_reason")
+    drop_column_if_exists("change_requests", "dual_approval_reason")

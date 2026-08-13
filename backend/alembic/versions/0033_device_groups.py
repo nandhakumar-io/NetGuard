@@ -20,6 +20,8 @@ from migration_helpers import (
     add_column_if_missing,
     create_index_if_missing,
     create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
 )
 
 revision = "0033"
@@ -47,9 +49,9 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_devices_group_id", table_name="devices")
-    op.drop_column("devices", "group_id")
+    drop_index_if_exists("ix_devices_group_id", table_name="devices")
+    drop_column_if_exists("devices", "group_id")
 
-    op.drop_index("ix_device_groups_parent_group_id", table_name="device_groups")
-    op.drop_index("ix_device_groups_name", table_name="device_groups")
+    drop_index_if_exists("ix_device_groups_parent_group_id", table_name="device_groups")
+    drop_index_if_exists("ix_device_groups_name", table_name="device_groups")
     op.drop_table("device_groups")

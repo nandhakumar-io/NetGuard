@@ -15,7 +15,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import create_index_if_missing, create_table_if_missing
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+)
 
 revision = "0045"
 down_revision = "0044"
@@ -58,6 +62,6 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_webhook_delivery_attempts_attempted_at", table_name="webhook_delivery_attempts")
-    op.drop_index("ix_webhook_delivery_attempts_webhook_endpoint_id", table_name="webhook_delivery_attempts")
+    drop_index_if_exists("ix_webhook_delivery_attempts_attempted_at", table_name="webhook_delivery_attempts")
+    drop_index_if_exists("ix_webhook_delivery_attempts_webhook_endpoint_id", table_name="webhook_delivery_attempts")
     op.drop_table("webhook_delivery_attempts")

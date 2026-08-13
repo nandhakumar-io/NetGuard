@@ -12,8 +12,12 @@ don't fail on missing columns.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing, create_index_if_missing
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0007"
 down_revision = "85cec3c5accf"
@@ -50,12 +54,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_devices_gns3_project_node", table_name="devices")
-    op.drop_column("devices", "bootstrapped")
-    op.drop_column("devices", "console_type")
-    op.drop_column("devices", "console_port")
-    op.drop_column("devices", "console_host")
-    op.drop_column("devices", "gns3_node_id")
-    op.drop_column("devices", "gns3_project_id")
-    op.drop_column("devices", "lab_provider")
-    op.drop_column("devices", "is_simulated")
+    drop_index_if_exists("ix_devices_gns3_project_node", table_name="devices")
+    drop_column_if_exists("devices", "bootstrapped")
+    drop_column_if_exists("devices", "console_type")
+    drop_column_if_exists("devices", "console_port")
+    drop_column_if_exists("devices", "console_host")
+    drop_column_if_exists("devices", "gns3_node_id")
+    drop_column_if_exists("devices", "gns3_project_id")
+    drop_column_if_exists("devices", "lab_provider")
+    drop_column_if_exists("devices", "is_simulated")

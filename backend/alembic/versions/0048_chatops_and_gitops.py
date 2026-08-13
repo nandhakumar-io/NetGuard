@@ -17,7 +17,13 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import add_column_if_missing, create_table_if_missing
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_column_if_exists,
+    drop_index_if_exists,
+)
 
 revision = "0048"
 down_revision = "0047"
@@ -32,12 +38,12 @@ def upgrade() -> None:
         ix["name"] == "ix_users_slack_user_id"
         for ix in sa.inspect(op.get_bind()).get_indexes("users")
     ):
-        op.create_index("ix_users_slack_user_id", "users", ["slack_user_id"], unique=True)
+        create_index_if_missing("ix_users_slack_user_id", "users", ["slack_user_id"], unique=True)
     if not any(
         ix["name"] == "ix_users_msteams_user_id"
         for ix in sa.inspect(op.get_bind()).get_indexes("users")
     ):
-        op.create_index("ix_users_msteams_user_id", "users", ["msteams_user_id"], unique=True)
+        create_index_if_missing("ix_users_msteams_user_id", "users", ["msteams_user_id"], unique=True)
 
     create_table_if_missing(
         "git_repo_configs",
@@ -74,7 +80,7 @@ def downgrade() -> None:
     op.drop_table("git_repo_configs")
     sa.Enum(name="gitsyncdirection").drop(op.get_bind(), checkfirst=True)
     sa.Enum(name="gitsyncstatus").drop(op.get_bind(), checkfirst=True)
-    op.drop_index("ix_users_msteams_user_id", table_name="users")
-    op.drop_index("ix_users_slack_user_id", table_name="users")
-    op.drop_column("users", "msteams_user_id")
-    op.drop_column("users", "slack_user_id")
+    drop_index_if_exists("ix_users_msteams_user_id", table_name="users")
+    drop_index_if_exists("ix_users_slack_user_id", table_name="users")
+    drop_column_if_exists("users", "msteams_user_id")
+    drop_column_if_exists("users", "slack_user_id")

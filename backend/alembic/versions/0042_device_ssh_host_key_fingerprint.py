@@ -16,8 +16,7 @@ a hard connection failure with a clear "host key changed" warning.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0042"
 down_revision = "0041"
@@ -30,4 +29,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("devices", "ssh_host_key_fingerprint")
+    drop_column_if_exists("devices", "ssh_host_key_fingerprint")

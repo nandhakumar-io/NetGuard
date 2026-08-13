@@ -22,8 +22,7 @@ how these are read.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0036"
 down_revision = "0035"
@@ -40,6 +39,6 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_column("devices", "last_reachability_poll_at")
-    op.drop_column("devices", "reachability_poll_interval_seconds")
-    op.drop_column("devices", "snmp_poll_interval_seconds")
+    drop_column_if_exists("devices", "last_reachability_poll_at")
+    drop_column_if_exists("devices", "reachability_poll_interval_seconds")
+    drop_column_if_exists("devices", "snmp_poll_interval_seconds")

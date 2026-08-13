@@ -15,7 +15,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import create_index_if_missing, create_table_if_missing
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+)
 
 revision = "0041"
 down_revision = "0040"
@@ -58,10 +62,10 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_jit_elevations_expires_at", table_name="jit_elevations")
-    op.drop_index("ix_jit_elevations_status", table_name="jit_elevations")
-    op.drop_index("ix_jit_elevations_change_request_id", table_name="jit_elevations")
-    op.drop_index("ix_jit_elevations_user_id", table_name="jit_elevations")
+    drop_index_if_exists("ix_jit_elevations_expires_at", table_name="jit_elevations")
+    drop_index_if_exists("ix_jit_elevations_status", table_name="jit_elevations")
+    drop_index_if_exists("ix_jit_elevations_change_request_id", table_name="jit_elevations")
+    drop_index_if_exists("ix_jit_elevations_user_id", table_name="jit_elevations")
     op.drop_table("jit_elevations")
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":

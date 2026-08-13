@@ -11,8 +11,7 @@ visible in the UI/API, instead of only affecting status transitions.
 """
 import sqlalchemy as sa
 
-from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0009"
 down_revision = "0008"
@@ -27,6 +26,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("change_requests", "validation_warnings")
-    op.drop_column("change_requests", "validation_errors")
-    op.drop_column("change_requests", "validation_passed")
+    drop_column_if_exists("change_requests", "validation_warnings")
+    drop_column_if_exists("change_requests", "validation_errors")
+    drop_column_if_exists("change_requests", "validation_passed")

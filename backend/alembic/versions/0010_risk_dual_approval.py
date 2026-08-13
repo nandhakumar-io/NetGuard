@@ -14,7 +14,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import add_column_if_missing, create_foreign_key_if_missing
+from migration_helpers import (
+    add_column_if_missing,
+    create_foreign_key_if_missing,
+    drop_column_if_exists,
+)
 
 revision = "0010"
 down_revision = "0009"
@@ -44,7 +48,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint("fk_change_requests_first_approved_by_users", "change_requests", type_="foreignkey")
-    op.drop_column("change_requests", "first_approved_at")
-    op.drop_column("change_requests", "first_approved_by")
-    op.drop_column("change_requests", "requires_dual_approval")
-    op.drop_column("change_requests", "risk_classification")
+    drop_column_if_exists("change_requests", "first_approved_at")
+    drop_column_if_exists("change_requests", "first_approved_by")
+    drop_column_if_exists("change_requests", "requires_dual_approval")
+    drop_column_if_exists("change_requests", "risk_classification")

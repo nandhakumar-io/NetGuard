@@ -18,7 +18,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import create_index_if_missing, create_table_if_missing
+from migration_helpers import (
+    create_index_if_missing,
+    create_table_if_missing,
+    drop_index_if_exists,
+)
 
 revision = "0039"
 down_revision = "0038"
@@ -46,6 +50,6 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("ix_device_status_history_changed_at", table_name="device_status_history")
-    op.drop_index("ix_device_status_history_device_id", table_name="device_status_history")
+    drop_index_if_exists("ix_device_status_history_changed_at", table_name="device_status_history")
+    drop_index_if_exists("ix_device_status_history_device_id", table_name="device_status_history")
     op.drop_table("device_status_history")

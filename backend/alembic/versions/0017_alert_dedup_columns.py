@@ -13,6 +13,7 @@ would immediately recreate duplicates for any condition still active.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
 revision = "0017"
 down_revision = "0016"
@@ -30,9 +31,9 @@ def upgrade() -> None:
     columns = {c["name"] for c in inspector.get_columns("alerts")}
 
     if "last_seen_at" not in columns:
-        op.add_column("alerts", sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True))
+        add_column_if_missing("alerts", sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True))
     if "occurrence_count" not in columns:
-        op.add_column(
+        add_column_if_missing(
             "alerts", sa.Column("occurrence_count", sa.Integer(), nullable=False, server_default="1")
         )
         # Backfill last_seen_at for any pre-existing rows so it's never
@@ -41,5 +42,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("alerts", "occurrence_count")
-    op.drop_column("alerts", "last_seen_at")
+    drop_column_if_exists("alerts", "occurrence_count")
+    drop_column_if_exists("alerts", "last_seen_at")

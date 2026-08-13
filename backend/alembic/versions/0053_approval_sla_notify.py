@@ -11,9 +11,8 @@ same stage twice. See app.services.approval_sla_notifier_service.
 """
 import sqlalchemy as sa
 
-from alembic import op
+from migration_helpers import add_column_if_missing, drop_column_if_exists
 
-# revision identifiers, used by Alembic.
 revision = "0053"
 down_revision = "0052"
 branch_labels = None
@@ -21,10 +20,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "change_requests", sa.Column("sla_last_notified_stage", sa.String(), nullable=True)
     )
 
 
 def downgrade() -> None:
-    op.drop_column("change_requests", "sla_last_notified_stage")
+    drop_column_if_exists("change_requests", "sla_last_notified_stage")
