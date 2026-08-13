@@ -490,7 +490,20 @@ function DeviceInlineDetails({
     if ((activeTab === "Overview" || activeTab === "Health" || activeTab === "Interfaces") && !health && !healthLoading) {
       loadHealth();
     }
-    // Interfaces tab intentionally does NOT auto-fetch -- see loadInterfaces.
+    // Interfaces tab auto-fetches live per-interface status on first visit,
+    // same as Health -- this is a single protocol read (NETCONF/RESTCONF/SSH),
+    // not a full SNMP discovery sweep, so there's no meaningful polling
+    // overhead in doing it automatically.
+    if (activeTab === "Interfaces" && !interfaces && !interfacesLoading && !interfacesError) {
+      loadInterfaces();
+    }
+    // Discovery tab also auto-fetches on first visit (LLDP/CDP/ARP/routes/
+    // inventory) -- a single on-demand SNMP poll of this device, not a
+    // recurring background job, so it's safe to fire once when the tab
+    // opens rather than making the user click Run Discovery first.
+    if (activeTab === "Discovery" && !discovery && !discoveryLoading && !discoveryError) {
+      loadDiscovery();
+    }
     if (activeTab === "Alerts" && deviceAlerts.length === 0 && !alertsLoading) {
       loadAlerts();
     }

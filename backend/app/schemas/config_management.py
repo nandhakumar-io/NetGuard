@@ -58,7 +58,8 @@ class InterfaceStatusOut(BaseModel):
     # than a guess, so the UI shows "--" instead of a wrong value.
     port_mode: str | None = None  # "access" | "trunk" | "routed" | None
     vlan: str | None = None  # access/native VLAN ID
-    edge_port: bool | None = None  # STP edge/portfast state; not populated yet (vendor-proprietary MIBs)
+    trunk_vlans: list[str] | None = None  # allowed/tagged VLAN IDs, only set when port_mode == "trunk"
+    edge_port: bool | None = None  # STP edge/portfast state (Cisco CISCO-STP-EXTENSIONS-MIB); None where unsupported
     # Whether the automatic "Interface Down" critical alert is armed for
     # this port -- see InterfaceAlertConfig. True unless an operator has
     # explicitly muted it from the Interfaces tab.

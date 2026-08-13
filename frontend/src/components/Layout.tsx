@@ -112,12 +112,12 @@ function NavGroupSection({
   group,
   defaultOpen,
   onNavigate,
-  fadeClass = "",
+  iconOnly = false,
 }: {
   group: NavGroup;
   defaultOpen: boolean;
   onNavigate?: () => void;
-  fadeClass?: string;
+  iconOnly?: boolean;
 }) {
   // Each group manages its own open/closed state -- click the header to
   // expand, click again to collapse, independent of the other groups.
@@ -131,6 +131,34 @@ function NavGroupSection({
     if (defaultOpen) setOpen(true);
   }, [defaultOpen]);
 
+  if (iconOnly) {
+    // Collapsed rail: no group headers/labels at all, just a flat icon
+    // dock of every item in the group, each with a native title tooltip.
+    // Avoids any opacity/width fade choreography entirely.
+    return (
+      <div className="space-y-0.5">
+        {group.items.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            title={item.label}
+            onClick={onNavigate}
+            className={({ isActive }) =>
+              `flex items-center justify-center w-full h-9 rounded-lg transition-colors ${
+                isActive
+                  ? "bg-brandblue text-white dark:bg-noc-cyan/15 dark:text-noc-cyan"
+                  : "text-slate-300 dark:text-noc-muted hover:bg-white/5 hover:text-white dark:hover:text-noc-text"
+              }`
+            }
+          >
+            {group.icon}
+          </NavLink>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div>
       <button
@@ -140,10 +168,10 @@ function NavGroupSection({
         className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-noc-muted hover:bg-white/5 hover:text-slate-200 dark:hover:text-noc-text transition-colors"
       >
         <span className="text-slate-500 dark:text-noc-muted shrink-0">{group.icon}</span>
-        <span className={`flex-1 text-left ${fadeClass || "whitespace-nowrap"}`}>{group.label}</span>
+        <span className="flex-1 text-left whitespace-nowrap">{group.label}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""} ${fadeClass}`}
+          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""}`}
         >
           <path d="M9 6l6 6-6 6" />
         </svg>
@@ -154,7 +182,7 @@ function NavGroupSection({
         }`}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className={`pl-4 pt-1 pb-1 space-y-0.5 ${fadeClass}`}>
+          <div className="pl-4 pt-1 pb-1 space-y-0.5">
             {group.items.map((item) => (
               <NavLink
                 key={item.to}
@@ -185,19 +213,25 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Desktop (md+): the sidebar is a normal static column, exactly as
-  // before -- always visible at w-64, taking up real space in the flex
-  // row so the page content sits beside it. This is untouched.
-  //
+  // Desktop (md+) sidebar collapse: a real React state toggle (button
+  // click), not a CSS :hover trick. Previously the rail collapsed to 72px
+  // and only expanded on :hover with label text faded in via opacity on a
+  // separate timing from the width transition -- that combination is what
+  // made text intermittently invisible/clipped and the rail feel
+  // unreliable to expand. A click-driven toggle with text conditionally
+  // rendered (not just faded) removes that whole class of bug and gives
+  // predictable, persistent expand/collapse instead of a hover-only state.
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("ng6-sidebar-collapsed") === "1");
+  useEffect(() => {
+    localStorage.setItem("ng6-sidebar-collapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
+
   // Mobile/tablet (<md): the sidebar is a true off-canvas drawer. It is
   // fixed + translated fully off-screen when closed, so it never
   // occupies layout space and can never sit on top of the page. A
   // hamburger button in the header opens it; it then slides in above a
   // dimmed backdrop, and tapping the backdrop, a nav link, or the close
-  // button dismisses it. This replaces the previous hover/pin icon-rail,
-  // which -- because it depended on `:hover` (unavailable on touch) and
-  // kept the sidebar `fixed` with the page padded to match -- could get
-  // out of sync and leave the expanded rail sitting on top of the page.
+  // button dismisses it.
   const [mobileOpen, setMobileOpen] = useState(false);
 
   // Close the drawer automatically on navigation.
@@ -216,23 +250,18 @@ export default function Layout() {
     }
   }, [mobileOpen]);
 
-  // Fade-only class applied to any label/text that should disappear while
-  // the rail is collapsed and fade back in on hover. Icons/badges never
-  // carry this class, so the collapsed rail still reads as a usable icon
-  // dock rather than a sliver of clipped text.
-  const fade =
-    "opacity-0 group-hover/side:opacity-100 transition-opacity duration-150 group-hover/side:delay-100 whitespace-nowrap";
-
-  const sidebarContent = (onNavigate?: () => void, collapsible?: boolean) => (
+  const sidebarContent = (onNavigate?: () => void, iconOnly?: boolean) => (
     <>
       <div className="px-4 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-3 overflow-hidden">
         <div className="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-white/10 text-white font-display font-bold text-sm">
           NG
         </div>
-        <div className={`min-w-0 ${collapsible ? fade : ""}`}>
-          <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
-          <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
-        </div>
+        {!iconOnly && (
+          <div className="min-w-0">
+            <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
+            <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
+          </div>
+        )}
         <button
           onClick={() => setMobileOpen(false)}
           aria-label="Close navigation"
@@ -248,13 +277,13 @@ export default function Layout() {
             group={group}
             defaultOpen={isGroupActive(group, location.pathname)}
             onNavigate={onNavigate}
-            fadeClass={collapsible ? fade : ""}
+            iconOnly={iconOnly}
           />
         ))}
       </nav>
       <div className="px-4 py-4 border-t border-white/10 dark:border-noc-border overflow-hidden">
-        {user && (
-          <div className={`mb-3 min-w-0 ${collapsible ? fade : ""}`}>
+        {user && !iconOnly && (
+          <div className="mb-3 min-w-0">
             <p className="text-sm font-medium truncate">{user.full_name}</p>
             <p className="text-[11px] text-accent dark:text-noc-cyan capitalize truncate">{user.role.replace(/_/g, " ")}</p>
           </div>
@@ -265,29 +294,47 @@ export default function Layout() {
             navigate("/login");
           }}
           title="Sign out"
-          className="flex items-center gap-2.5 text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors"
+          className={`flex items-center gap-2.5 text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors ${iconOnly ? "justify-center w-full" : ""}`}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
             <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" />
           </svg>
-          <span className={collapsible ? fade : "whitespace-nowrap"}>Sign out</span>
+          {!iconOnly && <span className="whitespace-nowrap">Sign out</span>}
         </button>
-        <p className={`text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num ${collapsible ? fade : "whitespace-nowrap"}`}>v1.0 · Prototype</p>
+        {!iconOnly && <p className="text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num whitespace-nowrap">v1.0 · Prototype</p>}
       </div>
     </>
   );
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100 md:flex">
-      {/* Desktop sidebar: a normal static column, always at full width with
-          labels always legible. (Previously this collapsed to a 72px icon
-          rail and relied on a CSS :hover to expand -- with overflow-hidden
-          clipping the panel at 72px, the labels' fade-in transition and the
-          width transition drifted out of sync, so text was frequently
-          clipped/invisible and the hover expansion felt unreliable. A
-          static, always-expanded rail avoids that class of bug entirely.) */}
-      <aside className="hidden md:flex bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static w-64 overflow-hidden z-20">
-        {sidebarContent(undefined, false)}
+      {/* Desktop sidebar: a normal static column (no :hover dependency).
+          Collapse/expand is a real click-driven toggle (state below,
+          persisted in localStorage), swapping between a 264px full panel
+          with labels and a 72px icon-only rail with tooltips -- so it's
+          both always legible and actually flexible, unlike the previous
+          hover-only rail where the width and label-opacity transitions
+          could drift out of sync and leave text clipped/invisible. */}
+      <aside
+        className={`hidden md:flex bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static overflow-hidden z-20 transition-[width] duration-200 ease-in-out ${
+          collapsed ? "w-[72px]" : "w-64"
+        }`}
+      >
+        {sidebarContent(undefined, collapsed)}
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+          title={collapsed ? "Expand navigation" : "Collapse navigation"}
+          className="shrink-0 h-9 flex items-center justify-center gap-2 text-slate-400 dark:text-noc-muted hover:bg-white/5 hover:text-white dark:hover:text-noc-text border-t border-white/10 dark:border-noc-border transition-colors"
+        >
+          <svg
+            width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            className={`transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`}
+          >
+            <path d="M15 6l-6 6 6 6" />
+          </svg>
+          {!collapsed && <span className="text-[11px] font-semibold uppercase tracking-wider">Collapse</span>}
+        </button>
       </aside>
 
       {/* Mobile backdrop */}
