@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DashboardLayoutEntry, DashboardWidgetInfo } from "../lib/types";
+import { DashboardLayoutEntry, DashboardThresholds, DashboardWidgetInfo } from "../lib/types";
 
 /** Customize-dashboard modal: toggle which widgets show and drag/reorder
  * them (via up/down buttons, not full drag-and-drop -- keeps this
@@ -9,15 +9,17 @@ import { DashboardLayoutEntry, DashboardWidgetInfo } from "../lib/types";
 export default function DashboardCustomizePanel({
   layout,
   availableWidgets,
+  thresholds,
   saving,
   onClose,
   onSave,
 }: {
   layout: DashboardLayoutEntry[];
   availableWidgets: DashboardWidgetInfo[];
+  thresholds: DashboardThresholds;
   saving: boolean;
   onClose: () => void;
-  onSave: (next: DashboardLayoutEntry[]) => void;
+  onSave: (next: DashboardLayoutEntry[], thresholds?: DashboardThresholds) => void;
 }) {
   const [local, setLocal] = useState<DashboardLayoutEntry[]>(layout);
 
@@ -126,7 +128,7 @@ export default function DashboardCustomizePanel({
               Cancel
             </button>
             <button
-              onClick={() => onSave(local)}
+              onClick={() => onSave(local, thresholds)}
               disabled={saving}
               className="px-4 py-2 text-xs font-semibold text-white bg-brandblue rounded-lg hover:bg-navy dark:bg-slate-950 disabled:opacity-50"
             >

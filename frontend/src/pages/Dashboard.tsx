@@ -53,7 +53,7 @@ function bandColor(value: number, band: MetricThreshold, base: string): string {
   if (value >= band.warn) return "#F59E0B";
   return base;
 }
-function bandTextClass(value: number, band: MetricThreshold, base = "text-slate-800"): string {
+function bandTextClass(value: number, band: MetricThreshold, base = "text-slate-800 dark:text-slate-100"): string {
   if (value >= band.critical) return "text-red-600";
   if (value >= band.warn) return "text-amber-600";
   return base;
@@ -75,12 +75,12 @@ interface GroupStat {
 }
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <div className={`bg-white border border-slate-200 rounded-2xl shadow-sm ${className}`}>{children}</div>;
+  return <div className={`bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-sm ${className}`}>{children}</div>;
 }
 
 // Small semicircular gauge (0-100) used for CPU / Memory / Health — a
 // real progress ring, not a stylised HUD element.
-function Gauge({ label, value, color }: { label: string; value: number; color: string }) {
+function Gauge({ label, value, color, dark }: { label: string; value: number; color: string; dark?: boolean }) {
   const data = [{ value: Math.max(0, Math.min(value, 100)) }];
   return (
     <div className="flex flex-col items-center min-w-0 w-full">
@@ -94,11 +94,11 @@ function Gauge({ label, value, color }: { label: string; value: number; color: s
             endAngle={0}
             barSize={9}
           >
-            <RadialBar dataKey="value" cornerRadius={6} fill={color} background={{ fill: "#EEF2F7" }} />
+            <RadialBar dataKey="value" cornerRadius={6} fill={color} background={{ fill: dark ? "#1E293B" : "#EEF2F7" }} />
           </RadialBarChart>
         </ResponsiveContainer>
         <div className="absolute inset-0 flex items-end justify-center pb-1">
-          <span className="text-lg font-bold text-slate-800">{Math.round(value)}%</span>
+          <span className="text-lg font-bold text-slate-800 dark:text-slate-100">{Math.round(value)}%</span>
         </div>
       </div>
       <p className="text-[11px] text-slate-400 font-medium mt-0.5">{label}</p>
@@ -127,7 +127,7 @@ function StatCard({
   value,
   label,
   sublabel,
-  valueClass = "text-slate-800",
+  valueClass = "text-slate-800 dark:text-slate-100",
 }: {
   iconKey: keyof typeof STAT_ICONS;
   value: React.ReactNode;
@@ -138,12 +138,12 @@ function StatCard({
   const cfg = STAT_ICONS[iconKey];
   return (
     <Card className="p-5">
-      <div className={`w-9 h-9 rounded-lg ${cfg.bg} ${cfg.fg} flex items-center justify-center mb-4`}>
+      <div className={`w-9 h-9 rounded-lg ${cfg.bg} ${cfg.fg} flex items-center justify-center mb-4 dark:bg-opacity-20`}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{cfg.icon}</svg>
       </div>
       <p className={`text-2xl font-bold ${valueClass}`}>{value}</p>
-      <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mt-1">{label}</p>
-      {sublabel && <p className="text-[11px] text-slate-400 mt-0.5">{sublabel}</p>}
+      <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide mt-1">{label}</p>
+      {sublabel && <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">{sublabel}</p>}
     </Card>
   );
 }
@@ -312,7 +312,7 @@ export default function Dashboard() {
       {/* ---- Header --------------------------------------------------- */}
       <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">
+          <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">
             {greeting}, <span className="text-brandblue">{user ? user.full_name.split(" ")[0] : "there"}</span>
           </h1>
           <p className="text-sm text-slate-400 mt-1">
@@ -323,7 +323,7 @@ export default function Dashboard() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowCustomize(true)}
-            className="h-9 px-3 rounded-full bg-white border border-slate-200 shadow-sm flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-brandblue hover:border-brandblue/40 transition-colors"
+            className="h-9 px-3 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-brandblue hover:border-brandblue/40 transition-colors"
             title="Customize dashboard widgets"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -333,7 +333,7 @@ export default function Dashboard() {
           </button>
           <button
             onClick={loadAll}
-            className="w-9 h-9 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400 hover:text-brandblue hover:border-brandblue/40 transition-colors"
+            className="w-9 h-9 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-center text-slate-400 hover:text-brandblue hover:border-brandblue/40 transition-colors"
             title="Refresh"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -411,29 +411,29 @@ export default function Dashboard() {
                 </div>
                 <div className="flex-1 space-y-2.5 min-w-0">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Healthy</span>
-                    <span className="font-semibold text-slate-800">{breakdown?.healthy ?? online}</span>
+                    <span className="flex items-center gap-2 text-slate-500 dark:text-slate-400"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Healthy</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-100">{breakdown?.healthy ?? online}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-amber-500" />Degraded <span className="text-[10px] text-slate-300">(flapping/unstable)</span></span>
-                    <span className="font-semibold text-slate-800">{breakdown?.degraded ?? 0}</span>
+                    <span className="flex items-center gap-2 text-slate-500 dark:text-slate-400"><span className="w-2.5 h-2.5 rounded-full bg-amber-500" />Degraded <span className="text-[10px] text-slate-300 dark:text-slate-600">(flapping/unstable)</span></span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-100">{breakdown?.degraded ?? 0}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-red-500" />Offline</span>
-                    <span className="font-semibold text-slate-800">{(breakdown?.offline ?? offline) + (breakdown?.unknown ?? 0)}</span>
+                    <span className="flex items-center gap-2 text-slate-500 dark:text-slate-400"><span className="w-2.5 h-2.5 rounded-full bg-red-500" />Offline</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-100">{(breakdown?.offline ?? offline) + (breakdown?.unknown ?? 0)}</span>
                   </div>
-                  <div className="h-px bg-slate-100 my-1" />
+                  <div className="h-px bg-slate-100 dark:bg-slate-700 my-1" />
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-500">Deploy success</span>
-                    <span className="font-semibold text-slate-800">{summary?.deployment_success_rate ?? 100}%</span>
+                    <span className="text-slate-500 dark:text-slate-400">Deploy success</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-100">{summary?.deployment_success_rate ?? 100}%</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-500">Open drifts</span>
-                    <span className="font-semibold text-slate-800">{summary?.open_drifts ?? 0}</span>
+                    <span className="text-slate-500 dark:text-slate-400">Open drifts</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-100">{summary?.open_drifts ?? 0}</span>
                   </div>
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-2 mt-6 pt-5 border-t border-slate-100">
+              <div className="grid grid-cols-3 gap-2 mt-6 pt-5 border-t border-slate-100 dark:border-slate-700">
                 <Gauge label="CPU" value={avgCpu} color={bandColor(avgCpu, thresholds.cpu, "#06B6D4")} />
                 <Gauge label="RAM" value={avgMem} color={bandColor(avgMem, thresholds.memory, "#8B5CF6")} />
                 <Gauge label="HEALTH" value={summary?.global_health_score ?? 100} color="#10B981" />
@@ -463,11 +463,11 @@ export default function Dashboard() {
                           <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.01} />
                         </linearGradient>
                       </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
-                      <XAxis dataKey="timestamp" tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")} tick={{ fontSize: 10, fill: "#94A3B8" }} minTickGap={40} axisLine={false} tickLine={false} />
-                      <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: "#94A3B8" }} width={34} domain={[0, 100]} axisLine={false} tickLine={false} />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" vertical={false} />
+                      <XAxis dataKey="timestamp" tickFormatter={(v) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")} tick={{ fontSize: 10, fill: "#64748B" }} minTickGap={40} axisLine={false} tickLine={false} />
+                      <YAxis tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: "#64748B" }} width={34} domain={[0, 100]} axisLine={false} tickLine={false} />
                       <Tooltip
-                        contentStyle={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12 }}
+                        contentStyle={{ background: "#1E293B", border: "1px solid #334155", borderRadius: 8, fontSize: 12, color: "#E2E8F0" }}
                         formatter={(v: number, name: string) => [`${v?.toFixed?.(1) ?? v}%`, name]}
                         labelFormatter={(v) => (v ? new Date(v).toLocaleString() : "")}
                       />
@@ -499,7 +499,7 @@ export default function Dashboard() {
                       <Link
                         key={i}
                         to={ev.link}
-                        className="flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-slate-50 transition-colors"
+                        className="flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
                       >
                         <span className={`w-6 h-6 rounded-md ${ic.bg} ${ic.fg} flex items-center justify-center shrink-0 mt-0.5`}>
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{ic.icon}</svg>
@@ -535,14 +535,14 @@ export default function Dashboard() {
                   {summary?.uplinks?.map((link, i) => (
                     <div key={i}>
                       <div className="flex justify-between items-center gap-2 text-sm mb-1.5">
-                        <span className="flex items-center gap-2 font-medium text-slate-700 truncate">
+                        <span className="flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200 truncate">
                           <span className={`w-2 h-2 rounded-full shrink-0 ${link.status === "online" ? "bg-emerald-500" : link.status === "offline" ? "bg-red-500" : "bg-slate-300"}`} />
                           {link.hostname}
                           <span className="text-slate-400 font-normal text-xs">{link.ip_address}</span>
                         </span>
                         <span className="text-slate-500 text-xs font-medium shrink-0">{link.utilization_pct.toFixed(0)}% util</span>
                       </div>
-                      <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                      <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
                         <div
                           className="h-full rounded-full"
                           style={{
@@ -578,7 +578,7 @@ export default function Dashboard() {
                         <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${s.dot}`} />
                         <div className="min-w-0">
                           <p className={`text-[10px] font-semibold uppercase tracking-wide ${s.text}`}>{alert.category}</p>
-                          <p className="text-xs text-slate-700 truncate">{alert.message}</p>
+                          <p className="text-xs text-slate-700 dark:text-slate-200 truncate">{alert.message}</p>
                           <p className="text-[10px] text-slate-400 mt-0.5">{timeAgo(alert.created_at)}</p>
                         </div>
                       </div>
@@ -593,7 +593,7 @@ export default function Dashboard() {
             <Card className="p-6 h-full">
               <div className="flex items-center justify-between mb-1">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Fleet Availability</p>
-                <span className="text-[11px] text-slate-300">last 24h</span>
+                <span className="text-[11px] text-slate-300 dark:text-slate-500">last 24h</span>
               </div>
               {availability === null ? (
                 <div className="h-24 flex items-center justify-center text-sm text-slate-400">Loading…</div>
@@ -618,11 +618,11 @@ export default function Dashboard() {
                     {availability.devices_in_rollup} device{availability.devices_in_rollup === 1 ? "" : "s"} in rollup
                   </p>
                   {availability.worst_devices.length > 0 && (
-                    <div className="pt-3 border-t border-slate-100 space-y-1.5">
+                    <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-1.5">
                       <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Lowest availability</p>
                       {availability.worst_devices.slice(0, 4).map((d) => (
                         <div key={d.device_id} className="flex items-center justify-between text-xs">
-                          <span className="text-slate-600 truncate">{d.hostname}</span>
+                          <span className="text-slate-600 dark:text-slate-300 truncate">{d.hostname}</span>
                           <span
                             className={`font-semibold shrink-0 ml-2 ${
                               d.availability_pct >= 99.9 ? "text-emerald-600" : d.availability_pct >= 99 ? "text-amber-600" : "text-red-600"
@@ -658,12 +658,12 @@ export default function Dashboard() {
                     return (
                       <div key={d.device_id}>
                         <div className="flex items-center justify-between text-sm mb-1">
-                          <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                          <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{d.hostname}</span>
                           <span className="text-[11px] text-slate-400 shrink-0 ml-2">
                             {d.reachability_flaps} reach · {d.interface_flaps} iface · {d.drift_events} drift
                           </span>
                         </div>
-                        <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                        <div className="w-full h-1.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
                           <div
                             className={`h-full rounded-full ${pct >= 66 ? "bg-red-500" : pct >= 33 ? "bg-amber-500" : "bg-brandblue"}`}
                             style={{ width: `${pct}%` }}
@@ -695,7 +695,7 @@ export default function Dashboard() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className={`w-2 h-2 rounded-full shrink-0 ${d.status === "offline" ? "bg-red-500" : "bg-amber-500"}`} />
-                          <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                          <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{d.hostname}</span>
                         </div>
                         <p className="text-[11px] text-slate-400 ml-4 truncate">{d.ip_address}{d.last_error ? ` · ${d.last_error}` : ""}</p>
                       </div>
@@ -711,7 +711,7 @@ export default function Dashboard() {
             <Card className="p-6 h-full">
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Top Interface Errors</p>
-                <span className="text-[11px] text-slate-300">by device</span>
+                <span className="text-[11px] text-slate-300 dark:text-slate-500">by device</span>
               </div>
               {(summary?.top_error_devices?.length ?? 0) === 0 ? (
                 <div className="text-center py-8">
@@ -723,7 +723,7 @@ export default function Dashboard() {
                   {summary?.top_error_devices?.map((d, i) => (
                     <div key={i} className="flex items-center justify-between text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{d.hostname}</span>
                         <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
                       </div>
                       <span className="text-red-600 font-semibold text-xs shrink-0 ml-2">{d.interface_errors.toLocaleString()} errs</span>
@@ -738,7 +738,7 @@ export default function Dashboard() {
             <Card className="p-6 h-full">
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Flapping Interfaces</p>
-                <span className="text-[11px] text-slate-300">last 24h</span>
+                <span className="text-[11px] text-slate-300 dark:text-slate-500">last 24h</span>
               </div>
               {(summary?.flapping_interfaces?.length ?? 0) === 0 ? (
                 <div className="text-center py-8">
@@ -750,7 +750,7 @@ export default function Dashboard() {
                   {summary?.flapping_interfaces?.map((f, i) => (
                     <div key={i} className="flex items-start justify-between gap-2 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{f.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{f.hostname}</span>
                         <p className="text-[11px] text-slate-400 truncate">{f.interface}</p>
                       </div>
                       <div className="text-right shrink-0">
@@ -774,7 +774,7 @@ export default function Dashboard() {
                   {summary?.top_cpu_devices?.map((d, i) => (
                     <div key={i} className="flex items-center justify-between gap-3 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{d.hostname}</span>
                         <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -798,7 +798,7 @@ export default function Dashboard() {
                   {summary?.top_memory_devices?.map((d, i) => (
                     <div key={i} className="flex items-center justify-between gap-3 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{d.hostname}</span>
                         <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -822,7 +822,7 @@ export default function Dashboard() {
                   {summary?.top_bandwidth_devices?.map((d, i) => (
                     <div key={i} className="flex items-center justify-between gap-3 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{d.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{d.hostname}</span>
                         <span className="text-slate-400 font-normal text-xs ml-2">{d.ip_address}</span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -846,7 +846,7 @@ export default function Dashboard() {
                   {summary?.down_ports?.map((p, i) => (
                     <div key={i} className="flex items-start justify-between gap-2 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{p.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{p.hostname}</span>
                         <p className="text-[11px] text-slate-400 truncate">{p.interface}</p>
                       </div>
                       <span className="text-[11px] text-slate-400 shrink-0">{p.down_since ? timeAgo(p.down_since) : ""}</span>
@@ -867,7 +867,7 @@ export default function Dashboard() {
                   {summary?.recent_reboots?.map((r, i) => (
                     <div key={i} className="flex items-start justify-between gap-2 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{r.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{r.hostname}</span>
                         <p className="text-[11px] text-slate-400 truncate">{r.ip_address}</p>
                       </div>
                       <span className="text-[11px] text-slate-400 shrink-0">up {Math.round(r.uptime_seconds / 60)}m</span>
@@ -888,7 +888,7 @@ export default function Dashboard() {
                   {summary?.recent_backups?.map((b) => (
                     <div key={b.id} className="flex items-center justify-between gap-2 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{b.hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{b.hostname}</span>
                         <span className="text-slate-400 font-normal text-xs ml-2">v{b.version}</span>
                       </div>
                       <span className="text-[11px] text-slate-400 shrink-0">{timeAgo(b.created_at)}</span>
@@ -909,7 +909,7 @@ export default function Dashboard() {
                   {summary?.recent_protocol_operations?.map((op) => (
                     <div key={op.id} className="flex items-center justify-between gap-2 text-sm">
                       <div className="min-w-0">
-                        <span className="font-medium text-slate-700 truncate">{op.device_hostname}</span>
+                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate">{op.device_hostname}</span>
                         <span className="text-slate-400 font-normal text-xs ml-2">{op.protocol.toUpperCase()} · {op.operation}</span>
                       </div>
                       <span className={`text-[11px] font-semibold shrink-0 ${op.success ? "text-emerald-600" : "text-red-600"}`}>
@@ -925,7 +925,7 @@ export default function Dashboard() {
           group_availability: (
             <Card className="p-6 h-full">
               <div className="flex items-center justify-between mb-4">
-                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Group Availability <span className="text-slate-300 font-normal normal-case">· last poll per group</span></p>
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Group Availability <span className="text-slate-300 dark:text-slate-500 font-normal normal-case">· last poll per group</span></p>
                 <Link to="/groups" className="text-xs text-brandblue font-medium hover:underline">All groups →</Link>
               </div>
               {groupStats.length === 0 ? (
@@ -937,13 +937,13 @@ export default function Dashboard() {
                     const tone = pct >= 90 ? "text-emerald-600" : pct >= 50 ? "text-amber-600" : "text-red-600";
                     const barTone = pct >= 90 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-500" : "bg-red-500";
                     return (
-                      <div key={g.id} className="border border-slate-100 rounded-xl p-4">
+                      <div key={g.id} className="border border-slate-100 dark:border-slate-700 rounded-xl p-4">
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-semibold text-slate-700 truncate">{g.name}</span>
+                          <span className="text-sm font-semibold text-slate-700 dark:text-slate-200 truncate">{g.name}</span>
                           <span className={`text-sm font-bold ${tone}`}>{pct.toFixed(0)}%</span>
                         </div>
                         <p className="text-[11px] text-slate-400 mb-2">{g.online}/{g.total} online</p>
-                        <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden mb-2">
+                        <div className="w-full h-1.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden mb-2">
                           <div className={`h-full rounded-full ${barTone}`} style={{ width: `${pct}%` }} />
                         </div>
                         <div className="flex items-center gap-3 text-[11px] text-slate-400">
@@ -982,7 +982,7 @@ export default function Dashboard() {
           saving={savingLayout}
           onClose={() => setShowCustomize(false)}
           onSave={(next, nextThresholds) => {
-            saveDashboardPrefs(next, nextThresholds);
+            saveDashboardPrefs(next, nextThresholds ?? thresholds);
             setShowCustomize(false);
           }}
         />
