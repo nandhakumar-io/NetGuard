@@ -12,14 +12,27 @@ from app.core import vm_client
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.alert import Alert
+from app.models.alert_snooze import AlertSnooze
 from app.models.audit_log import AuditLog
 from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
+from app.models.device_metric import DeviceMetric
+from app.models.device_status_history import DeviceStatusHistory
+from app.models.discovered_neighbor import DiscoveredNeighbor
+from app.models.firmware_upgrade import FirmwareUpgrade
+from app.models.flow_record import FlowRecord
 from app.models.golden_config import GoldenConfig
+from app.models.interface_alert_config import InterfaceAlertConfig
+from app.models.interface_metric import InterfaceMetric
+from app.models.interface_status import InterfaceStatus
+from app.models.maintenance_window import MaintenanceWindow
+from app.models.path_trace import PathTrace, PathTraceHop
 from app.models.protocol_operation import ProtocolOperation
+from app.models.recurring_maintenance_schedule import RecurringMaintenanceSchedule
 from app.models.snapshot import ConfigSnapshot
+from app.models.syslog_message import SyslogMessage
 from app.models.user import User, UserRole
 from app.schemas.device import (
     BulkDeviceAction,
@@ -713,9 +726,33 @@ def delete_device(
         # ------- Purge ALL child rows before deleting the device -------
         # Pure telemetry: no compliance value — always purged.
         db.query(Alert).filter(Alert.device_id == device_id).delete(synchronize_session=False)
+        db.query(AlertSnooze).filter(AlertSnooze.device_id == device_id).delete(synchronize_session=False)
         db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
         vm_client.delete_device_series(device_id)
         db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
+        db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
+        db.query(DeviceStatusHistory).filter(DeviceStatusHistory.device_id == device_id).delete(synchronize_session=False)
+        db.query(InterfaceMetric).filter(InterfaceMetric.device_id == device_id).delete(synchronize_session=False)
+        db.query(InterfaceStatus).filter(InterfaceStatus.device_id == device_id).delete(synchronize_session=False)
+        db.query(InterfaceAlertConfig).filter(InterfaceAlertConfig.device_id == device_id).delete(synchronize_session=False)
+        db.query(SyslogMessage).filter(SyslogMessage.device_id == device_id).delete(synchronize_session=False)
+        db.query(FlowRecord).filter(FlowRecord.device_id == device_id).delete(synchronize_session=False)
+        db.query(MaintenanceWindow).filter(MaintenanceWindow.device_id == device_id).delete(synchronize_session=False)
+        db.query(RecurringMaintenanceSchedule).filter(RecurringMaintenanceSchedule.device_id == device_id).delete(synchronize_session=False)
+        db.query(FirmwareUpgrade).filter(FirmwareUpgrade.device_id == device_id).delete(synchronize_session=False)
+        # PathTrace: device can be source or target; purge dependent hops first
+        path_trace_ids = [
+            pt.id for pt in db.query(PathTrace.id).filter(
+                (PathTrace.source_device_id == device_id) | (PathTrace.target_device_id == device_id)
+            ).all()
+        ]
+        if path_trace_ids:
+            db.query(PathTraceHop).filter(PathTraceHop.trace_id.in_(path_trace_ids)).delete(synchronize_session=False)
+            db.query(PathTrace).filter(PathTrace.id.in_(path_trace_ids)).delete(synchronize_session=False)
+        # DiscoveredNeighbor: device_id OR neighbor_device_id
+        db.query(DiscoveredNeighbor).filter(
+            (DiscoveredNeighbor.device_id == device_id) | (DiscoveredNeighbor.neighbor_device_id == device_id)
+        ).delete(synchronize_session=False)
 
         # Compliance-relevant records (only reached when force=true or counts are 0).
         # Deletion order: children before parents.

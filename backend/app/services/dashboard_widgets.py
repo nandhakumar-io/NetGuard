@@ -39,14 +39,14 @@ DASHBOARD_WIDGETS: list[DashboardWidget] = [
     DashboardWidget("offline_devices", "Offline / Degraded Devices", "offline_devices"),
     DashboardWidget("top_interface_errors", "Top Interface Errors", "top_error_devices"),
     DashboardWidget("flapping_interfaces", "Flapping Interfaces", "flapping_interfaces"),
-    DashboardWidget("top_cpu_devices", "Top CPU Devices", "top_cpu_devices", default_visible=False),
-    DashboardWidget("top_memory_devices", "Top Memory Devices", "top_memory_devices", default_visible=False),
-    DashboardWidget("top_bandwidth_devices", "Top Bandwidth Devices", "top_bandwidth_devices", default_visible=False),
-    DashboardWidget("down_ports", "Down Ports", "down_ports", default_visible=False),
-    DashboardWidget("recent_reboots", "Recent Reboots", "recent_reboots", default_visible=False),
-    DashboardWidget("recent_backups", "Recent Backups", "recent_backups", default_visible=False),
+    DashboardWidget("top_cpu_devices", "Top CPU Devices", "top_cpu_devices"),
+    DashboardWidget("top_memory_devices", "Top Memory Devices", "top_memory_devices"),
+    DashboardWidget("top_bandwidth_devices", "Top Bandwidth Devices", "top_bandwidth_devices"),
+    DashboardWidget("down_ports", "Down Ports", "down_ports"),
+    DashboardWidget("recent_reboots", "Recent Reboots", "recent_reboots"),
+    DashboardWidget("recent_backups", "Recent Backups", "recent_backups"),
     DashboardWidget(
-        "recent_protocol_operations", "Recent Protocol Operations", "recent_protocol_operations", default_visible=False
+        "recent_protocol_operations", "Recent Protocol Operations", "recent_protocol_operations"
     ),
     DashboardWidget("group_availability", "Group Availability", "GET /device-groups"),
 ]
