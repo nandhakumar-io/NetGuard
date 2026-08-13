@@ -49,10 +49,9 @@ html.dark ::-webkit-scrollbar-thumb {
    ============================================================ */
 
 .noc-root {
-  background:
-    radial-gradient(ellipse 1200px 600px at 15% -10%, rgba(34,211,238,0.06), transparent 60%),
-    radial-gradient(ellipse 900px 500px at 100% 0%, rgba(167,139,250,0.05), transparent 55%),
-    #080B10;
+  /* Light mode (default): match every other page's plain background
+     instead of forcing the dark console look regardless of theme. */
+  background: #F8FAFC;
   /* Was `min-height: 100%`, which resolves against the parent's height --
      with no explicit height set anywhere up the ancestor chain (html/body/
      #root), that collapses to 0/auto, i.e. this element's own content
@@ -68,11 +67,24 @@ html.dark ::-webkit-scrollbar-thumb {
   min-height: 100vh;
   min-height: 100dvh;
 }
+html.dark .noc-root {
+  background:
+    radial-gradient(ellipse 1200px 600px at 15% -10%, rgba(34,211,238,0.06), transparent 60%),
+    radial-gradient(ellipse 900px 500px at 100% 0%, rgba(167,139,250,0.05), transparent 55%),
+    #080B10;
+}
 
 /* Bracket-corner panel: four short corner ticks instead of a full
-   rounded border, like a HUD reticle framing each instrument. */
+   rounded border, like a HUD reticle framing each instrument.
+   Light mode (default) uses a plain white card, same as every other
+   page's panels; the HUD-reticle dark treatment only applies in
+   dark mode. */
 .noc-panel {
   position: relative;
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+}
+html.dark .noc-panel {
   background: #0E131C;
   border: 1px solid #1D2532;
 }

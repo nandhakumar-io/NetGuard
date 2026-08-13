@@ -34,14 +34,14 @@ function ShieldMark() {
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <label className="noc-label block text-[10px] text-noc-muted uppercase mb-1.5">
+    <label className="noc-label block text-[10px] text-slate-500 dark:text-noc-muted uppercase mb-1.5">
       {children}
     </label>
   );
 }
 
 const inputClass =
-  "w-full bg-noc-panel2 border border-noc-border rounded-md px-3 py-2.5 text-sm text-noc-text placeholder:text-noc-faint outline-none transition-colors focus:border-noc-cyan focus:ring-1 focus:ring-noc-cyan/40";
+  "w-full bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border rounded-md px-3 py-2.5 text-sm text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint outline-none transition-colors focus:border-blue-600 dark:border-noc-cyan focus:ring-1 focus:ring-blue-600/40 dark:ring-noc-cyan/40";
 
 // Brand-side highlights, shown on the wide-screen split layout only. Purely
 // presentational -- reinforces what NetGuard actually does while the person
@@ -158,30 +158,30 @@ export default function Login() {
       {/* Left brand panel -- wide screens only. Gives the auth screen a
           sense of place instead of a lone card floating on black, and
           doubles as a quick reminder of what the product actually does. */}
-      <div className="hidden lg:flex flex-col justify-between w-[46%] max-w-xl relative px-14 py-14 border-r border-noc-border">
+      <div className="hidden lg:flex flex-col justify-between w-[46%] max-w-xl relative px-14 py-14 border-r border-slate-200 dark:border-noc-border">
         <div className="flex items-center gap-3">
           <ShieldMark />
           <div>
-            <p className="font-display text-2xl font-bold tracking-widest uppercase text-noc-text leading-none">
+            <p className="font-display text-2xl font-bold tracking-widest uppercase text-slate-900 dark:text-noc-text leading-none">
               NetGuard
             </p>
-            <p className="noc-label text-[10px] text-noc-cyan mt-1">Intelligent Network Change Management</p>
+            <p className="noc-label text-[10px] text-blue-600 dark:text-noc-cyan mt-1">Intelligent Network Change Management</p>
           </div>
         </div>
 
         <div className="space-y-7">
-          <p className="text-noc-text text-2xl font-display font-semibold leading-snug max-w-sm">
+          <p className="text-slate-900 dark:text-noc-text text-2xl font-display font-semibold leading-snug max-w-sm">
             Command your network fleet with confidence, not luck.
           </p>
           <div className="space-y-5">
             {HIGHLIGHTS.map((h) => (
               <div key={h.title} className="flex gap-3.5">
-                <div className="w-9 h-9 rounded-lg bg-noc-cyan/10 border border-noc-cyan/20 text-noc-cyan flex items-center justify-center shrink-0">
+                <div className="w-9 h-9 rounded-lg bg-blue-600/10 dark:bg-noc-cyan/10 border border-blue-600/20 dark:border-noc-cyan/20 text-blue-600 dark:text-noc-cyan flex items-center justify-center shrink-0">
                   {h.icon}
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-noc-text">{h.title}</p>
-                  <p className="text-xs text-noc-muted mt-0.5 leading-relaxed max-w-xs">{h.body}</p>
+                  <p className="text-sm font-semibold text-slate-900 dark:text-noc-text">{h.title}</p>
+                  <p className="text-xs text-slate-500 dark:text-noc-muted mt-0.5 leading-relaxed max-w-xs">{h.body}</p>
                 </div>
               </div>
             ))}
@@ -189,8 +189,8 @@ export default function Login() {
         </div>
 
         <div className="flex items-center gap-1.5">
-          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-noc-good" />
-          <p className="noc-label text-[10px] text-noc-faint">All systems monitored</p>
+          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-noc-good" />
+          <p className="noc-label text-[10px] text-slate-400 dark:text-noc-faint">All systems monitored</p>
         </div>
       </div>
 
@@ -201,10 +201,10 @@ export default function Login() {
         <div className="flex lg:hidden items-center gap-3 mb-6 justify-center">
           <ShieldMark />
           <div>
-            <p className="font-display text-2xl font-bold tracking-widest uppercase text-noc-text leading-none">
+            <p className="font-display text-2xl font-bold tracking-widest uppercase text-slate-900 dark:text-noc-text leading-none">
               NetGuard
             </p>
-            <p className="noc-label text-[10px] text-noc-cyan mt-1">
+            <p className="noc-label text-[10px] text-blue-600 dark:text-noc-cyan mt-1">
               Intelligent Network Change Management
             </p>
           </div>
@@ -214,11 +214,11 @@ export default function Login() {
           {mfaToken ? (
             <>
               <div className="flex items-center gap-2 mb-1">
-                <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-noc-good" />
-                <p className="noc-label text-[10px] text-noc-muted">Identity Verification</p>
+                <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-noc-good" />
+                <p className="noc-label text-[10px] text-slate-500 dark:text-noc-muted">Identity Verification</p>
               </div>
-              <p className="text-base font-semibold text-noc-text mb-1">Two-factor code required</p>
-              <p className="text-xs text-noc-muted mb-5">
+              <p className="text-base font-semibold text-slate-900 dark:text-noc-text mb-1">Two-factor code required</p>
+              <p className="text-xs text-slate-500 dark:text-noc-muted mb-5">
                 Enter the 6-digit code from your authenticator app.
               </p>
               <form onSubmit={submitMfa} className="space-y-4">
@@ -234,20 +234,20 @@ export default function Login() {
                   required
                 />
                 {error && (
-                  <p className="text-xs text-noc-crit bg-noc-crit/10 border border-noc-crit/30 rounded-md px-3 py-2">
+                  <p className="text-xs text-red-600 dark:text-noc-crit bg-red-600/10 dark:bg-noc-crit/10 border border-red-600/30 dark:border-noc-crit/30 rounded-md px-3 py-2">
                     {error}
                   </p>
                 )}
                 <button
                   type="submit"
                   disabled={loading || mfaCode.length < 6}
-                  className="w-full bg-noc-cyan text-noc-bg rounded-md px-4 py-2.5 text-sm font-semibold hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="w-full bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-4 py-2.5 text-sm font-semibold hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {loading ? "Verifying…" : "Verify & Continue"}
                 </button>
                 <button
                   type="button"
-                  className="w-full text-xs text-noc-muted hover:text-noc-text transition-colors"
+                  className="w-full text-xs text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:text-noc-text transition-colors"
                   onClick={() => {
                     setMfaToken(null);
                     setMfaCode("");
@@ -260,11 +260,11 @@ export default function Login() {
             </>
           ) : (
             <>
-              <div className="flex mb-6 rounded-md bg-noc-panel2 border border-noc-border p-1 text-sm font-medium">
+              <div className="flex mb-6 rounded-md bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border p-1 text-sm font-medium">
                 <button
                   type="button"
                   className={`flex-1 py-1.5 rounded transition-colors ${
-                    mode === "login" ? "bg-noc-cyan text-noc-bg" : "text-noc-muted hover:text-noc-text"
+                    mode === "login" ? "bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg" : "text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:text-noc-text"
                   }`}
                   onClick={() => {
                     setMode("login");
@@ -276,7 +276,7 @@ export default function Login() {
                 <button
                   type="button"
                   className={`flex-1 py-1.5 rounded transition-colors ${
-                    mode === "register" ? "bg-noc-cyan text-noc-bg" : "text-noc-muted hover:text-noc-text"
+                    mode === "register" ? "bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg" : "text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:text-noc-text"
                   }`}
                   onClick={() => {
                     setMode("register");
@@ -328,7 +328,7 @@ export default function Login() {
                     <button
                       type="button"
                       onClick={() => setShowPassword((s) => !s)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] font-medium text-noc-muted hover:text-noc-cyan transition-colors"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] font-medium text-slate-500 dark:text-noc-muted hover:text-blue-600 dark:text-noc-cyan transition-colors"
                       tabIndex={-1}
                     >
                       {showPassword ? "Hide" : "Show"}
@@ -336,7 +336,7 @@ export default function Login() {
                   </div>
                   {mode === "register" && password.length > 0 && (
                     <div className="mt-2">
-                      <div className="h-1 w-full bg-noc-panel2 rounded-full overflow-hidden flex gap-0.5">
+                      <div className="h-1 w-full bg-slate-50 dark:bg-noc-panel2 rounded-full overflow-hidden flex gap-0.5">
                         {[0, 1, 2, 3].map((i) => (
                           <div
                             key={i}
@@ -356,7 +356,7 @@ export default function Login() {
                     <div className="text-right mt-1.5">
                       <button
                         type="button"
-                        className="text-[11px] text-noc-muted hover:text-noc-cyan transition-colors"
+                        className="text-[11px] text-slate-500 dark:text-noc-muted hover:text-blue-600 dark:text-noc-cyan transition-colors"
                         onClick={() => setError("Ask a Network Administrator to reset your password from Access Control.")}
                       >
                         Forgot password?
@@ -381,20 +381,20 @@ export default function Login() {
                   </div>
                 )}
                 {error && (
-                  <p className="text-xs text-noc-crit bg-noc-crit/10 border border-noc-crit/30 rounded-md px-3 py-2">
+                  <p className="text-xs text-red-600 dark:text-noc-crit bg-red-600/10 dark:bg-noc-crit/10 border border-red-600/30 dark:border-noc-crit/30 rounded-md px-3 py-2">
                     {error}
                   </p>
                 )}
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full bg-noc-cyan text-noc-bg rounded-md px-4 py-2.5 text-sm font-semibold hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="w-full bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-4 py-2.5 text-sm font-semibold hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {loading ? "Please wait…" : mode === "login" ? "Sign In" : "Create Account"}
                 </button>
               </form>
 
-              <p className="text-[11px] text-noc-faint mt-5 text-center leading-relaxed">
+              <p className="text-[11px] text-slate-400 dark:text-noc-faint mt-5 text-center leading-relaxed">
                 Approving change requests requires a Network Administrator role.
                 Admin and Security accounts are granted by an existing admin, not self-selected at sign-up.
               </p>
@@ -403,8 +403,8 @@ export default function Login() {
         </div>
 
         <div className="flex lg:hidden items-center justify-center gap-1.5 mt-5">
-          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-noc-good" />
-          <p className="noc-label text-[10px] text-noc-faint">All systems monitored</p>
+          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-noc-good" />
+          <p className="noc-label text-[10px] text-slate-400 dark:text-noc-faint">All systems monitored</p>
         </div>
       </div>
       </div>

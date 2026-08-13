@@ -345,7 +345,7 @@ export default function Layout() {
         {!iconOnly && (
           <div className="min-w-0">
             <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
-            <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
+            <p className="text-[11px] text-slate-300 dark:text-noc-muted mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
           </div>
         )}
         <button
@@ -371,7 +371,7 @@ export default function Layout() {
         {user && !iconOnly && (
           <div className="mb-3 min-w-0">
             <p className="text-sm font-medium truncate">{user.full_name}</p>
-            <p className="text-[11px] text-accent dark:text-noc-cyan capitalize truncate">{user.role.replace(/_/g, " ")}</p>
+            <p className="text-[11px] text-slate-300 dark:text-noc-muted capitalize truncate">{user.role.replace(/_/g, " ")}</p>
           </div>
         )}
         <button

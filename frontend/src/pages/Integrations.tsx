@@ -63,10 +63,10 @@ const emptyRepoForm = {
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1").replace(/\/$/, "");
 
 const syncStatusStyle: Record<string, string> = {
-  never_synced: "bg-noc-panel2 text-noc-muted border border-noc-border",
-  syncing: "bg-noc-cyan/10 text-noc-cyan border border-noc-cyan/30",
-  succeeded: "bg-noc-good/10 text-noc-good border border-noc-good/30",
-  failed: "bg-noc-crit/10 text-noc-crit border border-noc-crit/30",
+  never_synced: "bg-slate-50 dark:bg-noc-panel2 text-slate-500 dark:text-noc-muted border border-slate-200 dark:border-noc-border",
+  syncing: "bg-blue-600/10 dark:bg-noc-cyan/10 text-blue-600 dark:text-noc-cyan border border-blue-600/30 dark:border-noc-cyan/30",
+  succeeded: "bg-emerald-600/10 dark:bg-noc-good/10 text-emerald-600 dark:text-noc-good border border-emerald-600/30 dark:border-noc-good/30",
+  failed: "bg-red-600/10 dark:bg-noc-crit/10 text-red-600 dark:text-noc-crit border border-red-600/30 dark:border-noc-crit/30",
 };
 
 const directionCopy: Record<GitRepoConfig["direction"], string> = {
@@ -85,17 +85,17 @@ function CopyField({ label, value }: { label: string; value: string }) {
   const toast = useToast();
   return (
     <div>
-      <p className="noc-label text-[10px] text-noc-muted mb-1">{label}</p>
+      <p className="noc-label text-[10px] text-slate-500 dark:text-noc-muted mb-1">{label}</p>
       <button
         type="button"
         onClick={() => {
           navigator.clipboard?.writeText(value);
           toast.success("Copied to clipboard.");
         }}
-        className="w-full flex items-center gap-2 bg-noc-panel2 border border-noc-border rounded-md px-3 py-2 text-left group hover:border-noc-cyan/40 transition-colors"
+        className="w-full flex items-center gap-2 bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border rounded-md px-3 py-2 text-left group hover:border-blue-600/40 dark:border-noc-cyan/40 transition-colors"
       >
-        <code className="flex-1 font-mono text-[11px] text-noc-text truncate">{value}</code>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-noc-muted group-hover:text-noc-cyan">
+        <code className="flex-1 font-mono text-[11px] text-slate-900 dark:text-noc-text truncate">{value}</code>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-slate-500 dark:text-noc-muted group-hover:text-blue-600 dark:text-noc-cyan">
           <rect x="9" y="9" width="13" height="13" rx="2" />
           <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
         </svg>
@@ -112,8 +112,8 @@ export default function IntegrationsPage() {
     <div className="pb-16 max-w-6xl mx-auto flex flex-col gap-8 pt-2">
       <div>
         <div className="flex items-center gap-2 mb-1">
-          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-noc-good" />
-          <p className="noc-label text-[10px] text-noc-cyan">External Integrations</p>
+          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-noc-good" />
+          <p className="noc-label text-[10px] text-blue-600 dark:text-noc-cyan">External Integrations</p>
         </div>
         <h1 className="text-3xl font-bold text-navy dark:text-white font-display tracking-wide">Integrations</h1>
         <p className="text-sm text-slate-500 dark:text-noc-muted mt-1 font-medium max-w-2xl">
@@ -182,9 +182,9 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
 
   return (
     <Panel>
-      <div className="p-5 flex items-start justify-between gap-4 flex-wrap border-b border-noc-border">
+      <div className="p-5 flex items-start justify-between gap-4 flex-wrap border-b border-slate-200 dark:border-noc-border">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-lg bg-noc-violet/10 border border-noc-violet/25 text-noc-violet flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-lg bg-purple-600/10 dark:bg-noc-violet/10 border border-purple-600/25 dark:border-noc-violet/25 text-purple-600 dark:text-noc-violet flex items-center justify-center shrink-0">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M8 9h8M8 13h5" /><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
             </svg>
@@ -192,11 +192,11 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
           <div>
             <h2 className="text-lg font-bold text-navy dark:text-noc-text">ChatOps</h2>
             <p className="text-xs text-slate-500 dark:text-noc-muted mt-1 max-w-2xl leading-relaxed">
-              Linked users can run <code className="font-mono text-noc-cyan">/netguard approve &lt;id&gt;</code>,{" "}
-              <code className="font-mono text-noc-cyan">reject</code>, <code className="font-mono text-noc-cyan">rollback</code>,{" "}
-              <code className="font-mono text-noc-cyan">status &lt;hostname&gt;</code>,{" "}
-              <code className="font-mono text-noc-cyan">alerts</code>, <code className="font-mono text-noc-cyan">fleet</code>,{" "}
-              <code className="font-mono text-noc-cyan">drift</code>, and more from Slack or Teams.
+              Linked users can run <code className="font-mono text-blue-600 dark:text-noc-cyan">/netguard approve &lt;id&gt;</code>,{" "}
+              <code className="font-mono text-blue-600 dark:text-noc-cyan">reject</code>, <code className="font-mono text-blue-600 dark:text-noc-cyan">rollback</code>,{" "}
+              <code className="font-mono text-blue-600 dark:text-noc-cyan">status &lt;hostname&gt;</code>,{" "}
+              <code className="font-mono text-blue-600 dark:text-noc-cyan">alerts</code>, <code className="font-mono text-blue-600 dark:text-noc-cyan">fleet</code>,{" "}
+              <code className="font-mono text-blue-600 dark:text-noc-cyan">drift</code>, and more from Slack or Teams.
             </p>
           </div>
         </div>
@@ -207,7 +207,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
               setSaveError(null);
               setShowForm(true);
             }}
-            className="bg-noc-cyan text-noc-bg rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition shrink-0"
+            className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition shrink-0"
           >
             + Link Account
           </button>
@@ -217,19 +217,19 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
       {/* Webhook target endpoints -- copy-to-clipboard so wiring up the
           Slack slash command / Teams outgoing webhook doesn't require
           reading source or docs. */}
-      <div className="p-5 border-b border-noc-border grid grid-cols-1 sm:grid-cols-2 gap-3 bg-noc-panel2/40">
+      <div className="p-5 border-b border-slate-200 dark:border-noc-border grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50/40 dark:bg-noc-panel2/40">
         <CopyField label="Slack slash command URL" value={`${API_BASE}/chatops/slack/commands`} />
         <CopyField label="Teams outgoing webhook URL" value={`${API_BASE}/chatops/teams/commands`} />
       </div>
 
-      {error && <p className="text-noc-crit text-sm p-5">{error}</p>}
+      {error && <p className="text-red-600 dark:text-noc-crit text-sm p-5">{error}</p>}
 
       {loading ? (
-        <p className="text-xs text-noc-faint p-5">Loading links…</p>
+        <p className="text-xs text-slate-400 dark:text-noc-faint p-5">Loading links…</p>
       ) : links.length === 0 ? (
-        <p className="text-xs text-noc-faint italic p-5">No Slack or Teams accounts linked yet.</p>
+        <p className="text-xs text-slate-400 dark:text-noc-faint italic p-5">No Slack or Teams accounts linked yet.</p>
       ) : (
-        <div className="divide-y divide-noc-border">
+        <div className="divide-y divide-slate-200 dark:divide-noc-border">
           {links.map((l) => (
             <div key={l.user_id} className="p-4 flex items-center justify-between gap-3 flex-wrap">
               <div>
@@ -238,20 +238,20 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 {l.slack_user_id && (
-                  <span className="text-[11px] font-mono bg-noc-violet/10 border border-noc-violet/25 text-noc-violet px-2 py-1 rounded-full flex items-center gap-2">
+                  <span className="text-[11px] font-mono bg-purple-600/10 dark:bg-noc-violet/10 border border-purple-600/25 dark:border-noc-violet/25 text-purple-600 dark:text-noc-violet px-2 py-1 rounded-full flex items-center gap-2">
                     Slack: {l.slack_user_id}
                     {canManage && (
-                      <button onClick={() => unlink(l, "slack")} className="font-bold hover:text-noc-crit">
+                      <button onClick={() => unlink(l, "slack")} className="font-bold hover:text-red-600 dark:text-noc-crit">
                         ×
                       </button>
                     )}
                   </span>
                 )}
                 {l.msteams_user_id && (
-                  <span className="text-[11px] font-mono bg-noc-cyan/10 border border-noc-cyan/25 text-noc-cyan px-2 py-1 rounded-full flex items-center gap-2">
+                  <span className="text-[11px] font-mono bg-blue-600/10 dark:bg-noc-cyan/10 border border-blue-600/25 dark:border-noc-cyan/25 text-blue-600 dark:text-noc-cyan px-2 py-1 rounded-full flex items-center gap-2">
                     Teams: {l.msteams_user_id}
                     {canManage && (
-                      <button onClick={() => unlink(l, "teams")} className="font-bold hover:text-noc-crit">
+                      <button onClick={() => unlink(l, "teams")} className="font-bold hover:text-red-600 dark:text-noc-crit">
                         ×
                       </button>
                     )}
@@ -264,13 +264,13 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
       )}
 
       {showForm && (
-        <form onSubmit={submit} className="p-5 border-t border-noc-border flex flex-col gap-3 bg-noc-panel2/60">
-          {saveError && <p className="text-noc-crit text-xs">{saveError}</p>}
+        <form onSubmit={submit} className="p-5 border-t border-slate-200 dark:border-noc-border flex flex-col gap-3 bg-slate-50/60 dark:bg-noc-panel2/60">
+          {saveError && <p className="text-red-600 dark:text-noc-crit text-xs">{saveError}</p>}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <select
               value={form.platform}
               onChange={(e) => setForm((f) => ({ ...f, platform: e.target.value as "slack" | "teams" }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             >
               <option value="slack">Slack</option>
               <option value="teams">Microsoft Teams</option>
@@ -280,7 +280,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
               placeholder="External user ID (e.g. Slack U0123ABC)"
               value={form.external_user_id}
               onChange={(e) => setForm((f) => ({ ...f, external_user_id: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
             <input
               required
@@ -288,17 +288,17 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
               placeholder="NetGuard user email"
               value={form.user_email}
               onChange={(e) => setForm((f) => ({ ...f, user_email: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
           </div>
           <div className="flex gap-2 justify-end">
-            <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-xs font-bold text-noc-muted hover:text-noc-text">
+            <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-xs font-bold text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:text-noc-text">
               Cancel
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="bg-noc-cyan text-noc-bg rounded-md px-5 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
+              className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-5 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
             >
               {saving ? "Linking…" : "Link Account"}
             </button>
@@ -338,14 +338,14 @@ function CommandTester() {
   };
 
   return (
-    <div className="p-5 border-t border-noc-border bg-noc-bg/40">
+    <div className="p-5 border-t border-slate-200 dark:border-noc-border bg-slate-50/40 dark:bg-noc-bg/40">
       <div className="flex items-center gap-2 mb-1">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-noc-cyan">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-600 dark:text-noc-cyan">
           <path d="M4 17l6-6-6-6" /><path d="M12 19h8" />
         </svg>
-        <p className="noc-label text-[10px] text-noc-cyan">Command Tester</p>
+        <p className="noc-label text-[10px] text-blue-600 dark:text-noc-cyan">Command Tester</p>
       </div>
-      <p className="text-xs text-noc-muted mb-3">
+      <p className="text-xs text-slate-500 dark:text-noc-muted mb-3">
         Runs as you, through the same executor Slack/Teams use — a safe way to check a command and its
         permissions before wiring up a chat platform.
       </p>
@@ -356,19 +356,19 @@ function CommandTester() {
         }}
         className="flex flex-col sm:flex-row gap-2"
       >
-        <div className="flex-1 flex items-center bg-noc-panel2 border border-noc-border rounded-md px-3 focus-within:border-noc-cyan">
-          <span className="font-mono text-noc-cyan text-sm mr-1.5 select-none">/netguard</span>
+        <div className="flex-1 flex items-center bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border rounded-md px-3 focus-within:border-blue-600 dark:border-noc-cyan">
+          <span className="font-mono text-blue-600 dark:text-noc-cyan text-sm mr-1.5 select-none">/netguard</span>
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder="fleet"
-            className="flex-1 bg-transparent py-2.5 text-sm text-noc-text placeholder:text-noc-faint outline-none font-mono"
+            className="flex-1 bg-transparent py-2.5 text-sm text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint outline-none font-mono"
           />
         </div>
         <button
           type="submit"
           disabled={running}
-          className="bg-noc-cyan text-noc-bg rounded-md px-5 py-2.5 text-sm font-bold hover:brightness-110 transition disabled:opacity-50 shrink-0"
+          className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-5 py-2.5 text-sm font-bold hover:brightness-110 transition disabled:opacity-50 shrink-0"
         >
           {running ? "Running…" : "Run"}
         </button>
@@ -380,7 +380,7 @@ function CommandTester() {
             key={c}
             type="button"
             onClick={() => run(c)}
-            className="text-[11px] font-mono bg-noc-panel2 border border-noc-border text-noc-muted hover:text-noc-cyan hover:border-noc-cyan/40 rounded-full px-2.5 py-1 transition-colors"
+            className="text-[11px] font-mono bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border text-slate-500 dark:text-noc-muted hover:text-blue-600 dark:text-noc-cyan hover:border-blue-600/40 dark:border-noc-cyan/40 rounded-full px-2.5 py-1 transition-colors"
           >
             {c}
           </button>
@@ -391,16 +391,16 @@ function CommandTester() {
         <div
           className={`mt-3 rounded-md border px-4 py-3 font-mono text-xs whitespace-pre-wrap leading-relaxed ${
             err || result?.ok === false
-              ? "border-noc-crit/30 bg-noc-crit/10 text-noc-crit"
-              : "border-noc-good/25 bg-noc-good/5 text-noc-text"
+              ? "border-red-600/30 dark:border-noc-crit/30 bg-red-600/10 dark:bg-noc-crit/10 text-red-600 dark:text-noc-crit"
+              : "border-emerald-600/25 dark:border-noc-good/25 bg-emerald-600/5 dark:bg-noc-good/5 text-slate-900 dark:text-noc-text"
           }`}
         >
           {err || result?.text}
           {!!result?.items?.length && (
-            <div className="mt-2 pt-2 border-t border-noc-border/60 space-y-1">
+            <div className="mt-2 pt-2 border-t border-slate-200/60 dark:border-noc-border/60 space-y-1">
               {result.items.map((it, i) => (
-                <div key={i} className="flex gap-3 text-[11px] text-noc-muted">
-                  {it.hostname && <span className="text-noc-text">{it.hostname}</span>}
+                <div key={i} className="flex gap-3 text-[11px] text-slate-500 dark:text-noc-muted">
+                  {it.hostname && <span className="text-slate-900 dark:text-noc-text">{it.hostname}</span>}
                   {it.severity && <span className="uppercase">{it.severity}</span>}
                   {it.category && <span>{it.category}</span>}
                 </div>
@@ -492,9 +492,9 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
 
   return (
     <Panel>
-      <div className="p-5 flex items-start justify-between gap-4 flex-wrap border-b border-noc-border">
+      <div className="p-5 flex items-start justify-between gap-4 flex-wrap border-b border-slate-200 dark:border-noc-border">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-lg bg-noc-cyan/10 border border-noc-cyan/25 text-noc-cyan flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-lg bg-blue-600/10 dark:bg-noc-cyan/10 border border-blue-600/25 dark:border-noc-cyan/25 text-blue-600 dark:text-noc-cyan flex items-center justify-center shrink-0">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
               <path d="M6 21V9a9 9 0 009 9" />
@@ -503,7 +503,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
           <div>
             <h2 className="text-lg font-bold text-navy dark:text-noc-text">GitOps / Config-as-Code</h2>
             <p className="text-xs text-slate-500 dark:text-noc-muted mt-1 max-w-2xl leading-relaxed">
-              Pull direction reads <code className="font-mono text-noc-cyan">*.j2</code> files under the template
+              Pull direction reads <code className="font-mono text-blue-600 dark:text-noc-cyan">*.j2</code> files under the template
               path and queues them as new template versions for review — never auto-published. Push direction
               mirrors published versions back out to the repo.
             </p>
@@ -516,37 +516,37 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
               setSaveError(null);
               setShowForm(true);
             }}
-            className="bg-noc-cyan text-noc-bg rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition shrink-0"
+            className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition shrink-0"
           >
             + Add Repo
           </button>
         )}
       </div>
 
-      {error && <p className="text-noc-crit text-sm p-5">{error}</p>}
+      {error && <p className="text-red-600 dark:text-noc-crit text-sm p-5">{error}</p>}
 
       {loading ? (
-        <p className="text-xs text-noc-faint p-5">Loading repos…</p>
+        <p className="text-xs text-slate-400 dark:text-noc-faint p-5">Loading repos…</p>
       ) : repos.length === 0 ? (
         <div className="p-8 text-center">
-          <p className="text-sm text-noc-muted">No Git repos configured yet.</p>
-          <p className="text-xs text-noc-faint mt-1">Add one to pull templates from a repo or mirror published versions out.</p>
+          <p className="text-sm text-slate-500 dark:text-noc-muted">No Git repos configured yet.</p>
+          <p className="text-xs text-slate-400 dark:text-noc-faint mt-1">Add one to pull templates from a repo or mirror published versions out.</p>
         </div>
       ) : (
-        <div className="divide-y divide-noc-border">
+        <div className="divide-y divide-slate-200 dark:divide-noc-border">
           {repos.map((r) => (
             <div key={r.id} className="p-5 flex flex-col gap-3">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2 flex-wrap">
                   <p className="font-bold text-navy dark:text-noc-text text-sm">{r.name}</p>
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-noc-muted bg-noc-panel2 border border-noc-border px-2 py-0.5 rounded-full">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-noc-muted bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border px-2 py-0.5 rounded-full">
                     {directionCopy[r.direction]}
                   </span>
                   <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${syncStatusStyle[r.last_sync_status] || syncStatusStyle.never_synced}`}>
                     {r.last_sync_status.replace("_", " ")}
                   </span>
                   {r.auto_sync_enabled && (
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-noc-good bg-noc-good/10 border border-noc-good/25 px-2 py-0.5 rounded-full">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-noc-good bg-emerald-600/10 dark:bg-noc-good/10 border border-emerald-600/25 dark:border-noc-good/25 px-2 py-0.5 rounded-full">
                       Auto-sync
                     </span>
                   )}
@@ -556,7 +556,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
                     <button
                       onClick={() => syncNow(r)}
                       disabled={syncingId === r.id}
-                      className="text-[10px] font-bold uppercase tracking-wider text-noc-cyan hover:brightness-110 disabled:opacity-50 flex items-center gap-1.5"
+                      className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-noc-cyan hover:brightness-110 disabled:opacity-50 flex items-center gap-1.5"
                     >
                       {syncingId === r.id ? (
                         "Syncing…"
@@ -569,7 +569,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
                     </button>
                     <button
                       onClick={() => removeRepo(r)}
-                      className="text-[10px] font-bold uppercase tracking-wider text-noc-crit hover:brightness-125"
+                      className="text-[10px] font-bold uppercase tracking-wider text-red-600 dark:text-noc-crit hover:brightness-125"
                     >
                       Remove
                     </button>
@@ -577,25 +577,25 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
                 )}
               </div>
 
-              <p className="text-xs text-noc-muted font-mono">
+              <p className="text-xs text-slate-500 dark:text-noc-muted font-mono">
                 {r.repo_url} @ {r.branch} — {r.template_path}
               </p>
 
               {r.last_sync_error && (
-                <p className="text-xs text-noc-crit bg-noc-crit/10 border border-noc-crit/25 rounded-md px-3 py-2">{r.last_sync_error}</p>
+                <p className="text-xs text-red-600 dark:text-noc-crit bg-red-600/10 dark:bg-noc-crit/10 border border-red-600/25 dark:border-noc-crit/25 rounded-md px-3 py-2">{r.last_sync_error}</p>
               )}
 
-              <div className="flex items-center justify-between flex-wrap gap-3 text-[11px] text-noc-faint">
+              <div className="flex items-center justify-between flex-wrap gap-3 text-[11px] text-slate-400 dark:text-noc-faint">
                 <span>
                   {r.last_synced_at
                     ? `Last synced ${new Date(r.last_synced_at).toLocaleString()}${r.last_synced_commit ? ` @ ${r.last_synced_commit.slice(0, 8)}` : ""}`
                     : "Never synced"}
                 </span>
                 <span className="flex items-center gap-3">
-                  <span className={r.has_access_token ? "text-noc-good" : "text-noc-faint"}>
+                  <span className={r.has_access_token ? "text-emerald-600 dark:text-noc-good" : "text-slate-400 dark:text-noc-faint"}>
                     {r.has_access_token ? "✓" : "–"} Access token
                   </span>
-                  <span className={r.has_webhook_secret ? "text-noc-good" : "text-noc-faint"}>
+                  <span className={r.has_webhook_secret ? "text-emerald-600 dark:text-noc-good" : "text-slate-400 dark:text-noc-faint"}>
                     {r.has_webhook_secret ? "✓" : "–"} Webhook secret
                   </span>
                 </span>
@@ -612,50 +612,50 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
       )}
 
       {showForm && (
-        <form onSubmit={submit} className="p-5 border-t border-noc-border flex flex-col gap-3 bg-noc-panel2/60">
-          {saveError && <p className="text-noc-crit text-xs">{saveError}</p>}
+        <form onSubmit={submit} className="p-5 border-t border-slate-200 dark:border-noc-border flex flex-col gap-3 bg-slate-50/60 dark:bg-noc-panel2/60">
+          {saveError && <p className="text-red-600 dark:text-noc-crit text-xs">{saveError}</p>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <input
               required
               placeholder="Name (e.g. network-configs)"
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
             <input
               required
               placeholder="Repo URL (https://github.com/org/repo.git)"
               value={form.repo_url}
               onChange={(e) => setForm((f) => ({ ...f, repo_url: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
             <input
               placeholder="Branch"
               value={form.branch}
               onChange={(e) => setForm((f) => ({ ...f, branch: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
             <input
               placeholder="Template path (templates/)"
               value={form.template_path}
               onChange={(e) => setForm((f) => ({ ...f, template_path: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
             <select
               value={form.direction}
               onChange={(e) => setForm((f) => ({ ...f, direction: e.target.value as GitRepoConfig["direction"] }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             >
               <option value="pull">Pull (repo → NetGuard review queue)</option>
               <option value="push">Push (NetGuard → repo mirror)</option>
               <option value="bidirectional">Bidirectional</option>
             </select>
-            <label className="flex items-center gap-2 text-sm text-noc-muted">
+            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-noc-muted">
               <input
                 type="checkbox"
                 checked={form.auto_sync_enabled}
                 onChange={(e) => setForm((f) => ({ ...f, auto_sync_enabled: e.target.checked }))}
-                className="accent-noc-cyan"
+                className="accent-blue-600 dark:accent-noc-cyan"
               />
               Auto-sync (periodic safety-net pull)
             </label>
@@ -664,24 +664,24 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
               placeholder="Access token (optional for public read-only repos)"
               value={form.access_token}
               onChange={(e) => setForm((f) => ({ ...f, access_token: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
             <input
               type="password"
               placeholder="Webhook secret (needed for push-triggered sync)"
               value={form.webhook_secret}
               onChange={(e) => setForm((f) => ({ ...f, webhook_secret: e.target.value }))}
-              className="border border-noc-border bg-noc-panel2 text-noc-text placeholder:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-noc-cyan"
+              className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan"
             />
           </div>
           <div className="flex gap-2 justify-end">
-            <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-xs font-bold text-noc-muted hover:text-noc-text">
+            <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-xs font-bold text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:text-noc-text">
               Cancel
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="bg-noc-cyan text-noc-bg rounded-md px-5 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
+              className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-5 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
             >
               {saving ? "Adding…" : "Add Repo"}
             </button>
