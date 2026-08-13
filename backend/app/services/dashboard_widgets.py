@@ -32,6 +32,12 @@ class DashboardWidget:
 DASHBOARD_WIDGETS: list[DashboardWidget] = [
     DashboardWidget("fleet_health", "Fleet Health", "devices_online/devices_total/global_health_score"),
     DashboardWidget("fleet_history_chart", "Fleet History (CPU/Memory/Bandwidth)", "fleet_health_history"),
+    # "What changed since I was last here": alerts + change requests +
+    # drift + deployments merged into a single time-sorted feed, so
+    # catching up doesn't mean checking five separate tabs. Placed right
+    # after Fleet Health/History since it's usually the first thing an
+    # admin wants after logging in.
+    DashboardWidget("whats_changed", "What Changed", "GET /dashboard/timeline"),
     DashboardWidget("uplinks", "Uplinks & WAN Links", "uplinks"),
     DashboardWidget("active_alerts", "Active Alerts", "GET /alerts"),
     DashboardWidget("fleet_availability", "Fleet Availability", "GET /devices/fleet-availability"),
@@ -39,14 +45,14 @@ DASHBOARD_WIDGETS: list[DashboardWidget] = [
     DashboardWidget("offline_devices", "Offline / Degraded Devices", "offline_devices"),
     DashboardWidget("top_interface_errors", "Top Interface Errors", "top_error_devices"),
     DashboardWidget("flapping_interfaces", "Flapping Interfaces", "flapping_interfaces"),
-    DashboardWidget("top_cpu_devices", "Top CPU Devices", "top_cpu_devices"),
-    DashboardWidget("top_memory_devices", "Top Memory Devices", "top_memory_devices"),
-    DashboardWidget("top_bandwidth_devices", "Top Bandwidth Devices", "top_bandwidth_devices"),
-    DashboardWidget("down_ports", "Down Ports", "down_ports"),
-    DashboardWidget("recent_reboots", "Recent Reboots", "recent_reboots"),
-    DashboardWidget("recent_backups", "Recent Backups", "recent_backups"),
+    DashboardWidget("top_cpu_devices", "Top CPU Devices", "top_cpu_devices", default_visible=False),
+    DashboardWidget("top_memory_devices", "Top Memory Devices", "top_memory_devices", default_visible=False),
+    DashboardWidget("top_bandwidth_devices", "Top Bandwidth Devices", "top_bandwidth_devices", default_visible=False),
+    DashboardWidget("down_ports", "Down Ports", "down_ports", default_visible=False),
+    DashboardWidget("recent_reboots", "Recent Reboots", "recent_reboots", default_visible=False),
+    DashboardWidget("recent_backups", "Recent Backups", "recent_backups", default_visible=False),
     DashboardWidget(
-        "recent_protocol_operations", "Recent Protocol Operations", "recent_protocol_operations"
+        "recent_protocol_operations", "Recent Protocol Operations", "recent_protocol_operations", default_visible=False
     ),
     DashboardWidget("group_availability", "Group Availability", "GET /device-groups"),
 ]
