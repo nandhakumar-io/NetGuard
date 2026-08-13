@@ -48,6 +48,30 @@ class RollbackResponse(BaseModel):
     message: str
 
 
+class DeploymentRollbackPreviewResponse(BaseModel):
+    """Read-only dry-run diff for POST /deployments/{id}/rollback -- shown
+    before the partial rollback is confirmed, mirroring
+    RollbackPreviewResponse above but keyed by deployment (the target
+    snapshot is implicit: the deployment's own pre-deploy snapshot) since
+    that's what both the Deployments page and the ChatOps `rollback`
+    command act on. No ChangeRequest is created and nothing is pushed to
+    the device just by requesting this.
+    """
+
+    deployment_id: uuid.UUID
+    device_id: uuid.UUID
+    hostname: str
+    target_version: str
+    current_source: str  # "live" | "last_snapshot" | "unavailable"
+    diff: str
+    identical: bool
+    added_lines: int
+    removed_lines: int
+    warning: str | None = None
+    blocked: bool = False
+    blocked_reason: str | None = None
+
+
 class RollbackSection(BaseModel):
     """One independently revertible block found in a device's current
     config (an ACL, VLAN, interface stanza, etc) -- the picklist for a

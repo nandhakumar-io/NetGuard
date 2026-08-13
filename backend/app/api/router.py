@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api import (
     alert_rules,
+    alert_runbooks,
     alert_snoozes,
     alerts,
     audit,
@@ -33,11 +34,13 @@ from app.api import (
     notification,
     path_trace,
     rbac,
+    recurring_maintenance_schedules,
     reports,
     secrets_rotation,
     syslog,
     terminal,
     topology,
+    war_room,
     webhooks,
 )
 
@@ -60,6 +63,7 @@ api_router.include_router(drift.router)
 api_router.include_router(metrics.router)
 api_router.include_router(alerts.router)
 api_router.include_router(alert_rules.router)
+api_router.include_router(alert_runbooks.router)
 api_router.include_router(escalation_policies.router)
 api_router.include_router(incidents.router)
 api_router.include_router(jit_access.router)
@@ -69,12 +73,14 @@ api_router.include_router(reports.router)
 api_router.include_router(rbac.router)
 api_router.include_router(secrets_rotation.router)
 api_router.include_router(topology.router)
+api_router.include_router(war_room.router)
 api_router.include_router(terminal.router)
 api_router.include_router(compliance_baselines.router)
 api_router.include_router(config_templates.router)
 api_router.include_router(syslog.router)
 api_router.include_router(path_trace.router)
 api_router.include_router(maintenance_windows.router)
+api_router.include_router(recurring_maintenance_schedules.router)
 api_router.include_router(firmware_upgrades.router)
 api_router.include_router(flows.router)
 api_router.include_router(webhooks.router)

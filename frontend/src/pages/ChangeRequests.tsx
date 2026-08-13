@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, ImpactSimulationPreview, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain } from "../lib/types";
+import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, ImpactSimulationPreview, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain, ThreeWayDiff } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
@@ -116,6 +116,94 @@ function ImpactSimulationPanel({ sim, loading }: { sim: ImpactSimulationPreview 
             ))}
           </ul>
         </div>
+      )}
+    </div>
+  );
+}
+
+const DRIFT_DIRECTION_STYLE: Record<ThreeWayDiff["drift_direction"], { badge: string; label: string; panel: string }> = {
+  toward_compliance: {
+    badge: "bg-green-100 text-green-700",
+    label: "✓ Moves toward golden baseline",
+    panel: "border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-900",
+  },
+  away_from_compliance: {
+    badge: "bg-red-100 text-red-700",
+    label: "⚠ Drifts away from golden baseline",
+    panel: "border-red-300 bg-red-50 dark:bg-red-950/20 dark:border-red-800",
+  },
+  unchanged: {
+    badge: "bg-slate-100 text-slate-600",
+    label: "No change in compliance drift",
+    panel: "border-slate-200 bg-slate-50 dark:bg-slate-900 dark:border-slate-700",
+  },
+  unknown: {
+    badge: "bg-slate-100 text-slate-500",
+    label: "No golden config set for this device",
+    panel: "border-slate-200 bg-slate-50 dark:bg-slate-900 dark:border-slate-700",
+  },
+};
+
+// Running vs. golden vs. proposed -- not just "what does this change do"
+// (the plain two-way diff below already shows that) but "does this
+// change move the device toward or away from its approved baseline".
+function ThreeWayDiffPanel({ diff, loading }: { diff: ThreeWayDiff | null; loading: boolean }) {
+  const [leg, setLeg] = useState<"golden_vs_current" | "golden_vs_proposed">("golden_vs_proposed");
+
+  if (loading && !diff) {
+    return (
+      <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 text-xs bg-slate-50 dark:bg-slate-900">
+        <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">
+          3-Way Diff (Running vs. Golden vs. Proposed)
+        </p>
+        <p className="text-slate-400">Comparing against golden config…</p>
+      </div>
+    );
+  }
+  if (!diff) return null;
+
+  const style = DRIFT_DIRECTION_STYLE[diff.drift_direction] || DRIFT_DIRECTION_STYLE.unknown;
+
+  return (
+    <div className={`border rounded-lg p-3 text-xs ${style.panel}`}>
+      <div className="flex items-center justify-between mb-1">
+        <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+          3-Way Diff (Running vs. Golden vs. Proposed)
+        </p>
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${style.badge}`}>{style.label}</span>
+      </div>
+
+      {!diff.golden_available ? (
+        <p className="text-slate-500 dark:text-slate-400 mt-1">
+          Set a golden config for this device (Devices → device detail → Backups tab) to see whether changes move it
+          toward or away from compliance.
+        </p>
+      ) : (
+        <>
+          <p className="text-slate-700 dark:text-slate-200 font-mono mt-1">
+            Drift from golden: <span className="font-bold">{diff.current_drift_lines}</span> lines today →{" "}
+            <span className="font-bold">{diff.proposed_drift_lines}</span> lines after this change
+          </p>
+          <div className="flex mt-2 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden text-[10px] normal-case font-medium w-fit">
+            <button
+              type="button"
+              onClick={() => setLeg("golden_vs_current")}
+              className={`px-2 py-0.5 ${leg === "golden_vs_current" ? "bg-navy dark:bg-slate-950 text-white" : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400"}`}
+            >
+              Golden vs. Running
+            </button>
+            <button
+              type="button"
+              onClick={() => setLeg("golden_vs_proposed")}
+              className={`px-2 py-0.5 ${leg === "golden_vs_proposed" ? "bg-navy dark:bg-slate-950 text-white" : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400"}`}
+            >
+              Golden vs. Proposed
+            </button>
+          </div>
+          <div className="mt-2">
+            <ConfigDiff diffText={leg === "golden_vs_current" ? diff.golden_vs_current : diff.golden_vs_proposed} />
+          </div>
+        </>
       )}
     </div>
   );
@@ -327,6 +415,35 @@ export default function ChangeRequests() {
       })
       .finally(() => {
         if (!cancelled) setSelectedImpactSimLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id]);
+
+  // Three-way diff (running vs. golden vs. proposed) -- lets a reviewer
+  // see whether this change moves the device toward or away from its
+  // approved baseline, not just what the change itself does.
+  const [selectedThreeWayDiff, setSelectedThreeWayDiff] = useState<ThreeWayDiff | null>(null);
+  const [selectedThreeWayDiffLoading, setSelectedThreeWayDiffLoading] = useState(false);
+
+  useEffect(() => {
+    if (!selected) {
+      setSelectedThreeWayDiff(null);
+      return;
+    }
+    let cancelled = false;
+    setSelectedThreeWayDiffLoading(true);
+    api
+      .get<ThreeWayDiff>(`/change-requests/${selected.id}/three-way-diff`)
+      .then((res) => {
+        if (!cancelled) setSelectedThreeWayDiff(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedThreeWayDiff(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSelectedThreeWayDiffLoading(false);
       });
     return () => {
       cancelled = true;
@@ -1221,6 +1338,7 @@ export default function ChangeRequests() {
                 </div>
               )}
               <ImpactSimulationPanel sim={selectedImpactSim} loading={selectedImpactSimLoading} />
+              <ThreeWayDiffPanel diff={selectedThreeWayDiff} loading={selectedThreeWayDiffLoading} />
               <div className="space-y-3">
                 {selected.config_diff_summary && (
                   <div>

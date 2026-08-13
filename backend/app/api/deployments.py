@@ -18,6 +18,7 @@ from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResul
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User
+from app.schemas.rollback import DeploymentRollbackPreviewResponse
 from app.services import audit_service, event_bus, rollback_service
 from app.tasks import retry_deployment_task, run_deployment_pipeline_task
 
@@ -142,33 +143,12 @@ def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), cu
     return {"message": "Retry queued.", "task_id": task.id, "change_request_id": str(cr.id), "device_id": str(deployment.device_id)}
 
 
-@router.post("/{deployment_id}/rollback", response_model=dict, status_code=202)
-def rollback_deployment(
-    deployment_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Partial rollback: undoes this ONE device's deployment on a
-    multi-device change request, without touching any of the other
-    devices the CR targeted -- whether those succeeded, are still in
-    flight, or failed independently.
-
-    Restores the exact pre-deploy snapshot that was captured for this
-    device right before this deployment attempt (Deployment.snapshot_id),
-    rather than requiring the caller to hunt it down in the device's full
-    snapshot history the way a general-purpose rollback would. Runs
-    through the standard rollback_service (own ChangeRequest, own
-    Snapshot -> Deploy -> Health Monitor pipeline), so this device's undo
-    gets exactly the same safety net as any other change and shows up
-    independently in the audit trail / Change Requests / Deployments
-    views -- it is a new, separate CR, not a mutation of the batch CR
-    that failed.
-
-    Only a FAILED deployment can be manually rolled back this way -- one
-    that already self-healed (ROLLED_BACK) has nothing left to undo, and
-    a SUCCEEDED device on the same batch should be rolled back explicitly
-    from that device's own snapshot history (Devices page) if that's
-    really the intent, not accidentally lumped in here.
+def _validate_rollback_target(db: Session, deployment_id: uuid.UUID) -> tuple[Deployment, Device, ConfigSnapshot]:
+    """Shared validation for both the dry-run preview and the actual
+    partial rollback below -- keeps the two endpoints from drifting on
+    what makes a deployment eligible (same checks a preview shows would
+    block must be the same checks the real POST enforces, or the preview
+    is just decoration).
     """
     deployment = db.get(Deployment, deployment_id)
     if not deployment:
@@ -202,6 +182,80 @@ def rollback_deployment(
     if not snapshot:
         raise HTTPException(status_code=404, detail="Pre-deploy snapshot for this deployment no longer exists")
 
+    return deployment, device, snapshot
+
+
+@router.get("/{deployment_id}/rollback/preview", response_model=DeploymentRollbackPreviewResponse)
+def preview_deployment_rollback(
+    deployment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """Dry-run counterpart to POST /deployments/{id}/rollback: shows the
+    diff a partial rollback would apply -- what's live on this one device
+    right now vs. the pre-deploy snapshot it would be restored to --
+    without creating a ChangeRequest or pushing anything. Same eligibility
+    checks as the real rollback (FAILED deployment, snapshot on file), so
+    "can I roll back?" and "what would it change?" never disagree.
+    Powers the confirmation step on the Deployments page and the
+    `rollback <deployment-id>` ChatOps command.
+    """
+    deployment, device, snapshot = _validate_rollback_target(db, deployment_id)
+
+    try:
+        preview = rollback_service.preview_rollback(db, device, snapshot)
+    except rollback_service.RollbackError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return DeploymentRollbackPreviewResponse(
+        deployment_id=deployment.id,
+        device_id=device.id,
+        hostname=device.hostname,
+        target_version=preview["target_version"],
+        current_source=preview["current_source"],
+        diff=preview["diff"],
+        identical=preview["identical"],
+        added_lines=preview["added_lines"],
+        removed_lines=preview["removed_lines"],
+        warning=preview["warning"],
+        blocked=preview["blocked"],
+        blocked_reason=preview["blocked_reason"],
+    )
+
+
+@router.post("/{deployment_id}/rollback", response_model=dict, status_code=202)
+def rollback_deployment(
+    deployment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Partial rollback: undoes this ONE device's deployment on a
+    multi-device change request, without touching any of the other
+    devices the CR targeted -- whether those succeeded, are still in
+    flight, or failed independently.
+
+    Restores the exact pre-deploy snapshot that was captured for this
+    device right before this deployment attempt (Deployment.snapshot_id),
+    rather than requiring the caller to hunt it down in the device's full
+    snapshot history the way a general-purpose rollback would. Runs
+    through the standard rollback_service (own ChangeRequest, own
+    Snapshot -> Deploy -> Health Monitor pipeline), so this device's undo
+    gets exactly the same safety net as any other change and shows up
+    independently in the audit trail / Change Requests / Deployments
+    views -- it is a new, separate CR, not a mutation of the batch CR
+    that failed.
+
+    Only a FAILED deployment can be manually rolled back this way -- one
+    that already self-healed (ROLLED_BACK) has nothing left to undo, and
+    a SUCCEEDED device on the same batch should be rolled back explicitly
+    from that device's own snapshot history (Devices page) if that's
+    really the intent, not accidentally lumped in here.
+
+    Pair with GET /{deployment_id}/rollback/preview to show the diff
+    before calling this -- that dry run uses the exact same validation as
+    here, so anything it doesn't block, this won't either.
+    """
+    deployment, device, snapshot = _validate_rollback_target(db, deployment_id)
     cr = db.get(ChangeRequest, deployment.change_request_id)
 
     try:

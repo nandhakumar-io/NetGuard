@@ -222,6 +222,24 @@ class RiskAnalysisResult(BaseModel):
     llm_error: str | None = None
 
 
+class ThreeWayDiffResponse(BaseModel):
+    """Running (current) vs. golden (approved baseline) vs. proposed --
+    lets a reviewer see not just what a change does, but whether it moves
+    the device toward or away from its compliance baseline. See
+    app.services.diff_engine.three_way_diff for how drift_direction is
+    computed.
+    """
+
+    change_request_id: uuid.UUID
+    golden_available: bool
+    current_vs_proposed: str
+    golden_vs_current: str
+    golden_vs_proposed: str
+    current_drift_lines: int
+    proposed_drift_lines: int
+    drift_direction: str  # "toward_compliance" | "away_from_compliance" | "unchanged" | "unknown"
+
+
 class ValidationReport(BaseModel):
     passed: bool
     errors: list[str]

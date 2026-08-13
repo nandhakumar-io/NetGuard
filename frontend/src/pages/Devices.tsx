@@ -2057,10 +2057,10 @@ export default function Devices() {
           await api.delete(`/devices/${id}?force=true`);
           return { result: "deleted" };
         } catch (err2: any) {
-          return { result: "failed", detail: err2?.response?.data?.detail || err2?.message };
+          return { result: "failed", detail: extractErrorMessage(err2, err2?.message) };
         }
       }
-      return { result: "failed", detail: err?.response?.data?.detail || err?.message };
+      return { result: "failed", detail: extractErrorMessage(err, err?.message) };
     }
   };
 

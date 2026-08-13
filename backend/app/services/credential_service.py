@@ -31,12 +31,20 @@ still need migrating to the encrypted DB path.
 import logging
 import os
 import re
+from datetime import datetime, timezone
 
 from app.core import crypto
 from app.core.config import settings
 from app.models.device import Device
 
 logger = logging.getLogger("netguard.credential_service")
+
+# Default rotation policy: credentials older than this are considered
+# "overdue" and older than (policy - warning window) are "due soon".
+# Overridable via settings.CREDENTIAL_ROTATION_POLICY_DAYS if defined,
+# so ops can tighten/loosen this per environment without a code change.
+DEFAULT_ROTATION_POLICY_DAYS = getattr(settings, "CREDENTIAL_ROTATION_POLICY_DAYS", 90)
+DEFAULT_WARNING_WINDOW_DAYS = getattr(settings, "CREDENTIAL_ROTATION_WARNING_DAYS", 14)
 
 
 class CredentialNotFoundError(Exception):
@@ -122,6 +130,8 @@ def set_ssh_password(device: Device, password: str) -> None:
     dev default again). Caller is responsible for db.commit().
     """
     device.ssh_password_encrypted = crypto.encrypt(password) if password else None
+    if password:
+        device.credentials_rotated_at = datetime.now(timezone.utc)
 
 
 def get_secret(credential_ref: str | None, *, device: Device, label: str) -> str:
@@ -170,6 +180,8 @@ def set_snmp_credentials(
         device.snmp_auth_key_encrypted = crypto.encrypt(v3_auth_key) if v3_auth_key else None
     if v3_priv_key is not None:
         device.snmp_priv_key_encrypted = crypto.encrypt(v3_priv_key) if v3_priv_key else None
+    if community or v3_auth_key or v3_priv_key:
+        device.credentials_rotated_at = datetime.now(timezone.utc)
 
 
 def get_snmp_community(device: Device) -> str:
@@ -226,3 +238,74 @@ def get_snmp_v3_priv_key(device: Device) -> str | None:
             _warn_env_fallback_in_production(device=device, label="SNMP")
         return secret
     return None
+
+
+# ---------------------------------------------------------------------
+# Credential expiry countdown -- powers the badge on the device list/
+# detail views so rotation happens proactively (ahead of a policy
+# deadline) instead of reactively (after a device locks an account out
+# or a security scan flags a stale password).
+# ---------------------------------------------------------------------
+
+class CredentialExpiryStatus:
+    OK = "ok"                # comfortably within policy
+    DUE_SOON = "due_soon"    # inside the warning window, not yet overdue
+    OVERDUE = "overdue"      # past the rotation policy deadline
+    UNKNOWN = "unknown"      # never rotated through NetGuard -- no baseline to measure from
+
+
+def credential_expiry(
+    device: Device,
+    *,
+    policy_days: int = DEFAULT_ROTATION_POLICY_DAYS,
+    warning_days: int = DEFAULT_WARNING_WINDOW_DAYS,
+) -> dict:
+    """Returns the countdown badge payload for one device:
+
+        {
+          "status": "ok" | "due_soon" | "overdue" | "unknown",
+          "rotated_at": datetime | None,
+          "days_since_rotation": int | None,
+          "days_until_due": int | None,   # negative once overdue
+          "policy_days": int,
+        }
+
+    Only reflects credentials actually managed by NetGuard
+    (Device.credentials_rotated_at, stamped by set_ssh_password /
+    set_snmp_credentials / the bulk ROTATE_CREDENTIALS action). A device
+    still on the legacy env-var-ref path with no DB-encrypted credential
+    ever set reports "unknown", not "overdue" -- there's no rotation
+    event to measure the countdown from, and flagging every such device
+    red would just teach operators to ignore the badge.
+    """
+    rotated_at = device.credentials_rotated_at
+    if rotated_at is None:
+        return {
+            "status": CredentialExpiryStatus.UNKNOWN,
+            "rotated_at": None,
+            "days_since_rotation": None,
+            "days_until_due": None,
+            "policy_days": policy_days,
+        }
+
+    now = datetime.now(timezone.utc)
+    if rotated_at.tzinfo is None:
+        rotated_at = rotated_at.replace(tzinfo=timezone.utc)
+
+    days_since = (now - rotated_at).days
+    days_until_due = policy_days - days_since
+
+    if days_until_due < 0:
+        status = CredentialExpiryStatus.OVERDUE
+    elif days_until_due <= warning_days:
+        status = CredentialExpiryStatus.DUE_SOON
+    else:
+        status = CredentialExpiryStatus.OK
+
+    return {
+        "status": status,
+        "rotated_at": rotated_at,
+        "days_since_rotation": days_since,
+        "days_until_due": days_until_due,
+        "policy_days": policy_days,
+    }

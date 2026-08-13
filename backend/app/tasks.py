@@ -568,6 +568,46 @@ def run_escalation_sweep_task() -> int:
         db.close()
 
 
+@celery_app.task(name="app.tasks.run_approval_sla_notify_sweep_task")
+def run_approval_sla_notify_sweep_task() -> int:
+    """Celery beat entry point (see celery_app "approval-sla-notify-sweep"):
+    posts Slack/Teams reminders for PENDING_APPROVAL change requests that
+    have just crossed into the "due soon" or "overdue" SLA stage, so the
+    countdown that already exists in-app (GET
+    /change-requests/pending-approvals) is visible wherever the approver
+    actually works. See app.services.approval_sla_notifier_service.
+    Returns the number of reminders posted this tick.
+    """
+    from app.services import approval_sla_notifier_service
+
+    db = SessionLocal()
+    try:
+        return approval_sla_notifier_service.sweep_pending_approvals(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_recurring_window_generation_task")
+def run_recurring_window_generation_task() -> int:
+    """Celery beat entry point (see celery_app
+    "recurring-maintenance-window-generation"): materializes upcoming
+    concrete MaintenanceWindow rows for every enabled
+    RecurringMaintenanceSchedule (patch Tuesdays, monthly firmware
+    windows, ...), idempotently. Also run immediately whenever a
+    schedule is created/updated (app.api.recurring_maintenance_schedules)
+    so a new recurrence doesn't wait for the next daily tick. See
+    app.services.recurring_window_service.generate_all. Returns the
+    number of windows created this tick.
+    """
+    from app.services import recurring_window_service
+
+    db = SessionLocal()
+    try:
+        return recurring_window_service.generate_all(db)
+    finally:
+        db.close()
+
+
 # --- GitOps sync ---------------------------------------------------------
 
 

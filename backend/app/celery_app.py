@@ -159,6 +159,24 @@ celery_app.conf.update(
             "task": "app.tasks.run_escalation_sweep_task",
             "schedule": float(settings.ESCALATION_SWEEP_INTERVAL_SECONDS),
         },
+        # Approval SLA Slack/Teams reminders: posts a "due soon"/"overdue"
+        # countdown for any PENDING_APPROVAL change request that just
+        # crossed a new SLA stage, so approvers see it where they work
+        # instead of only in the in-app pending-approvals queue. See
+        # app.services.approval_sla_notifier_service.
+        "approval-sla-notify-sweep": {
+            "task": "app.tasks.run_approval_sla_notify_sweep_task",
+            "schedule": float(settings.APPROVAL_SLA_NOTIFY_SWEEP_INTERVAL_SECONDS),
+        },
+        # Recurring maintenance windows: materializes the next horizon of
+        # concrete MaintenanceWindow rows for every enabled
+        # RecurringMaintenanceSchedule once a day. Idempotent, so a
+        # missed/late tick just catches up on the next run. See
+        # app.services.recurring_window_service.
+        "recurring-maintenance-window-generation": {
+            "task": "app.tasks.run_recurring_window_generation_task",
+            "schedule": crontab(hour=settings.RECURRING_WINDOW_GENERATION_HOUR_UTC, minute=0),
+        },
         # GitOps: safety-net periodic re-pull for any auto_sync_enabled
         # repo, in case its webhook was never configured or a delivery
         # failed -- see app.tasks.run_gitops_auto_sync_sweep_task.

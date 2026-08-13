@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import { api } from "../lib/api";
-import { DeploymentRecord, DeploymentLog } from "../lib/types";
+import { DeploymentRecord, DeploymentLog, DeploymentRollbackPreview } from "../lib/types";
 import PipelineStages, { Stage, StageState, stagesFromStatus } from "../components/PipelineStages";
+import ConfigDiff from "../components/ConfigDiff";
 import { useToast, errorMessage } from "../lib/toast";
-import { useConfirm } from "../lib/confirm";
 
 const STATUS_STYLES: Record<DeploymentRecord["status"], string> = {
   queued: "bg-slate-100 text-slate-600",
@@ -24,10 +24,46 @@ const STATUS_FILTERS: { value: DeploymentRecord["status"] | "all"; label: string
 
 function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
   const toast = useToast();
-  const confirm = useConfirm();
   const [logs, setLogs] = useState<DeploymentLog[]>([]);
   const [loading, setLoading] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  // Rollback dry-run preview -- fetched on demand when the user clicks
+  // "Roll Back" / "Partial Rollback", shown in a confirmation modal
+  // before anything is actually queued. Mirrors the same preview-first
+  // pattern used for device-level rollbacks on the Devices page.
+  const [showRollbackPreview, setShowRollbackPreview] = useState(false);
+  const [rollbackPreview, setRollbackPreview] = useState<DeploymentRollbackPreview | null>(null);
+  const [rollbackPreviewLoading, setRollbackPreviewLoading] = useState(false);
+  const [rollbackPreviewError, setRollbackPreviewError] = useState<string | null>(null);
+  const [rollbackConfirmBusy, setRollbackConfirmBusy] = useState(false);
+
+  const openRollbackPreview = () => {
+    setShowRollbackPreview(true);
+    setRollbackPreview(null);
+    setRollbackPreviewError(null);
+    setRollbackPreviewLoading(true);
+    api
+      .get<DeploymentRollbackPreview>(`/deployments/${deployment.id}/rollback/preview`)
+      .then((res) => setRollbackPreview(res.data))
+      .catch((err) => setRollbackPreviewError(errorMessage(err, "Failed to load rollback preview.")))
+      .finally(() => setRollbackPreviewLoading(false));
+  };
+
+  const confirmRollback = async () => {
+    setRollbackConfirmBusy(true);
+    try {
+      const res = await api.post<{ message: string; change_request_id: string }>(
+        `/deployments/${deployment.id}/rollback`
+      );
+      toast.success(res.data.message);
+      setShowRollbackPreview(false);
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to queue partial rollback"));
+    } finally {
+      setRollbackConfirmBusy(false);
+    }
+  };
 
   useEffect(() => {
     // 1. Fetch historical logs
@@ -157,20 +193,7 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
           )}
           {deployment.status === "failed" && (
             <button
-              onClick={async () => {
-                const batchNote = deployment.target_device_count > 1
-                  ? ` Only this device is affected — the other ${deployment.target_device_count - 1} device(s) on this change request are left as-is.`
-                  : "";
-                if (!(await confirm(`Roll back this device to its pre-deployment configuration?${batchNote}`, { confirmLabel: "Roll back" }))) return;
-                try {
-                  const res = await api.post<{ message: string; change_request_id: string }>(
-                    `/deployments/${deployment.id}/rollback`
-                  );
-                  toast.success(res.data.message);
-                } catch (err) {
-                  toast.error(errorMessage(err, "Failed to queue partial rollback"));
-                }
-              }}
+              onClick={openRollbackPreview}
               title={
                 deployment.target_device_count > 1
                   ? "Roll back only this device — the rest of the batch is untouched"
@@ -212,6 +235,88 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
         </div>
       </div>
       </div>
+
+      {showRollbackPreview && (
+        <div className="fixed inset-0 bg-navy/60 backdrop-blur-sm flex items-center justify-center z-50 px-4">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-2xl w-full p-6 max-h-[85vh] overflow-y-auto">
+            <h3 className="text-xl font-bold text-navy dark:text-white">
+              {deployment.target_device_count > 1 ? "Partial rollback" : "Roll back"} this deployment?
+            </h3>
+            <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-2 leading-relaxed">
+              Restores this device's pre-deploy configuration snapshot.
+              {deployment.target_device_count > 1
+                ? ` Only this device is affected — the other ${deployment.target_device_count - 1} device(s) on this change request are left as-is.`
+                : ""}
+            </p>
+
+            <div className="mt-4">
+              <h4 className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wide mb-2">
+                Preview: What This Rollback Will Change
+              </h4>
+              {rollbackPreviewLoading ? (
+                <p className="text-xs text-slate-400">Loading preview…</p>
+              ) : rollbackPreviewError ? (
+                <p className="text-xs text-riskcrit">{rollbackPreviewError}</p>
+              ) : rollbackPreview ? (
+                <div>
+                  {rollbackPreview.warning && (
+                    <p className="text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 mb-2">
+                      {rollbackPreview.warning}
+                    </p>
+                  )}
+                  {rollbackPreview.blocked && (
+                    <p className="text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 mb-2 font-semibold">
+                      {rollbackPreview.blocked_reason}
+                    </p>
+                  )}
+                  {rollbackPreview.identical ? (
+                    <p className="text-xs text-risklow bg-green-50 dark:bg-green-950/20 border border-green-100 dark:border-green-900 rounded-lg px-3 py-2">
+                      No difference -- the live configuration already matches this deployment's pre-deploy snapshot.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 font-mono">
+                        +{rollbackPreview.added_lines}/-{rollbackPreview.removed_lines} lines · comparing{" "}
+                        {rollbackPreview.current_source === "live"
+                          ? "live configuration"
+                          : rollbackPreview.current_source === "last_snapshot"
+                          ? "most recent snapshot"
+                          : "nothing (no baseline available)"}{" "}
+                        against pre-deploy v{rollbackPreview.target_version}
+                      </p>
+                      <div className="max-h-64 overflow-y-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+                        <ConfigDiff diffText={rollbackPreview.diff} />
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <button
+                onClick={() => setShowRollbackPreview(false)}
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRollback}
+                disabled={
+                  rollbackConfirmBusy ||
+                  rollbackPreviewLoading ||
+                  !rollbackPreview ||
+                  rollbackPreview.blocked ||
+                  rollbackPreview.identical
+                }
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {rollbackConfirmBusy ? "Rolling back…" : "Confirm & Roll Back"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

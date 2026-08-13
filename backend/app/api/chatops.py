@@ -47,23 +47,54 @@ def _slack_blocks(result: chatops_service.ChatOpsResult) -> dict:
 
     for item in result.items:
         alert_id = item.get("alert_id")
-        if not alert_id:
+        if alert_id:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "block_id": f"alert_{alert_id}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Acknowledge"},
+                            "action_id": "ack",
+                            "value": alert_id,
+                            "style": "primary",
+                        }
+                    ],
+                }
+            )
             continue
-        blocks.append(
-            {
-                "type": "actions",
-                "block_id": f"alert_{alert_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Acknowledge"},
-                        "action_id": "ack",
-                        "value": alert_id,
-                        "style": "primary",
-                    }
-                ],
-            }
-        )
+
+        # Rollback dry-run preview (see chatops_service._rollback) -- the
+        # confirm button re-submits as `rollback_confirm <deployment-id>`,
+        # which slack_interactive below maps back onto the "rollback
+        # confirm <id>" text command that actually queues the rollback.
+        rollback_deployment_id = item.get("rollback_deployment_id")
+        if rollback_deployment_id:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "block_id": f"rollback_{rollback_deployment_id}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Confirm Rollback"},
+                            "action_id": "rollback_confirm",
+                            "value": rollback_deployment_id,
+                            "style": "danger",
+                            "confirm": {
+                                "title": {"type": "plain_text", "text": "Confirm rollback"},
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": "This will push the pre-deploy configuration back to the device. Proceed?",
+                                },
+                                "confirm": {"type": "plain_text", "text": "Roll back"},
+                                "deny": {"type": "plain_text", "text": "Cancel"},
+                            },
+                        }
+                    ],
+                }
+            )
 
     if result.severity in _SEVERITY_COLOR:
         return {
@@ -152,7 +183,11 @@ async def slack_interactive(
 
     action_id = actions[0].get("action_id", "")
     value = actions[0].get("value", "")
-    command_text = f"{action_id} {value}".strip()
+    # The rollback confirm button submits action_id="rollback_confirm" --
+    # translate that back to the two-word "rollback confirm" command
+    # chatops_service expects (every other button's action_id already
+    # matches its command name 1:1, e.g. "ack").
+    command_text = f"rollback confirm {value}".strip() if action_id == "rollback_confirm" else f"{action_id} {value}".strip()
 
     result = chatops_service.execute_command(db, user, command_text)
     response = _slack_blocks(result)

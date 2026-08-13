@@ -170,6 +170,15 @@ class Device(Base):
     # Fernet-encrypted at rest. NULL means the key is unencrypted (or has
     # no passphrase).
     ssh_private_key_passphrase_encrypted = Column(Text, nullable=True)
+    # When SSH and/or SNMP credentials were last set/rotated on this
+    # device -- powers the credential-expiry countdown badge (see
+    # app.services.credential_service.expiry_status) so rotation happens
+    # proactively ahead of a policy deadline instead of reactively after
+    # a lockout. Set by credential_service.set_ssh_password /
+    # set_snmp_credentials and by the bulk ROTATE_CREDENTIALS action;
+    # NULL means never rotated through NetGuard (e.g. legacy env-var-ref
+    # credentials that predate this column).
+    credentials_rotated_at = Column(DateTime(timezone=True), nullable=True)
     # Which credential the terminal (app.api.terminal) and other SSH
     # consumers should present: "password" (default, unchanged behavior)
     # or "key" (use ssh_private_key_encrypted instead of

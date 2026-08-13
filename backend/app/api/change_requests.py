@@ -11,6 +11,7 @@ from app.models.alert import Alert
 from app.models.approval_chain import ApprovalStageStatus, ApprovalStageType
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
+from app.models.golden_config import GoldenConfig
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.approval_chain import (
@@ -28,6 +29,7 @@ from app.schemas.change_request import (
     PendingApprovalItem,
     RemovedLinkPreview,
     RiskAnalysisResult,
+    ThreeWayDiffResponse,
 )
 from app.services import (
     approval_chain_service,
@@ -471,6 +473,31 @@ def get_change_request(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depend
     if not cr:
         raise HTTPException(status_code=404, detail="Change request not found")
     return _hydrate(db, [cr])[0]
+
+
+@router.get("/{cr_id}/three-way-diff", response_model=ThreeWayDiffResponse)
+def get_three_way_diff(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Running vs. golden vs. proposed, for a reviewer deciding whether to
+    approve. The plain `config_diff` on the CR already shows what the
+    change itself does (current -> proposed); this adds the two legs
+    against the device's approved golden config so a reviewer can see
+    whether the change moves the device toward or away from compliance,
+    not just what it changes.
+
+    golden_available is False (and drift_direction is "unknown") when the
+    device has no golden config set yet -- the two golden-side diffs are
+    still returned (against an empty baseline) so the response shape is
+    always the same, but they aren't meaningful without a real baseline.
+    """
+    cr = db.get(ChangeRequest, cr_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
+    golden = db.query(GoldenConfig).filter(GoldenConfig.device_id == cr.device_id).first()
+    golden_text = snapshot_service.decrypt_config(golden.config_encrypted) if golden else None
+
+    result = diff_engine.three_way_diff(golden_text, cr.current_config, cr.proposed_config)
+    return ThreeWayDiffResponse(change_request_id=cr.id, **result)
 
 
 # Only DRAFT/PENDING_APPROVAL CRs can be rescored -- once a CR has been

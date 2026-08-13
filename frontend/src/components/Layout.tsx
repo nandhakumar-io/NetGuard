@@ -5,76 +5,159 @@ import { useTheme } from "../lib/theme";
 import NotificationBell from "./NotificationBell";
 import CommandPalette from "./CommandPalette";
 
-type NavItem = { to: string; label: string; end?: boolean };
+type NavItem = { to: string; label: string; end?: boolean; icon: JSX.Element };
 type NavGroup = { label: string; icon: JSX.Element; items: NavItem[] };
 
-const iconProps = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2 } as const;
+// Slightly larger than the old fixed 16px so each glyph reads clearly in
+// the collapsed 72px rail -- every item below also gets its own distinct
+// icon (previously the rail rendered the *group's* icon once per item,
+// so a 5-item group showed 5 identical icons stacked on top of each other).
+const iconProps = { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2 } as const;
 
 const groups: NavGroup[] = [
   {
     label: "Overview",
     icon: <svg {...iconProps}><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>,
-    items: [{ to: "/", label: "Dashboard", end: true }, { to: "/insights", label: "Insights" }],
+    items: [
+      {
+        to: "/", label: "Dashboard", end: true,
+        icon: <svg {...iconProps}><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>,
+      },
+      {
+        to: "/insights", label: "Insights",
+        icon: <svg {...iconProps}><path d="M3 3v18h18" /><path d="M7 15l4-5 3 3 5-7" /></svg>,
+      },
+    ],
   },
   {
     label: "Change Management",
     icon: <svg {...iconProps}><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>,
     items: [
-      { to: "/change-requests", label: "Change Requests" },
-      { to: "/deployments", label: "Deployments" },
-      { to: "/templates", label: "Templates" },
-      { to: "/maintenance-windows", label: "Maintenance Windows" },
-      { to: "/firmware-upgrades", label: "Firmware Upgrades" },
+      {
+        to: "/change-requests", label: "Change Requests",
+        icon: <svg {...iconProps}><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg>,
+      },
+      {
+        to: "/deployments", label: "Deployments",
+        icon: <svg {...iconProps}><path d="M12 15V3" /><path d="M7 8l5-5 5 5" /><path d="M4 15v4a2 2 0 002 2h12a2 2 0 002-2v-4" /></svg>,
+      },
+      {
+        to: "/templates", label: "Templates",
+        icon: <svg {...iconProps}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" /><path d="M9 13h6M9 17h6" /></svg>,
+      },
+      {
+        to: "/maintenance-windows", label: "Maintenance Windows",
+        icon: <svg {...iconProps}><path d="M14.7 6.3a4 4 0 11-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 015.4-5.4z" /><path d="M17 4l3 3" /></svg>,
+      },
+      {
+        to: "/firmware-upgrades", label: "Firmware Upgrades",
+        icon: <svg {...iconProps}><rect x="6" y="6" width="12" height="12" rx="1" /><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" /></svg>,
+      },
     ],
   },
   {
     label: "Inventory",
     icon: <svg {...iconProps}><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" /></svg>,
     items: [
-      { to: "/devices", label: "Devices" },
-      { to: "/groups", label: "Groups" },
-      { to: "/config-search", label: "Config Search" },
+      {
+        to: "/devices", label: "Devices",
+        icon: <svg {...iconProps}><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" /></svg>,
+      },
+      {
+        to: "/groups", label: "Groups",
+        icon: <svg {...iconProps}><path d="M12 2l9 5-9 5-9-5 9-5z" /><path d="M3 12l9 5 9-5" /><path d="M3 17l9 5 9-5" /></svg>,
+      },
+      {
+        to: "/config-search", label: "Config Search",
+        icon: <svg {...iconProps}><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>,
+      },
     ],
   },
   {
     label: "Network Visibility",
     icon: <svg {...iconProps}><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M12 7v6M12 13l-5.5 4M12 13l5.5 4" /></svg>,
     items: [
-      { to: "/topology", label: "Topology" },
-      { to: "/path-trace", label: "Path Trace" },
-      { to: "/traffic-analysis", label: "Traffic Analysis" },
-      { to: "/syslog", label: "Syslog" },
-      { to: "/drift", label: "Drift" },
+      {
+        to: "/topology", label: "Topology",
+        icon: <svg {...iconProps}><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M12 7v6M12 13l-5.5 4M12 13l5.5 4" /></svg>,
+      },
+      {
+        to: "/path-trace", label: "Path Trace",
+        icon: <svg {...iconProps}><circle cx="5" cy="6" r="2" /><circle cx="19" cy="18" r="2" /><path d="M5 8v4a4 4 0 004 4h6" /></svg>,
+      },
+      {
+        to: "/traffic-analysis", label: "Traffic Analysis",
+        icon: <svg {...iconProps}><path d="M2 12h4l2-7 4 14 3-9 2 5h5" /></svg>,
+      },
+      {
+        to: "/syslog", label: "Syslog",
+        icon: <svg {...iconProps}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M6 9l3 3-3 3M12 15h6" /></svg>,
+      },
+      {
+        to: "/drift", label: "Drift",
+        icon: <svg {...iconProps}><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M6 9v6" /><path d="M18 6a9 9 0 01-9 9" /></svg>,
+      },
     ],
   },
   {
     label: "Alerting",
     icon: <svg {...iconProps}><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></svg>,
     items: [
-      { to: "/alerts", label: "Alerts" },
-      { to: "/incidents", label: "Incidents" },
+      {
+        to: "/alerts", label: "Alerts",
+        icon: <svg {...iconProps}><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></svg>,
+      },
+      {
+        to: "/incidents", label: "Incidents",
+        icon: <svg {...iconProps}><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9L1.8 18a1.5 1.5 0 001.3 2.3h17.8a1.5 1.5 0 001.3-2.3L13.7 3.9a1.5 1.5 0 00-2.6 0z" /></svg>,
+      },
     ],
   },
   {
     label: "Security & Access",
     icon: <svg {...iconProps}><path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6l8-4z" /></svg>,
     items: [
-      { to: "/security", label: "Security" },
-      { to: "/jit-access", label: "JIT Access" },
-      { to: "/audit-log", label: "Audit Log" },
-      { to: "/rbac-audit", label: "RBAC Audit" },
-      { to: "/integrations", label: "Integrations" },
+      {
+        to: "/security", label: "Security",
+        icon: <svg {...iconProps}><path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6l8-4z" /></svg>,
+      },
+      {
+        to: "/jit-access", label: "JIT Access",
+        icon: <svg {...iconProps}><circle cx="8" cy="8" r="5" /><path d="M11.5 11.5L21 21M16 16l3-3M19 19l2-2" /></svg>,
+      },
+      {
+        to: "/audit-log", label: "Audit Log",
+        icon: <svg {...iconProps}><path d="M4 4h16v16H4z" /><path d="M8 8h8M8 12h8M8 16h4" /></svg>,
+      },
+      {
+        to: "/rbac-audit", label: "RBAC Audit",
+        icon: <svg {...iconProps}><circle cx="9" cy="8" r="3" /><path d="M2 20a7 7 0 0114 0" /><circle cx="18" cy="8" r="2.2" /><path d="M16.5 4.5a2.2 2.2 0 013 2 2.2 2.2 0 01-1.5 2.1" /><path d="M17 13.5a6.3 6.3 0 015 6.5h-3" /></svg>,
+      },
+      {
+        to: "/integrations", label: "Integrations",
+        icon: <svg {...iconProps}><path d="M9 3H5a2 2 0 00-2 2v4" /><path d="M15 3h4a2 2 0 012 2v4" /><path d="M9 21H5a2 2 0 01-2-2v-4" /><path d="M15 21h4a2 2 0 002-2v-4" /><rect x="9" y="9" width="6" height="6" rx="1" /></svg>,
+      },
     ],
   },
   {
     label: "Lab",
     icon: <svg {...iconProps}><path d="M9 2v6L4 20a1 1 0 001 1h14a1 1 0 001-1L15 8V2" /><path d="M9 2h6" /></svg>,
-    items: [{ to: "/lab", label: "GNS3 Lab" }],
+    items: [
+      {
+        to: "/lab", label: "GNS3 Lab",
+        icon: <svg {...iconProps}><path d="M9 2v6L4 20a1 1 0 001 1h14a1 1 0 001-1L15 8V2" /><path d="M9 2h6" /></svg>,
+      },
+    ],
   },
   {
     label: "System",
     icon: <svg {...iconProps}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" /></svg>,
-    items: [{ to: "/jobs", label: "Jobs" }],
+    items: [
+      {
+        to: "/jobs", label: "Jobs",
+        icon: <svg {...iconProps}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>,
+      },
+    ],
   },
 ];
 
@@ -152,7 +235,7 @@ function NavGroupSection({
               }`
             }
           >
-            {group.icon}
+            {item.icon}
           </NavLink>
         ))}
       </div>

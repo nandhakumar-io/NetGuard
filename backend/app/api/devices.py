@@ -484,6 +484,10 @@ def bulk_device_action(
                     v3_auth_key=snmp_v3_auth_key,
                     v3_priv_key=snmp_v3_priv_key,
                 )
+            if not rotated_snmp and ssh_password is None and ssh_username is not None:
+                # Username-only change still counts as a credential
+                # rotation for countdown purposes.
+                device.credentials_rotated_at = datetime.datetime.now(datetime.timezone.utc)
             affected.append(device.id)
         db.commit()
 
@@ -507,6 +511,38 @@ def bulk_device_action(
         detail=detail,
         change_request_id=change_request_id,
     )
+
+
+@router.get("/credentials/expiry")
+def list_credential_expiry(
+    status: str | None = Query(
+        None, description="Filter: ok | due_soon | overdue | unknown"
+    ),
+    policy_days: int = Query(credential_service.DEFAULT_ROTATION_POLICY_DAYS, ge=1, le=3650),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Fleet-wide credential-expiry countdown -- backs the badge shown on
+    the device list and a dedicated "credentials due for rotation" view,
+    so rotation happens proactively ahead of the policy deadline instead
+    of reactively after a lockout. See
+    app.services.credential_service.credential_expiry for the per-device
+    calculation and status thresholds.
+    """
+    devices = db.query(Device).order_by(Device.hostname).all()
+    results = []
+    for device in devices:
+        badge = credential_service.credential_expiry(device, policy_days=policy_days)
+        if status and badge["status"] != status:
+            continue
+        results.append(
+            {
+                "device_id": device.id,
+                "hostname": device.hostname,
+                **badge,
+            }
+        )
+    return results
 
 
 @router.get("/{device_id}", response_model=DeviceRead)
@@ -535,7 +571,9 @@ def get_device_overview(
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return device_overview_service.build_device_overview(db, device, hours=hours)
+    overview = device_overview_service.build_device_overview(db, device, hours=hours)
+    overview["credential_expiry"] = credential_service.credential_expiry(device)
+    return overview
 
 
 @router.patch("/{device_id}", response_model=DeviceRead)

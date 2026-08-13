@@ -19,6 +19,7 @@ already stripped by the caller):
     approve <change-request-id>
     reject <change-request-id>
     rollback <deployment-id>
+    rollback confirm <deployment-id>
     status <hostname>
     ack <alert-id>
     resolve <alert-id>
@@ -156,7 +157,8 @@ HELP_TEXT = (
     "*Actions*\n"
     "`approve <change-request-id>` -- approve a pending change request\n"
     "`reject <change-request-id>` -- reject a pending change request\n"
-    "`rollback <deployment-id>` -- roll back a failed deployment\n"
+    "`rollback <deployment-id>` -- preview a rollback's diff (dry run, nothing pushed)\n"
+    "`rollback confirm <deployment-id>` -- actually queue the previewed rollback\n"
     "`ack <alert-id>` -- acknowledge an alert\n"
     "`resolve <alert-id>` -- resolve an alert\n"
     "`backup <hostname>` -- trigger an on-demand config backup\n"
@@ -238,13 +240,49 @@ def _reject(db: Session, user: User, arg: str) -> ChatOpsResult:
 
 
 def _rollback(db: Session, user: User, arg: str) -> ChatOpsResult:
-    from app.api.deployments import rollback_deployment
+    """Two-step: `rollback <deployment-id>` shows a dry-run diff of what
+    the rollback would change (no ChangeRequest created, nothing pushed);
+    `rollback confirm <deployment-id>` actually queues it. Mirrors the
+    Deployments page, which shows the same preview before its "Roll Back"
+    button is confirmed -- ChatOps shouldn't be able to push a config
+    change to a device with less scrutiny than the UI gives it.
+    """
+    from app.api.deployments import preview_deployment_rollback, rollback_deployment
 
     if not arg:
-        raise ChatOpsCommandError("Usage: `rollback <deployment-id>`")
+        raise ChatOpsCommandError("Usage: `rollback <deployment-id>` to preview, then `rollback confirm <deployment-id>` to execute.")
+
+    parts = arg.split(maxsplit=1)
+    if parts[0].lower() == "confirm":
+        if len(parts) < 2:
+            raise ChatOpsCommandError("Usage: `rollback confirm <deployment-id>`")
+        deployment_id = _parse_uuid(parts[1].strip(), "deployment")
+        result = rollback_deployment(deployment_id, db=db, current_user=user)
+        return ChatOpsResult(text=f"⏪ {result['message']} (new change request `{result['change_request_id']}`).")
+
     deployment_id = _parse_uuid(arg, "deployment")
-    result = rollback_deployment(deployment_id, db=db, current_user=user)
-    return ChatOpsResult(text=f"⏪ {result['message']} (new change request `{result['change_request_id']}`).")
+    preview = preview_deployment_rollback(deployment_id, db=db, _current_user=user)
+
+    if preview.blocked:
+        return ChatOpsResult(
+            ok=False,
+            severity="warning",
+            text=f":no_entry: Can't roll back `{deployment_id}` yet -- {preview.blocked_reason}",
+        )
+    if preview.identical:
+        return ChatOpsResult(
+            text=f":information_source: `{preview.hostname}` already matches pre-deploy snapshot v{preview.target_version} -- nothing to roll back.",
+        )
+
+    warning_line = f"\n:warning: {preview.warning}" if preview.warning else ""
+    text = (
+        f"*Rollback preview for* `{preview.hostname}` *(deployment `{deployment_id}`)*\n"
+        f"Restoring pre-deploy snapshot v{preview.target_version}: "
+        f"`+{preview.added_lines}/-{preview.removed_lines}` lines.{warning_line}\n"
+        f"Nothing has been changed yet -- run `rollback confirm {deployment_id}` to apply, "
+        "or click Confirm below."
+    )
+    return ChatOpsResult(text=text, items=[{"rollback_deployment_id": str(deployment_id)}])
 
 
 def _get_device_or_error(db: Session, hostname: str) -> Device:

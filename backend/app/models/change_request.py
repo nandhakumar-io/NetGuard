@@ -157,3 +157,12 @@ class ChangeRequest(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Approval SLA countdown -- surfaced where the approver actually
+    # lives (Slack/Teams), not just the in-app pending-approvals queue.
+    # Tracks which reminder stages have already been posted so the
+    # periodic sweep (app.tasks.run_approval_sla_notify_sweep_task) never
+    # re-posts the same stage twice: "due_soon" fires once when the SLA
+    # timer crosses into its warning window, "overdue" fires once when it
+    # breaches. NULL until the first reminder is sent.
+    sla_last_notified_stage = Column(String, nullable=True)

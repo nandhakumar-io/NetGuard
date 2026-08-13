@@ -211,6 +211,23 @@ class Settings(BaseSettings):
         "low": 72.0,
     }
 
+    # Approval SLA Slack/Teams reminders: fraction of the SLA window
+    # remaining at which a "due soon" countdown is posted to the
+    # approver's channel (in addition to the always-once "overdue" post).
+    # 0.25 = posted once the timer has 25% of its window left.
+    APPROVAL_SLA_WARNING_FRACTION: float = 0.25
+    APPROVAL_SLA_NOTIFY_SWEEP_INTERVAL_SECONDS: int = 300
+
+    # Daily hour (UTC) at which recurring maintenance schedules
+    # (patch Tuesdays, monthly firmware windows) are materialized into
+    # concrete MaintenanceWindow rows for the coming horizon.
+    RECURRING_WINDOW_GENERATION_HOUR_UTC: int = 1
+
+    # Base URL of the frontend, used to build deep links in Slack/Teams
+    # messages (approval SLA reminders, war-room links, ...) back to the
+    # in-app view of whatever the message is about.
+    FRONTEND_URL: str = "http://localhost:5173"
+
     # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
     # configurable" -- these two knobs are that configuration. After a
     # deploy, the health suite is polled every POLL_INTERVAL_SECONDS for up

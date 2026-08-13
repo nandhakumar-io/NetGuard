@@ -793,6 +793,32 @@ export interface DeploymentRecord {
   health_checks: HealthCheck[];
 }
 
+export interface ThreeWayDiff {
+  change_request_id: string;
+  golden_available: boolean;
+  current_vs_proposed: string;
+  golden_vs_current: string;
+  golden_vs_proposed: string;
+  current_drift_lines: number;
+  proposed_drift_lines: number;
+  drift_direction: "toward_compliance" | "away_from_compliance" | "unchanged" | "unknown";
+}
+
+export interface DeploymentRollbackPreview {
+  deployment_id: string;
+  device_id: string;
+  hostname: string;
+  target_version: string;
+  current_source: "live" | "last_snapshot" | "unavailable";
+  diff: string;
+  identical: boolean;
+  added_lines: number;
+  removed_lines: number;
+  warning: string | null;
+  blocked: boolean;
+  blocked_reason: string | null;
+}
+
 export interface ProtocolOperationRecord {
   id: string;
   protocol: "netconf" | "restconf" | "snmp";
