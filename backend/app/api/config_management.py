@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
+from app.models.interface_alert_config import InterfaceAlertConfig
 from app.models.snapshot import ConfigSnapshot
 from app.models.user import User, UserRole
 from app.schemas.config_management import (
@@ -20,6 +21,8 @@ from app.schemas.config_management import (
     GoldenConfigCompareResponse,
     GoldenConfigRead,
     GoldenConfigSet,
+    InterfaceAlertConfigOut,
+    InterfaceAlertConfigUpdate,
     InterfacesResponse,
     InterfaceStatusOut,
     RestoreConfigRequest,
@@ -33,7 +36,9 @@ from app.services import (
     audit_service,
     config_format_service,
     diff_engine,
+    metrics_service,
     snapshot_service,
+    snmp_service,
 )
 from app.services.protocol_manager import ProtocolManager, select_protocol
 from app.services.rollback_service import list_snapshots
@@ -177,14 +182,96 @@ def view_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depen
         )
 
     parsed = config_format_service.parse_interfaces(result.output, parse_protocol)
+
+    # Best-effort switchport (VLAN/mode) enrichment -- only meaningful for
+    # devices that have SNMP configured, and never allowed to fail the
+    # whole read: any error here just leaves port_mode/vlan unpopulated.
+    vlan_info: dict = {}
+    edge_port_info: dict = {}
+    if parsed and device.snmp_version:
+        try:
+            auth = metrics_service.build_snmp_auth(device)
+            vlan_info = snmp_service.walk_switchport_vlans(device.ip_address, auth)
+            edge_port_info = snmp_service.walk_stp_edge_ports(device.ip_address, auth)
+        except Exception:
+            vlan_info = {}
+            edge_port_info = {}
+
+    alert_config_by_if = {
+        row.if_descr: row.enabled
+        for row in db.query(InterfaceAlertConfig).filter(InterfaceAlertConfig.device_id == device.id).all()
+    }
+
+    interfaces_out: list[InterfaceStatusOut] = []
+    for i in parsed:
+        extra = vlan_info.get(i.name, {})
+        mode = extra.get("mode")
+        if not mode and i.ip_addresses:
+            # No switchport/PVID data, but it's got an IP -- almost
+            # certainly an L3/routed port rather than an access port with
+            # unreadable VLAN info.
+            mode = "routed"
+        interfaces_out.append(
+            InterfaceStatusOut(
+                **vars(i),
+                port_mode=mode,
+                vlan=extra.get("vlan"),
+                trunk_vlans=extra.get("trunk_vlans"),
+                edge_port=edge_port_info.get(i.name),
+                alerts_enabled=alert_config_by_if.get(i.name, True),
+            )
+        )
+
     return InterfacesResponse(
         device_id=device.id,
         hostname=device.hostname,
         protocol=protocol,
-        interfaces=[InterfaceStatusOut(**vars(i)) for i in parsed],
+        interfaces=interfaces_out,
         retrieved_at=datetime.datetime.utcnow(),
         error=None if parsed else "Device returned no parsable interface data",
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-interface "alert me if this port goes down" configuration
+# ---------------------------------------------------------------------------
+@router.get("/interfaces/alert-config", response_model=list[InterfaceAlertConfigOut])
+def list_interface_alert_config(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    device = _get_device(db, device_id)
+    return [
+        InterfaceAlertConfigOut(device_id=device.id, if_descr=row.if_descr, enabled=row.enabled)
+        for row in db.query(InterfaceAlertConfig).filter(InterfaceAlertConfig.device_id == device.id).all()
+    ]
+
+
+@router.put("/interfaces/{if_descr}/alert-config", response_model=InterfaceAlertConfigOut)
+def set_interface_alert_config(
+    device_id: uuid.UUID,
+    if_descr: str,
+    payload: InterfaceAlertConfigUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Arms/mutes the automatic "Interface Down" critical alert for one
+    interface (see InterfaceAlertConfig and metrics_service._sync_interface_status).
+    Any authenticated user can tune this -- it only affects alert noise,
+    not device state -- same bar as acking/resolving an alert.
+    """
+    device = _get_device(db, device_id)
+    row = (
+        db.query(InterfaceAlertConfig)
+        .filter(InterfaceAlertConfig.device_id == device.id, InterfaceAlertConfig.if_descr == if_descr)
+        .first()
+    )
+    if row is None:
+        row = InterfaceAlertConfig(device_id=device.id, if_descr=if_descr, enabled=payload.enabled)
+        db.add(row)
+    else:
+        row.enabled = payload.enabled
+    row.updated_by = current_user.email
+    db.commit()
+    db.refresh(row)
+    return InterfaceAlertConfigOut(device_id=device.id, if_descr=row.if_descr, enabled=row.enabled)
 
 
 # ---------------------------------------------------------------------------

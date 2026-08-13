@@ -55,6 +55,7 @@ from app.models.git_repo_config import (  # noqa: F401
 )
 from app.models.golden_config import GoldenConfig  # noqa: F401
 from app.models.health_color import HealthColor  # noqa: F401
+from app.models.interface_alert_config import InterfaceAlertConfig  # noqa: F401
 from app.models.interface_status import (  # noqa: F401
     InterfaceOperStatus,
     InterfaceStatus,

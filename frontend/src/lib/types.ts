@@ -267,6 +267,11 @@ export interface InterfaceStatus {
   mtu?: number | null;
   speed?: string | null;
   mac_address?: string | null;
+  port_mode?: string | null;
+  vlan?: string | null;
+  trunk_vlans?: string[] | null;
+  edge_port?: boolean | null;
+  alerts_enabled?: boolean;
 }
 
 export interface InterfacesResponse {

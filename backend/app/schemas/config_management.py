@@ -53,6 +53,16 @@ class InterfaceStatusOut(BaseModel):
     mtu: int | None = None
     speed: str | None = None
     mac_address: str | None = None
+    # Best-effort switchport enrichment (see snmp_service.walk_switchport_vlans)
+    # -- None/unknown on platforms or protocols that don't expose it rather
+    # than a guess, so the UI shows "--" instead of a wrong value.
+    port_mode: str | None = None  # "access" | "trunk" | "routed" | None
+    vlan: str | None = None  # access/native VLAN ID
+    edge_port: bool | None = None  # STP edge/portfast state; not populated yet (vendor-proprietary MIBs)
+    # Whether the automatic "Interface Down" critical alert is armed for
+    # this port -- see InterfaceAlertConfig. True unless an operator has
+    # explicitly muted it from the Interfaces tab.
+    alerts_enabled: bool = True
 
 
 class InterfacesResponse(BaseModel):
@@ -64,6 +74,18 @@ class InterfacesResponse(BaseModel):
     # Populated (interfaces == []) when the read itself failed, so the UI
     # can tell "device has no interfaces" apart from "couldn't reach it".
     error: str | None = None
+
+
+class InterfaceAlertConfigUpdate(BaseModel):
+    enabled: bool
+
+
+class InterfaceAlertConfigOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    device_id: uuid.UUID
+    if_descr: str
+    enabled: bool
 
 
 class BackupHistoryEntry(BaseModel):

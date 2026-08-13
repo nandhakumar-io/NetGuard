@@ -279,15 +279,15 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100 md:flex">
-      {/* Desktop sidebar: collapses to a 72px icon rail and expands to a
-          full 264px panel on hover. Pure CSS (group-hover) so there's no
-          layout-thrash from React state, and it lives as a normal flex
-          item -- not fixed/absolute -- so main content reflows smoothly
-          alongside it instead of being covered. */}
-      <aside
-        className="hidden md:flex group/side bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static w-[72px] hover:w-64 transition-[width] duration-300 ease-in-out overflow-hidden z-20"
-      >
-        {sidebarContent(undefined, true)}
+      {/* Desktop sidebar: a normal static column, always at full width with
+          labels always legible. (Previously this collapsed to a 72px icon
+          rail and relied on a CSS :hover to expand -- with overflow-hidden
+          clipping the panel at 72px, the labels' fade-in transition and the
+          width transition drifted out of sync, so text was frequently
+          clipped/invisible and the hover expansion felt unreliable. A
+          static, always-expanded rail avoids that class of bug entirely.) */}
+      <aside className="hidden md:flex bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static w-64 overflow-hidden z-20">
+        {sidebarContent(undefined, false)}
       </aside>
 
       {/* Mobile backdrop */}

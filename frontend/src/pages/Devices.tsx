@@ -319,7 +319,16 @@ function DeviceInlineDetails({
   const [interfaces, setInterfaces] = useState<InterfacesResponse | null>(null);
   const [interfacesLoading, setInterfacesLoading] = useState(false);
   const [interfacesError, setInterfacesError] = useState<string | null>(null);
+  // Toggling "alert on down" is per-interface and fires its own PUT, so it
+  // tracks its own in-flight if_descr rather than reusing interfacesLoading.
+  const [alertConfigSaving, setAlertConfigSaving] = useState<string | null>(null);
 
+  // Deliberately NOT auto-fetched on tab open (unlike Health/Config) --
+  // reading interface status means a live SNMP/NETCONF/SSH round-trip to
+  // the device, and firing that on every tab click across a fleet view is
+  // needless load on the device and the poller both. The operator opts in
+  // with the "Run Discovery" button below; once fetched it's cached in
+  // state for the rest of this session same as everything else here.
   const loadInterfaces = () => {
     setInterfacesLoading(true);
     setInterfacesError(null);
@@ -328,6 +337,21 @@ function DeviceInlineDetails({
       .then((res) => setInterfaces(res.data))
       .catch((err: any) => setInterfacesError(err?.response?.data?.detail || "Failed to read interface status."))
       .finally(() => setInterfacesLoading(false));
+  };
+
+  const setInterfaceAlertsEnabled = (ifName: string, enabled: boolean) => {
+    setAlertConfigSaving(ifName);
+    api
+      .put(`/devices/${device.id}/config/interfaces/${encodeURIComponent(ifName)}/alert-config`, { enabled })
+      .then(() => {
+        setInterfaces((prev) =>
+          prev
+            ? { ...prev, interfaces: prev.interfaces.map((i) => (i.name === ifName ? { ...i, alerts_enabled: enabled } : i)) }
+            : prev
+        );
+      })
+      .catch((err: any) => setInterfacesError(err?.response?.data?.detail || "Failed to update alert setting."))
+      .finally(() => setAlertConfigSaving(null));
   };
 
   // Discovery tab: on-demand SNMP discovery (hostname, ARP table, routing
@@ -466,9 +490,7 @@ function DeviceInlineDetails({
     if ((activeTab === "Overview" || activeTab === "Health" || activeTab === "Interfaces") && !health && !healthLoading) {
       loadHealth();
     }
-    if (activeTab === "Interfaces" && !interfaces && !interfacesLoading) {
-      loadInterfaces();
-    }
+    // Interfaces tab intentionally does NOT auto-fetch -- see loadInterfaces.
     if (activeTab === "Alerts" && deviceAlerts.length === 0 && !alertsLoading) {
       loadAlerts();
     }
@@ -1107,6 +1129,10 @@ function DeviceInlineDetails({
                         <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Oper</th>
                         <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">IP Address(es)</th>
                         <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">MTU</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Port Mode</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">VLAN(s)</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Edge Port</th>
+                        <th className="text-left px-3 py-2 font-bold text-slate-500 dark:text-slate-400 uppercase">Down Alerts</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1144,12 +1170,70 @@ function DeviceInlineDetails({
                             {iface.ip_addresses.length ? iface.ip_addresses.join(", ") : "—"}
                           </td>
                           <td className="px-3 py-1.5 text-slate-500 dark:text-slate-400">{iface.mtu ?? "—"}</td>
+                          <td className="px-3 py-1.5">
+                            {iface.port_mode ? (
+                              <span
+                                className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  iface.port_mode === "trunk"
+                                    ? "bg-purple-50 text-purple-700 border border-purple-200"
+                                    : iface.port_mode === "access"
+                                    ? "bg-sky-50 text-sky-700 border border-sky-200"
+                                    : "bg-slate-100 text-slate-500 border border-slate-200"
+                                }`}
+                              >
+                                {iface.port_mode}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 dark:text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5 font-mono text-slate-600 dark:text-slate-300">
+                            {iface.port_mode === "trunk" && iface.trunk_vlans?.length
+                              ? `${iface.vlan ?? "—"} (native), ${iface.trunk_vlans.join(", ")}`
+                              : iface.vlan ?? "—"}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            {iface.edge_port === true ? (
+                              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-50 text-green-700 border border-green-200">
+                                Edge
+                              </span>
+                            ) : iface.edge_port === false ? (
+                              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200">
+                                Non-edge
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 dark:text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <button
+                              onClick={() => setInterfaceAlertsEnabled(iface.name, !iface.alerts_enabled)}
+                              disabled={alertConfigSaving === iface.name}
+                              title={
+                                iface.alerts_enabled
+                                  ? "Interface Down alerts are armed for this port -- click to mute"
+                                  : "Interface Down alerts are muted for this port -- click to re-arm"
+                              }
+                              className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase border transition-colors disabled:opacity-50 ${
+                                iface.alerts_enabled
+                                  ? "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
+                                  : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
+                              }`}
+                            >
+                              {alertConfigSaving === iface.name ? "Saving…" : iface.alerts_enabled ? "On" : "Muted"}
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               )}
+              <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1.5">
+                Port Mode / VLAN / Edge Port are read via SNMP (BRIDGE-MIB / Q-BRIDGE-MIB, and Cisco's
+                CISCO-STP-EXTENSIONS-MIB for edge state) and show "—" on devices or platforms that don't expose them.
+                "Down Alerts" toggles whether an Interface Down alert fires for that specific port.
+              </p>
             </div>
 
             <div>

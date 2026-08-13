@@ -20,6 +20,7 @@ from app.models.alert import AlertSource
 from app.models.device import Device, DeviceStatus
 from app.models.device_status_history import DeviceStatusHistory
 from app.models.health_color import HealthColor
+from app.models.interface_alert_config import InterfaceAlertConfig
 from app.models.interface_status import InterfaceOperStatus, InterfaceStatus
 from app.services import (
     alert_service,
@@ -222,25 +223,38 @@ def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) ->
 
         category = f"Interface Down: {if_descr}"
 
+        # Per-interface opt-out (see InterfaceAlertConfig) -- history is
+        # still recorded above regardless, so flap timelines/topology
+        # stay complete even for muted ports; only the critical alert +
+        # notification are suppressed. No row for this (device, if_descr)
+        # means the implicit default (enabled) applies.
+        alert_config = (
+            db.query(InterfaceAlertConfig)
+            .filter(InterfaceAlertConfig.device_id == device.id, InterfaceAlertConfig.if_descr == if_descr)
+            .first()
+        )
+        alerts_enabled = alert_config.enabled if alert_config is not None else True
+
         if new_status == InterfaceOperStatus.DOWN:
             # A device's very first-ever poll finding a port already down
             # still alerts (there's nothing "newly down" to compare
             # against, but an operationally-down port is worth surfacing
             # regardless of whether we caught the actual transition).
-            alert, is_new = alert_service.raise_alert(
-                db,
-                device_id=device.id,
-                severity="critical",
-                source=AlertSource.HEALTH_POLL,
-                category=category,
-                message=f"{device.hostname}: interface {if_descr} is down",
-            )
-            if is_new:
-                notification_service.notify(
-                    event="Interface Down",
-                    message=f"{device.hostname}: interface {if_descr} is down",
+            if alerts_enabled:
+                alert, is_new = alert_service.raise_alert(
+                    db,
+                    device_id=device.id,
                     severity="critical",
+                    source=AlertSource.HEALTH_POLL,
+                    category=category,
+                    message=f"{device.hostname}: interface {if_descr} is down",
                 )
+                if is_new:
+                    notification_service.notify(
+                        event="Interface Down",
+                        message=f"{device.hostname}: interface {if_descr} is down",
+                        severity="critical",
+                    )
         elif latest is not None:
             # Only auto-resolve on a genuine down->up recovery, not on the
             # very first poll ever seeing this port (nothing to clear).

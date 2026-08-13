@@ -673,6 +673,122 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
     }
 
 
+def _bitmap_to_port_list(raw: str) -> list[int]:
+    """Q-BRIDGE-MIB PortList OCTET STRINGs are a bitmap, one bit per bridge
+    port (bit 0 of byte 0 == port 1, MSB-first within each byte). pysnmp
+    hands these back either as a real bytes-ish octet string or as a hex
+    string like '0xf0 03 ...' / raw escaped bytes depending on agent --
+    normalize both before scanning bits."""
+    if not raw:
+        return []
+    cleaned = raw.strip()
+    byte_vals: list[int] = []
+    hex_tokens = re.findall(r"[0-9A-Fa-f]{2}", cleaned.replace("0x", "").replace(" ", ""))
+    if hex_tokens and re.fullmatch(r"(0x)?([0-9A-Fa-f]{2}\s*)+", cleaned):
+        byte_vals = [int(h, 16) for h in hex_tokens]
+    else:
+        byte_vals = [ord(c) for c in cleaned]
+    ports = []
+    for byte_idx, byte_val in enumerate(byte_vals):
+        for bit in range(8):
+            if byte_val & (0x80 >> bit):
+                ports.append(byte_idx * 8 + bit + 1)
+    return ports
+
+
+def walk_switchport_vlans(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
+    """Best-effort switchport (mode / VLAN) lookup via the standard
+    BRIDGE-MIB / Q-BRIDGE-MIB, used to enrich the device Interfaces tab
+    with Port Mode / VLAN columns (see api.config_management.view_interfaces).
+
+    Walks dot1dBasePortIfIndex to map each bridge port back to its
+    ifIndex, then:
+      - dot1qPvid for that port's untagged/access (native) VLAN
+      - dot1qVlanStaticEgressPorts (per-VLAN egress port bitmap) to see
+        how many VLANs each port carries tagged traffic for -- a port
+        appearing in more than one VLAN's egress list is a trunk, and
+        every VLAN it appears in becomes part of ``trunk_vlans``.
+
+    Returns ``{ifDescr: {"vlan": "<id>", "mode": "access"|"trunk",
+    "trunk_vlans": ["10", "20", ...] | None}}`` keyed by the same
+    ifDescr string ifTable reports elsewhere in this module.
+
+    Any failure here is swallowed and just leaves these columns
+    unpopulated rather than breaking the rest of the interface read --
+    not every platform exposes this over SNMP.
+    """
+    try:
+        if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+        if not if_descr:
+            return {}
+        base_port_to_if_index = _walk(ip_address, auth, "1.3.6.1.2.1.17.1.4.1.2", timeout)
+        pvid_by_base_port = _walk(ip_address, auth, "1.3.6.1.2.1.17.7.1.4.5.1.1", timeout)
+        if not base_port_to_if_index or not pvid_by_base_port:
+            return {}
+
+        # dot1qVlanStaticEgressPorts: index is the VLAN ID, value is a
+        # PortList bitmap of every bridge port that egresses that VLAN
+        # (tagged or untagged). A port that shows up under >1 VLAN here is
+        # trunking; a port that shows up under exactly the VLAN matching
+        # its own PVID (and no others) is a plain access port.
+        egress_by_vlan = _walk(ip_address, auth, "1.3.6.1.2.1.17.7.1.4.3.1.2", timeout)
+        vlans_by_base_port: dict[str, list[str]] = {}
+        for vlan_id, bitmap in (egress_by_vlan or {}).items():
+            for port in _bitmap_to_port_list(bitmap):
+                vlans_by_base_port.setdefault(str(port), []).append(str(vlan_id))
+
+        result: dict[str, dict] = {}
+        for base_port, if_index in base_port_to_if_index.items():
+            pvid = pvid_by_base_port.get(base_port)
+            descr = if_descr.get(str(if_index))
+            if not pvid or not descr:
+                continue
+            native_vlan = str(_parse_snmp_enum_int(pvid) or pvid)
+            member_vlans = sorted(set(vlans_by_base_port.get(str(base_port), [])), key=lambda v: int(v) if v.isdigit() else 0)
+            is_trunk = len(member_vlans) > 1
+            result[descr.strip()] = {
+                "vlan": native_vlan,
+                "mode": "trunk" if is_trunk else "access",
+                "trunk_vlans": member_vlans if is_trunk else None,
+            }
+        return result
+    except Exception:
+        return {}
+
+
+def walk_stp_edge_ports(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
+    """Best-effort STP edge-port (PortFast) state via Cisco's
+    CISCO-STP-EXTENSIONS-MIB (stpxFastPortOperState, .1.3.6.1.4.1.9.9.87.1.4.1.1.2),
+    the closest thing to a widely-deployed edge-port indicator over SNMP --
+    there's no vendor-neutral MIB for this (RSTP's operEdgePort is only
+    exposed via NETCONF/YANG on most platforms).
+
+    Reuses the same dot1dBasePortIfIndex mapping as walk_switchport_vlans
+    to translate the MIB's bridge-port index back to ifDescr. Returns
+    ``{ifDescr: True|False}`` for ports where a value was read; any
+    platform that doesn't implement this MIB (Juniper, most non-Cisco
+    gear) or any SNMP failure just yields ``{}``, leaving edge_port
+    unpopulated (None) rather than reported as False.
+    """
+    try:
+        if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+        base_port_to_if_index = _walk(ip_address, auth, "1.3.6.1.2.1.17.1.4.1.2", timeout)
+        fast_state = _walk(ip_address, auth, "1.3.6.1.4.1.9.9.87.1.4.1.1.2", timeout)
+        if not if_descr or not base_port_to_if_index or not fast_state:
+            return {}
+        result: dict[str, bool] = {}
+        for base_port, if_index in base_port_to_if_index.items():
+            descr = if_descr.get(str(if_index))
+            state = fast_state.get(str(base_port))
+            if not descr or state is None:
+                continue
+            # stpxFastPortOperState: 1 = enabled (edge/PortFast), 2 = disabled
+            result[descr.strip()] = str(_parse_snmp_enum_int(state) or state) == "1"
+        return result
+    except Exception:
+        return {}
+
+
 def _mac_from_snmp_value(raw: str) -> str:
     """pysnmp returns OctetString MAC values either as a colon-hex string
     already, or as a raw/escaped byte string depending on the agent --
