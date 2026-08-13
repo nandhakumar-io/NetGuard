@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
-import { api } from "../lib/api";
+import { api, getAccessToken } from "../lib/api";
 import { DeploymentRecord, DeploymentLog, DeploymentRollbackPreview } from "../lib/types";
 import PipelineStages, { Stage, StageState, stagesFromStatus } from "../components/PipelineStages";
 import ConfigDiff from "../components/ConfigDiff";
@@ -76,7 +76,7 @@ function DeploymentDetails({ deployment }: { deployment: DeploymentRecord }) {
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     // If backend is running locally usually port 8000
     const host = window.location.hostname === "localhost" ? "localhost:8000" : window.location.host;
-    const wsUrl = `${wsProtocol}//${host}/api/v1/deployments/ws`;
+    const wsUrl = `${wsProtocol}//${host}/api/v1/deployments/ws?token=` + encodeURIComponent(getAccessToken() || "");
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
@@ -340,7 +340,7 @@ export default function Deployments() {
     load();
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.hostname === "localhost" ? "localhost:8000" : window.location.host;
-    const wsUrl = `${wsProtocol}//${host}/api/v1/deployments/ws`;
+    const wsUrl = `${wsProtocol}//${host}/api/v1/deployments/ws?token=` + encodeURIComponent(getAccessToken() || "");
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {

@@ -753,6 +753,15 @@ def delete_device(
         db.query(DiscoveredNeighbor).filter(
             (DiscoveredNeighbor.device_id == device_id) | (DiscoveredNeighbor.neighbor_device_id == device_id)
         ).delete(synchronize_session=False)
+        # PathHop.device_id: best-effort link back to inventory when a hop's
+        # IP matches a managed device. A device can show up here as a mere
+        # *intermediate* hop in some other pair's trace (neither source nor
+        # target), which the path_trace_ids purge above doesn't cover --
+        # null it out rather than deleting the hop, since the hop row itself
+        # (RTT/loss/timeout) is still valid history for that trace.
+        db.query(PathHop).filter(PathHop.device_id == device_id).update(
+            {"device_id": None}, synchronize_session=False
+        )
 
         # Compliance-relevant records (only reached when force=true or counts are 0).
         # Deletion order: children before parents.

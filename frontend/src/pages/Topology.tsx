@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, getAccessToken } from "../lib/api";
 import {
   TopologyResponse,
   TopologyNode,
@@ -526,7 +526,19 @@ export default function Topology() {
       if (cancelled) return;
       setLiveStatus("connecting");
       const httpBase = api.defaults.baseURL || window.location.origin;
-      const wsUrl = httpBase.replace(/^http/, "ws").replace(/\/$/, "") + "/topology/ws";
+      // The backend's /topology/ws handler requires an auth token as a
+      // query param -- there's no HTTP response to hang a 401 off of once
+      // the handshake completes, so it closes with code 1008 instead (see
+      // app.core.deps.get_current_user_ws). Without this the socket opens,
+      // gets immediately closed by the server, and the onclose handler's
+      // backoff loop retries forever -- which is exactly the "stuck on
+      // reconnecting" symptom, since every retry hits the same missing-token
+      // rejection.
+      const token = getAccessToken();
+      const wsUrl =
+        httpBase.replace(/^http/, "ws").replace(/\/$/, "") +
+        "/topology/ws" +
+        (token ? `?token=${encodeURIComponent(token)}` : "");
       const ws = new WebSocket(wsUrl);
       socket = ws;
 

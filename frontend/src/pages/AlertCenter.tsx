@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, getAccessToken } from "../lib/api";
 import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
 import { useToast, errorMessage } from "../lib/toast";
 import { useConfirm } from "../lib/confirm";
@@ -163,7 +163,7 @@ export default function AlertCenter() {
   useEffect(() => {
     let mounted = true;
     const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
-    const wsUrl = base.replace(/^http/, "ws") + "/alerts/ws";
+    const wsUrl = base.replace(/^http/, "ws") + "/alerts/ws?token=" + encodeURIComponent(getAccessToken() || "");
     let ws: WebSocket | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 

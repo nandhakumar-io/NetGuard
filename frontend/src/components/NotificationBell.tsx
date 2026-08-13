@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { api, getAccessToken } from "../lib/api";
 import { AppNotification, NotificationSummary } from "../lib/types";
 
 const SEVERITY_DOT: Record<string, string> = {
@@ -88,7 +88,7 @@ export default function NotificationBell() {
   useEffect(() => {
     let mounted = true;
     const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
-    const wsUrl = base.replace(/^http/, "ws") + "/notifications/ws";
+    const wsUrl = base.replace(/^http/, "ws") + "/notifications/ws?token=" + encodeURIComponent(getAccessToken() || "");
     let ws: WebSocket | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
