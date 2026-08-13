@@ -29,7 +29,7 @@ branch_labels = None
 depends_on = None
 
 recurrence_frequency_enum = postgresql.ENUM(
-    "weekly", "monthly", name="recurrencefrequency", create_type=True,
+    "weekly", "monthly", name="recurrencefrequency", create_type=False,
 )
 
 
