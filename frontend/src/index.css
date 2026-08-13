@@ -1,6 +1,10 @@
-@tailwind base;
++@tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -49,7 +53,20 @@ html.dark ::-webkit-scrollbar-thumb {
     radial-gradient(ellipse 1200px 600px at 15% -10%, rgba(34,211,238,0.06), transparent 60%),
     radial-gradient(ellipse 900px 500px at 100% 0%, rgba(167,139,250,0.05), transparent 55%),
     #080B10;
-  min-height: 100%;
+  /* Was `min-height: 100%`, which resolves against the parent's height --
+     with no explicit height set anywhere up the ancestor chain (html/body/
+     #root), that collapses to 0/auto, i.e. this element's own content
+     height. Tailwind's `min-h-screen` (100vh) on the same element got
+     silently overridden by this rule since both are plain-class
+     selectors of equal specificity and this stylesheet loads after
+     Tailwind's utilities -- the visible bug was a login page that only
+     filled as tall as its content, exposing the plain white document
+     background as a dead strip below the fold. 100vh (with dvh as a
+     modern fallback for mobile browser chrome) fixes it independent of
+     ancestor height.
+  */
+  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* Bracket-corner panel: four short corner ticks instead of a full
