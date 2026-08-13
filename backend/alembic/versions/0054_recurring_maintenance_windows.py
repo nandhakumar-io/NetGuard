@@ -20,6 +20,7 @@ from migration_helpers import (
     create_table_if_missing,
     drop_column_if_exists,
     drop_index_if_exists,
+    enum_type_exists,
 )
 
 revision = "0054"
@@ -33,7 +34,8 @@ recurrence_frequency_enum = postgresql.ENUM(
 
 
 def upgrade() -> None:
-    recurrence_frequency_enum.create(op.get_bind(), checkfirst=True)
+    if not enum_type_exists("recurrencefrequency"):
+        recurrence_frequency_enum.create(op.get_bind(), checkfirst=True)
 
     create_table_if_missing(
         "recurring_maintenance_schedules",
