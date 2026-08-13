@@ -112,10 +112,12 @@ function NavGroupSection({
   group,
   defaultOpen,
   onNavigate,
+  fadeClass = "",
 }: {
   group: NavGroup;
   defaultOpen: boolean;
   onNavigate?: () => void;
+  fadeClass?: string;
 }) {
   // Each group manages its own open/closed state -- click the header to
   // expand, click again to collapse, independent of the other groups.
@@ -138,10 +140,10 @@ function NavGroupSection({
         className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-noc-muted hover:bg-white/5 hover:text-slate-200 dark:hover:text-noc-text transition-colors"
       >
         <span className="text-slate-500 dark:text-noc-muted shrink-0">{group.icon}</span>
-        <span className="flex-1 text-left whitespace-nowrap">{group.label}</span>
+        <span className={`flex-1 text-left ${fadeClass || "whitespace-nowrap"}`}>{group.label}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""}`}
+          className={`transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""} ${fadeClass}`}
         >
           <path d="M9 6l6 6-6 6" />
         </svg>
@@ -152,7 +154,7 @@ function NavGroupSection({
         }`}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className="pl-4 pt-1 pb-1 space-y-0.5">
+          <div className={`pl-4 pt-1 pb-1 space-y-0.5 ${fadeClass}`}>
             {group.items.map((item) => (
               <NavLink
                 key={item.to}
@@ -214,13 +216,20 @@ export default function Layout() {
     }
   }, [mobileOpen]);
 
-  const sidebarContent = (onNavigate?: () => void) => (
+  // Fade-only class applied to any label/text that should disappear while
+  // the rail is collapsed and fade back in on hover. Icons/badges never
+  // carry this class, so the collapsed rail still reads as a usable icon
+  // dock rather than a sliver of clipped text.
+  const fade =
+    "opacity-0 group-hover/side:opacity-100 transition-opacity duration-150 group-hover/side:delay-100 whitespace-nowrap";
+
+  const sidebarContent = (onNavigate?: () => void, collapsible?: boolean) => (
     <>
-      <div className="px-5 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-2">
+      <div className="px-4 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-3 overflow-hidden">
         <div className="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-white/10 text-white font-display font-bold text-sm">
           NG
         </div>
-        <div className="min-w-0">
+        <div className={`min-w-0 ${collapsible ? fade : ""}`}>
           <p className="font-display text-xl font-bold tracking-widest uppercase whitespace-nowrap">NetGuard</p>
           <p className="text-[11px] text-accent dark:text-noc-cyan mt-0.5 noc-label uppercase tracking-wider whitespace-nowrap">Network Ops Console</p>
         </div>
@@ -239,14 +248,15 @@ export default function Layout() {
             group={group}
             defaultOpen={isGroupActive(group, location.pathname)}
             onNavigate={onNavigate}
+            fadeClass={collapsible ? fade : ""}
           />
         ))}
       </nav>
-      <div className="px-5 py-4 border-t border-white/10 dark:border-noc-border">
+      <div className="px-4 py-4 border-t border-white/10 dark:border-noc-border overflow-hidden">
         {user && (
-          <div className="mb-3 min-w-0">
+          <div className={`mb-3 min-w-0 ${collapsible ? fade : ""}`}>
             <p className="text-sm font-medium truncate">{user.full_name}</p>
-            <p className="text-[11px] text-accent dark:text-noc-cyan capitalize">{user.role.replace(/_/g, " ")}</p>
+            <p className="text-[11px] text-accent dark:text-noc-cyan capitalize truncate">{user.role.replace(/_/g, " ")}</p>
           </div>
         )}
         <button
@@ -255,20 +265,29 @@ export default function Layout() {
             navigate("/login");
           }}
           title="Sign out"
-          className="text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors whitespace-nowrap"
+          className="flex items-center gap-2.5 text-[11px] text-slate-400 dark:text-noc-muted hover:text-white dark:hover:text-noc-text transition-colors"
         >
-          Sign out
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" />
+          </svg>
+          <span className={collapsible ? fade : "whitespace-nowrap"}>Sign out</span>
         </button>
-        <p className="text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num whitespace-nowrap">v1.0 · Prototype</p>
+        <p className={`text-[11px] text-slate-500 dark:text-noc-faint mt-2 noc-num ${collapsible ? fade : "whitespace-nowrap"}`}>v1.0 · Prototype</p>
       </div>
     </>
   );
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-navy dark:text-slate-100 md:flex">
-      {/* Desktop sidebar: static, always visible, unchanged from before */}
-      <aside className="hidden md:flex bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static md:w-64">
-        {sidebarContent()}
+      {/* Desktop sidebar: collapses to a 72px icon rail and expands to a
+          full 264px panel on hover. Pure CSS (group-hover) so there's no
+          layout-thrash from React state, and it lives as a normal flex
+          item -- not fixed/absolute -- so main content reflows smoothly
+          alongside it instead of being covered. */}
+      <aside
+        className="hidden md:flex group/side bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static w-[72px] hover:w-64 transition-[width] duration-300 ease-in-out overflow-hidden z-20"
+      >
+        {sidebarContent(undefined, true)}
       </aside>
 
       {/* Mobile backdrop */}
@@ -289,7 +308,7 @@ export default function Layout() {
         aria-modal="true"
         aria-label="Navigation menu"
       >
-        {sidebarContent(() => setMobileOpen(false))}
+        {sidebarContent(() => setMobileOpen(false), false)}
       </aside>
 
       <main className="flex-1 flex flex-col overflow-y-auto dark:bg-noc-bg min-w-0">

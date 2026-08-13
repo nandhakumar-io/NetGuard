@@ -43,6 +43,40 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 const inputClass =
   "w-full bg-noc-panel2 border border-noc-border rounded-md px-3 py-2.5 text-sm text-noc-text placeholder:text-noc-faint outline-none transition-colors focus:border-noc-cyan focus:ring-1 focus:ring-noc-cyan/40";
 
+// Brand-side highlights, shown on the wide-screen split layout only. Purely
+// presentational -- reinforces what NetGuard actually does while the person
+// authenticates instead of leaving that side of the screen empty.
+const HIGHLIGHTS: { title: string; body: string; icon: JSX.Element }[] = [
+  {
+    title: "Approval-gated change control",
+    body: "Every config push runs through review, diff preview, and rollback safety nets.",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+      </svg>
+    ),
+  },
+  {
+    title: "Live fleet visibility",
+    body: "Topology, syslog, drift, and traffic telemetry in one console, refreshed in real time.",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" />
+        <path d="M12 7v6M12 13l-5.5 4M12 13l5.5 4" />
+      </svg>
+    ),
+  },
+  {
+    title: "ChatOps + GitOps native",
+    body: "Approve from Slack, sync templates from Git — the console stays the source of truth.",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M8 9h8M8 13h5" /><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+      </svg>
+    ),
+  },
+];
+
 export default function Login() {
   const { login, verifyMfa, register } = useAuth();
   const navigate = useNavigate();
@@ -110,7 +144,7 @@ export default function Login() {
   const strengthColor = ["#F87171", "#F87171", "#FBBF24", "#34D399", "#22D3EE"][passwordScore];
 
   return (
-    <div className="noc-root min-h-screen flex items-center justify-center px-4 py-10 relative overflow-hidden">
+    <div className="noc-root min-h-screen flex items-stretch relative overflow-hidden">
       {/* faint scanning grid backdrop, consistent with the console identity used across the app */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.05]"
@@ -121,9 +155,50 @@ export default function Login() {
         }}
       />
 
+      {/* Left brand panel -- wide screens only. Gives the auth screen a
+          sense of place instead of a lone card floating on black, and
+          doubles as a quick reminder of what the product actually does. */}
+      <div className="hidden lg:flex flex-col justify-between w-[46%] max-w-xl relative px-14 py-14 border-r border-noc-border">
+        <div className="flex items-center gap-3">
+          <ShieldMark />
+          <div>
+            <p className="font-display text-2xl font-bold tracking-widest uppercase text-noc-text leading-none">
+              NetGuard
+            </p>
+            <p className="noc-label text-[10px] text-noc-cyan mt-1">Intelligent Network Change Management</p>
+          </div>
+        </div>
+
+        <div className="space-y-7">
+          <p className="text-noc-text text-2xl font-display font-semibold leading-snug max-w-sm">
+            Command your network fleet with confidence, not luck.
+          </p>
+          <div className="space-y-5">
+            {HIGHLIGHTS.map((h) => (
+              <div key={h.title} className="flex gap-3.5">
+                <div className="w-9 h-9 rounded-lg bg-noc-cyan/10 border border-noc-cyan/20 text-noc-cyan flex items-center justify-center shrink-0">
+                  {h.icon}
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-noc-text">{h.title}</p>
+                  <p className="text-xs text-noc-muted mt-0.5 leading-relaxed max-w-xs">{h.body}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-noc-good" />
+          <p className="noc-label text-[10px] text-noc-faint">All systems monitored</p>
+        </div>
+      </div>
+
+      {/* Right / auth column */}
+      <div className="relative flex-1 flex items-center justify-center px-4 py-10">
       <div className="relative w-full max-w-sm">
-        {/* Brand header */}
-        <div className="flex items-center gap-3 mb-6 justify-center">
+        {/* Brand header -- shown only when the wide brand panel is hidden */}
+        <div className="flex lg:hidden items-center gap-3 mb-6 justify-center">
           <ShieldMark />
           <div>
             <p className="font-display text-2xl font-bold tracking-widest uppercase text-noc-text leading-none">
@@ -327,10 +402,11 @@ export default function Login() {
           )}
         </div>
 
-        <div className="flex items-center justify-center gap-1.5 mt-5">
+        <div className="flex lg:hidden items-center justify-center gap-1.5 mt-5">
           <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-noc-good" />
           <p className="noc-label text-[10px] text-noc-faint">All systems monitored</p>
         </div>
+      </div>
       </div>
     </div>
   );
