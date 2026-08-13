@@ -28,7 +28,7 @@ from app.models.interface_alert_config import InterfaceAlertConfig
 from app.models.interface_metric import InterfaceMetric
 from app.models.interface_status import InterfaceStatus
 from app.models.maintenance_window import MaintenanceWindow
-from app.models.path_trace import PathTrace, PathTraceHop
+from app.models.path_trace import PathHop, PathTrace
 from app.models.protocol_operation import ProtocolOperation
 from app.models.recurring_maintenance_schedule import RecurringMaintenanceSchedule
 from app.models.snapshot import ConfigSnapshot
@@ -747,7 +747,7 @@ def delete_device(
             ).all()
         ]
         if path_trace_ids:
-            db.query(PathTraceHop).filter(PathTraceHop.trace_id.in_(path_trace_ids)).delete(synchronize_session=False)
+            db.query(PathHop).filter(PathHop.path_trace_id.in_(path_trace_ids)).delete(synchronize_session=False)
             db.query(PathTrace).filter(PathTrace.id.in_(path_trace_ids)).delete(synchronize_session=False)
         # DiscoveredNeighbor: device_id OR neighbor_device_id
         db.query(DiscoveredNeighbor).filter(
