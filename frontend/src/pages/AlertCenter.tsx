@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
 import { useToast, errorMessage } from "../lib/toast";
 import { useConfirm } from "../lib/confirm";
+import SavedViews from "../components/SavedViews";
 
 const SEVERITY_CONFIG = {
   critical: { color: "text-riskcrit", bg: "bg-riskcrit", bgLight: "bg-red-50", border: "border-riskcrit/20", icon: "🚨", label: "Critical" },
@@ -682,6 +683,17 @@ export default function AlertCenter() {
                 Reset
               </button>
             )}
+
+            <SavedViews
+              storageKey="netguard_saved_views_alerts"
+              currentFilters={{ severityFilter, sourceFilter, statusFilter }}
+              isDefault={(f) => !f.severityFilter && !f.sourceFilter && f.statusFilter === "active"}
+              onApply={(f) => {
+                setSeverityFilter(f.severityFilter);
+                setSourceFilter(f.sourceFilter);
+                setStatusFilter(f.statusFilter);
+              }}
+            />
 
             <button
               onClick={() => setShowSnoozeManager((v) => !v)}

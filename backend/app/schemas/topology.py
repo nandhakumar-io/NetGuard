@@ -17,6 +17,7 @@ class TopologyNodeRead(BaseModel):
     rack: str | None = None
     device_role: str | None = None
     interface_error_rate: int | None = None
+    active_alert_severity: str | None = None
 
 
 class TopologyEdgeRead(BaseModel):
@@ -29,6 +30,8 @@ class TopologyEdgeRead(BaseModel):
     local_port: str | None = None
     neighbor_port: str | None = None
     utilization_pct: int | None = None
+    last_confirmed_at: str | None = None
+    stale: bool = False
 
 
 class TopologyResponse(BaseModel):

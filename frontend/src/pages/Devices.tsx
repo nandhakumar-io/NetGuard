@@ -1,6 +1,7 @@
 import React, { Fragment, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
+import SavedViews from "../components/SavedViews";
 import {
   Device,
   Snapshot,
@@ -1775,6 +1776,11 @@ export default function Devices() {
   const [vendorFilter, setVendorFilter] = useState<string>("all");
   const [dcFilter, setDcFilter] = useState<string>("all");
   const [rackFilter, setRackFilter] = useState<string>("all");
+  // "core" | "distribution" | "access" | ... (free-text, org-defined) --
+  // same values Device.device_role/the Topology layered view use. Added
+  // alongside the other filters mainly so saved views like "My Core
+  // Switches" are actually expressible, not just vendor/DC/rack ones.
+  const [roleFilter, setRoleFilter] = useState<string>("all");
   // Fleet Health strip -- scoped to whatever vendorFilter is currently
   // selected, so picking "juniper" in the existing vendor dropdown also
   // narrows this to a "Juniper fleet" health view instead of needing a
@@ -2315,6 +2321,7 @@ export default function Devices() {
   const vendors = useMemo(() => Array.from(new Set(devices.map((d) => d.vendor))), [devices]);
   const dataCenters = useMemo(() => Array.from(new Set(devices.map((d) => d.data_center).filter(Boolean))), [devices]);
   const racks = useMemo(() => Array.from(new Set(devices.map((d) => d.rack).filter(Boolean))), [devices]);
+  const roles = useMemo(() => Array.from(new Set(devices.map((d) => d.device_role).filter(Boolean))), [devices]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -2322,6 +2329,7 @@ export default function Devices() {
       if (vendorFilter !== "all" && d.vendor !== vendorFilter) return false;
       if (dcFilter !== "all" && d.data_center !== dcFilter) return false;
       if (rackFilter !== "all" && d.rack !== rackFilter) return false;
+      if (roleFilter !== "all" && d.device_role !== roleFilter) return false;
       if (!q) return true;
       return (
         d.hostname.toLowerCase().includes(q) ||
@@ -2331,7 +2339,7 @@ export default function Devices() {
         (d.rack || "").toLowerCase().includes(q)
       );
     });
-  }, [devices, query, vendorFilter]);
+  }, [devices, query, vendorFilter, dcFilter, rackFilter, roleFilter]);
 
   const counts = useMemo(() => {
     const c = { online: 0, offline: 0, degraded: 0, unknown: 0 };
@@ -2739,6 +2747,30 @@ export default function Devices() {
             ))}
           </select>
         )}
+        {(roles as string[]).length > 0 && (
+          <select
+            className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 focus:ring-2 focus:ring-brandblue outline-none"
+            value={roleFilter}
+            onChange={(e) => setRoleFilter(e.target.value)}
+          >
+            <option value="all">All Roles</option>
+            {(roles as string[]).map((r) => (
+              <option key={r} value={r} className="capitalize">{r}</option>
+            ))}
+          </select>
+        )}
+        <SavedViews
+          storageKey="netguard_saved_views_devices"
+          currentFilters={{ query, vendorFilter, dcFilter, rackFilter, roleFilter }}
+          isDefault={(f) => !f.query && f.vendorFilter === "all" && f.dcFilter === "all" && f.rackFilter === "all" && f.roleFilter === "all"}
+          onApply={(f) => {
+            setQuery(f.query);
+            setVendorFilter(f.vendorFilter);
+            setDcFilter(f.dcFilter);
+            setRackFilter(f.rackFilter);
+            setRoleFilter(f.roleFilter);
+          }}
+        />
       </div>
 
       {/* Fleet Health strip -- scoped to vendorFilter above, so switching

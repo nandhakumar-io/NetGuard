@@ -897,6 +897,10 @@ export interface TopologyNode {
   // since the prior poll), for the Topology map's error-rate badge. null
   // if the device has never been polled.
   interface_error_rate?: number | null;
+  // Worst active (unresolved, non-suppressed) alert on this device, or
+  // null if it has none -- powers the Topology map's alert overlay
+  // toggle.
+  active_alert_severity?: "critical" | "warning" | "info" | null;
 }
 
 export interface TopologyEdge {
@@ -914,6 +918,14 @@ export interface TopologyEdge {
   // the higher of the two endpoints' whole-device interface utilization
   // readings, not a true per-port figure.
   utilization_pct: number | null;
+  // ISO timestamp of the LLDP/CDP discovery run that last confirmed this
+  // edge, or null for subnet-inferred/GNS3 edges. Powers the "live vs.
+  // inferred" link-age display.
+  last_confirmed_at?: string | null;
+  // True when an lldp/cdp edge's last confirmation is older than the
+  // backend's staleness window -- the neighbor data may no longer
+  // reflect reality (device rebooted, recabled, etc).
+  stale?: boolean;
 }
 
 export interface TopologyResponse {
@@ -932,6 +944,10 @@ export interface GlobalSearchResultItem {
 
 export interface GlobalSearchResponse {
   query: string;
+  // True when the query parsed as an IP or CIDR ("10.20.0.4",
+  // "10.20.0.0/24") -- the palette uses this to explain why `devices`
+  // is a range match instead of a text match.
+  is_ip_query?: boolean;
   devices: GlobalSearchResultItem[];
   groups: GlobalSearchResultItem[];
   alerts: GlobalSearchResultItem[];

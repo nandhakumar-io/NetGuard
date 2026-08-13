@@ -15,6 +15,8 @@ config_search.search_configs's helper rather than re-implementing decrypt
 + scan here, and everything else is a straightforward ILIKE against
 already-plaintext columns -- no new index or storage needed.
 """
+import ipaddress
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -41,6 +43,88 @@ CONFIG_MIN_QUERY_LENGTH = 3
 CONFIG_MATCH_LIMIT = 5
 
 
+def _parse_ip_query(q: str) -> "ipaddress.IPv4Network | ipaddress.IPv6Network | None":
+    """A bare IP ("10.20.0.4") or CIDR ("10.20.0.0/24") typed into search
+    means "what's using this address/range" -- an extremely common NOC
+    lookup ("what's on 10.20.0.0/24") that plain substring ILIKE can't
+    answer (10.20.0.4 doesn't substring-match "10.20.0.0/24", and a /24
+    query obviously can't ILIKE-match individual host IPs at all).
+    strict=False so a host address typed with a prefix (10.20.0.4/24) is
+    still treated as "that /24", matching how NOC engineers actually type
+    these. Returns None for anything that isn't a valid IP/network, so
+    normal text queries fall straight through to the existing ILIKE path.
+    """
+    q = q.strip()
+    if not q:
+        return None
+    try:
+        if "/" in q:
+            return ipaddress.ip_network(q, strict=False)
+        # A bare IP is treated as a /32 (or /128) -- "what's using this
+        # exact address" is the same lookup as "what's using this /32".
+        return ipaddress.ip_network(f"{ipaddress.ip_address(q)}/32")
+    except ValueError:
+        return None
+
+
+def _devices_in_network(db: Session, network, limit: int) -> list[dict]:
+    """Devices whose management IP falls in `network`, plus devices whose
+    *latest config* declares an interface IP in `network` -- a CIDR search
+    for "what's using 10.20.0.0/24" should surface a device even if its
+    management IP is elsewhere but it has an interface wired into that
+    subnet (e.g. a core switch with dozens of SVIs), same interface-IP
+    source topology_service already trusts for subnet-inferred links.
+    """
+    from app.models.snapshot import ConfigSnapshot
+    from app.services import risk_engine, snapshot_service
+
+    matches: dict[str, dict] = {}
+
+    for device in db.query(Device).order_by(Device.hostname).all():
+        if len(matches) >= limit:
+            break
+        try:
+            mgmt_ip = ipaddress.ip_address(device.ip_address)
+        except ValueError:
+            mgmt_ip = None
+        if mgmt_ip is not None and mgmt_ip in network:
+            matches[str(device.id)] = {
+                "id": str(device.id),
+                "title": device.hostname,
+                "subtitle": f"{device.ip_address} (management) · {network}",
+                "url": f"/devices?q={device.hostname}",
+            }
+            continue
+
+        snap = (
+            db.query(ConfigSnapshot)
+            .filter(ConfigSnapshot.device_id == device.id)
+            .order_by(ConfigSnapshot.seq.desc())
+            .first()
+        )
+        if not snap:
+            continue
+        try:
+            config_text = snapshot_service.decrypt_config(snap.running_config_encrypted)
+        except Exception:
+            continue
+        for ip, _mask in risk_engine.parse_config(config_text).ip_addresses:
+            try:
+                iface_ip = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if iface_ip in network:
+                matches[str(device.id)] = {
+                    "id": str(device.id),
+                    "title": device.hostname,
+                    "subtitle": f"{ip} (interface) · {network}",
+                    "url": f"/devices?q={device.hostname}",
+                }
+                break
+
+    return list(matches.values())[:limit]
+
+
 @router.get("")
 def global_search(
     query: str = Query(..., min_length=1, max_length=MAX_QUERY_LENGTH),
@@ -51,26 +135,39 @@ def global_search(
     requests / configs. Returns partial results per category rather than
     failing the whole search if one category errors -- a broken config
     decrypt on one device shouldn't hide a matching device hostname.
+
+    A query that parses as an IP or CIDR ("10.20.0.4", "10.20.0.0/24")
+    takes a different path for the devices category: instead of ILIKE
+    substring-matching Device.ip_address (which can't express "in this
+    range" at all), every device is checked for a management IP or a
+    config-declared interface IP inside that network. All other
+    categories still run their normal ILIKE search alongside it -- a
+    change request description or alert message could still legitimately
+    contain that literal IP/CIDR string.
     """
     q = query.strip()
     like = f"%{q}%"
+    ip_network = _parse_ip_query(q)
 
-    devices = (
-        db.query(Device)
-        .filter(or_(Device.hostname.ilike(like), Device.ip_address.ilike(like), Device.site.ilike(like)))
-        .order_by(Device.hostname)
-        .limit(PER_CATEGORY_LIMIT)
-        .all()
-    )
-    device_results = [
-        {
-            "id": str(d.id),
-            "title": d.hostname,
-            "subtitle": f"{d.ip_address}" + (f" · {d.site}" if d.site else ""),
-            "url": f"/devices?q={d.hostname}",
-        }
-        for d in devices
-    ]
+    if ip_network is not None:
+        device_results = _devices_in_network(db, ip_network, PER_CATEGORY_LIMIT)
+    else:
+        devices = (
+            db.query(Device)
+            .filter(or_(Device.hostname.ilike(like), Device.ip_address.ilike(like), Device.site.ilike(like)))
+            .order_by(Device.hostname)
+            .limit(PER_CATEGORY_LIMIT)
+            .all()
+        )
+        device_results = [
+            {
+                "id": str(d.id),
+                "title": d.hostname,
+                "subtitle": f"{d.ip_address}" + (f" · {d.site}" if d.site else ""),
+                "url": f"/devices?q={d.hostname}",
+            }
+            for d in devices
+        ]
 
     groups = (
         db.query(DeviceGroup)
@@ -158,11 +255,12 @@ def global_search(
     ]
 
     config_results: list[dict] = []
-    if len(q) >= CONFIG_MIN_QUERY_LENGTH:
+    if ip_network is None and len(q) >= CONFIG_MIN_QUERY_LENGTH:
         config_results = _search_configs_brief(db, q, limit=CONFIG_MATCH_LIMIT)
 
     return {
         "query": q,
+        "is_ip_query": ip_network is not None,
         "devices": device_results,
         "groups": group_results,
         "alerts": alert_results,

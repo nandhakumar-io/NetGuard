@@ -53,6 +53,7 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "rack": n.rack,
                 "device_role": n.device_role,
                 "interface_error_rate": n.interface_error_rate,
+                "active_alert_severity": n.active_alert_severity,
             }
             for n in graph.nodes
         ],
@@ -67,6 +68,8 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "local_port": e.local_port,
                 "neighbor_port": e.neighbor_port,
                 "utilization_pct": e.utilization_pct,
+                "last_confirmed_at": e.last_confirmed_at,
+                "stale": e.stale,
             }
             for e in graph.edges
         ],

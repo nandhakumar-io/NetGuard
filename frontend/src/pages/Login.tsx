@@ -144,7 +144,7 @@ export default function Login() {
   const strengthColor = ["#F87171", "#F87171", "#FBBF24", "#34D399", "#22D3EE"][passwordScore];
 
   return (
-    <div className="noc-root min-h-screen flex items-stretch relative overflow-hidden">
+    <div className="noc-root w-full flex items-stretch relative overflow-hidden" style={{ minHeight: "100vh", backgroundColor: "#080B10" }}>
       {/* faint scanning grid backdrop, consistent with the console identity used across the app */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.05]"

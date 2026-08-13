@@ -222,6 +222,9 @@ export default function Layout() {
   // rendered (not just faded) removes that whole class of bug and gives
   // predictable, persistent expand/collapse instead of a hover-only state.
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("ng6-sidebar-collapsed") === "1");
+  const [isHovered, setIsHovered] = useState(false);
+  const effectivelyCollapsed = collapsed && !isHovered;
+
   useEffect(() => {
     localStorage.setItem("ng6-sidebar-collapsed", collapsed ? "1" : "0");
   }, [collapsed]);
@@ -316,11 +319,13 @@ export default function Layout() {
           hover-only rail where the width and label-opacity transitions
           could drift out of sync and leave text clipped/invisible. */}
       <aside
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
         className={`hidden md:flex bg-navy dark:bg-noc-panel dark:border-r dark:border-noc-border text-white flex-shrink-0 flex-col md:static overflow-hidden z-20 transition-[width] duration-200 ease-in-out ${
-          collapsed ? "w-[72px]" : "w-64"
+          effectivelyCollapsed ? "w-[72px]" : "w-64"
         }`}
       >
-        {sidebarContent(undefined, collapsed)}
+        {sidebarContent(undefined, effectivelyCollapsed)}
         <button
           onClick={() => setCollapsed((c) => !c)}
           aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
@@ -333,7 +338,7 @@ export default function Layout() {
           >
             <path d="M15 6l-6 6 6 6" />
           </svg>
-          {!collapsed && <span className="text-[11px] font-semibold uppercase tracking-wider">Collapse</span>}
+          {!effectivelyCollapsed && <span className="text-[11px] font-semibold uppercase tracking-wider">{collapsed ? "Pin Expand" : "Collapse"}</span>}
         </button>
       </aside>
 

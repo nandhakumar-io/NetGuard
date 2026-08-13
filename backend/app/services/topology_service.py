@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
 from app.core import vm_client
+from app.models.alert import Alert, AlertSeverity
 from app.models.device import Device
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
@@ -37,6 +39,23 @@ from app.services import gns3_service, risk_engine, snapshot_service
 
 if TYPE_CHECKING:
     from app.models.topology_snapshot import TopologySnapshot
+
+# A confirmed (LLDP/CDP) link whose discovery run is older than this is
+# flagged `stale` on the Topology page rather than trusted at face value --
+# the device may have rebooted, been recabled, or changed neighbors since,
+# and a fresh SNMP Discovery run is the only way to know for sure. Matches
+# the cadence discovery is expected to run on (roughly daily); a week of
+# silence is well past "just hasn't polled yet."
+LINK_STALE_AFTER_DAYS = 7
+
+# Severity ranking so a device with multiple active alerts reports its
+# worst one on the topology map (a device with a critical AND a warning
+# alert should badge as critical, not whichever row happened to sort last).
+_ALERT_SEVERITY_RANK = {
+    AlertSeverity.CRITICAL: 3,
+    AlertSeverity.WARNING: 2,
+    AlertSeverity.INFO: 1,
+}
 
 
 @dataclass
@@ -63,6 +82,11 @@ class TopologyNode:
     # badge nodes with recent error activity directly on the Topology map.
     # None if the device has never been polled.
     interface_error_rate: int | None = None
+    # Worst active (unresolved, non-suppressed) alert severity for this
+    # device, or None if it has none -- powers the Topology page's "alert
+    # overlay" toggle (red pulse on links touching a device with an
+    # active critical alert). See _ALERT_SEVERITY_RANK.
+    active_alert_severity: str | None = None
 
 
 @dataclass
@@ -85,6 +109,17 @@ class TopologyEdge:
     # one that would actually bottleneck this link), which is a reasonable
     # stand-in until per-interface octet counters are tracked per edge.
     utilization_pct: int | None = None
+    # When this edge was last confirmed by an LLDP/CDP discovery run (ISO
+    # timestamp), or None for subnet-inferred/GNS3 edges where "confirmed"
+    # doesn't apply the same way. Powers the "live vs. inferred" link-age
+    # display -- a link's neighbor data only reflects reality as of this
+    # timestamp, and a rebooted/recabled device won't show up as changed
+    # until the next discovery run overwrites it.
+    last_confirmed_at: str | None = None
+    # True when an lldp/cdp edge's discovery run is older than
+    # LINK_STALE_AFTER_DAYS -- flagged in the UI so a stale-but-still-drawn
+    # link isn't mistaken for a just-confirmed one.
+    stale: bool = False
 
 
 @dataclass
@@ -246,6 +281,34 @@ def _latest_metrics_by_device(devices: list[Device]) -> dict[str, dict]:
     return out
 
 
+def _active_alert_severity_by_device(db: Session) -> dict[str, str]:
+    """device_id -> worst active alert severity (see _ALERT_SEVERITY_RANK),
+    for every device with at least one unresolved, non-suppressed alert.
+    Suppressed alerts (topology-correlation consequences or maintenance-
+    window noise) are excluded so the map's alert overlay highlights root
+    causes, not every downstream device a real outage cascaded into.
+    """
+    rows = (
+        db.query(Alert.device_id, Alert.severity)
+        .filter(
+            Alert.resolved.is_(False),
+            Alert.suppressed.is_(False),
+            Alert.suppressed_by_window_id.is_(None),
+            Alert.device_id.isnot(None),
+        )
+        .all()
+    )
+    out: dict[str, str] = {}
+    for device_id, severity in rows:
+        key = str(device_id)
+        current = out.get(key)
+        if current is None or _ALERT_SEVERITY_RANK.get(severity, 0) > _ALERT_SEVERITY_RANK.get(
+            AlertSeverity(current), 0
+        ):
+            out[key] = severity.value if hasattr(severity, "value") else str(severity)
+    return out
+
+
 def build_topology(db: Session) -> TopologyGraph:
     """Builds the fleet-wide topology graph: one node per device, edges
     inferred from shared interface subnets across each device's latest
@@ -254,6 +317,7 @@ def build_topology(db: Session) -> TopologyGraph:
     """
     devices = db.query(Device).order_by(Device.hostname).all()
     metrics_by_device = _latest_metrics_by_device(devices)
+    alert_severity_by_device = _active_alert_severity_by_device(db)
 
     nodes: list[TopologyNode] = []
     # device_id -> list of (network, original_ip) so edges can report which
@@ -283,6 +347,7 @@ def build_topology(db: Session) -> TopologyGraph:
                 rack=device.rack,
                 device_role=device.device_role,
                 interface_error_rate=interface_error_rate,
+                active_alert_severity=alert_severity_by_device.get(str(device.id)),
             )
         )
         if config_text:
@@ -334,6 +399,12 @@ def build_topology(db: Session) -> TopologyGraph:
         if pair_key in confirmed_pairs:
             continue
         confirmed_pairs.add(pair_key)
+        confirmed_at = row.discovered_at
+        is_stale = bool(
+            confirmed_at
+            and datetime.now(timezone.utc) - confirmed_at.replace(tzinfo=confirmed_at.tzinfo or timezone.utc)
+            > timedelta(days=LINK_STALE_AFTER_DAYS)
+        )
         edges.append(
             TopologyEdge(
                 source=a_id,
@@ -344,6 +415,8 @@ def build_topology(db: Session) -> TopologyGraph:
                 link_source=row.protocol,
                 local_port=row.local_port,
                 neighbor_port=row.neighbor_port,
+                last_confirmed_at=confirmed_at.isoformat() if confirmed_at else None,
+                stale=is_stale,
             )
         )
 

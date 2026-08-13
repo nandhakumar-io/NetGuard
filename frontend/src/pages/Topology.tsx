@@ -286,6 +286,12 @@ export default function Topology() {
   // counterpart to colorByUtilization's link heatmap. Off by default so a
   // healthy fleet's map isn't cluttered with "0" badges.
   const [showErrorBadges, setShowErrorBadges] = useState(false);
+  // Alert overlay: independently toggleable layer that pulses links red
+  // where either endpoint has an active (unresolved, non-suppressed)
+  // alert, and rings the device itself -- so "what's currently on fire"
+  // reads directly off the map without cross-referencing the Alerts page.
+  // Defaults on since it's the highest-signal overlay for troubleshooting.
+  const [alertOverlay, setAlertOverlay] = useState(true);
 
   // --- Path highlight: click two devices, trace the path between them ---
   // Reuses the existing /path-trace endpoint (same one that powers the
@@ -605,6 +611,28 @@ export default function Topology() {
     return keys;
   }, [hoveredId, filteredEdges]);
 
+  // Hovering a device highlights it and every neighbor it has a link to
+  // (not just the links themselves) -- the single most useful thing for
+  // "why can't A reach B" troubleshooting: sweep the mouse across the map
+  // and immediately see each device's blast radius of direct neighbors.
+  const hoveredNeighborIds = useMemo(() => {
+    if (!hoveredId) return null;
+    const s = new Set<string>([hoveredId]);
+    filteredEdges.forEach((e) => {
+      if (e.source === hoveredId) s.add(e.target);
+      if (e.target === hoveredId) s.add(e.source);
+    });
+    return s;
+  }, [hoveredId, filteredEdges]);
+
+  const nodeAlertSeverity = (nodeId: string): string | null | undefined => nodeById.get(nodeId)?.active_alert_severity;
+
+  const edgeHasActiveAlert = (e: TopologyEdge) => {
+    const a = nodeAlertSeverity(e.source);
+    const b = nodeAlertSeverity(e.target);
+    return a === "critical" || a === "warning" || b === "critical" || b === "warning";
+  };
+
   const selectedNodeId = selection?.kind === "node" ? selection.node.id : null;
   const selectedEdgeKey = selection?.kind === "edge" ? edgeKey(selection.edge) : null;
 
@@ -866,6 +894,13 @@ export default function Topology() {
               onChange={(e) => setShowErrorBadges(e.target.checked)}
             />
             Show interface errors
+          </label>
+          <label
+            className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm"
+            title="Pulses links red and rings devices that have an active, unresolved alert -- an independent layer on top of whatever view/overlay is already showing."
+          >
+            <input type="checkbox" checked={alertOverlay} onChange={(e) => setAlertOverlay(e.target.checked)} />
+            Alert overlay
           </label>
           <button
             onClick={togglePathMode}
@@ -1167,7 +1202,12 @@ export default function Topology() {
                       ? !matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target)
                       : false;
                     const dimForPath = pathTraceResult ? !onTracedPath : false;
+                    const dimForHover = hoveredNeighborIds
+                      ? !(hoveredNeighborIds.has(e.source) && hoveredNeighborIds.has(e.target))
+                      : false;
                     const utilColor = colorByUtilization ? utilizationColor(e.utilization_pct) : null;
+                    const edgeAlerting = alertOverlay && edgeHasActiveAlert(e);
+                    const isStaleLink = e.link_source !== "subnet" && e.stale;
                     const srcLabelPos = pointAlong(a.x, a.y, b.x, b.y, 30);
                     const tgtLabelPos = pointAlong(b.x, b.y, a.x, a.y, 30);
                     const midX = (a.x + b.x) / 2;
@@ -1176,12 +1216,12 @@ export default function Topology() {
                     const linkLabel =
                       e.link_source === "subnet"
                         ? e.subnet || ""
-                        : e.link_source.toUpperCase(); // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
+                        : `${e.link_source.toUpperCase()}${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
                     return (
                       <g
                         key={key}
                         className="cursor-pointer"
-                        opacity={dimForSearch || dimForPath ? 0.12 : 1}
+                        opacity={dimForSearch || dimForPath || dimForHover ? 0.12 : 1}
                         onClick={() => setSelection({ kind: "edge", edge: e })}
                       >
                         {/* fat invisible hit-area so thin lines are easy to click */}
@@ -1191,9 +1231,17 @@ export default function Topology() {
                           y1={a.y}
                           x2={b.x}
                           y2={b.y}
-                          stroke={onTracedPath ? "#7c3aed" : active ? "#2563eb" : utilColor || "#94a3b8"}
+                          stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : utilColor || "#94a3b8"}
                           strokeWidth={active ? 2.75 : 1.5}
+                          strokeDasharray={isStaleLink ? "5 3" : undefined}
                         />
+                        {/* Alert overlay: a pulsing red line laid on top so an actively
+                            alerting link reads as "live incident", not just a static color. */}
+                        {edgeAlerting && (
+                          <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#dc2626" strokeWidth={4}>
+                            <animate attributeName="opacity" values="0.55;0.05;0.55" dur="1.6s" repeatCount="indefinite" />
+                          </line>
+                        )}
                         {/* subnet / link-source label at midpoint */}
                         <rect
                           x={midX - linkLabel.length * 3.1 - 4}
@@ -1202,7 +1250,7 @@ export default function Topology() {
                           height={13}
                           rx={3}
                           fill={
-                            e.link_source !== "subnet" ? "#dcfce7" : active ? "#dbeafe" : "#f1f5f9"
+                            isStaleLink ? "#fef3c7" : e.link_source !== "subnet" ? "#dcfce7" : active ? "#dbeafe" : "#f1f5f9"
                           }
                           opacity={0.95}
                         />
@@ -1213,7 +1261,7 @@ export default function Topology() {
                           className="pointer-events-none select-none"
                           fontSize={9.5}
                           fontWeight={600}
-                          fill={e.link_source !== "subnet" ? "#166534" : active ? "#1e3a8a" : "#64748b"}
+                          fill={isStaleLink ? "#92400e" : e.link_source !== "subnet" ? "#166534" : active ? "#1e3a8a" : "#64748b"}
                           fontFamily="ui-monospace, monospace"
                         >
                           {linkLabel}
@@ -1284,17 +1332,32 @@ export default function Topology() {
                       : true;
                     const isBlastDependent = blastRadiusIds ? blastRadiusIds.has(node.id) && node.id !== blastRadiusFor : false;
                     const isBlastTouched = blastRadiusFor === node.id;
+                    // Neighbor highlight: with a device hovered, everything that isn't
+                    // it or one of its direct neighbors fades out, and the hovered
+                    // device's neighbors get a blue ring so the "who's connected to
+                    // this" answer is visible at a glance, not just via edge color.
+                    const isHoveredNeighbor = hoveredNeighborIds ? hoveredNeighborIds.has(node.id) : false;
+                    const dimForHoverNode = hoveredNeighborIds ? !isHoveredNeighbor : false;
+                    const isAlerting = alertOverlay && (node.active_alert_severity === "critical" || node.active_alert_severity === "warning");
                     return (
                       <g
                         key={node.id}
                         transform={`translate(${node.x}, ${node.y})`}
                         className="cursor-pointer"
-                        opacity={isSearchMatch ? 1 : 0.18}
+                        opacity={!isSearchMatch ? 0.18 : dimForHoverNode ? 0.25 : 1}
                         onMouseEnter={() => setHoveredId(node.id)}
                         onClick={() => (pathMode ? handlePathClick(node.id) : setSelection({ kind: "node", node }))}
                       >
                         {pathMode && (pathSourceId === node.id || pathTargetId === node.id || pathDeviceIds.includes(node.id)) && (
                           <circle r={26} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="4 3" />
+                        )}
+                        {isHoveredNeighbor && hoveredId !== node.id && (
+                          <circle r={22} fill="none" stroke="#2563eb" strokeWidth={2.5} />
+                        )}
+                        {isAlerting && (
+                          <circle r={24} fill="none" stroke={node.active_alert_severity === "critical" ? "#dc2626" : "#d97706"} strokeWidth={2.5}>
+                            <animate attributeName="opacity" values="1;0.25;1" dur="1.6s" repeatCount="indefinite" />
+                          </circle>
                         )}
                         {matchedNodeIds && !blastRadiusIds && isSearchMatch && (
                           <circle r={24} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="2 2">
@@ -1839,12 +1902,26 @@ export default function Topology() {
                             </dd>
                           </>
                         )}
+                        {e.link_source !== "subnet" && e.last_confirmed_at && (
+                          <>
+                            <dt className="text-slate-500">Last confirmed</dt>
+                            <dd className={`font-mono ${e.stale ? "text-amber-600 font-bold" : "text-slate-700"}`}>
+                              {new Date(e.last_confirmed_at).toLocaleString()}
+                              {e.stale ? " ⚠ stale" : ""}
+                            </dd>
+                          </>
+                        )}
                       </div>
                     </dl>
                     <p className="text-[11px] text-slate-400">
                       {e.link_source === "subnet"
                         ? "Inferred because both devices have an interface configured into this subnet in their latest config snapshot."
                         : `Confirmed by ${e.link_source.toUpperCase()} neighbor discovery — this is a real reported adjacency, not a guess.`}
+                      {e.link_source !== "subnet" && e.stale && (
+                        <span className="block text-amber-600 font-semibold mt-1">
+                          This link hasn't been reconfirmed by a fresh discovery run in over a week — the device may have rebooted or been recabled since. Re-run SNMP Discovery to refresh it.
+                        </span>
+                      )}
                     </p>
                     <div className="flex gap-3">
                       {src && (
