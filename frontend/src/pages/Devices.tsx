@@ -1,4 +1,4 @@
-import React, { Fragment, useEffect, useMemo, useState } from "react";
+import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import SavedViews from "../components/SavedViews";
@@ -2323,6 +2323,22 @@ export default function Devices() {
   const racks = useMemo(() => Array.from(new Set(devices.map((d) => d.rack).filter(Boolean))), [devices]);
   const roles = useMemo(() => Array.from(new Set(devices.map((d) => d.device_role).filter(Boolean))), [devices]);
 
+  // --- Row virtualization ---------------------------------------------
+  // NOC fleets can run into the thousands of devices; rendering every
+  // <tr> (each with badges, sparkline-adjacent status pills, and an
+  // expandable detail panel) gets sluggish well before that. Past
+  // VIRTUALIZE_THRESHOLD rows we switch the table body to a scrollable
+  // pane and only mount the rows currently in (or near) the viewport,
+  // padded out with spacer rows so scrollbar height/position stays
+  // correct. Below the threshold -- the common case -- this is a no-op
+  // and the table renders exactly as it always has.
+  const ROW_HEIGHT = 64; // approx rendered height of a collapsed row (py-4 + text)
+  const VIRTUALIZE_THRESHOLD = 150;
+  const OVERSCAN_ROWS = 12;
+  const ESTIMATED_VIEWPORT_PX = 900; // ~ generous max-h-[70vh] on common screens
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return devices.filter((d) => {
@@ -2340,6 +2356,40 @@ export default function Devices() {
       );
     });
   }, [devices, query, vendorFilter, dcFilter, rackFilter, roleFilter]);
+
+  // A row is expanded inline (detail panel pushes rows below it down),
+  // which breaks the fixed-row-height spacer math. Previously this fell
+  // back to rendering the full unvirtualized list whenever any row was
+  // expanded -- on a multi-thousand-device fleet that meant clicking a
+  // single row to inspect it froze the page. Instead: keep virtualizing,
+  // but force the expanded device's index into the rendered window (even
+  // if it's currently scrolled out of view -- expanding a row shouldn't
+  // make it vanish), and pad the spacer math with one row's worth of
+  // estimated extra height for the panel. This is an approximation, same
+  // as ROW_HEIGHT itself is -- the panel's real height varies by tab/data
+  // -- so the scrollbar can be off by a bit near the expanded row, but
+  // that's a minor cosmetic gap versus thousands of mounted rows.
+  const ESTIMATED_EXPANDED_PANEL_PX = 640;
+  const shouldVirtualize = filtered.length > VIRTUALIZE_THRESHOLD;
+  const expandedIndex = expandedDeviceId
+    ? filtered.findIndex((d) => d.id === expandedDeviceId)
+    : -1;
+  let virtualStartIndex = shouldVirtualize
+    ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS)
+    : 0;
+  let virtualEndIndex = shouldVirtualize
+    ? Math.min(filtered.length, Math.ceil((scrollTop + ESTIMATED_VIEWPORT_PX) / ROW_HEIGHT) + OVERSCAN_ROWS)
+    : filtered.length;
+  if (shouldVirtualize && expandedIndex >= 0) {
+    virtualStartIndex = Math.min(virtualStartIndex, expandedIndex);
+    virtualEndIndex = Math.max(virtualEndIndex, expandedIndex + 1);
+  }
+  const visibleDevices = shouldVirtualize ? filtered.slice(virtualStartIndex, virtualEndIndex) : filtered;
+  const topSpacerPx = shouldVirtualize ? virtualStartIndex * ROW_HEIGHT : 0;
+  const expandedInWindow = expandedIndex >= virtualStartIndex && expandedIndex < virtualEndIndex;
+  const bottomSpacerPx = shouldVirtualize
+    ? (filtered.length - virtualEndIndex) * ROW_HEIGHT + (expandedInWindow ? ESTIMATED_EXPANDED_PANEL_PX : 0)
+    : 0;
 
   const counts = useMemo(() => {
     const c = { online: 0, offline: 0, degraded: 0, unknown: 0 };
@@ -3004,9 +3054,18 @@ export default function Devices() {
       )}
 
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
+        {shouldVirtualize && (
+          <p className="px-5 py-1.5 text-[11px] text-slate-400 bg-slate-50 dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800">
+            Showing {filtered.length.toLocaleString()} devices in a scrollable, virtualized view for performance.
+          </p>
+        )}
+        <div
+          ref={tableScrollRef}
+          className={shouldVirtualize ? "overflow-x-auto overflow-y-auto max-h-[70vh]" : "overflow-x-auto"}
+          onScroll={shouldVirtualize ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
+        >
         <table className="w-full text-sm">
-          <thead className="bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-700">
+          <thead className="bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-700 sticky top-0 z-10">
             <tr>
               {canManage && (
                 <th className="w-10 px-4 py-3.5">
@@ -3061,7 +3120,12 @@ export default function Devices() {
                 </td>
               </tr>
             )}
-            {filtered.map((d) => (
+            {shouldVirtualize && topSpacerPx > 0 && (
+              <tr aria-hidden="true" style={{ height: topSpacerPx }}>
+                <td colSpan={canManage ? 10 : 8} className="p-0 border-0" />
+              </tr>
+            )}
+            {visibleDevices.map((d) => (
               <Fragment key={d.id}>
                 <tr className={`cursor-pointer transition-colors hover:bg-slate-50/70 border-l-4 ${
                     expandedDeviceId === d.id ? "bg-slate-50 dark:bg-slate-900 border-l-navy" : "border-l-transparent bg-white dark:bg-slate-800"
@@ -3178,6 +3242,11 @@ export default function Devices() {
                 )}
               </Fragment>
             ))}
+            {shouldVirtualize && bottomSpacerPx > 0 && (
+              <tr aria-hidden="true" style={{ height: bottomSpacerPx }}>
+                <td colSpan={canManage ? 10 : 8} className="p-0 border-0" />
+              </tr>
+            )}
           </tbody>
         </table>
         </div>

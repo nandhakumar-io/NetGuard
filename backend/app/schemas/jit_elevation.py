@@ -34,3 +34,10 @@ class JitElevationRead(BaseModel):
     revoked_at: str | None = None
     is_active_now: bool = False
     seconds_remaining: int | None = None
+    # Blast radius: this app's RBAC is role-based with no per-device
+    # scoping (see app.api.rbac.PERMISSION_MATRIX), so any capability a
+    # role gains applies fleet-wide. blast_radius_devices is the current
+    # total device count when the grant confers at least one new
+    # capability the requester doesn't already have, else 0.
+    capabilities_gained: list[str] = []
+    blast_radius_devices: int = 0

@@ -15,8 +15,10 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.rbac import PERMISSION_MATRIX
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
+from app.models.device import Device
 from app.models.jit_elevation import JitElevation, JitElevationStatus
 from app.models.user import User, UserRole
 from app.schemas.jit_elevation import (
@@ -31,12 +33,28 @@ router = APIRouter(prefix="/jit-access", tags=["jit-access"])
 _admin_only = require_roles(UserRole.NETWORK_ADMIN)
 
 
+def _capabilities_gained(current_role: str | None, elevated_role: str) -> list[str]:
+    """Resources the elevated role can reach that the requester's own
+    base role cannot -- i.e. what this specific grant actually adds, not
+    just everything the elevated role can do."""
+    gained = []
+    for entry in PERMISSION_MATRIX:
+        roles = entry["roles"]
+        if elevated_role in roles and current_role not in roles:
+            gained.append(entry["resource"])
+    return gained
+
+
 def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
     if not rows:
         return []
     user_ids = {r.user_id for r in rows} | {r.requested_by for r in rows}
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()}
     now = datetime.datetime.now(datetime.timezone.utc)
+    # Grants are role-based and unscoped to specific devices (see
+    # PERMISSION_MATRIX), so any new capability applies to the whole
+    # fleet -- one count covers every row being hydrated.
+    total_devices = db.query(Device).count()
 
     out = []
     for r in rows:
@@ -47,6 +65,13 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
             seconds_remaining = max(0, int((expires_at - now).total_seconds()))
+
+        requester = users_by_id.get(r.user_id)
+        current_role = requester.role.value if requester and hasattr(requester.role, "value") else (requester.role if requester else None)
+        elevated_role_value = r.elevated_role.value if hasattr(r.elevated_role, "value") else r.elevated_role
+        capabilities_gained = _capabilities_gained(current_role, elevated_role_value)
+        blast_radius_devices = total_devices if capabilities_gained else 0
+
         out.append(
             JitElevationRead(
                 id=str(r.id),
@@ -68,6 +93,8 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
                 revoked_at=r.revoked_at.isoformat() if r.revoked_at else None,
                 is_active_now=active_now,
                 seconds_remaining=seconds_remaining,
+                capabilities_gained=capabilities_gained,
+                blast_radius_devices=blast_radius_devices,
             )
         )
     return out

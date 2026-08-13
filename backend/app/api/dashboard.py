@@ -370,6 +370,52 @@ def _compute_summary(db: Session) -> dict:
         for r in flap_rows
     ]
 
+    # 9. Severity-weighted fleet health -- devices_online/devices_total
+    # (and the top "Online" stat card) only answer "is it reachable right
+    # now", so a device that's technically online but has a port flapping
+    # every few minutes, a down interface, or is already flagged by the
+    # instability circuit-breaker counts as a full "healthy" device -- the
+    # 100% tile can lie. This blends those already-tracked signals into
+    # one score: a clean online device is worth 1.0, an online-but-flaky
+    # one (flagged unstable, has a currently-down port, or an interface
+    # that's flapped >1x in the last 24h) is worth 0.5, DEGRADED is worth
+    # 0.5, UNKNOWN is worth 0.25 (no recent poll to vouch for it), and
+    # OFFLINE is worth 0.
+    flapping_device_ids = {r.device_id for r in flap_rows}
+    down_port_device_ids = {
+        r.device_id
+        for r in db.query(InterfaceStatus.device_id)
+        .join(
+            latest_if_subq,
+            (InterfaceStatus.device_id == latest_if_subq.c.device_id)
+            & (InterfaceStatus.if_index == latest_if_subq.c.if_index)
+            & (InterfaceStatus.changed_at == latest_if_subq.c.latest_at),
+        )
+        .filter(InterfaceStatus.status == "down")
+        .all()
+    }
+    flagged_unstable_ids = {d.id for d in db.query(Device.id).filter(Device.flagged_unstable == True).all()}
+
+    healthy_count = degraded_count = offline_count = unknown_count = 0
+    weighted_sum = 0.0
+    for d in all_devices.values():
+        if d.status == DeviceStatus.OFFLINE:
+            offline_count += 1
+        elif d.status == DeviceStatus.UNKNOWN:
+            unknown_count += 1
+            weighted_sum += 0.25
+        elif d.status == DeviceStatus.DEGRADED:
+            degraded_count += 1
+            weighted_sum += 0.5
+        elif d.id in flagged_unstable_ids or d.id in flapping_device_ids or d.id in down_port_device_ids:
+            # ONLINE by reachability, but flaky by one of the signals above.
+            degraded_count += 1
+            weighted_sum += 0.5
+        else:
+            healthy_count += 1
+            weighted_sum += 1.0
+    fleet_health_weighted_pct = round((weighted_sum / devices_total) * 100, 1) if devices_total else 100.0
+
     return {
         "devices_online": devices_online,
         "offline_devices": offline_devices,
@@ -398,6 +444,14 @@ def _compute_summary(db: Session) -> dict:
         "fleet_health_history": fleet_health_history,
         "recent_backups": recent_backups,
         "recent_protocol_operations": recent_protocol_operations,
+
+        "fleet_health_weighted_pct": fleet_health_weighted_pct,
+        "fleet_health_breakdown": {
+            "healthy": healthy_count,
+            "degraded": degraded_count,
+            "offline": offline_count,
+            "unknown": unknown_count,
+        },
     }
 
 
@@ -413,12 +467,18 @@ def get_dashboard_preferences(db: Session = Depends(get_db), current_user: User 
     pref = db.query(DashboardPreference).filter(DashboardPreference.user_id == current_user.id).first()
     if pref is None:
         layout = dashboard_widgets.default_layout()
+        thresholds = dashboard_widgets.default_thresholds()
     else:
         try:
             saved = json.loads(pref.layout)
         except (ValueError, TypeError):
             saved = []
         layout = dashboard_widgets.merge_layout(saved)
+        try:
+            saved_thresholds = json.loads(pref.thresholds or "{}")
+        except (ValueError, TypeError):
+            saved_thresholds = {}
+        thresholds = dashboard_widgets.merge_thresholds(saved_thresholds)
 
     return DashboardPreferenceRead(
         layout=[DashboardLayoutEntry(**e) for e in layout],
@@ -426,6 +486,7 @@ def get_dashboard_preferences(db: Session = Depends(get_db), current_user: User 
             DashboardWidgetInfo(id=w.id, title=w.title, data_source=w.data_source, default_visible=w.default_visible)
             for w in dashboard_widgets.DASHBOARD_WIDGETS
         ],
+        thresholds=thresholds,
     )
 
 
@@ -444,11 +505,29 @@ def set_dashboard_preferences(
     merged = dashboard_widgets.merge_layout([e.model_dump() for e in payload.layout])
 
     pref = db.query(DashboardPreference).filter(DashboardPreference.user_id == current_user.id).first()
+
+    # Thresholds: omitted entirely -> keep whatever's already saved (or the
+    # registry default for a brand-new pref row); provided -> merge/validate
+    # against the registry so a bad payload can't leave a gauge stuck on
+    # one color.
+    if payload.thresholds is not None:
+        merged_thresholds = dashboard_widgets.merge_thresholds(payload.thresholds.model_dump())
+    elif pref is not None:
+        try:
+            merged_thresholds = dashboard_widgets.merge_thresholds(json.loads(pref.thresholds or "{}"))
+        except (ValueError, TypeError):
+            merged_thresholds = dashboard_widgets.default_thresholds()
+    else:
+        merged_thresholds = dashboard_widgets.default_thresholds()
+
     if pref is None:
-        pref = DashboardPreference(user_id=current_user.id, layout=json.dumps(merged))
+        pref = DashboardPreference(
+            user_id=current_user.id, layout=json.dumps(merged), thresholds=json.dumps(merged_thresholds)
+        )
         db.add(pref)
     else:
         pref.layout = json.dumps(merged)
+        pref.thresholds = json.dumps(merged_thresholds)
     db.commit()
 
     return DashboardPreferenceRead(
@@ -457,12 +536,113 @@ def set_dashboard_preferences(
             DashboardWidgetInfo(id=w.id, title=w.title, data_source=w.data_source, default_visible=w.default_visible)
             for w in dashboard_widgets.DASHBOARD_WIDGETS
         ],
+        thresholds=merged_thresholds,
     )
 
 
 @router.get("/summary")
 def get_summary(db: Session = Depends(get_db)):
     return _compute_summary(db)
+
+
+# --- "What changed since I was last here" timeline -----------------------
+#
+# Merges alerts, change requests, config drift, and deployments -- the four
+# things that make up "did anything happen overnight" -- into one
+# time-sorted feed. Previously answering that question meant checking the
+# Alert Center, Change Requests, Drift, and Deployments pages separately;
+# each of those still has its own full page for filtering/detail, this is
+# just the merged skim view for the dashboard.
+TIMELINE_DEFAULT_LIMIT = 40
+TIMELINE_MAX_LIMIT = 200
+# Fetch this many of the most-recent rows per source before merging, so the
+# merge/sort itself stays cheap even if `limit` is small -- without this an
+# `since` filter far in the past on a source with very few new rows would
+# still be fine, but a plain "give me the last 10" from an active fleet
+# would otherwise have to sort every alert ever raised.
+_PER_SOURCE_FETCH_MULTIPLIER = 3
+
+
+def _compute_timeline(db: Session, limit: int, since: "datetime.datetime | None") -> list[dict]:
+    fetch_n = min(limit * _PER_SOURCE_FETCH_MULTIPLIER, TIMELINE_MAX_LIMIT * _PER_SOURCE_FETCH_MULTIPLIER)
+    events: list[dict] = []
+
+    alert_q = db.query(Alert, Device.hostname).outerjoin(Device, Device.id == Alert.device_id)
+    if since is not None:
+        alert_q = alert_q.filter(Alert.created_at >= since)
+    for a, hostname in alert_q.order_by(desc(Alert.created_at)).limit(fetch_n).all():
+        events.append({
+            "type": "alert",
+            "severity": a.severity.value if hasattr(a.severity, "value") else a.severity,
+            "timestamp": a.created_at.isoformat() if a.created_at else None,
+            "title": a.category,
+            "detail": a.message,
+            "hostname": hostname,
+            "link": "/alerts",
+        })
+
+    cr_q = db.query(ChangeRequest, Device.hostname).outerjoin(Device, Device.id == ChangeRequest.device_id)
+    if since is not None:
+        cr_q = cr_q.filter(ChangeRequest.created_at >= since)
+    for cr, hostname in cr_q.order_by(desc(ChangeRequest.created_at)).limit(fetch_n).all():
+        status = cr.status.value if hasattr(cr.status, "value") else cr.status
+        events.append({
+            "type": "change_request",
+            "severity": {"failed": "critical", "rolled_back": "warning", "pending_approval": "warning"}.get(status, "info"),
+            "timestamp": cr.created_at.isoformat() if cr.created_at else None,
+            "title": f"Change request {status.replace('_', ' ')}",
+            "detail": cr.description,
+            "hostname": hostname,
+            "link": f"/change-requests/{cr.id}",
+        })
+
+    drift_q = db.query(ConfigDrift, Device.hostname).outerjoin(Device, Device.id == ConfigDrift.device_id)
+    if since is not None:
+        drift_q = drift_q.filter(ConfigDrift.detected_at >= since)
+    for d, hostname in drift_q.order_by(desc(ConfigDrift.detected_at)).limit(fetch_n).all():
+        severity = d.severity.value if hasattr(d.severity, "value") else d.severity
+        events.append({
+            "type": "drift",
+            "severity": "critical" if severity in ("high", "critical") else "warning" if severity == "medium" else "info",
+            "timestamp": d.detected_at.isoformat() if d.detected_at else None,
+            "title": f"Config drift detected ({severity})",
+            "detail": d.ai_summary or f"+{d.added_lines}/-{d.removed_lines} lines vs baseline",
+            "hostname": hostname,
+            "link": "/drift",
+        })
+
+    dep_q = db.query(Deployment, Device.hostname).outerjoin(Device, Device.id == Deployment.device_id)
+    if since is not None:
+        dep_q = dep_q.filter(Deployment.created_at >= since)
+    for dep, hostname in dep_q.order_by(desc(Deployment.created_at)).limit(fetch_n).all():
+        status = dep.status.value if hasattr(dep.status, "value") else dep.status
+        events.append({
+            "type": "deployment",
+            "severity": "critical" if status == "failed" else "warning" if status == "rolled_back" else "info",
+            "timestamp": dep.created_at.isoformat() if dep.created_at else None,
+            "title": f"Deployment {status.replace('_', ' ')}",
+            "detail": dep.error_message,
+            "hostname": hostname,
+            "link": "/deployments",
+        })
+
+    events = [e for e in events if e["timestamp"]]
+    events.sort(key=lambda e: e["timestamp"], reverse=True)
+    return events[:limit]
+
+
+@router.get("/timeline")
+def get_timeline(
+    limit: int = Query(TIMELINE_DEFAULT_LIMIT, ge=1, le=TIMELINE_MAX_LIMIT),
+    since_hours: int | None = Query(None, ge=1, le=24 * 30, description="Only include events from the last N hours"),
+    db: Session = Depends(get_db),
+):
+    since = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=since_hours)
+        if since_hours is not None
+        else None
+    )
+    return _compute_timeline(db, limit=limit, since=since)
 
 
 async def _heartbeat_loop(websocket: WebSocket):

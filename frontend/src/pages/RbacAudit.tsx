@@ -33,6 +33,13 @@ interface MatrixResponse {
   matrix: MatrixEntry[];
 }
 
+interface JitElevationLite {
+  user_email: string | null;
+  elevated_role: string;
+  is_active_now: boolean;
+  expires_at: string | null;
+}
+
 const ROLE_BADGE: Record<string, string> = {
   network_admin: "bg-red-100 text-red-700",
   network_engineer: "bg-blue-100 text-blue-700",
@@ -44,8 +51,10 @@ const ROLE_BADGE: Record<string, string> = {
 export default function RbacAudit() {
   const [users, setUsers] = useState<RbacUsersResponse | null>(null);
   const [matrix, setMatrix] = useState<MatrixResponse | null>(null);
+  const [activeElevations, setActiveElevations] = useState<JitElevationLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [roleFilter, setRoleFilter] = useState("all");
+  const [lookupResource, setLookupResource] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -54,10 +63,34 @@ export default function RbacAudit() {
       .then(([u, m]) => {
         setUsers(u.data);
         setMatrix(m.data);
+        if (m.data.matrix.length > 0) setLookupResource(m.data.matrix[0].resource);
       })
       .catch((err) => setError(err?.response?.data?.detail || "You don't have access to this view."))
       .finally(() => setLoading(false));
+    // Best-effort: active JIT grants can extend "who has X" beyond base
+    // roles. Restricted to network_admin server-side, so auditors simply
+    // won't see this section -- the base-role reverse lookup below still
+    // works for them.
+    api
+      .get<JitElevationLite[]>("/jit-access")
+      .then((res) => setActiveElevations(res.data.filter((e) => e.is_active_now)))
+      .catch(() => setActiveElevations([]));
   }, []);
+
+  const lookupEntry = useMemo(
+    () => matrix?.matrix.find((m) => m.resource === lookupResource) || null,
+    [matrix, lookupResource]
+  );
+
+  const lookupBaseUsers = useMemo(() => {
+    if (!users || !lookupEntry) return [];
+    return users.users.filter((u) => lookupEntry.roles.includes(u.role));
+  }, [users, lookupEntry]);
+
+  const lookupJitUsers = useMemo(() => {
+    if (!lookupEntry) return [];
+    return activeElevations.filter((e) => lookupEntry.roles.includes(e.elevated_role));
+  }, [activeElevations, lookupEntry]);
 
   const filtered = useMemo(() => {
     if (!users) return [];
@@ -126,6 +159,67 @@ export default function RbacAudit() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400 mb-3">Who can do X?</h2>
+      <div className="bg-white dark:bg-noc-panel border border-slate-200 dark:border-noc-border rounded-xl p-4 mb-8">
+        <label className="text-xs text-slate-500 flex flex-col gap-1 max-w-md">
+          Resource / capability
+          <select
+            className="border border-slate-300 dark:border-noc-border dark:bg-noc-panel rounded-lg px-3 py-1.5 text-sm"
+            value={lookupResource}
+            onChange={(e) => setLookupResource(e.target.value)}
+          >
+            {(matrix?.matrix ?? []).map((m) => (
+              <option key={m.resource} value={m.resource}>
+                {m.resource}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {lookupEntry && (
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
+                Standing access ({lookupBaseUsers.length})
+              </p>
+              {lookupBaseUsers.length === 0 ? (
+                <p className="text-sm text-slate-400 italic">No user currently holds a role with this access.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {lookupBaseUsers.map((u) => (
+                    <li key={u.id} className="flex items-center justify-between text-sm border-b border-slate-50 dark:border-white/5 pb-1.5">
+                      <span className="text-navy dark:text-white font-medium">{u.full_name || u.email}</span>
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${ROLE_BADGE[u.role] || "bg-slate-100 text-slate-600"}`}>
+                        {u.role.replace(/_/g, " ")}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
+                Temporary via active JIT grant ({lookupJitUsers.length})
+              </p>
+              {lookupJitUsers.length === 0 ? (
+                <p className="text-sm text-slate-400 italic">No active JIT elevation currently grants this.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {lookupJitUsers.map((e, i) => (
+                    <li key={i} className="flex items-center justify-between text-sm border-b border-slate-50 dark:border-white/5 pb-1.5">
+                      <span className="text-navy dark:text-white font-medium">{e.user_email || "—"}</span>
+                      <span className="text-xs text-amber-600 font-medium">
+                        until {e.expires_at ? new Date(e.expires_at).toLocaleString() : "—"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between mb-3">

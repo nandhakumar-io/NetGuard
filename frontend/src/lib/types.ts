@@ -603,6 +603,22 @@ export interface DashboardSummary {
   flapping_interfaces: { hostname: string; interface: string; flap_count: number; last_change: string | null }[];
   recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
   recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
+  fleet_health_weighted_pct: number;
+  fleet_health_breakdown: { healthy: number; degraded: number; offline: number; unknown: number };
+}
+
+// --- "What changed" timeline ---
+
+export type TimelineEventType = "alert" | "change_request" | "drift" | "deployment";
+
+export interface TimelineEvent {
+  type: TimelineEventType;
+  severity: "critical" | "warning" | "info";
+  timestamp: string;
+  title: string;
+  detail: string | null;
+  hostname: string | null;
+  link: string;
 }
 
 // --- Dashboard widget customization ---
@@ -619,9 +635,21 @@ export interface DashboardLayoutEntry {
   visible: boolean;
 }
 
+export interface MetricThreshold {
+  warn: number;
+  critical: number;
+}
+
+export interface DashboardThresholds {
+  cpu: MetricThreshold;
+  memory: MetricThreshold;
+  bandwidth: MetricThreshold;
+}
+
 export interface DashboardPreferenceResponse {
   layout: DashboardLayoutEntry[];
   available_widgets: DashboardWidgetInfo[];
+  thresholds: DashboardThresholds;
 }
 
 // --- Alert System ---

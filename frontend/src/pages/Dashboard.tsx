@@ -15,7 +15,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../lib/api";
-import { DashboardSummary, Alert, DeviceGroup, Device, FleetAvailabilitySummary, UnstableDevice, DashboardPreferenceResponse, DashboardLayoutEntry, DashboardWidgetInfo } from "../lib/types";
+import { DashboardSummary, Alert, DeviceGroup, Device, FleetAvailabilitySummary, UnstableDevice, DashboardPreferenceResponse, DashboardLayoutEntry, DashboardWidgetInfo, DashboardThresholds, MetricThreshold, TimelineEvent } from "../lib/types";
 import Sparkline from "../components/Sparkline";
 import DashboardCustomizePanel from "../components/DashboardCustomizePanel"; // Trigger HMR
 import { useAuth } from "../lib/auth";
@@ -35,6 +35,35 @@ const SEV_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
   critical: { dot: "bg-red-500", text: "text-red-700", bg: "bg-red-50 border-red-100" },
   warning: { dot: "bg-amber-500", text: "text-amber-700", bg: "bg-amber-50 border-amber-100" },
   info: { dot: "bg-blue-500", text: "text-blue-700", bg: "bg-blue-50 border-blue-100" },
+};
+
+const DEFAULT_THRESHOLDS: DashboardThresholds = {
+  cpu: { warn: 70, critical: 90 },
+  memory: { warn: 75, critical: 90 },
+  bandwidth: { warn: 70, critical: 90 },
+};
+
+// Colors a metric value against a user-configurable warn/critical band
+// (falls back to `base` below the warn line) -- used by the CPU/RAM
+// gauges and the Top CPU/Memory/Bandwidth widgets so "high" reflects what
+// each admin actually set in Customize > Alert Thresholds, not a
+// hardcoded 70/90 split baked into the component.
+function bandColor(value: number, band: MetricThreshold, base: string): string {
+  if (value >= band.critical) return "#EF4444";
+  if (value >= band.warn) return "#F59E0B";
+  return base;
+}
+function bandTextClass(value: number, band: MetricThreshold, base = "text-slate-800"): string {
+  if (value >= band.critical) return "text-red-600";
+  if (value >= band.warn) return "text-amber-600";
+  return base;
+}
+
+const TIMELINE_ICON: Record<string, { fg: string; bg: string; icon: React.ReactNode }> = {
+  alert: { fg: "text-amber-500", bg: "bg-amber-50", icon: <path d="M12 3l9 16H3L12 3zM12 10v4M12 17h.01" strokeLinecap="round" strokeLinejoin="round" /> },
+  change_request: { fg: "text-indigo-500", bg: "bg-indigo-50", icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z" strokeLinecap="round" strokeLinejoin="round" /> },
+  drift: { fg: "text-cyan-500", bg: "bg-cyan-50", icon: <path d="M8 3v4M16 3v4M3 9h18M5 5h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" strokeLinecap="round" strokeLinejoin="round" /> },
+  deployment: { fg: "text-emerald-500", bg: "bg-emerald-50", icon: <path d="M4 12l8-8 8 8M12 4v16" strokeLinecap="round" strokeLinejoin="round" /> },
 };
 
 interface GroupStat {
@@ -143,6 +172,7 @@ const WIDGET_SPAN: Record<string, string> = {
   recent_backups: "md:col-span-2 xl:col-span-3",
   recent_protocol_operations: "md:col-span-2 xl:col-span-3",
   group_availability: "md:col-span-2 xl:col-span-6",
+  whats_changed: "md:col-span-2 xl:col-span-3",
 };
 
 export default function Dashboard() {
@@ -161,6 +191,8 @@ export default function Dashboard() {
   const [availableWidgets, setAvailableWidgets] = useState<DashboardWidgetInfo[]>([]);
   const [showCustomize, setShowCustomize] = useState(false);
   const [savingLayout, setSavingLayout] = useState(false);
+  const [thresholds, setThresholds] = useState<DashboardThresholds>(DEFAULT_THRESHOLDS);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
 
   const loadPreferences = () => {
     api
@@ -168,17 +200,19 @@ export default function Dashboard() {
       .then((res) => {
         setLayout(res.data.layout);
         setAvailableWidgets(res.data.available_widgets);
+        setThresholds(res.data.thresholds || DEFAULT_THRESHOLDS);
       })
       .catch(() => {});
   };
 
-  const saveLayout = (next: DashboardLayoutEntry[]) => {
+  const saveDashboardPrefs = (next: DashboardLayoutEntry[], nextThresholds: DashboardThresholds) => {
     setSavingLayout(true);
     api
-      .put<DashboardPreferenceResponse>("/dashboard/preferences", { layout: next })
+      .put<DashboardPreferenceResponse>("/dashboard/preferences", { layout: next, thresholds: nextThresholds })
       .then((res) => {
         setLayout(res.data.layout);
         setAvailableWidgets(res.data.available_widgets);
+        setThresholds(res.data.thresholds || DEFAULT_THRESHOLDS);
       })
       .finally(() => setSavingLayout(false));
   };
@@ -204,6 +238,11 @@ export default function Dashboard() {
     api
       .get<UnstableDevice[]>("/metrics/unstable-devices", { params: { hours: 24, limit: 6 } })
       .then((res) => setUnstableDevices(res.data))
+      .catch(() => {});
+
+    api
+      .get<TimelineEvent[]>("/dashboard/timeline", { params: { limit: 15 } })
+      .then((res) => setTimelineEvents(res.data))
       .catch(() => {});
 
     api
@@ -248,9 +287,16 @@ export default function Dashboard() {
   const cpuHistory = (summary?.fleet_health_history || []).map((h) => h.avg_cpu ?? 0);
   const memHistory = (summary?.fleet_health_history || []).map((h) => h.avg_memory ?? 0);
 
+  // Severity-weighted health -- a device that's "online" but has a
+  // flapping port, a down interface, or is already flagged unstable isn't
+  // healthy, so the headline number blends those signals in rather than
+  // just counting reachability. See backend fleet_health_weighted_pct.
+  const breakdown = summary?.fleet_health_breakdown;
+  const weightedHealthPct = summary?.fleet_health_weighted_pct ?? onlinePct;
   const donutData = [
-    { name: "Online", value: online, color: "#10B981" },
-    { name: "Offline", value: offline, color: "#EF4444" },
+    { name: "Healthy", value: breakdown?.healthy ?? online, color: "#10B981" },
+    { name: "Degraded", value: breakdown?.degraded ?? 0, color: "#F59E0B" },
+    { name: "Offline", value: (breakdown?.offline ?? offline) + (breakdown?.unknown ?? 0), color: "#EF4444" },
   ].filter((d) => d.value > 0);
 
   const totalGroups = groupStats.length;
@@ -307,7 +353,13 @@ export default function Dashboard() {
       {/* ---- Stat card row ---------------------------------------------- */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
         <StatCard iconKey="devices" value={total} label="Devices" sublabel={`${totalGroups} groups`} />
-        <StatCard iconKey="online" value={online} label="Online" valueClass="text-emerald-600" sublabel={`${onlinePct.toFixed(0)}% healthy`} />
+        <StatCard
+          iconKey="online"
+          value={`${weightedHealthPct.toFixed(0)}%`}
+          label="Fleet Health"
+          valueClass={weightedHealthPct >= 95 ? "text-emerald-600" : weightedHealthPct >= 80 ? "text-amber-600" : "text-red-600"}
+          sublabel={`${online}/${total} online${breakdown?.degraded ? ` · ${breakdown.degraded} flaky` : ""}`}
+        />
         <StatCard iconKey="offline" value={offline} label="Offline" valueClass={offline > 0 ? "text-red-600" : "text-slate-800"} sublabel={`${summary?.critical_alerts ?? 0} critical`} />
         <Link to="/devices" className="block">
           <StatCard
@@ -353,18 +405,22 @@ export default function Dashboard() {
                     </PieChart>
                   </ResponsiveContainer>
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <span className={`text-2xl font-bold ${offline === 0 ? "text-emerald-600" : "text-slate-800"}`}>{onlinePct.toFixed(0)}%</span>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wide">Online</span>
+                    <span className={`text-2xl font-bold ${weightedHealthPct >= 95 ? "text-emerald-600" : weightedHealthPct >= 80 ? "text-amber-600" : "text-red-600"}`}>{weightedHealthPct.toFixed(0)}%</span>
+                    <span className="text-[10px] text-slate-400 uppercase tracking-wide">Health</span>
                   </div>
                 </div>
                 <div className="flex-1 space-y-2.5 min-w-0">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Online</span>
-                    <span className="font-semibold text-slate-800">{online}</span>
+                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />Healthy</span>
+                    <span className="font-semibold text-slate-800">{breakdown?.healthy ?? online}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-amber-500" />Degraded <span className="text-[10px] text-slate-300">(flapping/unstable)</span></span>
+                    <span className="font-semibold text-slate-800">{breakdown?.degraded ?? 0}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="flex items-center gap-2 text-slate-500"><span className="w-2.5 h-2.5 rounded-full bg-red-500" />Offline</span>
-                    <span className="font-semibold text-slate-800">{offline}</span>
+                    <span className="font-semibold text-slate-800">{(breakdown?.offline ?? offline) + (breakdown?.unknown ?? 0)}</span>
                   </div>
                   <div className="h-px bg-slate-100 my-1" />
                   <div className="flex items-center justify-between text-sm">
@@ -378,8 +434,8 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="grid grid-cols-3 gap-2 mt-6 pt-5 border-t border-slate-100">
-                <Gauge label="CPU" value={avgCpu} color="#06B6D4" />
-                <Gauge label="RAM" value={avgMem} color="#8B5CF6" />
+                <Gauge label="CPU" value={avgCpu} color={bandColor(avgCpu, thresholds.cpu, "#06B6D4")} />
+                <Gauge label="RAM" value={avgMem} color={bandColor(avgMem, thresholds.memory, "#8B5CF6")} />
                 <Gauge label="HEALTH" value={summary?.global_health_score ?? 100} color="#10B981" />
               </div>
             </Card>
@@ -424,6 +480,48 @@ export default function Dashboard() {
             </Card>
           ),
 
+          whats_changed: (
+            <Card className="p-6 h-full">
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">What Changed</p>
+                <span className="text-[11px] text-slate-300">alerts · changes · drift · deploys</span>
+              </div>
+              {timelineEvents.length === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm font-semibold text-emerald-600">Quiet</p>
+                  <p className="text-xs text-slate-400 mt-1">Nothing new since your last visit.</p>
+                </div>
+              ) : (
+                <div className="space-y-1 max-h-72 overflow-y-auto pr-1">
+                  {timelineEvents.map((ev, i) => {
+                    const ic = TIMELINE_ICON[ev.type] || TIMELINE_ICON.alert;
+                    return (
+                      <Link
+                        key={i}
+                        to={ev.link}
+                        className="flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-slate-50 transition-colors"
+                      >
+                        <span className={`w-6 h-6 rounded-md ${ic.bg} ${ic.fg} flex items-center justify-center shrink-0 mt-0.5`}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{ic.icon}</svg>
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-medium text-slate-700 truncate">{ev.title}</p>
+                            <span className="text-[10px] text-slate-400 shrink-0">{timeAgo(ev.timestamp)}</span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 truncate">
+                            {ev.hostname ? `${ev.hostname} · ` : ""}
+                            {ev.detail || ""}
+                          </p>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          ),
+
           uplinks: (
             <Card className="p-6 h-full">
               <div className="flex items-center justify-between mb-4">
@@ -446,8 +544,11 @@ export default function Dashboard() {
                       </div>
                       <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
                         <div
-                          className={`h-full rounded-full ${link.utilization_pct >= 90 ? "bg-red-500" : link.utilization_pct >= 65 ? "bg-amber-500" : "bg-brandblue"}`}
-                          style={{ width: `${Math.min(link.utilization_pct, 100)}%` }}
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${Math.min(link.utilization_pct, 100)}%`,
+                            backgroundColor: bandColor(link.utilization_pct, thresholds.bandwidth, "#2563EB"),
+                          }}
                         />
                       </div>
                     </div>
@@ -678,7 +779,7 @@ export default function Dashboard() {
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <Sparkline values={d.cpu_history} color="#06B6D4" width={48} height={18} />
-                        <span className="font-semibold text-slate-800 text-xs w-10 text-right">{d.cpu.toFixed(0)}%</span>
+                        <span className={`font-semibold text-xs w-10 text-right ${bandTextClass(d.cpu, thresholds.cpu)}`}>{d.cpu.toFixed(0)}%</span>
                       </div>
                     </div>
                   ))}
@@ -702,7 +803,7 @@ export default function Dashboard() {
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <Sparkline values={d.memory_history} color="#8B5CF6" width={48} height={18} />
-                        <span className="font-semibold text-slate-800 text-xs w-10 text-right">{d.memory.toFixed(0)}%</span>
+                        <span className={`font-semibold text-xs w-10 text-right ${bandTextClass(d.memory, thresholds.memory)}`}>{d.memory.toFixed(0)}%</span>
                       </div>
                     </div>
                   ))}
@@ -726,7 +827,7 @@ export default function Dashboard() {
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <Sparkline values={d.bandwidth_history} color="#0EA5E9" width={48} height={18} />
-                        <span className="font-semibold text-slate-800 text-xs w-10 text-right">{d.bandwidth.toFixed(0)}%</span>
+                        <span className={`font-semibold text-xs w-10 text-right ${bandTextClass(d.bandwidth, thresholds.bandwidth)}`}>{d.bandwidth.toFixed(0)}%</span>
                       </div>
                     </div>
                   ))}
@@ -877,10 +978,11 @@ export default function Dashboard() {
         <DashboardCustomizePanel
           layout={layout.length > 0 ? layout : availableWidgets.map((w) => ({ id: w.id, visible: w.default_visible }))}
           availableWidgets={availableWidgets}
+          thresholds={thresholds}
           saving={savingLayout}
           onClose={() => setShowCustomize(false)}
-          onSave={(next) => {
-            saveLayout(next);
+          onSave={(next, nextThresholds) => {
+            saveDashboardPrefs(next, nextThresholds);
             setShowCustomize(false);
           }}
         />
