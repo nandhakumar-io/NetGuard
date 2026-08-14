@@ -19,14 +19,12 @@ from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
 from app.models.device_status_history import DeviceStatusHistory
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.firmware_upgrade import FirmwareUpgrade
 from app.models.flow_record import FlowRecord
 from app.models.golden_config import GoldenConfig
 from app.models.interface_alert_config import InterfaceAlertConfig
-from app.models.interface_metric import InterfaceMetric
 from app.models.interface_status import InterfaceStatus
 from app.models.maintenance_window import MaintenanceWindow
 from app.models.path_trace import PathHop, PathTrace
@@ -815,9 +813,7 @@ def delete_device(
         db.query(ConfigDrift).filter(ConfigDrift.device_id == device_id).delete(synchronize_session=False)
         vm_client.delete_device_series(device_id)
         db.query(ProtocolOperation).filter(ProtocolOperation.device_id == device_id).delete(synchronize_session=False)
-        db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
         db.query(DeviceStatusHistory).filter(DeviceStatusHistory.device_id == device_id).delete(synchronize_session=False)
-        db.query(InterfaceMetric).filter(InterfaceMetric.device_id == device_id).delete(synchronize_session=False)
         db.query(InterfaceStatus).filter(InterfaceStatus.device_id == device_id).delete(synchronize_session=False)
         db.query(InterfaceAlertConfig).filter(InterfaceAlertConfig.device_id == device_id).delete(synchronize_session=False)
         db.query(SyslogMessage).filter(SyslogMessage.device_id == device_id).delete(synchronize_session=False)

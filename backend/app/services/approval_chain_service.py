@@ -150,13 +150,25 @@ def act_on_current_stage(
 
     eligible_roles = STAGE_ELIGIBLE_ROLES[stage.stage_type]
     actor_role = actor.role.value if hasattr(actor.role, "value") else actor.role
-    if actor_role not in eligible_roles:
-        raise ApprovalChainError(
-            f"This stage ({stage.stage_type.value}) requires role "
-            f"{'/'.join(eligible_roles)}; you are '{actor_role}'."
-        )
 
-    if actor.id == cr.submitted_by:
+    acting_for: User | None = None
+    if actor_role not in eligible_roles:
+        # Not eligible under their own base role -- check whether they're
+        # currently acting as someone else's approval delegate for this
+        # exact stage type (app.services.approval_delegate_service). This
+        # was previously never consulted here, which made delegation a
+        # dead feature: a delegate would still be rejected with "requires
+        # role X; you are Y" even with an active delegation in place.
+        from app.services import approval_delegate_service
+
+        acting_for = approval_delegate_service.resolve_delegated_authority(db, actor, stage.stage_type)
+        if acting_for is None:
+            raise ApprovalChainError(
+                f"This stage ({stage.stage_type.value}) requires role "
+                f"{'/'.join(eligible_roles)}; you are '{actor_role}'."
+            )
+
+    if actor.id == cr.submitted_by or (acting_for is not None and acting_for.id == cr.submitted_by):
         raise ApprovalChainError(
             "The person who submitted a change request cannot act on its own approval chain."
         )
@@ -165,7 +177,9 @@ def act_on_current_stage(
         db.query(ChangeRequestApprovalStage)
         .filter(
             ChangeRequestApprovalStage.change_request_id == cr.id,
-            ChangeRequestApprovalStage.acted_by == actor.id,
+            ChangeRequestApprovalStage.acted_by.in_(
+                [actor.id, acting_for.id] if acting_for is not None else [actor.id]
+            ),
         )
         .first()
     )

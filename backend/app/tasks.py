@@ -323,7 +323,12 @@ def snmp_poll_task(self, device_id: str) -> str:
             return "device_missing"
         try:
             metric = metrics_service.poll_device(db, device)
-            return metric.health_color.value if metric.health_color else "unknown"
+            # poll_device returns a dict (mirrors the old DeviceMetric row's
+            # columns, see its docstring) since the VictoriaMetrics cutover --
+            # not an ORM row, so this must be a key lookup, not attribute
+            # access. health_color is already a plain string ("green" /
+            # "yellow" / "red" / "unknown"), not an enum, so no `.value`.
+            return metric.get("health_color") or "unknown"
         except metrics_service.SnmpNotConfiguredError:
             return "snmp_not_configured"
         except metrics_service.credential_service.CredentialNotFoundError as exc:

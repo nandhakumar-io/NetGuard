@@ -5,6 +5,7 @@ from app.api import (
     alert_runbooks,
     alert_snoozes,
     alerts,
+    approval_delegates,
     audit,
     auth,
     change_requests,
@@ -49,6 +50,7 @@ from app.api import (
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(approval_delegates.router)
 api_router.include_router(sso.router)
 api_router.include_router(health.router)
 api_router.include_router(devices.router)
