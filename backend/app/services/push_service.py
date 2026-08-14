@@ -1,0 +1,144 @@
+"""Mobile push notifications for on-call engineers.
+
+Deliberately built on ntfy/Pushover (plain HTTP POST to an existing
+mobile app) rather than a NetGuard-authored iOS/Android app with its own
+APNs/FCM registration -- that's a much bigger lift for the same outcome
+("this device's lock screen buzzes"), and both providers have free
+mobile apps an engineer can install today. See app.models.push_subscription
+for why `target` doesn't need encryption at rest.
+
+Every send is best-effort per subscription: one engineer's misconfigured
+topic/key never blocks delivery to anyone else's, matching the existing
+"notifications must never break the caller" policy used throughout
+notification_service.
+"""
+import logging
+from datetime import datetime, timezone
+
+import httpx
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.models.push_subscription import PushSubscription
+
+logger = logging.getLogger(__name__)
+
+TIMEOUT_SECONDS = 5.0
+
+# ntfy priority levels: 1 min .. 5 max. "urgent" (5) bypasses the phone's
+# silent/DND mode on supported ntfy clients, which is exactly what a P1
+# page needs at 3am.
+_NTFY_PRIORITY = {"critical": "urgent", "warning": "high", "info": "default"}
+_PUSHOVER_PRIORITY = {"critical": 2, "warning": 1, "info": 0}  # 2 = emergency (repeats until acked)
+
+
+def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
+    headers = {
+        "Title": title,
+        "Priority": _NTFY_PRIORITY.get(severity, "default"),
+        "Tags": "rotating_light" if severity == "critical" else "warning",
+    }
+    if url:
+        headers["Click"] = url
+    if severity == "critical":
+        # Emergency-priority ntfy pushes retry/repeat client-side until
+        # acknowledged in the app, same intent as Pushover priority 2
+        # below -- a P1 shouldn't be silently missed because one push
+        # arrived while the phone was locked in a pocket.
+        headers["Priority"] = "urgent"
+    try:
+        resp = httpx.post(sub.target, content=message.encode("utf-8"), headers=headers, timeout=TIMEOUT_SECONDS)
+        return resp.status_code < 300
+    except Exception:
+        logger.warning("ntfy push failed for subscription %s", sub.id, exc_info=True)
+        return False
+
+
+def _send_pushover(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
+    if not settings.PUSHOVER_APP_TOKEN:
+        logger.warning("Pushover subscription %s configured but PUSHOVER_APP_TOKEN is unset", sub.id)
+        return False
+    payload = {
+        "token": settings.PUSHOVER_APP_TOKEN,
+        "user": sub.target,
+        "title": title,
+        "message": message,
+        "priority": _PUSHOVER_PRIORITY.get(severity, 0),
+    }
+    if payload["priority"] == 2:
+        # Emergency priority requires retry/expire -- retry the alert
+        # every 60s for up to 1 hour until the engineer acknowledges it
+        # in the Pushover app.
+        payload["retry"] = 60
+        payload["expire"] = 3600
+    if url:
+        payload["url"] = url
+        payload["url_title"] = "Open in NetGuard"
+    try:
+        resp = httpx.post("https://api.pushover.net/1/messages.json", data=payload, timeout=TIMEOUT_SECONDS)
+        return resp.status_code < 300
+    except Exception:
+        logger.warning("Pushover push failed for subscription %s", sub.id, exc_info=True)
+        return False
+
+
+def _send_one(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
+    if sub.provider.value == "pushover":
+        return _send_pushover(sub, title, message, severity, url)
+    return _send_ntfy(sub, title, message, severity, url)
+
+
+def send_push(
+    db: Session,
+    *,
+    title: str,
+    message: str,
+    severity: str = "critical",
+    url: str | None = None,
+    user_ids: list | None = None,
+) -> int:
+    """Pushes to every enabled subscription that opted into this
+    severity -- subscriptions default to critical-only (see
+    PushSubscription.include_non_critical), so a P1 always reaches every
+    registered phone while routine warnings only reach devices that
+    explicitly asked for them.
+
+    `user_ids`: restrict delivery to specific users' subscriptions (e.g.
+    an escalation policy's designated on-call engineer) instead of every
+    subscription in the system. None = fan out to everyone subscribed.
+
+    Returns the number of subscriptions successfully pushed to.
+    """
+    query = db.query(PushSubscription).filter(PushSubscription.enabled == True)  # noqa: E712
+    if user_ids:
+        query = query.filter(PushSubscription.user_id.in_(user_ids))
+    subs = query.all()
+
+    sent = 0
+    now = datetime.now(timezone.utc)
+    for sub in subs:
+        if severity != "critical" and not sub.include_non_critical:
+            continue
+        if _send_one(sub, title, message, severity, url):
+            sub.last_pushed_at = now
+            db.add(sub)
+            sent += 1
+
+    if sent:
+        db.commit()
+    return sent
+
+
+def send_test_push(sub: PushSubscription) -> bool:
+    """Fires a one-off test push to a single subscription, independent
+    of the severity-filtering logic in send_push -- a test should always
+    go through regardless of include_non_critical, so the button in the
+    UI reliably confirms the subscription is wired up correctly.
+    """
+    return _send_one(
+        sub,
+        title="NetGuard test push",
+        message="If you can see this, push notifications are working for this device.",
+        severity="critical",
+        url=None,
+    )

@@ -21,9 +21,19 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String, unique=True, index=True, nullable=False)
     full_name = Column(String, nullable=False)
-    hashed_password = Column(String, nullable=False)
+    # Nullable: an SSO-only user (see sso_provider below) never has a local
+    # NetGuard password to check, so there's nothing to hash. Local
+    # email/password accounts still always populate this.
+    hashed_password = Column(String, nullable=True)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.NETWORK_ENGINEER)
     is_active = Column(String, default=True)
+
+    # SSO identity link (Google OIDC today; provider is a plain string so
+    # Okta/Entra OIDC can reuse the same columns later without a migration).
+    # sso_subject is the IdP's stable `sub` claim, not email -- email can be
+    # reassigned at some IdPs, sub can't.
+    sso_provider = Column(String, nullable=True)
+    sso_subject = Column(String, nullable=True)
 
     # Multi-Factor Authentication (NFR Security / FR-1)
     mfa_secret = Column(String, nullable=True)  # TOTP secret; set on /mfa/setup, unused until enabled

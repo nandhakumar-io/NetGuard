@@ -127,6 +127,14 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
 
+    # Mobile push notifications (see app.services.push_service). Only
+    # PUSHOVER_APP_TOKEN is global -- it identifies *NetGuard itself* to
+    # Pushover's API and is the same for every user's subscription. NTFY
+    # needs no app-level credential since a subscription's `target` is
+    # already the full topic URL to POST to (self-hosted ntfy instances
+    # work the same way, just with a different host in that URL).
+    PUSHOVER_APP_TOKEN: str | None = None
+
     # NetBox pull-sync (see app.services.netbox_service). Both unset =
     # sync endpoint returns a clear "not configured" error instead of
     # attempting a request with no credentials.
@@ -438,6 +446,39 @@ class Settings(BaseSettings):
     GNS3_PASSWORD: str | None = None
     GNS3_REQUEST_TIMEOUT_SECONDS: float = 10.0
     GNS3_CONSOLE_READY_TIMEOUT_SECONDS: float = 45.0
+
+    # Google OIDC login (see app.services.sso_service / app.api.sso).
+    # Unset GOOGLE_CLIENT_ID = SSO login disabled; the frontend hides the
+    # "Sign in with Google" button and the endpoints 404-equivalent
+    # (400) rather than silently misconfiguring an OAuth flow with a
+    # blank client id.
+    GOOGLE_CLIENT_ID: str | None = None
+    GOOGLE_CLIENT_SECRET: str | None = None
+    # Must exactly match a redirect URI registered in the Google Cloud
+    # Console OAuth client, e.g. "https://netguard.example.com/api/v1/sso/google/callback".
+    GOOGLE_REDIRECT_URI: str | None = None
+    # Optional Google Workspace hosted-domain restriction (`hd` claim) --
+    # e.g. "acme.com" so only that org's Workspace accounts can complete
+    # login, blocking any personal @gmail.com account from ever reaching
+    # the callback even if they somehow guess/share the redirect URI.
+    GOOGLE_ALLOWED_HD: str | None = None
+    # Role newly-provisioned SSO users get on first login, before any
+    # group-to-role mapping below is applied. Deliberately the lowest
+    # privilege role, same "never trust the client/IdP with admin by
+    # default" posture as local /auth/register's sanitized_role().
+    SSO_DEFAULT_ROLE: str = "network_engineer"
+    # Google Workspace group email -> NetGuard UserRole, e.g.
+    # '{"netguard-admins@acme.com": "network_admin", "netguard-noc@acme.com": "noc_engineer"}'.
+    # Requires Workspace Admin SDK / Directory API access (a service
+    # account with domain-wide delegation) to resolve a user's group
+    # membership -- see sso_service.resolve_role_from_groups. Left as an
+    # opt-in JSON blob rather than a first-class settings block because
+    # most deployments start with SSO_DEFAULT_ROLE alone and only wire up
+    # group mapping once onboarding/offboarding hygiene becomes a
+    # requirement.
+    SSO_GROUP_ROLE_MAP: str | None = None
+    GOOGLE_WORKSPACE_SERVICE_ACCOUNT_JSON: str | None = None
+    GOOGLE_WORKSPACE_ADMIN_EMAIL: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity
 from app.models.escalation_policy import EscalationPolicy
-from app.services import audit_service, notification_service
+from app.services import audit_service, notification_service, push_service
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def _due(alert: Alert, policy: EscalationPolicy, now: datetime) -> bool:
     return since_last >= policy.repeat_minutes
 
 
-def _send(policy: EscalationPolicy, alert: Alert) -> None:
+def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
     message = (
         f"Alert unacknowledged for {policy.unack_minutes}+ minutes: "
         f"[{alert.severity.value.upper()}] {alert.category} — {alert.message}"
@@ -86,6 +86,22 @@ def _send(policy: EscalationPolicy, alert: Alert) -> None:
         # above fails or nobody's watching that channel.
         notification_service.notify(event="Alert Escalated", message=message, severity=alert.severity.value)
 
+    # Mobile push, on top of whichever channel above -- an escalation is
+    # by definition something that already sat unacknowledged past its
+    # window, so it's exactly the "nobody's staring at the dashboard"
+    # case a phone push is for. Runs regardless of policy.channel so a
+    # team using SLACK/TEAMS/EMAIL for the primary escalation channel
+    # still gets a push as the secondary, wake-someone-up path.
+    # send_push itself only reaches devices subscribed to this severity
+    # (critical-only by default), so warning-scope policies won't buzz a
+    # phone unless that device opted into non-critical pushes.
+    push_service.send_push(
+        db,
+        title=f"🚨 Alert Escalated ({policy.name})",
+        message=message,
+        severity=alert.severity.value,
+    )
+
 
 def run_escalation_sweep(db: Session) -> int:
     """Evaluate every enabled EscalationPolicy against active alerts.
@@ -117,7 +133,7 @@ def run_escalation_sweep(db: Session) -> int:
             if not _due(alert, policy, now):
                 continue
 
-            _send(policy, alert)
+            _send(db, policy, alert)
 
             alert.escalated = True
             alert.escalated_at = alert.escalated_at or now

@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth, UserRole } from "../lib/auth";
+import { api } from "../lib/api";
 
 // Network Administrator and Security are privileged roles and are
 // deliberately excluded from self-registration -- the backend now
@@ -24,6 +25,17 @@ function BrandMark() {
   );
 }
 
+function GoogleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24">
+      <path fill="#4285F4" d="M23.52 12.27c0-.85-.08-1.66-.22-2.45H12v4.64h6.47c-.28 1.5-1.13 2.77-2.4 3.62v3h3.88c2.27-2.09 3.57-5.17 3.57-8.81z" />
+      <path fill="#34A853" d="M12 24c3.24 0 5.96-1.07 7.95-2.92l-3.88-3c-1.08.72-2.45 1.15-4.07 1.15-3.13 0-5.78-2.11-6.73-4.95H1.27v3.1C3.25 21.3 7.31 24 12 24z" />
+      <path fill="#FBBC05" d="M5.27 14.28A7.2 7.2 0 0 1 4.9 12c0-.79.14-1.56.37-2.28v-3.1H1.27A11.98 11.98 0 0 0 0 12c0 1.94.46 3.77 1.27 5.38l4-3.1z" />
+      <path fill="#EA4335" d="M12 4.77c1.77 0 3.35.61 4.6 1.8l3.44-3.44C17.95 1.19 15.24 0 12 0 7.31 0 3.25 2.7 1.27 6.62l4 3.1C6.22 6.88 8.87 4.77 12 4.77z" />
+    </svg>
+  );
+}
+
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
     <label className="block text-[13px] font-semibold text-slate-600 mb-1.5 tracking-wide">
@@ -36,8 +48,9 @@ const inputClass =
   "w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 placeholder:font-normal outline-none transition-colors focus:border-brandblue focus:ring-2 focus:ring-brandblue/20 focus:bg-white";
 
 export default function Login() {
-  const { login, verifyMfa, register } = useAuth();
+  const { login, verifyMfa, register, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [fullName, setFullName] = useState("");
@@ -46,6 +59,33 @@ export default function Login() {
   const [role, setRole] = useState<UserRole>("network_engineer");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+
+  // Surfaces a friendly message if we just bounced back from a failed
+  // GET /sso/google/callback (see app/api/sso.py's _login_error_redirect).
+  useEffect(() => {
+    const ssoError = searchParams.get("sso_error");
+    if (ssoError) {
+      const messages: Record<string, string> = {
+        sso_not_configured: "Google sign-in is not set up for this deployment.",
+        invalid_or_expired_state: "That sign-in link expired. Please try again.",
+        google_login_failed: "Google sign-in failed. Please try again.",
+        account_disabled: "This account has been disabled. Contact your administrator.",
+        access_denied: "Google sign-in was cancelled.",
+      };
+      setError(messages[ssoError] || "Google sign-in failed. Please try again.");
+    }
+  }, [searchParams]);
+
+  // Only show the button if the backend actually has Google OAuth
+  // credentials configured -- avoids a dead button in deployments that
+  // haven't set GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI yet.
+  useEffect(() => {
+    api
+      .get("/sso/providers")
+      .then((res) => setGoogleEnabled(!!res.data?.google))
+      .catch(() => setGoogleEnabled(false));
+  }, []);
 
   // MFA challenge step: set once /auth/login responds with mfa_required.
   const [mfaToken, setMfaToken] = useState<string | null>(null);
@@ -290,6 +330,24 @@ export default function Login() {
                 {loading ? "Please wait…" : mode === "login" ? "Login" : "Create Account"}
               </button>
             </form>
+
+            {mode === "login" && googleEnabled && (
+              <>
+                <div className="flex items-center gap-3 my-5">
+                  <div className="h-px bg-slate-200 flex-1" />
+                  <span className="text-xs text-slate-400 font-medium">OR</span>
+                  <div className="h-px bg-slate-200 flex-1" />
+                </div>
+                <button
+                  type="button"
+                  onClick={loginWithGoogle}
+                  className="w-full flex items-center justify-center gap-2.5 border border-slate-200 rounded-lg px-4 py-3 text-[15px] font-semibold text-slate-700 hover:bg-slate-50 transition"
+                >
+                  <GoogleIcon />
+                  Sign in with Google
+                </button>
+              </>
+            )}
 
             <p className="text-xs text-slate-400 mt-5 text-center leading-relaxed">
               Approving change requests requires a Network Administrator role.

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.alert import Alert
 from app.models.incident import Incident, IncidentStatus, IncidentTimelineEvent
+from app.services import push_service
 
 
 def alert_ids_list(incident: Incident) -> List[uuid.UUID]:
@@ -87,6 +88,22 @@ def create_incident(
         actor=created_by,
         occurred_at=detected_at or datetime.utcnow(),
     )
+
+    # P1 (CRITICAL) incidents get pushed straight to every on-call phone,
+    # on top of whatever Slack/Teams/email fan-out already happened for
+    # the underlying alerts -- an incident is the "this is now a real
+    # outage" signal, distinct from (and rarer than) individual alerts,
+    # so it's the right trigger point for a wake-someone-up push rather
+    # than pushing on every critical alert. Best-effort: a push failure
+    # never blocks incident creation.
+    if severity == "critical":
+        push_service.send_push(
+            db,
+            title=f"🚨 P1 Incident: {title}",
+            message=summary or "Critical incident opened in NetGuard. Tap to view details.",
+            severity="critical",
+        )
+
     return incident
 
 

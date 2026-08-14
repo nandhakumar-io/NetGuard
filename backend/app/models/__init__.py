@@ -84,11 +84,13 @@ from app.models.path_trace import (  # noqa: F401
     PathTraceStatus,
 )
 from app.models.protocol_operation import ProtocolName, ProtocolOperation  # noqa: F401
+from app.models.push_subscription import PushProvider, PushSubscription  # noqa: F401
 from app.models.recurring_maintenance_schedule import (  # noqa: F401
     RecurringMaintenanceSchedule,
 )
 from app.models.refresh_token import RefreshToken  # noqa: F401
 from app.models.snapshot import ConfigSnapshot  # noqa: F401
+from app.models.subnet import IPAddressState, IPReservation, Subnet  # noqa: F401
 from app.models.syslog_message import SyslogMessage, SyslogSeverity  # noqa: F401
 from app.models.topology_snapshot import TopologySnapshot  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401

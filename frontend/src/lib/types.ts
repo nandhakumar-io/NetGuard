@@ -1024,6 +1024,70 @@ export interface AlertSnooze {
   created_at: string | null;
 }
 
+export interface Subnet {
+  id: string;
+  cidr: string;
+  name: string | null;
+  vlan_id: number | null;
+  site: string | null;
+  description: string | null;
+  tags: string[];
+  created_at: string | null;
+  updated_at: string | null;
+  total_addresses: number;
+  usable_addresses: number;
+  used_count: number;
+  free_count: number;
+  utilization_pct: number;
+}
+
+export type IPAddressState = "free" | "assigned" | "reserved" | "gateway" | "broadcast" | "network";
+
+export interface SubnetAddressEntry {
+  ip_address: string;
+  state: IPAddressState;
+  device_id: string | null;
+  hostname: string | null;
+  note: string | null;
+}
+
+export interface IPReservation {
+  id: string;
+  subnet_id: string;
+  ip_address: string;
+  state: "reserved" | "gateway" | "broadcast" | "network";
+  note: string | null;
+  created_at: string | null;
+}
+
+export interface FreeIPResult {
+  subnet_id: string;
+  cidr: string;
+  free_ip: string | null;
+  message: string | null;
+}
+
+export interface IPConflict {
+  ip_address: string;
+  device_ids: string[];
+  hostnames: string[];
+}
+
+export interface ConflictReport {
+  conflicts: IPConflict[];
+}
+
+export interface PushSubscription {
+  id: string;
+  label: string;
+  provider: "ntfy" | "pushover";
+  target: string;
+  include_non_critical: boolean;
+  enabled: boolean;
+  created_at: string | null;
+  last_pushed_at: string | null;
+}
+
 export interface DeviceGroupRule {
   field: "hostname" | "tag" | "site" | "device_type" | "device_role";
   pattern: string;

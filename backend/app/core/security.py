@@ -71,6 +71,23 @@ def create_mfa_challenge_token(subject: str) -> str:
     )
 
 
+def create_sso_state_token(extra_claims: dict | None = None) -> str:
+    """Short-lived, signed CSRF-protection token for the Google OIDC
+    redirect round-trip (the `state` param). A JWT here rather than a
+    random opaque string because it needs no server-side storage --
+    the redirect to Google and back can hit different API replicas --
+    while still being unguessable and tamper-evident.
+    """
+    return _create_token("sso-state", token_type="sso_state", expires_delta=timedelta(minutes=10), extra_claims=extra_claims)
+
+
+def decode_sso_state_token(token: str) -> dict:
+    payload = decode_token(token)
+    if payload.get("type") != "sso_state":
+        raise jwt.JWTError("Not an SSO state token")
+    return payload
+
+
 def decode_token(token: str) -> dict:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
 

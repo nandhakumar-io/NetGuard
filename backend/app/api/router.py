@@ -27,16 +27,19 @@ from app.api import (
     gns3,
     health,
     incidents,
+    ipam,
     jit_access,
     jobs,
     maintenance_windows,
     metrics,
     notification,
     path_trace,
+    push_subscriptions,
     rbac,
     recurring_maintenance_schedules,
     reports,
     secrets_rotation,
+    sso,
     syslog,
     terminal,
     topology,
@@ -46,6 +49,7 @@ from app.api import (
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(sso.router)
 api_router.include_router(health.router)
 api_router.include_router(devices.router)
 api_router.include_router(device_groups.router)
@@ -87,3 +91,5 @@ api_router.include_router(webhooks.router)
 api_router.include_router(config_intents.router)
 api_router.include_router(chatops.router)
 api_router.include_router(gitops.router)
+api_router.include_router(ipam.router)
+api_router.include_router(push_subscriptions.router)

@@ -68,6 +68,10 @@ const groups: NavGroup[] = [
         icon: <svg {...iconProps}><path d="M12 2l9 5-9 5-9-5 9-5z" /><path d="M3 12l9 5 9-5" /><path d="M3 17l9 5 9-5" /></svg>,
       },
       {
+        to: "/ipam", label: "IPAM",
+        icon: <svg {...iconProps}><rect x="3" y="4" width="18" height="6" rx="1" /><rect x="3" y="14" width="18" height="6" rx="1" /><path d="M7 10v4M11 10v4M15 10v4" /></svg>,
+      },
+      {
         to: "/config-search", label: "Config Search",
         icon: <svg {...iconProps}><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>,
       },

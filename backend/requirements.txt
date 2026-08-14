@@ -6,6 +6,11 @@ pydantic==2.9.2
 pydantic[email]==2.9.2
 pydantic-settings==2.5.2
 python-jose[cryptography]==3.3.0
+# Optional: only needed if SSO_GROUP_ROLE_MAP + Workspace Admin SDK
+# group->role resolution is used (see app/services/sso_service.py). The
+# Google OIDC login flow itself uses plain httpx + Google's tokeninfo
+# endpoint and does not require this.
+google-auth==2.35.0
 bcrypt==4.0.1
 pyotp==2.9.0
 python-multipart==0.0.9

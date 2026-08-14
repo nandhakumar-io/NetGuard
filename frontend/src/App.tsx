@@ -16,6 +16,8 @@ const Jobs = lazy(() => import("./pages/Jobs"));
 const Devices = lazy(() => import("./pages/Devices"));
 const DeviceDetail = lazy(() => import("./pages/DeviceDetail"));
 const Groups = lazy(() => import("./pages/Groups"));
+const IPAMPage = lazy(() => import("./pages/IPAM"));
+const PushSettings = lazy(() => import("./pages/PushSettings"));
 const AuditLog = lazy(() => import("./pages/AuditLog"));
 const Security = lazy(() => import("./pages/Security"));
 const DriftPage = lazy(() => import("./pages/Drift"));
@@ -62,6 +64,7 @@ export default function App() {
           <Route path="/devices/config" element={withSuspense(<DeviceConfiguration />)} />
           <Route path="/devices/:deviceId" element={withSuspense(<DeviceDetail />)} />
           <Route path="/groups" element={withSuspense(<Groups />)} />
+          <Route path="/ipam" element={withSuspense(<IPAMPage />)} />
           <Route path="/config-search" element={withSuspense(<ConfigSearchPage />)} />
           <Route path="/templates" element={withSuspense(<TemplatesPage />)} />
           <Route path="/topology" element={withSuspense(<Topology />)} />
