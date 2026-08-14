@@ -972,6 +972,13 @@ export interface TopologyNode {
   // null if it has none -- powers the Topology map's alert overlay
   // toggle.
   active_alert_severity?: "critical" | "warning" | "info" | null;
+  // Mirrors Device.is_uplink -- WAN/uplink-flagged device, highlighted
+  // distinctly on the Topology map.
+  is_uplink?: boolean;
+  // True when this device is a graph articulation point -- removing it
+  // would split part of the fleet off from the rest, i.e. there's no
+  // redundant path around it. Powers the "single point of failure" badge.
+  is_spof?: boolean;
 }
 
 export interface TopologyEdge {
@@ -997,6 +1004,10 @@ export interface TopologyEdge {
   // backend's staleness window -- the neighbor data may no longer
   // reflect reality (device rebooted, recabled, etc).
   stale?: boolean;
+  // True when either endpoint device is flagged is_uplink -- rendered
+  // thicker / distinctly colored on the map so the WAN/uplink boundary
+  // is visible at a glance.
+  is_uplink?: boolean;
   // Physical members of this logical link. >1 means this line represents
   // a real multi-cable trunk (e.g. LACP port-channel) -- every LLDP/CDP-
   // confirmed port pair between the same two devices, previously

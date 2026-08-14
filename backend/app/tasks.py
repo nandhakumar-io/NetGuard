@@ -613,6 +613,78 @@ def run_recurring_window_generation_task() -> int:
         db.close()
 
 
+# --- IPAM ------------------------------------------------------------
+
+
+@celery_app.task(name="app.tasks.run_subnet_rescan_sweep_task")
+def run_subnet_rescan_sweep_task() -> int:
+    """Celery beat entry point (see celery_app "ipam-subnet-rescan-sweep"):
+    re-runs scan_subnet() for every Subnet whose auto_rescan_enabled
+    cadence (app.services.ipam_service.due_for_rescan) has elapsed, so
+    scanned-host/utilization data doesn't go stale between manual clicks
+    on the IPAM page -- same "beat ticks often, per-entity cadence
+    decides who's due" shape as run_reachability_sweep_task above.
+    Failures (e.g. nmap missing, subnet too large) are logged and skipped
+    per-subnet so one bad subnet doesn't block the rest of the sweep.
+    Returns the number of subnets actually rescanned.
+    """
+    import logging
+
+    from app.services import ipam_service
+
+    logger = logging.getLogger("netguard.tasks")
+    db = SessionLocal()
+    try:
+        due = ipam_service.due_for_rescan(db)
+        rescanned = 0
+        for subnet in due:
+            try:
+                ipam_service.scan_subnet(db, subnet)
+                rescanned += 1
+            except Exception:
+                logger.exception("Scheduled re-scan failed for subnet %s", subnet.cidr)
+        return rescanned
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_ipam_conflict_alert_sweep_task")
+def run_ipam_conflict_alert_sweep_task() -> int:
+    """Celery beat entry point (see celery_app "ipam-conflict-alert-sweep"):
+    turns app.services.ipam_service.fleet_conflicts from a pull-only
+    check someone has to open the IPAM page to see into a real alert,
+    same pattern as topology_service.raise_topology_change_alert. Raises
+    one fleet-wide (device_id=None) WARNING alert per conflicting IP, with
+    a category that includes the address so alert_service's existing
+    active-alert-by-category dedup naturally suppresses re-raising on
+    every subsequent tick while the conflict persists -- it only fires
+    again once the conflict has cleared and reappears. Returns the number
+    of conflicts alerted on this tick.
+    """
+    from app.models.alert import AlertSeverity, AlertSource
+    from app.services import alert_service, ipam_service
+
+    db = SessionLocal()
+    try:
+        conflicts = ipam_service.fleet_conflicts(db)
+        for conflict in conflicts:
+            hostnames = ", ".join(conflict["hostnames"])
+            alert_service.raise_alert(
+                db,
+                device_id=None,
+                severity=AlertSeverity.WARNING,
+                source=AlertSource.HEALTH_POLL,
+                category=f"IP Conflict: {conflict['ip_address']}",
+                message=(
+                    f"IP address {conflict['ip_address']} is claimed by more than one device: "
+                    f"{hostnames}."
+                ),
+            )
+        return len(conflicts)
+    finally:
+        db.close()
+
+
 # --- GitOps sync ---------------------------------------------------------
 
 

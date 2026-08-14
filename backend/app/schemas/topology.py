@@ -18,6 +18,8 @@ class TopologyNodeRead(BaseModel):
     device_role: str | None = None
     interface_error_rate: int | None = None
     active_alert_severity: str | None = None
+    is_uplink: bool = False
+    is_spof: bool = False
 
 
 class LinkMemberRead(BaseModel):
@@ -42,6 +44,7 @@ class TopologyEdgeRead(BaseModel):
     utilization_pct: int | None = None
     last_confirmed_at: str | None = None
     stale: bool = False
+    is_uplink: bool = False
     # Physical members of this logical link (see TopologyEdge.members) --
     # empty for subnet/mgmt_subnet-inferred edges. >1 member means this
     # line on the map represents a real multi-cable trunk (e.g. LACP

@@ -43,3 +43,10 @@ anthropic==0.40.0
 user-agents==2.2.0
 setuptools<70.0.0
 ruff==0.16.1
+
+# app.services.ipam_service shells out to the `nmap` binary (ping-sweep
+# and OS/device-type fingerprint scans) -- this is a system package, not
+# a pip package, so it isn't installed by `pip install -r
+# requirements.txt` alone. It's installed via apt-get in backend/Dockerfile.
+# If you're running the backend outside that image (e.g. locally), install
+# it yourself: `apt-get install nmap` / `brew install nmap`.

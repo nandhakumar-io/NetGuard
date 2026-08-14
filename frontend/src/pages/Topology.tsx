@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, getAccessToken } from "../lib/api";
 import {
   TopologyResponse,
   TopologyNode,
@@ -526,7 +526,10 @@ export default function Topology() {
       if (cancelled) return;
       setLiveStatus("connecting");
       const httpBase = api.defaults.baseURL || window.location.origin;
-      const wsUrl = httpBase.replace(/^http/, "ws").replace(/\/$/, "") + "/topology/ws";
+      const wsUrl =
+        httpBase.replace(/^http/, "ws").replace(/\/$/, "") +
+        "/topology/ws?token=" +
+        encodeURIComponent(getAccessToken() || "");
       const ws = new WebSocket(wsUrl);
       socket = ws;
 
@@ -1231,8 +1234,8 @@ export default function Topology() {
                           y1={a.y}
                           x2={b.x}
                           y2={b.y}
-                          stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : utilColor || "#94a3b8"}
-                          strokeWidth={active ? 2.75 : 1.5}
+                          stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : e.is_uplink ? "#0f766e" : utilColor || "#94a3b8"}
+                          strokeWidth={active ? 2.75 : e.is_uplink ? 3 : 1.5}
                           strokeDasharray={isStaleLink ? "5 3" : undefined}
                         />
                         {/* Alert overlay: a pulsing red line laid on top so an actively
@@ -1389,6 +1392,9 @@ export default function Topology() {
                         {node.flagged_unstable && (
                           <circle r={22} fill="none" stroke="#dc2626" strokeWidth={1.75} strokeDasharray="3 2" />
                         )}
+                        {node.is_uplink && (
+                          <circle r={20} fill="none" stroke="#0f766e" strokeWidth={2.25} />
+                        )}
                         {node.status === "online" && (
                           <circle r={19} fill="none" stroke={STATUS_COLOR.online} strokeWidth={1} opacity={0.35}>
                             <animate attributeName="r" values="15;22;15" dur="2.4s" repeatCount="indefinite" />
@@ -1430,6 +1436,28 @@ export default function Topology() {
                               {node.interface_error_rate > 99 ? "99+" : node.interface_error_rate}
                             </text>
                             <title>{`${node.interface_error_rate} interface error(s) since last poll`}</title>
+                          </g>
+                        )}
+                        {node.is_spof && (
+                          <g transform="translate(-12, 12)">
+                            <path
+                              d="M0,-9 L8,7 L-8,7 Z"
+                              fill="#d97706"
+                              stroke="white"
+                              strokeWidth={1.25}
+                              strokeLinejoin="round"
+                            />
+                            <text
+                              y={4.5}
+                              textAnchor="middle"
+                              fontSize={9}
+                              fontWeight={800}
+                              fill="white"
+                              className="pointer-events-none select-none"
+                            >
+                              !
+                            </text>
+                            <title>Single point of failure — no redundant path; removing this device would split the topology.</title>
                           </g>
                         )}
                         <text
@@ -1493,6 +1521,23 @@ export default function Topology() {
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full inline-block bg-slate-300 opacity-50" />
                 No inferred links
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-3.5 h-3.5 rounded-full inline-block border-2" style={{ borderColor: "#0f766e" }} />
+                Uplink
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="inline-block"
+                  style={{
+                    width: 0,
+                    height: 0,
+                    borderLeft: "5px solid transparent",
+                    borderRight: "5px solid transparent",
+                    borderBottom: "8px solid #d97706",
+                  }}
+                />
+                Single point of failure
               </span>
               <span className="flex items-center gap-1.5 ml-auto text-slate-400">
                 {filteredNodes.length} device{filteredNodes.length === 1 ? "" : "s"} · {filteredEdges.length} link
@@ -1654,6 +1699,16 @@ export default function Topology() {
                 {selection.node.flagged_unstable && (
                   <p className="text-[11px] bg-red-50 border border-red-200 text-riskcrit rounded-lg px-2.5 py-1.5">
                     Flagged unstable — automated deploys blocked pending manual review.
+                  </p>
+                )}
+                {selection.node.is_spof && (
+                  <p className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-2.5 py-1.5">
+                    Single point of failure — no redundant path in the discovered topology. Removing this device would split other devices off from each other, not just itself.
+                  </p>
+                )}
+                {selection.node.is_uplink && (
+                  <p className="text-[11px] bg-teal-50 border border-teal-200 text-teal-800 rounded-lg px-2.5 py-1.5">
+                    Flagged as a WAN/uplink device.
                   </p>
                 )}
 

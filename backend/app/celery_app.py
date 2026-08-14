@@ -177,6 +177,24 @@ celery_app.conf.update(
             "task": "app.tasks.run_recurring_window_generation_task",
             "schedule": crontab(hour=settings.RECURRING_WINDOW_GENERATION_HOUR_UTC, minute=0),
         },
+        # IPAM scheduled re-scan: re-runs the nmap ping-sweep for any
+        # Subnet with auto_rescan_enabled whose own cadence has elapsed
+        # (see app.services.ipam_service.due_for_rescan), same
+        # per-entity-cadence-behind-a-fixed-tick shape as
+        # reachability-sweep/snmp-poll-sweep above. See
+        # app.tasks.run_subnet_rescan_sweep_task.
+        "ipam-subnet-rescan-sweep": {
+            "task": "app.tasks.run_subnet_rescan_sweep_task",
+            "schedule": float(settings.IPAM_RESCAN_SWEEP_INTERVAL_SECONDS),
+        },
+        # IPAM conflict alerting: turns ipam_service.fleet_conflicts from
+        # a pull-only check (someone has to open the IPAM page) into a
+        # real alert in the same pipeline topology snapshot diffs use.
+        # See app.tasks.run_ipam_conflict_alert_sweep_task.
+        "ipam-conflict-alert-sweep": {
+            "task": "app.tasks.run_ipam_conflict_alert_sweep_task",
+            "schedule": float(settings.IPAM_CONFLICT_ALERT_SWEEP_INTERVAL_SECONDS),
+        },
         # GitOps: safety-net periodic re-pull for any auto_sync_enabled
         # repo, in case its webhook was never configured or a delivery
         # failed -- see app.tasks.run_gitops_auto_sync_sweep_task.

@@ -97,6 +97,17 @@ class TopologyNode:
     # overlay" toggle (red pulse on links touching a device with an
     # active critical alert). See _ALERT_SEVERITY_RANK.
     active_alert_severity: str | None = None
+    # Mirrors Device.is_uplink -- lets the Topology page draw WAN/uplink
+    # devices distinctly (not just escalate alerts on them, see
+    # raise_topology_change_alert below) so an operator can spot the
+    # uplink boundary at a glance instead of having to know hostnames.
+    is_uplink: bool = False
+    # True when this device is the only connection between part of the
+    # graph and the rest of it -- i.e. a graph articulation point (see
+    # find_single_points_of_failure). Powers the Topology page's "single
+    # point of failure" badge, computed proactively for every node
+    # instead of only surfacing on-demand via compute_blast_radius.
+    is_spof: bool = False
 
 
 @dataclass
@@ -130,6 +141,11 @@ class TopologyEdge:
     # LINK_STALE_AFTER_DAYS -- flagged in the UI so a stale-but-still-drawn
     # link isn't mistaken for a just-confirmed one.
     stale: bool = False
+    # True when either endpoint device is flagged Device.is_uplink --
+    # lets the Topology page render uplink-touching links distinctly
+    # (thicker/different color), same signal raise_topology_change_alert
+    # already escalates on when a link like this disappears.
+    is_uplink: bool = False
     # Bundle members: when two devices are joined by more than one
     # confirmed (LLDP/CDP/GNS3) physical link -- e.g. a real LACP/
     # port-channel trunk -- every individual local_port/neighbor_port
@@ -250,6 +266,74 @@ def uplink_interfaces_for_device(db: Session, device_id) -> set[str]:
         .all()
     )
     return {r[0] for r in rows if r[0]}
+
+
+def find_single_points_of_failure(nodes: list[TopologyNode], edges: list[TopologyEdge]) -> set[str]:
+    """Graph articulation points: devices whose removal would split the
+    rest of the (currently connected-through-them) graph into more than
+    one piece -- i.e. "no redundant path" nodes where losing that one
+    device doesn't just take itself offline, it cuts other devices off
+    from each other too. Built on the same adjacency structure
+    compute_blast_radius() builds from build_topology()'s graph, just
+    walked with the standard iterative low-link DFS instead of a BFS
+    from a target set, so it can run proactively for every node instead
+    of only on-demand for an operator-chosen change target.
+
+    A leaf node (degree <= 1) is never a SPOF by this definition -- it
+    has nothing behind it that would be cut off, only itself, which
+    compute_blast_radius already reports via `touched` rather than
+    `dependent`. Isolated/degree-0 nodes are likewise excluded.
+    """
+    adjacency: dict[str, set[str]] = {n.id: set() for n in nodes}
+    for edge in edges:
+        if edge.source in adjacency and edge.target in adjacency and edge.source != edge.target:
+            adjacency[edge.source].add(edge.target)
+            adjacency[edge.target].add(edge.source)
+
+    discovery: dict[str, int] = {}
+    low: dict[str, int] = {}
+    articulation: set[str] = set()
+    timer = 0
+
+    for start in adjacency:
+        if start in discovery:
+            continue
+        # Iterative DFS: stack of (node, parent, iterator-over-neighbors)
+        root_children = 0
+        stack: list[tuple[str, str | None, iter]] = [(start, None, iter(adjacency[start]))]
+        discovery[start] = low[start] = timer
+        timer += 1
+
+        while stack:
+            node, parent, neighbors = stack[-1]
+            advanced = False
+            for neighbor in neighbors:
+                if neighbor == parent:
+                    continue
+                if neighbor in discovery:
+                    low[node] = min(low[node], discovery[neighbor])
+                else:
+                    discovery[neighbor] = low[neighbor] = timer
+                    timer += 1
+                    if node == start:
+                        root_children += 1
+                    stack.append((neighbor, node, iter(adjacency[neighbor])))
+                    advanced = True
+                break
+            if advanced:
+                continue
+
+            stack.pop()
+            if stack:
+                gp_node = stack[-1][0]
+                low[gp_node] = min(low[gp_node], low[node])
+                if gp_node != start and low[node] >= discovery[gp_node]:
+                    articulation.add(gp_node)
+
+        if root_children > 1:
+            articulation.add(start)
+
+    return articulation
 
 
 def compute_blast_radius(db: Session, target_device_ids: list[str]) -> BlastRadiusResult:
@@ -421,6 +505,7 @@ def build_topology(db: Session) -> TopologyGraph:
                 device_role=device.device_role,
                 interface_error_rate=interface_error_rate,
                 active_alert_severity=alert_severity_by_device.get(str(device.id)),
+                is_uplink=bool(device.is_uplink),
             )
         )
         if config_text:
@@ -594,6 +679,21 @@ def build_topology(db: Session) -> TopologyGraph:
             if m is not None and m.get("interface_utilization_pct") is not None
         ]
         edge.utilization_pct = round(max(readings)) if readings else None
+
+    # Stamp uplink highlighting: a link touching a WAN/uplink-flagged
+    # device on either end is itself an uplink link for map styling.
+    uplink_node_ids = {n.id for n in nodes if n.is_uplink}
+    for edge in edges:
+        edge.is_uplink = edge.source in uplink_node_ids or edge.target in uplink_node_ids
+
+    # Stamp "single point of failure" badges: nodes whose removal would
+    # split the graph (see find_single_points_of_failure). Computed
+    # proactively for every node here rather than only on-demand, so the
+    # badge shows up on the map itself without an operator having to run
+    # a blast-radius check first.
+    spof_ids = find_single_points_of_failure(nodes, edges)
+    for node in nodes:
+        node.is_spof = node.id in spof_ids
 
     return TopologyGraph(nodes=nodes, edges=edges)
 

@@ -30,7 +30,7 @@ import ipaddress
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -222,6 +222,32 @@ def scan_subnet(db: Session, subnet: Subnet) -> dict:
     db.commit()
 
     return {"scanned_at": now.isoformat(), "hosts_found": len(hosts), "addresses_scanned": net.num_addresses}
+
+
+def due_for_rescan(db: Session) -> list[Subnet]:
+    """Subnets whose scheduled auto-rescan cadence has actually elapsed --
+    the per-subnet-cadence half of app.tasks.run_subnet_rescan_sweep_task
+    (same shape as Device's reachability-poll due check: the beat tick
+    fires often, this decides who's actually due). A subnet with
+    auto_rescan_enabled but no explicit rescan_interval_hours falls back
+    to settings.IPAM_RESCAN_SWEEP_INTERVAL_SECONDS converted to hours, so
+    turning the toggle on with no override still does something sane. A
+    subnet that's never been scanned is always due.
+    """
+    from app.core.config import settings
+
+    now = datetime.now(timezone.utc)
+    default_hours = max(1, settings.IPAM_RESCAN_SWEEP_INTERVAL_SECONDS // 3600) or 1
+    due: list[Subnet] = []
+    for subnet in db.query(Subnet).filter(Subnet.auto_rescan_enabled.is_(True)).all():
+        if subnet.last_scanned_at is None:
+            due.append(subnet)
+            continue
+        interval_hours = subnet.rescan_interval_hours or default_hours
+        elapsed = now - subnet.last_scanned_at
+        if elapsed >= timedelta(hours=interval_hours):
+            due.append(subnet)
+    return due
 
 
 def fingerprint_subnet(db: Session, subnet: Subnet) -> dict:

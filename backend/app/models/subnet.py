@@ -2,6 +2,7 @@ import enum
 import uuid
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Enum,
@@ -72,6 +73,16 @@ class Subnet(Base):
     # next to the utilization figure, so an operator knows whether "used"
     # reflects live reality or is still purely inventory+config-derived.
     last_scanned_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Scheduled re-scan (see app.services.ipam_service.due_for_rescan /
+    # app.tasks.run_subnet_rescan_sweep_task): when enabled, the sweep
+    # re-runs scan_subnet() for this subnet on its own every
+    # rescan_interval_hours, the same "beat ticks often, per-entity
+    # cadence decides who's due" shape as Device's reachability-poll
+    # override, so scanned-host/utilization data doesn't go stale between
+    # manual clicks on the IPAM page.
+    auto_rescan_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    rescan_interval_hours = Column(Integer, nullable=True)
 
 
 class IPReservation(Base):

@@ -11,6 +11,8 @@ class SubnetCreate(BaseModel):
     site: str | None = None
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
+    auto_rescan_enabled: bool = False
+    rescan_interval_hours: int | None = None
 
     @field_validator("cidr")
     @classmethod
@@ -32,6 +34,8 @@ class SubnetUpdate(BaseModel):
     site: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    auto_rescan_enabled: bool | None = None
+    rescan_interval_hours: int | None = None
 
 
 class SubnetRead(BaseModel):
@@ -55,6 +59,8 @@ class SubnetRead(BaseModel):
     utilization_pct: float = 0.0
     last_scanned_at: datetime.datetime | None = None
     scanned_only_count: int = 0
+    auto_rescan_enabled: bool = False
+    rescan_interval_hours: int | None = None
 
 
 class IPReservationCreate(BaseModel):

@@ -60,6 +60,8 @@ def _to_read(db: Session, subnet: Subnet) -> SubnetRead:
         tags=_tags_from_json(subnet.tags),
         created_at=subnet.created_at,
         updated_at=subnet.updated_at,
+        auto_rescan_enabled=subnet.auto_rescan_enabled,
+        rescan_interval_hours=subnet.rescan_interval_hours,
         **util,
     )
 
@@ -92,6 +94,8 @@ def create_subnet(payload: SubnetCreate, db: Session = Depends(get_db), _=Depend
         site=payload.site,
         description=payload.description,
         tags=_tags_to_json(payload.tags),
+        auto_rescan_enabled=payload.auto_rescan_enabled,
+        rescan_interval_hours=payload.rescan_interval_hours,
     )
     db.add(subnet)
     db.commit()

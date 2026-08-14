@@ -54,6 +54,8 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "device_role": n.device_role,
                 "interface_error_rate": n.interface_error_rate,
                 "active_alert_severity": n.active_alert_severity,
+                "is_uplink": n.is_uplink,
+                "is_spof": n.is_spof,
             }
             for n in graph.nodes
         ],
@@ -70,6 +72,7 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "utilization_pct": e.utilization_pct,
                 "last_confirmed_at": e.last_confirmed_at,
                 "stale": e.stale,
+                "is_uplink": e.is_uplink,
                 "members": [
                     {
                         "local_port": m.local_port,

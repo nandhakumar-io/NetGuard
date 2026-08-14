@@ -317,6 +317,21 @@ class Settings(BaseSettings):
     REACHABILITY_PING_TIMEOUT_SECONDS: float = 1.0
     SNMP_METRIC_RETENTION_DAYS: int = 30
 
+    # IPAM: how often app.tasks.run_subnet_rescan_sweep_task ticks to
+    # check which Subnets are due for an automatic nmap re-scan (per-
+    # subnet cadence set via Subnet.auto_rescan_enabled/
+    # rescan_interval_hours -- same "beat ticks often, per-entity cadence
+    # decides who's actually due" shape as REACHABILITY_POLL_INTERVAL_SECONDS
+    # above). Keeps subnet utilization/scanned-host data from silently
+    # going stale between someone manually clicking "Scan" on the IPAM page.
+    IPAM_RESCAN_SWEEP_INTERVAL_SECONDS: int = 900
+    # IPAM: how often app.tasks.run_ipam_conflict_alert_sweep_task calls
+    # app.services.ipam_service.fleet_conflicts and raises an alert for
+    # any newly-seen conflict, so a duplicate static IP assignment shows
+    # up in Alerts / the notification bell instead of only being visible
+    # to someone who happens to open the IPAM page.
+    IPAM_CONFLICT_ALERT_SWEEP_INTERVAL_SECONDS: int = 300
+
     # Discovery at Scale: rather than firing every due device's poll task
     # at the exact same instant every sweep tick (fine for a handful of
     # devices, a thundering herd of simultaneous SNMP walks / ICMP bursts
