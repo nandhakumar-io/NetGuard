@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
@@ -76,6 +77,7 @@ from app.services.health_monitor import ALL_CHECKS
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/devices", tags=["devices"])
+logger = logging.getLogger(__name__)
 
 # Only Network Administrators manage inventory (FR-2 + RBAC); everyone authenticated can read it.
 INVENTORY_MANAGER_ROLES = require_roles(UserRole.NETWORK_ADMIN)
@@ -815,6 +817,12 @@ def delete_device(
         )
     except IntegrityError:
         db.rollback()
+        # Log the real DB error -- the message below tells the operator to
+        # "check the server logs", so make sure something is actually
+        # there to find. Previously nothing was logged here at all, which
+        # made a genuinely stuck device (e.g. a table this function didn't
+        # know to purge yet) undiagnosable from the outside.
+        logger.exception("delete_device: IntegrityError purging %s (force=%s)", device.hostname, force)
         raise HTTPException(
             status_code=409,
             detail={
@@ -825,7 +833,7 @@ def delete_device(
                 "counts": {"related_records": 1},
             },
         )
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         # Belt-and-suspenders alongside the IntegrityError branch above:
         # any *other* unexpected DB error partway through this multi-table
         # purge (a future FK this function doesn't know about yet, a
@@ -836,12 +844,33 @@ def delete_device(
         # unreadable "Network Error" this used to produce -- but failing
         # cleanly here gives a much more actionable message than that.)
         db.rollback()
+        logger.exception("delete_device: SQLAlchemyError purging %s (force=%s)", device.hostname, force)
         raise HTTPException(
             status_code=409,
             detail={
                 "message": (
-                    f"'{device.hostname}' could not be deleted due to an unexpected database error. "
-                    "Retry with ?force=true, or check the server logs for the underlying cause."
+                    f"'{device.hostname}' could not be deleted due to an unexpected database error "
+                    f"({exc.__class__.__name__}). Retry with ?force=true, or check the server logs "
+                    "for the underlying cause."
+                ),
+                "counts": {"related_records": 1},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - last-resort safety net.
+        # Anything that reaches here is neither an IntegrityError nor any
+        # other SQLAlchemyError (e.g. a bug in this function itself, or a
+        # third-party call raising something unrelated to the DB). Without
+        # this, such an error would propagate past both branches above as
+        # a raw, unhandled 500 -- leaving the device permanently stuck
+        # with no actionable message and, as above, nothing logged either.
+        db.rollback()
+        logger.exception("delete_device: unexpected error purging %s (force=%s)", device.hostname, force)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"'{device.hostname}' could not be deleted due to an unexpected error "
+                    f"({exc.__class__.__name__}). Check the server logs for the underlying cause."
                 ),
                 "counts": {"related_records": 1},
             },

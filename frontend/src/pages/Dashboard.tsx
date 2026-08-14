@@ -193,6 +193,7 @@ export default function Dashboard() {
   const [savingLayout, setSavingLayout] = useState(false);
   const [thresholds, setThresholds] = useState<DashboardThresholds>(DEFAULT_THRESHOLDS);
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [prefsError, setPrefsError] = useState<string | null>(null);
 
   const loadPreferences = () => {
     api
@@ -201,8 +202,16 @@ export default function Dashboard() {
         setLayout(res.data.layout);
         setAvailableWidgets(res.data.available_widgets);
         setThresholds(res.data.thresholds || DEFAULT_THRESHOLDS);
+        setPrefsError(null);
       })
-      .catch(() => {});
+      .catch(() => {
+        // Previously swallowed silently -- a failure here (e.g. the API
+        // rejecting the request because of a pending DB migration) left
+        // both `layout` and `availableWidgets` empty, which made the
+        // whole widget grid disappear with no explanation and nothing
+        // to pick from in Customize. Surface it instead.
+        setPrefsError("Couldn't load your dashboard layout — showing the API error below instead of an empty page.");
+      });
   };
 
   const saveDashboardPrefs = (next: DashboardLayoutEntry[], nextThresholds: DashboardThresholds) => {
@@ -347,6 +356,12 @@ export default function Dashboard() {
         <Card className="p-4 mb-6 border-red-200 bg-red-50 text-sm text-red-700">
           {error} Make sure the backend is running at{" "}
           <code className="bg-white px-2 py-0.5 rounded border border-red-200 ml-1">{import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1"}</code>.
+        </Card>
+      )}
+
+      {prefsError && (
+        <Card className="p-4 mb-6 border-amber-200 bg-amber-50 text-sm text-amber-800">
+          {prefsError}
         </Card>
       )}
 

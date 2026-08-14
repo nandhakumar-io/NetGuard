@@ -2,9 +2,11 @@ import asyncio
 import contextlib
 import datetime
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import desc, func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core import vm_client
@@ -29,6 +31,7 @@ from app.schemas.dashboard_preference import (
 from app.services import dashboard_widgets, event_bus
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 30
 
@@ -464,31 +467,50 @@ def get_dashboard_preferences(db: Session = Depends(get_db), current_user: User 
     anything gets the registry's default layout back -- no row is
     created until they actually save one via PUT.
     """
-    pref = db.query(DashboardPreference).filter(DashboardPreference.user_id == current_user.id).first()
-    if pref is None:
+    # available_widgets always comes from the in-memory registry (no DB
+    # dependency), so it's built up front and returned even if the
+    # user's saved-preference row can't be read below -- e.g. because a
+    # migration adding a column here (like `thresholds`) hasn't been
+    # applied to this deployment's DB yet. Previously a DB error here
+    # took down the whole response, the frontend silently swallowed it,
+    # and the dashboard rendered with no widgets and nothing to
+    # customize -- with no indication anywhere of why.
+    available_widgets = [
+        DashboardWidgetInfo(id=w.id, title=w.title, data_source=w.data_source, default_visible=w.default_visible)
+        for w in dashboard_widgets.DASHBOARD_WIDGETS
+    ]
+
+    try:
+        pref = db.query(DashboardPreference).filter(DashboardPreference.user_id == current_user.id).first()
+        if pref is None:
+            layout = dashboard_widgets.default_layout()
+            thresholds = dashboard_widgets.default_thresholds()
+        else:
+            try:
+                saved = json.loads(pref.layout)
+            except (ValueError, TypeError):
+                saved = []
+            layout = dashboard_widgets.merge_layout(saved)
+            try:
+                saved_thresholds = json.loads(pref.thresholds or "{}")
+            except (ValueError, TypeError):
+                saved_thresholds = {}
+            thresholds = dashboard_widgets.merge_thresholds(saved_thresholds)
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception(
+            "get_dashboard_preferences: failed to read saved preferences for user %s -- "
+            "falling back to registry defaults (likely a pending migration on this DB)",
+            current_user.id,
+        )
         layout = dashboard_widgets.default_layout()
         thresholds = dashboard_widgets.default_thresholds()
-    else:
-        try:
-            saved = json.loads(pref.layout)
-        except (ValueError, TypeError):
-            saved = []
-        layout = dashboard_widgets.merge_layout(saved)
-        try:
-            saved_thresholds = json.loads(pref.thresholds or "{}")
-        except (ValueError, TypeError):
-            saved_thresholds = {}
-        thresholds = dashboard_widgets.merge_thresholds(saved_thresholds)
 
     return DashboardPreferenceRead(
         layout=[DashboardLayoutEntry(**e) for e in layout],
-        available_widgets=[
-            DashboardWidgetInfo(id=w.id, title=w.title, data_source=w.data_source, default_visible=w.default_visible)
-            for w in dashboard_widgets.DASHBOARD_WIDGETS
-        ],
+        available_widgets=available_widgets,
         thresholds=thresholds,
     )
-
 
 @router.put("/preferences", response_model=DashboardPreferenceRead)
 def set_dashboard_preferences(
