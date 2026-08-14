@@ -61,6 +61,40 @@ WIDGET_IDS = {w.id for w in DASHBOARD_WIDGETS}
 _DEFAULT_ORDER = [w.id for w in DASHBOARD_WIDGETS]
 _DEFAULTS_BY_ID = {w.id: w for w in DASHBOARD_WIDGETS}
 
+_DEFAULT_THRESHOLDS: dict = {
+    "cpu": {"warn": 70, "critical": 90},
+    "memory": {"warn": 75, "critical": 90},
+    "bandwidth": {"warn": 70, "critical": 90},
+}
+_THRESHOLD_KEYS = list(_DEFAULT_THRESHOLDS.keys())
+
+
+def default_thresholds() -> dict:
+    """Returns a fresh copy of the default warn/critical bands for each
+    tracked metric (cpu, memory, bandwidth)."""
+    return {k: dict(v) for k, v in _DEFAULT_THRESHOLDS.items()}
+
+
+def merge_thresholds(saved: dict) -> dict:
+    """Reconciles a user's saved thresholds against the canonical defaults:
+    - keeps any key the user set, as long as warn < critical and both are
+      in [0, 100];
+    - falls back to the default band for any key that is missing or invalid.
+    """
+    merged: dict = {}
+    for key in _THRESHOLD_KEYS:
+        saved_band = saved.get(key, {})
+        default_band = _DEFAULT_THRESHOLDS[key]
+        try:
+            warn = float(saved_band.get("warn", default_band["warn"]))
+            critical = float(saved_band.get("critical", default_band["critical"]))
+            if not (0 <= warn < critical <= 100):
+                raise ValueError("out of range")
+            merged[key] = {"warn": warn, "critical": critical}
+        except (TypeError, ValueError, AttributeError):
+            merged[key] = dict(default_band)
+    return merged
+
 
 def default_layout() -> list[dict]:
     return [{"id": w.id, "visible": w.default_visible} for w in DASHBOARD_WIDGETS]

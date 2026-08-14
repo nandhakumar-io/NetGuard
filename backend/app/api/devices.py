@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -93,6 +93,89 @@ def _poll_snmp_best_effort(db: Session, device: Device) -> None:
         snmp_poll_task.delay(str(device.id))
     except Exception:
         pass
+
+
+def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_result: dict) -> None:
+    """Writes LLDP/CDP neighbor rows from a discovery result into the
+    ``discovered_neighbors`` table so topology_service.build_topology() can
+    emit confirmed link edges on the Topology page.
+
+    A fresh discovery run replaces all prior rows for this device (this table
+    is a live snapshot of *current* adjacency, not an audit trail -- see the
+    DiscoveredNeighbor model docstring). Only neighbors that at least have a
+    non-empty identifier are stored; completely empty rows from a partial MIB
+    walk are skipped.
+
+    ``neighbor_device_id`` is resolved best-effort by matching the neighbor's
+    reported system name against managed Device hostnames and IP addresses --
+    the same lookup topology_service would have to do itself. A neighbor that
+    isn't in the inventory is still persisted (so the raw name shows in the
+    Discovery UI) but has ``neighbor_device_id=NULL``, which means topology
+    won't draw an edge for it (we can't connect an unknown device).
+    """
+    # Build a lookup of all managed devices so neighbour resolution is O(1)
+    # rather than one SELECT per neighbor row.
+    all_devices = db.query(Device).all()
+    by_hostname: dict[str, uuid.UUID] = {
+        (d.hostname or "").lower(): d.id for d in all_devices if d.hostname
+    }
+    by_ip: dict[str, uuid.UUID] = {
+        d.ip_address: d.id for d in all_devices if d.ip_address
+    }
+
+    def _resolve_neighbor_id(name: str | None) -> uuid.UUID | None:
+        if not name:
+            return None
+        key = name.strip().lower()
+        # Try exact hostname match first (most reliable), then IP.
+        match = by_hostname.get(key)
+        if match:
+            return match
+        # Some LLDP implementations advertise the management IP as the
+        # chassis/system name -- try it as an IP address too.
+        return by_ip.get(key)
+
+    # Wipe stale rows for this device before inserting fresh ones.
+    db.query(DiscoveredNeighbor).filter(
+        DiscoveredNeighbor.device_id == device_id
+    ).delete(synchronize_session=False)
+
+    new_rows: list[DiscoveredNeighbor] = []
+
+    for lldp in discovery_result.get("lldp_neighbors") or []:
+        name = lldp.get("neighbor_name") or ""
+        if not name and not lldp.get("neighbor_chassis_id"):
+            continue  # nothing to identify the neighbor -- skip
+        new_rows.append(
+            DiscoveredNeighbor(
+                device_id=device_id,
+                protocol="lldp",
+                local_port=str(lldp.get("local_port_index") or ""),
+                neighbor_name=name or lldp.get("neighbor_chassis_id"),
+                neighbor_port=lldp.get("neighbor_port"),
+                neighbor_device_id=_resolve_neighbor_id(name),
+            )
+        )
+
+    for cdp in discovery_result.get("cdp_neighbors") or []:
+        name = cdp.get("neighbor_id") or ""
+        if not name:
+            continue
+        new_rows.append(
+            DiscoveredNeighbor(
+                device_id=device_id,
+                protocol="cdp",
+                local_port=str(cdp.get("local_if_index") or ""),
+                neighbor_name=name,
+                neighbor_port=cdp.get("neighbor_port"),
+                neighbor_platform=cdp.get("neighbor_platform"),
+                neighbor_device_id=_resolve_neighbor_id(name),
+            )
+        )
+
+    for row in new_rows:
+        db.add(row)
+
 
 # Rollback carries the same authority as approving a change (both bypass
 # the normal validation/approval queue), so it's gated the same way.
@@ -745,7 +828,7 @@ def delete_device(
         # PathTrace: device can be source or target; purge dependent hops first
         path_trace_ids = [
             pt.id for pt in db.query(PathTrace.id).filter(
-                (PathTrace.source_device_id == device_id) | (PathTrace.target_device_id == device_id)
+                or_(PathTrace.source_device_id == device_id, PathTrace.target_device_id == device_id)
             ).all()
         ]
         if path_trace_ids:
@@ -753,7 +836,7 @@ def delete_device(
             db.query(PathTrace).filter(PathTrace.id.in_(path_trace_ids)).delete(synchronize_session=False)
         # DiscoveredNeighbor: device_id OR neighbor_device_id
         db.query(DiscoveredNeighbor).filter(
-            (DiscoveredNeighbor.device_id == device_id) | (DiscoveredNeighbor.neighbor_device_id == device_id)
+            or_(DiscoveredNeighbor.device_id == device_id, DiscoveredNeighbor.neighbor_device_id == device_id)
         ).delete(synchronize_session=False)
         # PathHop.device_id: best-effort link back to inventory when a hop's
         # IP matches a managed device. A device can show up here as a mere
@@ -1222,6 +1305,13 @@ def discover_device(
         device.serial_number = result["detected_serial_number"]
     if not device.os_version and result.get("detected_os_version"):
         device.os_version = result["detected_os_version"]
+
+    # Persist LLDP/CDP neighbors so topology_service.build_topology() can
+    # emit confirmed link edges on the Topology page.  A fresh discovery run
+    # replaces all prior rows for this device (see DiscoveredNeighbor's
+    # docstring -- this table is a live snapshot, not history).
+    _persist_discovered_neighbors(db, device.id, result)
+
     db.commit()
 
     return DeviceDiscoveryResult(
