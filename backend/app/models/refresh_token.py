@@ -20,3 +20,12 @@ class RefreshToken(Base):
     revoked = Column(Boolean, nullable=False, default=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Captured from the request that issued this token (login, or the
+    # /auth/refresh call that rotated a prior token into this one) --
+    # drives the device/browser label and best-effort location shown in
+    # Security > Active Sessions. Both nullable: non-browser API clients
+    # may not send a User-Agent, and the client IP may be unavailable
+    # behind some proxy configurations.
+    user_agent = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)

@@ -26,14 +26,14 @@ function BrandMark() {
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <label className="block text-sm font-medium text-slate-700 mb-1.5">
+    <label className="block text-[13px] font-semibold text-slate-600 mb-1.5 tracking-wide">
       {children}
     </label>
   );
 }
 
 const inputClass =
-  "w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-[15px] text-slate-900 placeholder:text-slate-400 outline-none transition-colors focus:border-brandblue focus:ring-2 focus:ring-brandblue/20 focus:bg-white";
+  "w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 placeholder:font-normal outline-none transition-colors focus:border-brandblue focus:ring-2 focus:ring-brandblue/20 focus:bg-white";
 
 export default function Login() {
   const { login, verifyMfa, register } = useAuth();
@@ -190,10 +190,9 @@ export default function Login() {
             <form onSubmit={submit} className="space-y-4">
               {mode === "register" && (
                 <div>
-                  <FieldLabel>Full name</FieldLabel>
+                  <FieldLabel>Full Name</FieldLabel>
                   <input
                     className={inputClass}
-                    placeholder="Jordan Alvarez"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
                     required
@@ -201,11 +200,10 @@ export default function Login() {
                 </div>
               )}
               <div>
-                <FieldLabel>Username</FieldLabel>
+                <FieldLabel>Email</FieldLabel>
                 <input
                   className={inputClass}
                   type="email"
-                  placeholder="Enter your email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   autoComplete="username"
@@ -218,7 +216,6 @@ export default function Login() {
                   <input
                     className={`${inputClass} pr-14`}
                     type={showPassword ? "text" : "password"}
-                    placeholder="Enter your password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     autoComplete={mode === "login" ? "current-password" : "new-password"}
@@ -266,7 +263,7 @@ export default function Login() {
               </div>
               {mode === "register" && (
                 <div>
-                  <FieldLabel>Requested role</FieldLabel>
+                  <FieldLabel>Requested Role</FieldLabel>
                   <select
                     className={inputClass}
                     value={role}

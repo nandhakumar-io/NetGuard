@@ -8,6 +8,9 @@ interface SessionInfo {
   created_at: string;
   expires_at: string;
   current: boolean;
+  device: string | null;
+  ip_address: string | null;
+  location: string | null;
 }
 
 interface RotationTableResult {
@@ -139,6 +142,45 @@ export default function Security() {
       dateStyle: "medium",
       timeStyle: "short",
     });
+
+  // Approximates "last active" -- refresh tokens rotate on every use (see
+  // POST /auth/refresh), so `created_at` on the current row for a device
+  // is effectively when that device last talked to the API.
+  const timeAgo = (iso: string) => {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  };
+
+  const isMobileDevice = (device: string | null) =>
+    !!device && /android|ios|iphone|ipad/i.test(device);
+
+  const [revokingAll, setRevokingAll] = useState(false);
+  const otherSessions = (sessions ?? []).filter((s) => !s.current);
+
+  const revokeAllOthers = async () => {
+    if (otherSessions.length === 0) return;
+    const ok = await confirm(
+      `Sign out of ${otherSessions.length} other session${otherSessions.length === 1 ? "" : "s"}? You'll stay signed in here.`,
+      { confirmLabel: "Sign out of others" }
+    );
+    if (!ok) return;
+    setRevokingAll(true);
+    setSessionsError(null);
+    try {
+      await Promise.all(otherSessions.map((s) => api.delete(`/auth/sessions/${s.id}`)));
+      setSessions((prev) => (prev ? prev.filter((s) => s.current) : prev));
+    } catch (err: any) {
+      setSessionsError(err?.response?.data?.detail || "Could not revoke all other sessions.");
+      loadSessions();
+    } finally {
+      setRevokingAll(false);
+    }
+  };
 
   const copySecret = async () => {
     if (!secret) return;
@@ -297,7 +339,7 @@ export default function Security() {
 
       <h2 className="text-lg font-bold text-navy mt-8 mb-1">Active Sessions</h2>
       <p className="text-sm text-slate-500 mb-4">
-        Everywhere you're currently signed in. Revoke any session you don't recognize.
+        These are the devices and browsers currently signed in to your account. Revoke any you don't recognize.
       </p>
 
       <div className="bg-white border border-slate-200 rounded-xl p-6">
@@ -311,27 +353,57 @@ export default function Security() {
           <p className="text-sm text-slate-500">No active sessions found.</p>
         )}
 
+        {otherSessions.length > 0 && (
+          <button
+            onClick={revokeAllOthers}
+            disabled={revokingAll}
+            className="text-xs font-semibold text-riskcrit hover:underline disabled:opacity-50 mb-4"
+          >
+            {revokingAll ? "Signing out…" : `Sign out of all other sessions (${otherSessions.length})`}
+          </button>
+        )}
+
         {sessions !== null && sessions.length > 0 && (
           <ul className="divide-y divide-slate-100">
             {sessions.map((s) => (
-              <li key={s.id} className="flex items-center justify-between py-3 first:pt-0 last:pb-0">
-                <div>
-                  <p className="text-sm font-medium text-navy flex items-center gap-2">
-                    Session {s.id.slice(0, 8)}
-                    {s.current && (
-                      <span className="text-[10px] uppercase tracking-wide font-semibold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
-                        This device
-                      </span>
+              <li key={s.id} className="flex items-center justify-between gap-3 py-3.5 first:pt-0 last:pb-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 shrink-0">
+                    {isMobileDevice(s.device) ? (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="7" y="2" width="10" height="20" rx="2" />
+                        <path d="M11 18h2" strokeLinecap="round" />
+                      </svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="2" y="4" width="20" height="13" rx="2" />
+                        <path d="M8 21h8M12 17v4" strokeLinecap="round" />
+                      </svg>
                     )}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Signed in {formatDate(s.created_at)} &middot; expires {formatDate(s.expires_at)}
-                  </p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-navy flex items-center gap-2 flex-wrap">
+                      {s.device || `Session ${s.id.slice(0, 8)}`}
+                      {s.current && (
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                          This device
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      {[s.ip_address, s.location].filter(Boolean).join(" · ") || "IP unknown"}
+                      {" · last active "}
+                      {timeAgo(s.created_at)}
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Signed in {formatDate(s.created_at)} &middot; expires {formatDate(s.expires_at)}
+                    </p>
+                  </div>
                 </div>
                 <button
                   onClick={() => revokeSession(s.id, s.current)}
                   disabled={revokingId === s.id}
-                  className="text-xs font-semibold text-riskcrit border border-riskcrit rounded-lg px-3 py-1.5 hover:bg-red-50 transition-colors disabled:opacity-50"
+                  className="text-xs font-semibold text-riskcrit border border-riskcrit rounded-lg px-3 py-1.5 hover:bg-red-50 transition-colors disabled:opacity-50 shrink-0"
                 >
                   {revokingId === s.id ? "Revoking..." : s.current ? "Sign out" : "Revoke"}
                 </button>

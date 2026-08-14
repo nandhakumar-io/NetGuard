@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from jose import JWTError
 from sqlalchemy.orm import Session
 
@@ -30,7 +30,7 @@ from app.schemas.auth import (
     UserCreate,
     UserRoleUpdate,
 )
-from app.services import mfa_service, rate_limiter
+from app.services import mfa_service, rate_limiter, session_device
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -59,7 +59,7 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
 
 
-def _issue_token_pair(db: Session, user: User, response: Response) -> Token:
+def _issue_token_pair(db: Session, user: User, response: Response, request: Request | None = None) -> Token:
     access_token = create_access_token(subject=user.email, role=user.role.value)
 
     raw_refresh = generate_refresh_token()
@@ -67,6 +67,8 @@ def _issue_token_pair(db: Session, user: User, response: Response) -> Token:
         user_id=user.id,
         token_hash=hash_refresh_token(raw_refresh),
         expires_at=refresh_token_expiry(),
+        user_agent=request.headers.get("user-agent") if request else None,
+        ip_address=session_device.client_ip(request) if request else None,
     ))
     db.commit()
 
@@ -99,7 +101,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token | MfaRequiredResponse)
-def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     locked_out, retry_after = rate_limiter.is_locked_out(payload.email)
     if locked_out:
         raise HTTPException(
@@ -118,11 +120,11 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
         mfa_token = create_mfa_challenge_token(subject=user.email)
         return MfaRequiredResponse(mfa_token=mfa_token)
 
-    return _issue_token_pair(db, user, response)
+    return _issue_token_pair(db, user, response, request)
 
 
 @router.post("/mfa/verify", response_model=Token)
-def mfa_verify(payload: MfaVerifyRequest, response: Response, db: Session = Depends(get_db)):
+def mfa_verify(payload: MfaVerifyRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     try:
         claims = decode_mfa_challenge_token(payload.mfa_token)
     except JWTError:
@@ -148,7 +150,7 @@ def mfa_verify(payload: MfaVerifyRequest, response: Response, db: Session = Depe
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
     rate_limiter.reset_attempts(f"mfa:{email}")
-    return _issue_token_pair(db, user, response)
+    return _issue_token_pair(db, user, response, request)
 
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse)
@@ -187,6 +189,7 @@ def mfa_disable(payload: MfaDisableRequest, db: Session = Depends(get_db), curre
 
 @router.post("/refresh", response_model=Token)
 def refresh(
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     refresh_token_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
@@ -226,7 +229,7 @@ def refresh(
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
 
-    return _issue_token_pair(db, user, response)
+    return _issue_token_pair(db, user, response, request)
 
 
 @router.post("/logout", status_code=204)
@@ -309,6 +312,9 @@ def list_sessions(
                 created_at=r.created_at,
                 expires_at=expires_at,
                 current=bool(current_hash and r.token_hash == current_hash),
+                device=session_device.device_label(r.user_agent),
+                ip_address=r.ip_address,
+                location=session_device.location_label(r.ip_address),
             )
         )
     return sessions
