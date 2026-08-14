@@ -594,6 +594,19 @@ export interface DashboardSummary {
     errors: number | null;
     history: number[];
   }[];
+  uplink_availability: {
+    uplinks_total: number;
+    uplinks_up: number;
+    uptime_pct: number | null;
+    window_days: number;
+  };
+  ipam_overview: {
+    total_subnets: number;
+    never_scanned_count: number;
+    near_exhaustion_count: number;
+    near_exhaustion: { subnet_id: string; cidr: string; name: string | null; utilization_pct: number }[];
+    fingerprint_coverage: { identified: number; total_live_hosts: number };
+  };
   fleet_health_history: {
     timestamp: string | null;
     avg_cpu: number | null;

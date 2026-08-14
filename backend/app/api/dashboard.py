@@ -21,6 +21,7 @@ from app.models.device import Device, DeviceStatus
 from app.models.interface_status import InterfaceStatus
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
+from app.models.subnet import Subnet, SubnetScannedHost
 from app.models.user import User
 from app.schemas.dashboard_preference import (
     DashboardLayoutEntry,
@@ -28,7 +29,7 @@ from app.schemas.dashboard_preference import (
     DashboardPreferenceUpdate,
     DashboardWidgetInfo,
 )
-from app.services import dashboard_widgets, event_bus
+from app.services import dashboard_widgets, event_bus, ipam_service
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 logger = logging.getLogger(__name__)
@@ -54,6 +55,154 @@ def _metric_sparkline(db: Session, device_id, column_name: str) -> list[float]:
     history = vm_client.device_metric_history(device_id, since, end, step_seconds=step)
     values = [row.get(column_name, 0) for row in history if row.get(column_name) is not None]
     return values[-SPARKLINE_MAX_POINTS:]
+
+
+# --- Uplink Availability % -------------------------------------------------
+#
+# Rolls the existing "Uplinks & WAN Links" widget (a top-10-by-utilization
+# list) up into a single headline stat: how many of the fleet's is_uplink
+# devices are up *right now*, plus a trailing-window uptime percentage
+# derived from "Interface Down: <ifDescr>" Alert rows (see
+# metrics_service._sync_interface_status) on those devices -- an alert's
+# created_at -> resolved_at span *is* a downtime interval, since
+# alert_service.auto_resolve only clears it on a genuine down->up
+# recovery. Intervals are merged per device before summing so two
+# overlapping down interfaces on the same uplink device (e.g. both legs
+# of a bonded WAN link dropping together) don't double-count downtime.
+UPLINK_AVAILABILITY_WINDOW_DAYS = 30
+
+
+def _uplink_availability(db: Session) -> dict:
+    uplink_devices = db.query(Device).filter(Device.is_uplink.is_(True)).all()
+    uplinks_total = len(uplink_devices)
+    if uplinks_total == 0:
+        return {
+            "uplinks_total": 0,
+            "uplinks_up": 0,
+            "uptime_pct": None,
+            "window_days": UPLINK_AVAILABILITY_WINDOW_DAYS,
+        }
+
+    uplinks_up = sum(1 for d in uplink_devices if d.status == DeviceStatus.ONLINE)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window_start = now - datetime.timedelta(days=UPLINK_AVAILABILITY_WINDOW_DAYS)
+    ids = [d.id for d in uplink_devices]
+
+    # Any "Interface Down" alert on an uplink device that was active at
+    # any point during the window -- still-unresolved ones (resolved_at
+    # IS NULL) count as down through `now`.
+    alerts = (
+        db.query(Alert)
+        .filter(
+            Alert.device_id.in_(ids),
+            Alert.category.like("Interface Down:%"),
+            (Alert.resolved_at.is_(None)) | (Alert.resolved_at >= window_start),
+            Alert.created_at <= now,
+        )
+        .all()
+    )
+
+    intervals_by_device: dict = {}
+    for a in alerts:
+        start = max(a.created_at, window_start) if a.created_at else window_start
+        end = min(a.resolved_at, now) if a.resolved_at else now
+        if end <= start:
+            continue
+        intervals_by_device.setdefault(a.device_id, []).append((start, end))
+
+    window_seconds = (now - window_start).total_seconds()
+    total_downtime_seconds = 0.0
+    for _device_id, intervals in intervals_by_device.items():
+        intervals.sort(key=lambda t: t[0])
+        merged: list[tuple] = []
+        for start, end in intervals:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        total_downtime_seconds += sum((e - s).total_seconds() for s, e in merged)
+
+    possible_seconds = uplinks_total * window_seconds
+    uptime_pct = round(max(0.0, (possible_seconds - total_downtime_seconds) / possible_seconds) * 100, 2) if possible_seconds else 100.0
+
+    return {
+        "uplinks_total": uplinks_total,
+        "uplinks_up": uplinks_up,
+        "uptime_pct": uptime_pct,
+        "window_days": UPLINK_AVAILABILITY_WINDOW_DAYS,
+    }
+
+
+# --- IPAM Utilization Overview + Fingerprint Coverage -----------------------
+#
+# Cross-subnet rollup on top of app.services.ipam_service.subnet_utilization
+# (per-subnet) -- surfaces the handful of subnets actually worth an
+# operator's attention (near exhaustion, or never scanned) without having
+# to open every subnet in IPAM one at a time. Fingerprint coverage is a
+# similarly cheap aggregate over SubnetScannedHost now that OS/device-type
+# fingerprinting exists, meant to nudge adoption of that feature by making
+# "how much of what's actually on the wire do we have visibility into"
+# visible without digging into IPAM.
+IPAM_NEAR_EXHAUSTION_THRESHOLD_PCT = 85.0
+IPAM_NEAR_EXHAUSTION_TOP_N = 5
+
+# _compute_summary runs on every dashboard heartbeat (every
+# HEARTBEAT_INTERVAL_SECONDS, currently 30s) via the /dashboard/live
+# websocket, but subnet_utilization() is not cheap -- it decrypts every
+# device's latest config snapshot per subnet to find interface IPs.
+# Recomputing that every 30s for every connected dashboard would be a
+# real cost for a fleet of any size, for a number that only meaningfully
+# changes on the timescale of new subnets/devices/scans being added, not
+# every poll cycle -- so this is cached process-wide with a short TTL
+# rather than tied to any specific request or websocket connection.
+_IPAM_OVERVIEW_CACHE_TTL_SECONDS = 300
+_ipam_overview_cache: dict = {"computed_at": None, "value": None}
+
+
+def _ipam_overview_cached(db: Session) -> dict:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cached_at = _ipam_overview_cache["computed_at"]
+    if cached_at is not None and (now - cached_at).total_seconds() < _IPAM_OVERVIEW_CACHE_TTL_SECONDS:
+        return _ipam_overview_cache["value"]
+    value = _ipam_overview(db)
+    _ipam_overview_cache["computed_at"] = now
+    _ipam_overview_cache["value"] = value
+    return value
+
+
+def _ipam_overview(db: Session) -> dict:
+    subnets = db.query(Subnet).all()
+    near_exhaustion = []
+    never_scanned_count = 0
+    for s in subnets:
+        util = ipam_service.subnet_utilization(db, s)
+        if util["utilization_pct"] >= IPAM_NEAR_EXHAUSTION_THRESHOLD_PCT:
+            near_exhaustion.append(
+                {
+                    "subnet_id": str(s.id),
+                    "cidr": s.cidr,
+                    "name": s.name,
+                    "utilization_pct": util["utilization_pct"],
+                }
+            )
+        if not s.last_scanned_at:
+            never_scanned_count += 1
+    near_exhaustion.sort(key=lambda r: r["utilization_pct"], reverse=True)
+
+    total_live_hosts = db.query(SubnetScannedHost).count()
+    fingerprinted_hosts = db.query(SubnetScannedHost).filter(SubnetScannedHost.os_guess.isnot(None)).count()
+
+    return {
+        "total_subnets": len(subnets),
+        "never_scanned_count": never_scanned_count,
+        "near_exhaustion_count": len(near_exhaustion),
+        "near_exhaustion": near_exhaustion[:IPAM_NEAR_EXHAUSTION_TOP_N],
+        "fingerprint_coverage": {
+            "identified": fingerprinted_hosts,
+            "total_live_hosts": total_live_hosts,
+        },
+    }
 
 
 def _compute_summary(db: Session) -> dict:
@@ -442,6 +591,8 @@ def _compute_summary(db: Session) -> dict:
         "top_memory_devices": top_memory_devices,
         "top_bandwidth_devices": top_bandwidth_devices,
         "uplinks": uplinks,
+        "uplink_availability": _uplink_availability(db),
+        "ipam_overview": _ipam_overview_cached(db),
         "down_ports": down_ports,
         "recent_reboots": recent_reboots,
         "fleet_health_history": fleet_health_history,

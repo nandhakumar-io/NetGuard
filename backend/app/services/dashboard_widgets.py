@@ -39,6 +39,8 @@ DASHBOARD_WIDGETS: list[DashboardWidget] = [
     # admin wants after logging in.
     DashboardWidget("whats_changed", "What Changed", "GET /dashboard/timeline"),
     DashboardWidget("uplinks", "Uplinks & WAN Links", "uplinks"),
+    DashboardWidget("uplink_availability", "Uplink Availability", "uplink_availability"),
+    DashboardWidget("ipam_overview", "IPAM Utilization Overview", "ipam_overview"),
     DashboardWidget("active_alerts", "Active Alerts", "GET /alerts"),
     DashboardWidget("fleet_availability", "Fleet Availability", "GET /devices/fleet-availability"),
     DashboardWidget("top_flapping_devices", "Top Flapping Devices", "GET /devices/unstable"),

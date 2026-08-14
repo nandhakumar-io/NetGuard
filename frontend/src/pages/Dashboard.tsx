@@ -167,6 +167,8 @@ const WIDGET_SPAN: Record<string, string> = {
   fleet_health: "sm:col-span-6 lg:col-span-6",
   fleet_history_chart: "sm:col-span-6 lg:col-span-6",
   uplinks: "sm:col-span-6 lg:col-span-8",
+  uplink_availability: "sm:col-span-6 lg:col-span-4",
+  ipam_overview: "sm:col-span-6 lg:col-span-6",
   active_alerts: "sm:col-span-6 lg:col-span-4",
   fleet_availability: "sm:col-span-3 lg:col-span-4",
   top_flapping_devices: "sm:col-span-6 lg:col-span-8",
@@ -581,6 +583,100 @@ export default function Dashboard() {
               )}
             </Card>
           ),
+
+          // Headline rollup for the list above -- "N/M WAN links up" plus
+          // a trailing 30-day uptime %, so the operationally important
+          // number ("are we actually okay right now, and have we been
+          // okay") doesn't require scanning the per-link list.
+          uplink_availability: (() => {
+            const ua = summary?.uplink_availability;
+            const allUp = !!ua && ua.uplinks_total > 0 && ua.uplinks_up === ua.uplinks_total;
+            const anyDown = !!ua && ua.uplinks_up < ua.uplinks_total;
+            return (
+              <Card className="p-6 h-full flex flex-col justify-center">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">Uplink Availability</p>
+                {!ua || ua.uplinks_total === 0 ? (
+                  <p className="text-sm text-slate-400 italic py-4">No devices flagged as WAN/uplink yet. Mark one from the Devices page.</p>
+                ) : (
+                  <div className="flex items-center gap-5">
+                    <div className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 ${allUp ? "bg-emerald-500/15 text-emerald-600" : "bg-red-500/15 text-red-600"}`}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                        {allUp ? <path d="M20 6L9 17l-5-5" /> : <><path d="M12 9v4" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="10" /></>}
+                      </svg>
+                    </div>
+                    <div>
+                      <p className={`text-2xl font-bold ${anyDown ? "text-red-600" : "text-navy dark:text-white"}`}>
+                        {ua.uplinks_up}/{ua.uplinks_total} <span className="text-sm font-medium text-slate-400">links up</span>
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        {ua.uptime_pct != null ? `${ua.uptime_pct.toFixed(2)}% uptime, trailing ${ua.window_days}d` : "Uptime history not yet available"}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })(),
+
+          // Cross-subnet IPAM rollup -- subnets at risk of running out of
+          // addresses, subnets nobody has ever scanned, and how much of
+          // what nmap has actually found on the wire has an OS/device-type
+          // fingerprint on file (see ipam_service.fingerprint_subnet).
+          ipam_overview: (() => {
+            const io = summary?.ipam_overview;
+            const fp = io?.fingerprint_coverage;
+            const fpPct = fp && fp.total_live_hosts > 0 ? Math.round((fp.identified / fp.total_live_hosts) * 100) : null;
+            return (
+              <Card className="p-6 h-full">
+                <div className="flex items-center justify-between mb-4">
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">IPAM Utilization Overview</p>
+                  <Link to="/ipam" className="text-xs text-brandblue font-medium hover:underline">Open IPAM →</Link>
+                </div>
+                {!io || io.total_subnets === 0 ? (
+                  <p className="text-sm text-slate-400 italic py-6 text-center">No subnets configured yet.</p>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    <div className="grid grid-cols-3 gap-3 text-center">
+                      <div>
+                        <p className={`text-xl font-bold ${io.near_exhaustion_count > 0 ? "text-amber-600" : "text-navy dark:text-white"}`}>{io.near_exhaustion_count}</p>
+                        <p className="text-[10px] text-slate-400 uppercase tracking-wide mt-0.5">Near exhaustion</p>
+                      </div>
+                      <div>
+                        <p className={`text-xl font-bold ${io.never_scanned_count > 0 ? "text-slate-500" : "text-navy dark:text-white"}`}>{io.never_scanned_count}</p>
+                        <p className="text-[10px] text-slate-400 uppercase tracking-wide mt-0.5">Never scanned</p>
+                      </div>
+                      <div>
+                        <p className="text-xl font-bold text-navy dark:text-white">{fpPct != null ? `${fpPct}%` : "—"}</p>
+                        <p className="text-[10px] text-slate-400 uppercase tracking-wide mt-0.5">Fingerprinted</p>
+                      </div>
+                    </div>
+                    {fp && fp.total_live_hosts > 0 && (
+                      <p className="text-[11px] text-slate-400 dark:text-slate-500 -mt-1">
+                        {fp.identified}/{fp.total_live_hosts} live hosts identified by OS/device-type fingerprint
+                      </p>
+                    )}
+                    {io.near_exhaustion.length > 0 && (
+                      <div className="border-t border-slate-100 dark:border-slate-700 pt-3 space-y-2">
+                        {io.near_exhaustion.map((s) => (
+                          <Link
+                            key={s.subnet_id}
+                            to="/ipam"
+                            className="flex items-center justify-between text-sm hover:text-brandblue"
+                          >
+                            <span className="font-mono text-xs text-slate-600 dark:text-slate-300 truncate">
+                              {s.cidr}
+                              {s.name && <span className="text-slate-400 font-sans ml-1.5">({s.name})</span>}
+                            </span>
+                            <span className="text-xs font-semibold text-amber-600 shrink-0 ml-2">{s.utilization_pct.toFixed(0)}%</span>
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </Card>
+            );
+          })(),
 
           active_alerts: (
             <Card className="p-6 h-full">
