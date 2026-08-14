@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useConfirm } from "../lib/confirm";
 import { useToast } from "../lib/toast";
-import { ConflictReport, FreeIPResult, IPReservation, Subnet, SubnetAddressEntry } from "../lib/types";
+import { ConflictReport, FreeIPResult, IPReservation, Subnet, SubnetAddressEntry, SubnetFingerprintResult, SubnetScanResult } from "../lib/types";
 import { EmptyState, LoadingRows } from "../components/EmptyState";
 
 const emptySubnetForm = {
@@ -24,14 +24,16 @@ const emptyReservationForm = {
 const stateStyle: Record<string, string> = {
   free: "bg-slate-100 text-slate-500 dark:bg-white/5 dark:text-slate-400",
   assigned: "bg-brandblue/10 text-brandblue",
-  // Address found live on a device interface via its latest backed-up
-  // config, not the device's management IP -- equally "used", distinct
-  // shade so it's clear at a glance where this address came from.
   interface: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/60 dark:text-cyan-300",
   reserved: "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
   gateway: "bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300",
   broadcast: "bg-slate-200 text-slate-600 dark:bg-white/10 dark:text-slate-300",
   network: "bg-slate-200 text-slate-600 dark:bg-white/10 dark:text-slate-300",
+  // Found by a live nmap sweep, not by inventory/config -- an unmanaged
+  // host (PC, printer, phone, IoT device) that none of the other
+  // signals could have seen. Distinct emerald so it visually reads as
+  // "confirmed live", not just another inference tier.
+  scanned: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
 };
 
 function utilizationColor(pct: number): string {
@@ -378,6 +380,22 @@ function SubnetDetailModal({
   const [freeResult, setFreeResult] = useState<FreeIPResult | null>(null);
   const [onlyFree, setOnlyFree] = useState(false);
 
+  // Live utilization figures (used_count/free_count/utilization_pct/
+  // last_scanned_at/scanned_only_count) refresh after a scan without
+  // waiting on the parent list's own refetch to flow back down as a new
+  // `subnet` prop -- otherwise the modal would keep showing pre-scan
+  // numbers until it's closed and reopened.
+  const [liveSubnet, setLiveSubnet] = useState<Subnet>(subnet);
+  useEffect(() => setLiveSubnet(subnet), [subnet]);
+
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [lastScanResult, setLastScanResult] = useState<SubnetScanResult | null>(null);
+
+  const [fingerprinting, setFingerprinting] = useState(false);
+  const [fingerprintError, setFingerprintError] = useState<string | null>(null);
+  const [lastFingerprintResult, setLastFingerprintResult] = useState<SubnetFingerprintResult | null>(null);
+
   const [showReserve, setShowReserve] = useState(false);
   const [reserveForm, setReserveForm] = useState(emptyReservationForm);
   const [reserveError, setReserveError] = useState<string | null>(null);
@@ -399,6 +417,49 @@ function SubnetDetailModal({
   };
 
   useEffect(loadAddresses, [subnet.id]);
+
+  const runScan = async () => {
+    setScanning(true);
+    setScanError(null);
+    try {
+      const res = await api.post<SubnetScanResult>(`/ipam/${subnet.id}/scan`);
+      setLastScanResult(res.data);
+      toast.success(`Scan complete — ${res.data.hosts_found} live host${res.data.hosts_found === 1 ? "" : "s"} found.`);
+      // Pull the refreshed subnet (updated used_count/utilization_pct/
+      // last_scanned_at) rather than recomputing client-side, so this
+      // modal always shows exactly what the backend just calculated.
+      const subRes = await api.get<Subnet>(`/ipam/${subnet.id}`);
+      setLiveSubnet(subRes.data);
+      loadAddresses();
+      onChanged();
+    } catch (err: any) {
+      setScanError(err?.response?.data?.detail ?? "Scan failed.");
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const runFingerprint = async () => {
+    setFingerprinting(true);
+    setFingerprintError(null);
+    try {
+      const res = await api.post<SubnetFingerprintResult>(`/ipam/${subnet.id}/fingerprint`);
+      setLastFingerprintResult(res.data);
+      toast.success(
+        `Fingerprint complete — ${res.data.hosts_fingerprinted} host${res.data.hosts_fingerprinted === 1 ? "" : "s"} identified.`
+      );
+      loadAddresses();
+      onChanged();
+    } catch (err: any) {
+      // 403 here specifically means the backend lacks the raw-socket
+      // capability -O needs (root, or CAP_NET_RAW+CAP_NET_ADMIN) --
+      // surface that distinctly from a generic failure so it's clear
+      // this is a deployment config issue, not a bug.
+      setFingerprintError(err?.response?.data?.detail ?? "Fingerprinting failed.");
+    } finally {
+      setFingerprinting(false);
+    }
+  };
 
   const findFreeIP = async () => {
     setFindingFree(true);
@@ -478,7 +539,23 @@ function SubnetDetailModal({
         </div>
 
         {canManage && (
-          <div className="flex items-center gap-2 mb-4 flex-wrap">
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
+            <button
+              onClick={runScan}
+              disabled={scanning}
+              title="Live nmap ping-sweep -- finds unmanaged hosts (PCs, printers, phones) with no Device row"
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-white/20 disabled:opacity-50"
+            >
+              {scanning ? "Scanning…" : "Scan subnet"}
+            </button>
+            <button
+              onClick={runFingerprint}
+              disabled={fingerprinting}
+              title="OS/device-type fingerprint (nmap -O) -- needs a raw socket on the backend, see docs"
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-white/20 disabled:opacity-50"
+            >
+              {fingerprinting ? "Fingerprinting…" : "Fingerprint hosts"}
+            </button>
             <button
               onClick={findFreeIP}
               disabled={findingFree}
@@ -506,6 +583,31 @@ function SubnetDetailModal({
               Reserve address
             </button>
           </div>
+        )}
+
+        {(scanError || fingerprintError || lastScanResult || lastFingerprintResult) && (
+          <div className="mb-3 flex flex-col gap-1 text-xs">
+            {scanError && <p className="text-riskcrit">Scan: {scanError}</p>}
+            {fingerprintError && <p className="text-riskcrit">Fingerprint: {fingerprintError}</p>}
+            {lastScanResult && !scanError && (
+              <p className="text-slate-500 dark:text-slate-400">
+                Last scan: {lastScanResult.hosts_found} live host{lastScanResult.hosts_found === 1 ? "" : "s"} of{" "}
+                {lastScanResult.addresses_scanned} addresses, {new Date(lastScanResult.scanned_at).toLocaleTimeString()}
+              </p>
+            )}
+            {lastFingerprintResult && !fingerprintError && (
+              <p className="text-slate-500 dark:text-slate-400">
+                Last fingerprint: {lastFingerprintResult.hosts_fingerprinted} host
+                {lastFingerprintResult.hosts_fingerprinted === 1 ? "" : "s"} identified,{" "}
+                {new Date(lastFingerprintResult.fingerprinted_at).toLocaleTimeString()}
+              </p>
+            )}
+          </div>
+        )}
+        {subnet.last_scanned_at && !scanError && !lastScanResult && (
+          <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">
+            Last scanned {new Date(subnet.last_scanned_at).toLocaleString()}
+          </p>
         )}
 
         <div className="flex items-center gap-2 mb-2">
@@ -541,7 +643,24 @@ function SubnetDetailModal({
                           {a.state}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-slate-600 dark:text-slate-300">{a.hostname ?? a.note ?? "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 dark:text-slate-300">
+                        {a.hostname ?? a.note ?? "—"}
+                        {(a.os_guess || a.device_type) && (
+                          <span className="ml-2 inline-flex items-center gap-1">
+                            {a.device_type && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300">
+                                {a.device_type}
+                              </span>
+                            )}
+                            {a.os_guess && (
+                              <span className="text-[10px] text-slate-400 dark:text-slate-500" title={`nmap OS match, ${a.os_accuracy ?? "?"}% confidence`}>
+                                {a.os_guess}
+                                {a.os_accuracy != null ? ` (${a.os_accuracy}%)` : ""}
+                              </span>
+                            )}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-right">
                         {canManage && hasReservation && (
                           <button

@@ -32,6 +32,11 @@ class DeviceBase(BaseModel):
     # ("switch") but need different baselines because they're different
     # device_roles ("core" vs "access").
     device_role: str | None = None
+    # Explicit WAN/uplink flag -- see Device.is_uplink's docstring.
+    # Independent of device_role: an operator can mark a device as an
+    # uplink without needing to know (or fit into) the role-keyword
+    # convention the dashboard widget used to rely on exclusively.
+    is_uplink: bool = False
     # Physical placement (Groups page: Data Center -> Rack -> device).
     # Free-text on purpose -- see Device.data_center/rack in
     # app/models/device.py. rack_position is a cosmetic 1-based U slot,
@@ -104,6 +109,7 @@ class DeviceUpdate(BaseModel):
     site: str | None = None
     device_type: str | None = None
     device_role: str | None = None
+    is_uplink: bool | None = None
     data_center: str | None = None
     rack: str | None = None
     rack_position: int | None = None

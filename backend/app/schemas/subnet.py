@@ -53,6 +53,8 @@ class SubnetRead(BaseModel):
     used_count: int = 0
     free_count: int = 0
     utilization_pct: float = 0.0
+    last_scanned_at: datetime.datetime | None = None
+    scanned_only_count: int = 0
 
 
 class IPReservationCreate(BaseModel):
@@ -82,6 +84,14 @@ class SubnetAddressEntry(BaseModel):
     device_id: uuid.UUID | None = None
     hostname: str | None = None
     note: str | None = None
+    # Only ever populated for "scanned" rows, and only after a
+    # fingerprinting pass (not a plain ping-sweep) has been run -- see
+    # services.ipam_service.fingerprint_subnet.
+    os_guess: str | None = None
+    os_accuracy: int | None = None
+    device_type: str | None = None
+    mac_vendor: str | None = None
+    fingerprinted_at: datetime.datetime | None = None
 
 
 class FreeIPResult(BaseModel):
@@ -95,6 +105,20 @@ class IPConflict(BaseModel):
     ip_address: str
     device_ids: list[uuid.UUID]
     hostnames: list[str]
+
+
+class SubnetScanResult(BaseModel):
+    subnet_id: uuid.UUID
+    scanned_at: datetime.datetime
+    hosts_found: int
+    addresses_scanned: int
+
+
+class SubnetFingerprintResult(BaseModel):
+    subnet_id: uuid.UUID
+    fingerprinted_at: datetime.datetime
+    hosts_fingerprinted: int
+    addresses_scanned: int
 
 
 class ConflictReport(BaseModel):

@@ -83,12 +83,23 @@ async def _topology_snapshot_loop() -> None:
     diff_snapshots and GET /topology/diff.
     """
     from app.core.database import SessionLocal
+    from app.models.topology_snapshot import TopologySnapshot
     from app.services import topology_service
 
     def _capture() -> None:
         db = SessionLocal()
         try:
-            topology_service.capture_snapshot(db)
+            # Grab the previous snapshot *before* inserting the new one so
+            # we can diff "then" vs. "now" and raise a real alert on any
+            # actual change (a device/link appearing or disappearing),
+            # instead of the topology page being the only place a rewired
+            # or lost link ever shows up.
+            previous = (
+                db.query(TopologySnapshot).order_by(TopologySnapshot.captured_at.desc()).first()
+            )
+            newest = topology_service.capture_snapshot(db)
+            if previous is not None:
+                topology_service.raise_topology_change_alert(db, previous, newest)
         finally:
             db.close()
 

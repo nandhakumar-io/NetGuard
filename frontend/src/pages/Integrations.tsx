@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useConfirm } from "../lib/confirm";
 import { useToast } from "../lib/toast";
+import { NotificationSettings, NotificationTestResult, WebhookEndpoint, WebhookTestResult } from "../lib/types";
 
 // --- Types (kept local -- these features are small enough not to warrant
 // new entries in lib/types.ts's shared type set) -----------------------
@@ -104,12 +105,48 @@ function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
+type IntegrationTabId = "chatops" | "notifications" | "gitops";
+
+const INTEGRATION_TABS: { id: IntegrationTabId; label: string; blurb: string; icon: React.ReactNode }[] = [
+  {
+    id: "chatops",
+    label: "ChatOps",
+    blurb: "Slack / Teams commands",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M8 9h8M8 13h5" /><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+      </svg>
+    ),
+  },
+  {
+    id: "notifications",
+    label: "Alert Notifications",
+    blurb: "Webhooks & delivery",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" />
+      </svg>
+    ),
+  },
+  {
+    id: "gitops",
+    label: "GitOps",
+    blurb: "Config-as-code sync",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M6 9v6a3 3 0 003 3h6M18 6h-1" />
+      </svg>
+    ),
+  },
+];
+
 export default function IntegrationsPage() {
   const { user } = useAuth();
   const canManage = user?.role === "network_admin";
+  const [tab, setTab] = useState<IntegrationTabId>("chatops");
 
   return (
-    <div className="pb-16 max-w-6xl mx-auto flex flex-col gap-8 pt-2">
+    <div className="pb-16 max-w-6xl mx-auto flex flex-col gap-6 pt-2">
       <div>
         <div className="flex items-center gap-2 mb-1">
           <span className="noc-live-dot inline-block w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-noc-good" />
@@ -122,8 +159,42 @@ export default function IntegrationsPage() {
         </p>
       </div>
 
-      <ChatOpsSection canManage={canManage} />
-      <GitOpsSection canManage={canManage} />
+      {/* Tab bar -- replaces the old always-stacked layout (ChatOps + Alert
+          Notifications + GitOps rendered one after another, ~1000px of
+          scroll before you ever reach GitOps). Each section is still its
+          own self-contained component; we just mount one at a time. */}
+      <div className="flex items-center gap-1 border-b border-slate-200 dark:border-noc-border overflow-x-auto no-scrollbar">
+        {INTEGRATION_TABS.map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex items-center gap-2 px-4 py-3 text-sm font-bold whitespace-nowrap border-b-2 -mb-px transition-colors ${
+                active
+                  ? "border-blue-600 dark:border-noc-cyan text-navy dark:text-noc-text"
+                  : "border-transparent text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:hover:text-noc-text"
+              }`}
+            >
+              <span className={active ? "text-blue-600 dark:text-noc-cyan" : "text-slate-400 dark:text-noc-faint"}>{t.icon}</span>
+              <span className="flex flex-col items-start leading-tight">
+                <span>{t.label}</span>
+                <span className="text-[10px] font-medium text-slate-400 dark:text-noc-faint hidden sm:inline">{t.blurb}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className={tab === "chatops" ? "flex flex-col gap-8" : "hidden"}>
+        <ChatOpsSection canManage={canManage} />
+      </div>
+      <div className={tab === "notifications" ? "flex flex-col gap-8" : "hidden"}>
+        <AlertNotificationsSection canManage={canManage} />
+      </div>
+      <div className={tab === "gitops" ? "flex flex-col gap-8" : "hidden"}>
+        <GitOpsSection canManage={canManage} />
+      </div>
     </div>
   );
 }
@@ -414,6 +485,277 @@ function CommandTester() {
 }
 
 // =============================== GitOps =====================================
+
+// =========================== Alert Notifications ============================
+// Email (SMTP) is DB-configurable here (app.api.notification_settings) --
+// previously env-var-only with no UI at all. Slack is a quick-add shortcut
+// onto the same WebhookEndpoint system (app.api.webhooks) Alert Center's
+// Webhooks tab already manages in full (multiple endpoints, event
+// filters, delivery logs, retries) -- this panel intentionally stays
+// thin and links there rather than re-implementing all of that.
+
+const emptySmtpForm = {
+  smtp_enabled: false, smtp_host: "", smtp_port: "587", smtp_username: "",
+  smtp_password: "", smtp_from_email: "", smtp_use_tls: true, recipients: "",
+};
+
+function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
+  const toast = useToast();
+
+  // --- Email (SMTP) ---
+  const [smtp, setSmtp] = useState<NotificationSettings | null>(null);
+  const [smtpForm, setSmtpForm] = useState(emptySmtpForm);
+  const [smtpLoading, setSmtpLoading] = useState(true);
+  const [smtpSaving, setSmtpSaving] = useState(false);
+  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpError, setSmtpError] = useState<string | null>(null);
+
+  const loadSmtp = () => {
+    setSmtpLoading(true);
+    api
+      .get<NotificationSettings>("/notification-settings")
+      .then((res) => {
+        setSmtp(res.data);
+        setSmtpForm({
+          smtp_enabled: res.data.smtp_enabled,
+          smtp_host: res.data.smtp_host || "",
+          smtp_port: String(res.data.smtp_port),
+          smtp_username: res.data.smtp_username || "",
+          smtp_password: "",
+          smtp_from_email: res.data.smtp_from_email || "",
+          smtp_use_tls: res.data.smtp_use_tls,
+          recipients: res.data.recipients || "",
+        });
+        setSmtpError(null);
+      })
+      .catch((err) => setSmtpError(err?.response?.data?.detail || "Failed to load email settings."))
+      .finally(() => setSmtpLoading(false));
+  };
+
+  useEffect(loadSmtp, []);
+
+  const saveSmtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSmtpSaving(true);
+    setSmtpError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        smtp_enabled: smtpForm.smtp_enabled,
+        smtp_host: smtpForm.smtp_host || null,
+        smtp_port: Number(smtpForm.smtp_port) || 587,
+        smtp_username: smtpForm.smtp_username || null,
+        smtp_from_email: smtpForm.smtp_from_email || null,
+        smtp_use_tls: smtpForm.smtp_use_tls,
+        recipients: smtpForm.recipients || null,
+      };
+      // Omit entirely (leave stored password unchanged) unless the operator typed a new one.
+      if (smtpForm.smtp_password) payload.smtp_password = smtpForm.smtp_password;
+      await api.put("/notification-settings", payload);
+      toast.success("Email alert settings saved.");
+      loadSmtp();
+    } catch (err: any) {
+      setSmtpError(err?.response?.data?.detail || "Failed to save email settings.");
+    } finally {
+      setSmtpSaving(false);
+    }
+  };
+
+  const testSmtp = async () => {
+    setSmtpTesting(true);
+    try {
+      const res = await api.post<NotificationTestResult>("/notification-settings/test");
+      if (res.data.success) toast.success(res.data.detail);
+      else toast.error(res.data.detail);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Test email failed to send.");
+    } finally {
+      setSmtpTesting(false);
+    }
+  };
+
+  // --- Slack quick-add (creates a WebhookEndpoint, webhook_type=slack) ---
+  const [slackWebhooks, setSlackWebhooks] = useState<WebhookEndpoint[]>([]);
+  const [slackLoading, setSlackLoading] = useState(true);
+  const [showSlackForm, setShowSlackForm] = useState(false);
+  const [slackForm, setSlackForm] = useState({ name: "", url: "" });
+  const [slackSaving, setSlackSaving] = useState(false);
+  const [slackError, setSlackError] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+
+  const loadSlack = () => {
+    setSlackLoading(true);
+    api
+      .get<WebhookEndpoint[]>("/webhooks")
+      .then((res) => setSlackWebhooks(res.data.filter((w) => w.webhook_type === "slack")))
+      .catch(() => {})
+      .finally(() => setSlackLoading(false));
+  };
+
+  useEffect(loadSlack, []);
+
+  const addSlackWebhook = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSlackSaving(true);
+    setSlackError(null);
+    try {
+      await api.post("/webhooks", { name: slackForm.name, url: slackForm.url, webhook_type: "slack" });
+      setShowSlackForm(false);
+      setSlackForm({ name: "", url: "" });
+      loadSlack();
+      toast.success("Slack webhook added — alert notifications will now post there.");
+    } catch (err: any) {
+      setSlackError(err?.response?.data?.detail || "Failed to add Slack webhook.");
+    } finally {
+      setSlackSaving(false);
+    }
+  };
+
+  const testSlackWebhook = async (id: string) => {
+    setTestingId(id);
+    try {
+      const res = await api.post<WebhookTestResult>(`/webhooks/${id}/test`);
+      if (res.data.success) toast.success(res.data.message || "Test message sent to Slack.");
+      else toast.error(res.data.message || "Slack test delivery failed.");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Slack test delivery failed.");
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  return (
+    <Panel>
+      <div className="p-5 flex items-start gap-3 border-b border-slate-200 dark:border-noc-border">
+        <div className="w-9 h-9 rounded-lg bg-emerald-600/10 dark:bg-noc-good/10 border border-emerald-600/25 dark:border-noc-good/25 text-emerald-600 dark:text-noc-good flex items-center justify-center shrink-0">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4z" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-navy dark:text-noc-text">Alert Notifications</h2>
+          <p className="text-xs text-slate-500 dark:text-noc-muted mt-1 max-w-2xl leading-relaxed">
+            Where critical alerts and rule breaches get sent, in addition to the in-app Notification Center.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-noc-border">
+        {/* --- Email --- */}
+        <div className="p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold text-navy dark:text-noc-text">Email (SMTP)</h3>
+            {smtp && (
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${smtp.smtp_enabled ? "bg-emerald-600/10 dark:bg-noc-good/10 text-emerald-600 dark:text-noc-good" : "bg-slate-100 dark:bg-noc-panel2 text-slate-500 dark:text-noc-muted"}`}>
+                {smtp.smtp_enabled ? "Enabled" : "Disabled"}
+              </span>
+            )}
+          </div>
+
+          {smtpLoading ? (
+            <p className="text-xs text-slate-400 dark:text-noc-faint">Loading…</p>
+          ) : !canManage ? (
+            <p className="text-xs text-slate-500 dark:text-noc-muted">
+              {smtp?.smtp_enabled ? `Email alerts are enabled, sending to ${smtp.recipients || "no recipients configured"}.` : "Email alerts aren't configured. A network admin can set this up."}
+            </p>
+          ) : (
+            <form onSubmit={saveSmtp} className="flex flex-col gap-3">
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-noc-muted">
+                <input type="checkbox" checked={smtpForm.smtp_enabled} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_enabled: e.target.checked }))} className="accent-blue-600 dark:accent-noc-cyan" />
+                Enable email alerts
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <input placeholder="SMTP host" value={smtpForm.smtp_host} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_host: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+                <input placeholder="Port" value={smtpForm.smtp_port} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_port: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+              </div>
+              <input placeholder="From address (e.g. netguard@yourco.com)" value={smtpForm.smtp_from_email} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_from_email: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+              <input placeholder="Recipients (comma-separated)" value={smtpForm.recipients} onChange={(e) => setSmtpForm((f) => ({ ...f, recipients: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+              <div className="grid grid-cols-2 gap-2">
+                <input placeholder="SMTP username (optional)" value={smtpForm.smtp_username} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_username: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+                <input type="password" placeholder={smtp?.smtp_password_set ? "Password (unchanged)" : "Password (optional)"} value={smtpForm.smtp_password} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_password: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+              </div>
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-noc-muted">
+                <input type="checkbox" checked={smtpForm.smtp_use_tls} onChange={(e) => setSmtpForm((f) => ({ ...f, smtp_use_tls: e.target.checked }))} className="accent-blue-600 dark:accent-noc-cyan" />
+                Use STARTTLS
+              </label>
+
+              {smtpError && <p className="text-red-600 dark:text-noc-crit text-xs">{smtpError}</p>}
+
+              <div className="flex gap-2">
+                <button type="submit" disabled={smtpSaving} className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50">
+                  {smtpSaving ? "Saving…" : "Save"}
+                </button>
+                <button type="button" onClick={testSmtp} disabled={smtpTesting || !smtp?.smtp_enabled} className="border border-slate-200 dark:border-noc-border text-slate-600 dark:text-noc-muted rounded-md px-4 py-2 text-xs font-bold hover:border-blue-600 dark:hover:border-noc-cyan hover:text-blue-600 dark:hover:text-noc-cyan transition disabled:opacity-40">
+                  {smtpTesting ? "Sending…" : "Send test email"}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+
+        {/* --- Slack --- */}
+        <div className="p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold text-navy dark:text-noc-text">Slack</h3>
+            {canManage && (
+              <button onClick={() => { setSlackForm({ name: "", url: "" }); setSlackError(null); setShowSlackForm(true); }} className="text-xs font-bold text-blue-600 dark:text-noc-cyan hover:brightness-110">
+                + Add webhook
+              </button>
+            )}
+          </div>
+
+          <p className="text-xs text-slate-500 dark:text-noc-muted mb-3 leading-relaxed">
+            Posts alert notifications to a Slack channel via an{" "}
+            <a href="https://api.slack.com/messaging/webhooks" target="_blank" rel="noreferrer" className="text-blue-600 dark:text-noc-cyan hover:underline">incoming webhook</a>.
+            This is separate from the ChatOps slash command above — that lets you run commands <em>from</em> Slack; this sends alerts <em>to</em> Slack.
+          </p>
+
+          {slackLoading ? (
+            <p className="text-xs text-slate-400 dark:text-noc-faint">Loading…</p>
+          ) : slackWebhooks.length === 0 ? (
+            <p className="text-xs text-slate-400 dark:text-noc-faint">No Slack webhook configured yet.</p>
+          ) : (
+            <ul className="flex flex-col gap-2 mb-3">
+              {slackWebhooks.map((wh) => (
+                <li key={wh.id} className="flex items-center justify-between gap-2 bg-slate-50 dark:bg-noc-panel2 border border-slate-200 dark:border-noc-border rounded-md px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-900 dark:text-noc-text truncate">{wh.name}</p>
+                    <p className="text-[11px] text-slate-400 dark:text-noc-faint truncate font-mono">{wh.url}</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${wh.enabled ? "text-emerald-600 dark:text-noc-good" : "text-slate-400 dark:text-noc-faint"}`}>{wh.enabled ? "On" : "Off"}</span>
+                    <button onClick={() => testSlackWebhook(wh.id)} disabled={testingId === wh.id} className="text-[11px] font-bold text-blue-600 dark:text-noc-cyan hover:brightness-110 disabled:opacity-50">
+                      {testingId === wh.id ? "Sending…" : "Test"}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {slackWebhooks.length > 0 && (
+            <p className="text-[11px] text-slate-400 dark:text-noc-faint">
+              Manage event filters, delivery logs, and retries from Alert Center → Webhooks.
+            </p>
+          )}
+
+          {showSlackForm && (
+            <form onSubmit={addSlackWebhook} className="mt-3 flex flex-col gap-2 border-t border-slate-200 dark:border-noc-border pt-3">
+              <input placeholder="Name (e.g. #network-alerts)" value={slackForm.name} onChange={(e) => setSlackForm((f) => ({ ...f, name: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+              <input placeholder="https://hooks.slack.com/services/…" value={slackForm.url} onChange={(e) => setSlackForm((f) => ({ ...f, url: e.target.value }))} className="border border-slate-200 dark:border-noc-border bg-slate-50 dark:bg-noc-panel2 text-slate-900 dark:text-noc-text placeholder:text-slate-400 dark:text-noc-faint rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-noc-cyan" />
+              {slackError && <p className="text-red-600 dark:text-noc-crit text-xs">{slackError}</p>}
+              <div className="flex gap-2 justify-end">
+                <button type="button" onClick={() => setShowSlackForm(false)} className="px-4 py-2 text-xs font-bold text-slate-500 dark:text-noc-muted hover:text-slate-900 dark:text-noc-text">Cancel</button>
+                <button type="submit" disabled={slackSaving || !slackForm.name || !slackForm.url} className="bg-blue-600 dark:bg-noc-cyan text-slate-50 dark:text-noc-bg rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50">
+                  {slackSaving ? "Adding…" : "Add"}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
 
 function GitOpsSection({ canManage }: { canManage: boolean }) {
   const confirm = useConfirm();

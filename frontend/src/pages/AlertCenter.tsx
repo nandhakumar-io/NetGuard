@@ -33,7 +33,10 @@ function timeAgo(dateStr: string): string {
 }
 
 const OP_LABELS: Record<string, string> = { gt: ">", gte: "≥", lt: "<", lte: "≤", eq: "=" };
-const METRIC_LABELS: Record<string, string> = { cpu: "CPU %", memory: "Memory %", bandwidth: "Bandwidth %", temperature: "Temp °C", uptime: "Uptime (s)" };
+const METRIC_LABELS: Record<string, string> = {
+  cpu: "CPU %", memory: "Memory %", bandwidth: "Bandwidth %", temperature: "Temp °C", uptime: "Uptime (s)",
+  interface_errors: "Interface Errors", interface_down_count: "Interfaces Down", fan_failure: "Fan Failure", power_supply_failure: "PSU Failure",
+};
 
 type Tab = "alerts" | "rules" | "escalations" | "webhooks";
 
@@ -1043,11 +1046,21 @@ export default function AlertCenter() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <input placeholder="Rule Name" value={ruleForm.name} onChange={(e) => setRuleForm({ ...ruleForm, name: e.target.value })} className="col-span-full text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900 focus:ring-2 focus:ring-brandblue/30 outline-none" />
                 <select value={ruleForm.metric} onChange={(e) => setRuleForm({ ...ruleForm, metric: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900">
-                  <option value="cpu">CPU %</option>
-                  <option value="memory">Memory %</option>
-                  <option value="bandwidth">Bandwidth %</option>
-                  <option value="temperature">Temperature</option>
-                  <option value="uptime">Uptime (s)</option>
+                  <optgroup label="Utilization">
+                    <option value="cpu">CPU %</option>
+                    <option value="memory">Memory %</option>
+                    <option value="bandwidth">Bandwidth %</option>
+                    <option value="temperature">Temperature (°C)</option>
+                    <option value="uptime">Uptime (s)</option>
+                  </optgroup>
+                  <optgroup label="Interface Health">
+                    <option value="interface_errors">Interface Errors (count)</option>
+                    <option value="interface_down_count">Interfaces Down (count)</option>
+                  </optgroup>
+                  <optgroup label="Hardware Health">
+                    <option value="fan_failure">Fan Failure (1 = failed)</option>
+                    <option value="power_supply_failure">Power Supply Failure (1 = failed)</option>
+                  </optgroup>
                 </select>
                 <select value={ruleForm.operator} onChange={(e) => setRuleForm({ ...ruleForm, operator: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900">
                   <option value="gt">&gt; Greater Than</option>

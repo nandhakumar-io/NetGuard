@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
 
 from app.core import vm_client
-from app.models.alert import Alert, AlertSeverity
+from app.models.alert import Alert, AlertSeverity, AlertSource
 from app.models.device import Device
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
@@ -130,6 +130,34 @@ class TopologyEdge:
     # LINK_STALE_AFTER_DAYS -- flagged in the UI so a stale-but-still-drawn
     # link isn't mistaken for a just-confirmed one.
     stale: bool = False
+    # Bundle members: when two devices are joined by more than one
+    # confirmed (LLDP/CDP/GNS3) physical link -- e.g. a real LACP/
+    # port-channel trunk -- every individual local_port/neighbor_port
+    # pair used to collapse into a single edge (first-seen-wins), which
+    # silently hid the other members of the bundle from the map. Now
+    # every confirmed link between the same device pair is kept as one
+    # `LinkMember` here, and `local_port`/`neighbor_port` above just
+    # mirror the first member for callers that don't care about bundles.
+    # Empty for subnet/mgmt_subnet-inferred edges, which have no
+    # per-port data at all.
+    members: list["LinkMember"] = field(default_factory=list)
+
+
+@dataclass
+class LinkMember:
+    local_port: str | None
+    neighbor_port: str | None
+    protocol: str  # "lldp" | "cdp" | "gns3"
+    last_confirmed_at: str | None
+    stale: bool
+    # Per-member operational state, best-effort from the source device's
+    # latest interface poll (app.core.vm_client interface list) matched
+    # by port name -- "up" / "down" / "unknown" (no recent poll data for
+    # that interface). Lets the UI show *which* member of a trunk is
+    # actually forwarding vs. one that's cabled but administratively/
+    # operationally down, instead of a single link-wide status.
+    status: str = "unknown"
+    utilization_pct: int | None = None
 
 
 @dataclass
@@ -160,6 +188,41 @@ class BlastRadiusResult:
     dependent_device_ids: list[str] = field(default_factory=list)
     dependent_count: int = 0
     unknown_device_ids: list[str] = field(default_factory=list)  # requested but not found in inventory
+
+
+def _member_port_state(db: Session, device_id: str, local_port: str | None) -> tuple[str, int | None]:
+    """Best-effort per-port operational state for one trunk member,
+    matched by interface name against the two things NetGuard actually
+    tracks per-port: an active unresolved "Interface Down: <port>" alert
+    (see app.services.metrics_service), and the latest polled utilization
+    for that ifIndex (app.core.vm_client.latest_interface_metrics).
+
+    Returns ("down" | "up" | "unknown", utilization_pct-or-None). "unknown"
+    means neither source has anything for that port name yet -- cabled per
+    LLDP/CDP but never independently polled, which the UI should render as
+    "cabled" rather than implying it's actively passing traffic.
+    """
+    if not local_port:
+        return "unknown", None
+    try:
+        down_alert = (
+            db.query(Alert.id)
+            .filter(
+                Alert.device_id == device_id,
+                Alert.category == f"Interface Down: {local_port}",
+                Alert.resolved.is_(False),
+            )
+            .first()
+        )
+        if down_alert:
+            return "down", None
+        for row in vm_client.latest_interface_metrics(device_id):
+            if row.get("if_descr") == local_port:
+                util = row.get("utilization_pct")
+                return "up", int(util) if util is not None else None
+    except Exception:
+        return "unknown", None
+    return "unknown", None
 
 
 def uplink_interfaces_for_device(db: Session, device_id) -> set[str]:
@@ -401,32 +464,75 @@ def build_topology(db: Session) -> TopologyGraph:
         .filter(DiscoveredNeighbor.neighbor_device_id.isnot(None))
         .all()
     )
+    # Group every confirmed row by device pair first, rather than keeping
+    # only the first row seen per pair -- a real LACP/port-channel trunk
+    # reports one LLDP/CDP neighbor row *per physical member link*, and
+    # collapsing those to a single first-seen-wins edge silently dropped
+    # every member but one from the map. Each pair now becomes exactly
+    # one TopologyEdge carrying a `members` list, so a 4-cable trunk still
+    # renders as one link line (it *is* one logical link) but the Link
+    # Detail panel can show and independently badge all 4 members.
+    rows_by_pair: dict[tuple[str, str], list[DiscoveredNeighbor]] = {}
     for row in neighbor_rows:
         a_id, b_id = str(row.device_id), str(row.neighbor_device_id)
         if a_id == b_id:
             continue
         pair_key = tuple(sorted((a_id, b_id)))
-        if pair_key in confirmed_pairs:
-            continue
+        rows_by_pair.setdefault(pair_key, []).append(row)
+
+    for pair_key, rows in rows_by_pair.items():
         confirmed_pairs.add(pair_key)
-        confirmed_at = row.discovered_at
-        is_stale = bool(
-            confirmed_at
-            and datetime.now(timezone.utc) - confirmed_at.replace(tzinfo=confirmed_at.tzinfo or timezone.utc)
-            > timedelta(days=LINK_STALE_AFTER_DAYS)
-        )
+        a_id, b_id = pair_key
+        # Preserve each row's own (device_id, neighbor_device_id) order for
+        # local_port/neighbor_port so "local" always means "on `source`",
+        # even though members are deduped/grouped by the unordered pair.
+        first = rows[0]
+        source_id, target_id = str(first.device_id), str(first.neighbor_device_id)
+        members: list[LinkMember] = []
+        seen_ports: set[tuple[str | None, str | None]] = set()
+        for row in rows:
+            # A device can re-report the same physical port pair across
+            # multiple discovery runs (history), not just once -- only
+            # keep the newest row per local/neighbor port combination.
+            port_key = (row.local_port, row.neighbor_port)
+            if port_key in seen_ports:
+                continue
+            seen_ports.add(port_key)
+            confirmed_at = row.discovered_at
+            is_stale = bool(
+                confirmed_at
+                and datetime.now(timezone.utc) - confirmed_at.replace(tzinfo=confirmed_at.tzinfo or timezone.utc)
+                > timedelta(days=LINK_STALE_AFTER_DAYS)
+            )
+            member_device_id = str(row.device_id)
+            status, member_util = _member_port_state(db, member_device_id, row.local_port)
+            members.append(
+                LinkMember(
+                    local_port=row.local_port,
+                    neighbor_port=row.neighbor_port,
+                    protocol=row.protocol,
+                    last_confirmed_at=confirmed_at.isoformat() if confirmed_at else None,
+                    stale=is_stale,
+                    status=status,
+                    utilization_pct=member_util,
+                )
+            )
+        members.sort(key=lambda m: (m.local_port or "", m.neighbor_port or ""))
+        newest_confirmed = max((m.last_confirmed_at for m in members if m.last_confirmed_at), default=None)
+        all_stale = all(m.stale for m in members) if members else False
         edges.append(
             TopologyEdge(
-                source=a_id,
-                target=b_id,
+                source=source_id,
+                target=target_id,
                 subnet=None,
                 source_ip=None,
                 target_ip=None,
-                link_source=row.protocol,
-                local_port=row.local_port,
-                neighbor_port=row.neighbor_port,
-                last_confirmed_at=confirmed_at.isoformat() if confirmed_at else None,
-                stale=is_stale,
+                link_source=first.protocol,
+                local_port=members[0].local_port if members else first.local_port,
+                neighbor_port=members[0].neighbor_port if members else first.neighbor_port,
+                last_confirmed_at=newest_confirmed,
+                stale=all_stale,
+                members=members,
             )
         )
 
@@ -656,6 +762,67 @@ def capture_snapshot(db: Session) -> TopologySnapshot:
     db.commit()
     db.refresh(snapshot)
     return snapshot
+
+
+def raise_topology_change_alert(db: Session, older: "TopologySnapshot", newer: "TopologySnapshot") -> None:
+    """Raises a fleet-wide (device_id=None) alert whenever the periodic
+    snapshot diff finds any actual change -- a device or a confirmed/
+    inferred link appearing or disappearing since the last capture.
+
+    Runs after every TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS capture (see
+    app.main._topology_snapshot_loop) so a rewired trunk, a device that
+    dropped off LLDP, or a newly-cabled neighbor shows up in Alerts /
+    the notification bell immediately, not only for someone who happens
+    to open the Topology page and click "What changed?".
+    """
+    from app.models.device import Device
+    from app.services.alert_service import raise_alert
+
+    diff = diff_snapshots(older, newer)
+    changes: list[str] = []
+    if diff["added_nodes"]:
+        changes.append(f"{len(diff['added_nodes'])} device(s) added")
+    if diff["removed_nodes"]:
+        changes.append(f"{len(diff['removed_nodes'])} device(s) removed")
+    if diff["added_edges"]:
+        changes.append(f"{len(diff['added_edges'])} link(s) added")
+    if diff["removed_edges"]:
+        changes.append(f"{len(diff['removed_edges'])} link(s) removed")
+    if not changes:
+        return
+
+    # A device disappearing (or a confirmed link being lost, which is the
+    # LLDP/CDP equivalent of a device going dark to that neighbor) is
+    # operationally more urgent than something new merely being added.
+    # If a WAN/uplink-flagged device (see Device.is_uplink) is one of the
+    # devices/link endpoints removed, that's escalated straight to
+    # critical -- losing a device on the LAN side is a warning, losing an
+    # uplink is a site going dark.
+    uplink_ids: set[str] = set()
+    if diff["removed_nodes"] or diff["removed_edges"]:
+        uplink_ids = {
+            str(d.id)
+            for d in db.query(Device.id).filter(Device.is_uplink.is_(True)).all()
+        }
+    removed_node_ids = {n["id"] for n in diff["removed_nodes"]}
+    removed_edge_endpoints = {e["source"] for e in diff["removed_edges"]} | {e["target"] for e in diff["removed_edges"]}
+    uplink_affected = bool(uplink_ids & (removed_node_ids | removed_edge_endpoints))
+
+    if uplink_affected:
+        severity = AlertSeverity.CRITICAL
+        changes.append("includes a WAN/uplink device")
+    elif diff["removed_nodes"] or diff["removed_edges"]:
+        severity = AlertSeverity.WARNING
+    else:
+        severity = AlertSeverity.INFO
+    raise_alert(
+        db,
+        device_id=None,
+        severity=severity,
+        source=AlertSource.HEALTH_POLL,
+        category="Topology Changed",
+        message="Network topology changed: " + ", ".join(changes) + ".",
+    )
 
 
 def _edge_key(e: dict) -> tuple[str, str]:

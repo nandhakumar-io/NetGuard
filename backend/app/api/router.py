@@ -34,6 +34,7 @@ from app.api import (
     maintenance_windows,
     metrics,
     notification,
+    notification_settings,
     path_trace,
     push_subscriptions,
     rbac,
@@ -75,6 +76,7 @@ api_router.include_router(incidents.router)
 api_router.include_router(jit_access.router)
 api_router.include_router(gns3.router)
 api_router.include_router(notification.router)
+api_router.include_router(notification_settings.router)
 api_router.include_router(reports.router)
 api_router.include_router(rbac.router)
 api_router.include_router(secrets_rotation.router)

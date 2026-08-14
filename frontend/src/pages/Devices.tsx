@@ -240,6 +240,7 @@ function DeviceInlineDetails({
   const [editingRole, setEditingRole] = useState(false);
   const [roleValue, setRoleValue] = useState(device.device_role || "");
   const [roleSaving, setRoleSaving] = useState(false);
+  const [uplinkSaving, setUplinkSaving] = useState(false);
 
   const saveDeviceRole = async () => {
     setRoleSaving(true);
@@ -733,6 +734,31 @@ function DeviceInlineDetails({
                   )}
                 </p>
               )}
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                WAN / Uplink <span className="normal-case font-normal">(dashboard + alert priority)</span>
+              </p>
+              <label className="mt-1 flex items-center gap-2 font-medium text-navy dark:text-white cursor-pointer">
+                <input
+                  type="checkbox"
+                  disabled={!canManage || uplinkSaving}
+                  checked={!!device.is_uplink}
+                  onChange={async (e) => {
+                    const next = e.target.checked;
+                    setUplinkSaving(true);
+                    try {
+                      const res = await api.patch<Device>(`/devices/${device.id}`, { is_uplink: next });
+                      onDeviceUpdated(res.data);
+                    } catch {
+                      // best-effort; checkbox will just reflect device.is_uplink again on failure
+                    } finally {
+                      setUplinkSaving(false);
+                    }
+                  }}
+                />
+                {device.is_uplink ? "Monitored as WAN/uplink" : "Not monitored as uplink"}
+              </label>
             </div>
             <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">Authentication</p>
@@ -1959,6 +1985,9 @@ export default function Devices() {
 
   const bulkTagVendor = () => bulkPatch({ vendor: bulkVendorValue }, `Vendor "${bulkVendorValue}"`);
 
+  const bulkSetUplink = (enabled: boolean) =>
+    bulkPatch({ is_uplink: enabled }, `WAN/uplink monitoring ${enabled ? "enabled" : "disabled"}`);
+
   /** Bulk move to a Data Center / Rack — same pair the Groups page's
    * drag-and-drop writes, so a rack full of devices can be relocated in
    * one shot instead of dragging them one at a time. Rack alone (no DC
@@ -2948,6 +2977,24 @@ export default function Devices() {
 
           <div className="w-px self-stretch bg-white/15" />
 
+          <button
+            onClick={() => bulkSetUplink(true)}
+            disabled={bulkBusy}
+            title="Mark selected devices as WAN/uplink — feeds the Dashboard's Uplinks & WAN Links widget and raises link-down/topology-change alert severity"
+            className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+          >
+            Mark as WAN/Uplink
+          </button>
+          <button
+            onClick={() => bulkSetUplink(false)}
+            disabled={bulkBusy}
+            className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+          >
+            Unmark Uplink
+          </button>
+
+          <div className="w-px self-stretch bg-white/15" />
+
           <div className="flex items-center gap-1.5">
             <input
               className="border border-white/20 bg-white/10 placeholder-slate-400 rounded-full px-3 py-1.5 text-xs text-white w-28 focus:ring-2 focus:ring-accent outline-none"
@@ -3143,7 +3190,17 @@ export default function Devices() {
                     />
                   </td>
                 )}
-                <td className="px-5 py-4 font-bold text-navy dark:text-white">{d.hostname}</td>
+                <td className="px-5 py-4 font-bold text-navy dark:text-white">
+                  {d.hostname}
+                  {d.is_uplink && (
+                    <span
+                      title="Monitored as WAN/uplink"
+                      className="ml-2 align-middle text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-full"
+                    >
+                      Uplink
+                    </span>
+                  )}
+                </td>
                 <td className="px-5 py-4 text-slate-500 dark:text-slate-400 font-mono text-xs font-semibold">{d.ip_address}</td>
                 <td className="px-5 py-4 text-slate-600 dark:text-slate-300 capitalize font-medium">{d.vendor}</td>
                 <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">

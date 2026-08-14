@@ -1,3 +1,0 @@
-import{j as e}from"./index-yjE-RXqW.js";function c({diffText:r}){if(!r)return e.jsx("p",{className:"text-sm text-slate-400 italic",children:"No diff available."});const a=r.split(`
-`);return e.jsx("pre",{className:"bg-slate-900 text-xs rounded-lg p-4 overflow-x-auto leading-relaxed",children:a.map((t,i)=>{let s="text-slate-300";return t.startsWith("+")&&!t.startsWith("+++")?s="text-risklow bg-green-950/40 block":t.startsWith("-")&&!t.startsWith("---")?s="text-riskcrit bg-red-950/40 block":t.startsWith("@@")&&(s="text-accent block"),e.jsxs("span",{className:s,children:[t||" ",`
-`]},i)})})}export{c as C};

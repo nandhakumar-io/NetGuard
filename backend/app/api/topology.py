@@ -70,6 +70,18 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "utilization_pct": e.utilization_pct,
                 "last_confirmed_at": e.last_confirmed_at,
                 "stale": e.stale,
+                "members": [
+                    {
+                        "local_port": m.local_port,
+                        "neighbor_port": m.neighbor_port,
+                        "protocol": m.protocol,
+                        "last_confirmed_at": m.last_confirmed_at,
+                        "stale": m.stale,
+                        "status": m.status,
+                        "utilization_pct": m.utilization_pct,
+                    }
+                    for m in e.members
+                ],
             }
             for e in graph.edges
         ],

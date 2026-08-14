@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, getAccessToken } from "../lib/api";
+import { api } from "../lib/api";
 import {
   TopologyResponse,
   TopologyNode,
@@ -199,20 +199,6 @@ function utilizationColor(pct: number | null | undefined): string | null {
   if (pct >= 80) return "#dc2626";
   if (pct >= 60) return "#d97706";
   return "#16a34a";
-}
-
-/** Only LLDP/CDP/GNS3 edges are a real reported/known adjacency -- treat
- * those as "confirmed" (green). `mgmt_subnet` is the weakest tier (two
- * devices just happen to share an IPAM subnet on their management IPs,
- * with no config or discovery data to back it up) and is deliberately
- * kept visually distinct so it's never mistaken for a confirmed link. */
-function isConfirmedLinkSource(linkSource: string): boolean {
-  return linkSource === "lldp" || linkSource === "cdp" || linkSource === "gns3";
-}
-
-function linkSourceLabel(linkSource: string): string {
-  if (linkSource === "mgmt_subnet") return "SHARED MGMT SUBNET (inferred)";
-  return linkSource.toUpperCase();
 }
 
 /** Amber -> red for a node's interface-error badge: any errors at all is
@@ -540,19 +526,7 @@ export default function Topology() {
       if (cancelled) return;
       setLiveStatus("connecting");
       const httpBase = api.defaults.baseURL || window.location.origin;
-      // The backend's /topology/ws handler requires an auth token as a
-      // query param -- there's no HTTP response to hang a 401 off of once
-      // the handshake completes, so it closes with code 1008 instead (see
-      // app.core.deps.get_current_user_ws). Without this the socket opens,
-      // gets immediately closed by the server, and the onclose handler's
-      // backoff loop retries forever -- which is exactly the "stuck on
-      // reconnecting" symptom, since every retry hits the same missing-token
-      // rejection.
-      const token = getAccessToken();
-      const wsUrl =
-        httpBase.replace(/^http/, "ws").replace(/\/$/, "") +
-        "/topology/ws" +
-        (token ? `?token=${encodeURIComponent(token)}` : "");
+      const wsUrl = httpBase.replace(/^http/, "ws").replace(/\/$/, "") + "/topology/ws";
       const ws = new WebSocket(wsUrl);
       socket = ws;
 
@@ -792,9 +766,8 @@ export default function Topology() {
           <p className="text-sm text-slate-500 mt-1 max-w-2xl">
             Devices and the links between them — green badges are confirmed links (LLDP/CDP neighbor discovery
             via SNMP, or imported GNS3 lab wiring), gray labels are inferred from interfaces sharing the same
-            subnet, and amber labels are a weaker guess from devices sharing an IPAM management subnet with no
-            discovery or config data yet. Click a device or a link for details. Scroll to zoom, drag to pan. Run
-            Discovery on a device to add confirmed links here.
+            subnet. Click a device or a link for details. Scroll to zoom, drag to pan. Run Discovery on a
+            device to add confirmed links here.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -1235,8 +1208,6 @@ export default function Topology() {
                     const utilColor = colorByUtilization ? utilizationColor(e.utilization_pct) : null;
                     const edgeAlerting = alertOverlay && edgeHasActiveAlert(e);
                     const isStaleLink = e.link_source !== "subnet" && e.stale;
-                    const isMgmtSubnetLink = e.link_source === "mgmt_subnet";
-                    const isConfirmed = isConfirmedLinkSource(e.link_source);
                     const srcLabelPos = pointAlong(a.x, a.y, b.x, b.y, 30);
                     const tgtLabelPos = pointAlong(b.x, b.y, a.x, a.y, 30);
                     const midX = (a.x + b.x) / 2;
@@ -1245,7 +1216,7 @@ export default function Topology() {
                     const linkLabel =
                       e.link_source === "subnet"
                         ? e.subnet || ""
-                        : `${linkSourceLabel(e.link_source)}${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" / "SHARED MGMT SUBNET (inferred)"
+                        : `${e.link_source.toUpperCase()}${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
                     return (
                       <g
                         key={key}
@@ -1279,15 +1250,7 @@ export default function Topology() {
                           height={13}
                           rx={3}
                           fill={
-                            isStaleLink
-                              ? "#fef3c7"
-                              : isMgmtSubnetLink
-                              ? "#fef3c7"
-                              : isConfirmed
-                              ? "#dcfce7"
-                              : active
-                              ? "#dbeafe"
-                              : "#f1f5f9"
+                            isStaleLink ? "#fef3c7" : e.link_source !== "subnet" ? "#dcfce7" : active ? "#dbeafe" : "#f1f5f9"
                           }
                           opacity={0.95}
                         />
@@ -1298,17 +1261,7 @@ export default function Topology() {
                           className="pointer-events-none select-none"
                           fontSize={9.5}
                           fontWeight={600}
-                          fill={
-                            isStaleLink
-                              ? "#92400e"
-                              : isMgmtSubnetLink
-                              ? "#92400e"
-                              : isConfirmed
-                              ? "#166534"
-                              : active
-                              ? "#1e3a8a"
-                              : "#64748b"
-                          }
+                          fill={isStaleLink ? "#92400e" : e.link_source !== "subnet" ? "#166534" : active ? "#1e3a8a" : "#64748b"}
                           fontFamily="ui-monospace, monospace"
                         >
                           {linkLabel}
@@ -1773,14 +1726,10 @@ export default function Topology() {
                               <span className="font-semibold text-slate-700">{other?.hostname || "unknown"}</span>
                               <span
                                 className={`font-mono text-[10px] ${
-                                  isConfirmedLinkSource(e.link_source)
-                                    ? "text-green-700 font-bold"
-                                    : e.link_source === "mgmt_subnet"
-                                    ? "text-amber-700 font-bold"
-                                    : "text-slate-400"
+                                  e.link_source !== "subnet" ? "text-green-700 font-bold" : "text-slate-400"
                                 }`}
                               >
-                                {e.link_source !== "subnet" ? linkSourceLabel(e.link_source) : e.subnet}
+                                {e.link_source !== "subnet" ? e.link_source.toUpperCase() : e.subnet}
                               </span>
                             </div>
                             {(localIp || remoteIp) && (
@@ -1794,7 +1743,7 @@ export default function Topology() {
                         );
                       })}
                     {linkCountFor(selection.node.id) === 0 && (
-                      <li className="text-xs text-slate-400 italic">No links found (no shared subnet, confirmed LLDP/CDP neighbor, GNS3 wiring, or shared IPAM management subnet).</li>
+                      <li className="text-xs text-slate-400 italic">No links found (no shared subnet, confirmed LLDP/CDP neighbor, or GNS3 wiring).</li>
                     )}
                   </ul>
                 </div>
@@ -1931,13 +1880,7 @@ export default function Topology() {
                       </div>
                       <div className="flex items-center gap-2 text-slate-300">
                         <div className="flex-1 border-t border-dashed border-slate-300" />
-                        <span className="text-[10px]">
-                          {e.link_source === "subnet"
-                            ? "shared subnet"
-                            : isConfirmedLinkSource(e.link_source)
-                            ? `${linkSourceLabel(e.link_source)} confirmed`
-                            : linkSourceLabel(e.link_source).toLowerCase()}
-                        </span>
+                        <span className="text-[10px]">{e.link_source === "subnet" ? "shared subnet" : `${e.link_source.toUpperCase()} confirmed`}</span>
                         <div className="flex-1 border-t border-dashed border-slate-300" />
                       </div>
                       <div>
@@ -1950,7 +1893,7 @@ export default function Topology() {
                     <dl className="text-xs space-y-1.5">
                       <div className="flex justify-between">
                         <dt className="text-slate-500">{e.link_source === "subnet" ? "Subnet" : "Discovered via"}</dt>
-                        <dd className="font-mono text-slate-700">{e.link_source === "subnet" ? e.subnet : linkSourceLabel(e.link_source)}</dd>
+                        <dd className="font-mono text-slate-700">{e.link_source === "subnet" ? e.subnet : e.link_source.toUpperCase()}</dd>
                         {e.utilization_pct !== null && e.utilization_pct !== undefined && (
                           <>
                             <dt className="text-slate-500">Utilization</dt>
@@ -1973,9 +1916,7 @@ export default function Topology() {
                     <p className="text-[11px] text-slate-400">
                       {e.link_source === "subnet"
                         ? "Inferred because both devices have an interface configured into this subnet in their latest config snapshot."
-                        : e.link_source === "mgmt_subnet"
-                        ? "Weak inference: both devices' management IPs fall inside the same IPAM subnet, but neither SNMP Discovery nor a config backup has confirmed an actual adjacency yet. Run Discovery or a config backup on either device to replace this with a real link."
-                        : `Confirmed by ${linkSourceLabel(e.link_source)} neighbor discovery — this is a real reported adjacency, not a guess.`}
+                        : `Confirmed by ${e.link_source.toUpperCase()} neighbor discovery — this is a real reported adjacency, not a guess.`}
                       {e.link_source !== "subnet" && e.stale && (
                         <span className="block text-amber-600 font-semibold mt-1">
                           This link hasn't been reconfirmed by a fresh discovery run in over a week — the device may have rebooted or been recabled since. Re-run SNMP Discovery to refresh it.

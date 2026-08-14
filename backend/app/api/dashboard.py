@@ -140,7 +140,7 @@ def _compute_summary(db: Session) -> dict:
     UPLINK_ROLE_PATTERNS = ["wan", "uplink", "edge", "core", "isp", "internet"]
     uplink_tuples = [
         (r, d) for r, d in metrics_with_device
-        if d.device_role and any(pat in d.device_role.lower() for pat in UPLINK_ROLE_PATTERNS)
+        if d.is_uplink or (d.device_role and any(pat in d.device_role.lower() for pat in UPLINK_ROLE_PATTERNS))
     ]
     uplink_tuples = sorted(uplink_tuples, key=lambda x: x[0].get("interface_utilization_pct") or 0, reverse=True)[:10]
 

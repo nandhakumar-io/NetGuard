@@ -148,31 +148,40 @@ function StatCard({
   );
 }
 
-// Grid span (out of a 6-col grid) for each customizable widget id --
-// literal class strings (not dynamically built) so Tailwind's content
-// scanner picks them up. Roughly mirrors the original hand-grouped rows
-// (e.g. fleet_health + fleet_history_chart = 3+3, uplinks +
-// active_alerts = 4+2) while letting any subset/order actually render
-// sensibly once a widget can be hidden or moved independently.
+// Grid span for each customizable widget id, in twelfths -- literal
+// class strings (not dynamically built) so Tailwind's content scanner
+// picks them up.
+//
+// Previously this was two tiers (`md:` 2-col, `xl:` 6-col) with NO tier
+// in between, so any viewport from 768px up to 1280px (i.e. most laptop
+// screens, and exactly what a NOC operator is usually on) fell back to
+// the crude 2-col grid. On top of that, the 2-col spans didn't sum
+// correctly for several rows -- e.g. uplinks(2) + active_alerts(1) = 3
+// against a 2-col grid, leaving a half-empty dangling row -- which is
+// the misaligned look on the dashboard. Fixed by switching to a single
+// 12-col grid from `sm:` upward: every pair of spans below sums to
+// exactly 12 at both the `sm:` (tablet, stacked pairs) and `lg:`
+// (desktop, the "real" intended layout) tier, so there's no dead tier
+// where things don't line up.
 const WIDGET_SPAN: Record<string, string> = {
-  fleet_health: "md:col-span-2 xl:col-span-3",
-  fleet_history_chart: "md:col-span-2 xl:col-span-3",
-  uplinks: "md:col-span-2 xl:col-span-4",
-  active_alerts: "md:col-span-1 xl:col-span-2",
-  fleet_availability: "md:col-span-1 xl:col-span-2",
-  top_flapping_devices: "md:col-span-2 xl:col-span-4",
-  offline_devices: "md:col-span-1 xl:col-span-2",
-  top_interface_errors: "md:col-span-1 xl:col-span-2",
-  flapping_interfaces: "md:col-span-1 xl:col-span-2",
-  top_cpu_devices: "md:col-span-2 xl:col-span-3",
-  top_memory_devices: "md:col-span-2 xl:col-span-3",
-  top_bandwidth_devices: "md:col-span-2 xl:col-span-3",
-  down_ports: "md:col-span-2 xl:col-span-3",
-  recent_reboots: "md:col-span-2 xl:col-span-3",
-  recent_backups: "md:col-span-2 xl:col-span-3",
-  recent_protocol_operations: "md:col-span-2 xl:col-span-3",
-  group_availability: "md:col-span-2 xl:col-span-6",
-  whats_changed: "md:col-span-2 xl:col-span-3",
+  fleet_health: "sm:col-span-6 lg:col-span-6",
+  fleet_history_chart: "sm:col-span-6 lg:col-span-6",
+  uplinks: "sm:col-span-6 lg:col-span-8",
+  active_alerts: "sm:col-span-6 lg:col-span-4",
+  fleet_availability: "sm:col-span-3 lg:col-span-4",
+  top_flapping_devices: "sm:col-span-6 lg:col-span-8",
+  offline_devices: "sm:col-span-3 lg:col-span-4",
+  top_interface_errors: "sm:col-span-3 lg:col-span-4",
+  flapping_interfaces: "sm:col-span-6 lg:col-span-4",
+  top_cpu_devices: "sm:col-span-3 lg:col-span-4",
+  top_memory_devices: "sm:col-span-3 lg:col-span-4",
+  top_bandwidth_devices: "sm:col-span-6 lg:col-span-4",
+  down_ports: "sm:col-span-3 lg:col-span-6",
+  recent_reboots: "sm:col-span-3 lg:col-span-6",
+  recent_backups: "sm:col-span-3 lg:col-span-6",
+  recent_protocol_operations: "sm:col-span-3 lg:col-span-6",
+  group_availability: "sm:col-span-6 lg:col-span-12",
+  whats_changed: "sm:col-span-6 lg:col-span-6",
 };
 
 export default function Dashboard() {
@@ -977,11 +986,11 @@ export default function Dashboard() {
         const orderedIds = layout.length > 0 ? layout : availableWidgets.map((w) => ({ id: w.id, visible: w.default_visible }));
 
         return (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-5 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 mb-6">
             {orderedIds
               .filter((entry) => entry.visible && widgetContent[entry.id])
               .map((entry) => (
-                <div key={entry.id} className={WIDGET_SPAN[entry.id] || "md:col-span-2 xl:col-span-3"}>
+                <div key={entry.id} className={`min-w-0 ${WIDGET_SPAN[entry.id] || "sm:col-span-6 lg:col-span-6"}`}>
                   {widgetContent[entry.id]}
                 </div>
               ))}

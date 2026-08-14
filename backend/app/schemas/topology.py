@@ -20,6 +20,16 @@ class TopologyNodeRead(BaseModel):
     active_alert_severity: str | None = None
 
 
+class LinkMemberRead(BaseModel):
+    local_port: str | None = None
+    neighbor_port: str | None = None
+    protocol: str
+    last_confirmed_at: str | None = None
+    stale: bool = False
+    status: str = "unknown"  # "up" | "down" | "unknown"
+    utilization_pct: int | None = None
+
+
 class TopologyEdgeRead(BaseModel):
     source: str
     target: str
@@ -32,6 +42,11 @@ class TopologyEdgeRead(BaseModel):
     utilization_pct: int | None = None
     last_confirmed_at: str | None = None
     stale: bool = False
+    # Physical members of this logical link (see TopologyEdge.members) --
+    # empty for subnet/mgmt_subnet-inferred edges. >1 member means this
+    # line on the map represents a real multi-cable trunk (e.g. LACP
+    # port-channel), not a single link.
+    members: list[LinkMemberRead] = []
 
 
 class TopologyResponse(BaseModel):

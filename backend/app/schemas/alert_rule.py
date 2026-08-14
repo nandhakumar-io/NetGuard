@@ -8,7 +8,8 @@ from pydantic import BaseModel
 class AlertRuleCreate(BaseModel):
     name: str
     description: str | None = None
-    metric: str  # cpu / memory / bandwidth / temperature / uptime
+    metric: str  # cpu / memory / bandwidth / temperature / uptime /
+    # interface_errors / interface_down_count / fan_failure / power_supply_failure
     operator: str  # gt / gte / lt / lte / eq
     threshold: float
     severity: str = "warning"
@@ -22,7 +23,7 @@ class AlertRuleCreate(BaseModel):
 class AlertRuleUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
-    metric: str | None = None
+    metric: str | None = None  # see AlertRuleCreate.metric for the full list
     operator: str | None = None
     threshold: float | None = None
     severity: str | None = None

@@ -94,6 +94,20 @@ class Device(Base):
     # same device_type. See app.models.compliance_baseline.ComplianceBaseline
     # and drift_service's DriftBaseline.ROLE_BASELINE.
     device_role = Column(String, nullable=True)
+    # Explicit "this is a WAN/uplink device" flag, independent of the
+    # free-text device_role above. The Uplinks & WAN Links dashboard
+    # widget (see app.api.dashboard) used to rely purely on
+    # device_role containing one of a fixed set of keywords
+    # ("wan"/"uplink"/"edge"/"core"/"isp"/"internet") -- which worked,
+    # but only for someone who already knew that convention; there was
+    # no actual "mark as uplink" control anywhere in the UI. This is a
+    # real boolean an operator can flip from the Devices page, checked
+    # by the dashboard widget in *addition* to (not instead of) the
+    # device_role heuristic, and also consulted by
+    # app.services.health_monitor's link-down alerting to raise WAN/
+    # uplink interface drops at a higher severity than an ordinary
+    # access-port flap.
+    is_uplink = Column(Boolean, nullable=False, default=False, server_default="false")
     status = Column(Enum(DeviceStatus), nullable=False, default=DeviceStatus.UNKNOWN)
 
     # Lifecycle state (staging -> production -> decommissioned), separate

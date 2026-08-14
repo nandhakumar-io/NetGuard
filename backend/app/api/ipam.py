@@ -20,7 +20,9 @@ from app.schemas.subnet import (
     IPReservationRead,
     SubnetAddressEntry,
     SubnetCreate,
+    SubnetFingerprintResult,
     SubnetRead,
+    SubnetScanResult,
     SubnetUpdate,
 )
 from app.services import ipam_service
@@ -175,6 +177,57 @@ def list_addresses(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depend
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return [SubnetAddressEntry(**r) for r in rows]
+
+
+@router.post("/{subnet_id}/scan", response_model=SubnetScanResult)
+def scan_subnet(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(IPAM_MANAGER_ROLES)):
+    """Runs a live nmap ping-sweep over this subnet and replaces its
+    stored scan results, so utilization/the address table reflect who's
+    actually on the wire right now -- not just switches/routers NetGuard
+    manages. See app.services.ipam_service.scan_subnet's docstring for
+    why this is the only one of IPAM's four "used" signals that can see
+    an unmanaged endpoint (PC, printer, phone, IoT device).
+
+    Gated behind the same Network Admin/Engineer roles as other
+    IPAM-mutating actions, and behind an explicit button click in the UI
+    -- this touches the actual network (albeit just a ping sweep), so it
+    should never fire silently on page load.
+    """
+    subnet = db.get(Subnet, subnet_id)
+    if not subnet:
+        raise HTTPException(status_code=404, detail="Subnet not found")
+    try:
+        result = ipam_service.scan_subnet(db, subnet)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return SubnetScanResult(subnet_id=subnet.id, **result)
+
+
+@router.post("/{subnet_id}/fingerprint", response_model=SubnetFingerprintResult)
+def fingerprint_subnet(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(IPAM_MANAGER_ROLES)):
+    """Runs a live `nmap -O` OS/device-type fingerprint pass over this
+    subnet's live hosts. Separate endpoint (and separate button) from
+    /scan on purpose -- this needs a raw socket (root, or
+    CAP_NET_RAW+CAP_NET_ADMIN) on the NetGuard backend host, which a
+    plain ping-sweep never does, so it may simply 503 in deployments
+    that haven't granted that capability. See
+    app.services.ipam_service.fingerprint_subnet's docstring for the
+    deployment options.
+    """
+    subnet = db.get(Subnet, subnet_id)
+    if not subnet:
+        raise HTTPException(status_code=404, detail="Subnet not found")
+    try:
+        result = ipam_service.fingerprint_subnet(db, subnet)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return SubnetFingerprintResult(subnet_id=subnet.id, **result)
 
 
 @router.get("/{subnet_id}/free-ip", response_model=FreeIPResult)

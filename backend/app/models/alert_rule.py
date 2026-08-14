@@ -31,6 +31,16 @@ class AlertRuleMetric(str, enum.Enum):
     BANDWIDTH = "bandwidth"
     TEMPERATURE = "temperature"
     UPTIME = "uptime"
+    # Added alongside the cpu/memory/temperature "resource" metrics above --
+    # these come from the same per-poll SnmpMetrics (snmp_service.poll_health)
+    # but represent link/hardware health rather than utilization, which is
+    # exactly the class of real-world condition a NOC actually wants a
+    # custom rule for (a flapping port, a dying fan, a failed PSU) instead
+    # of only ever alerting on "some percentage got too high".
+    INTERFACE_ERRORS = "interface_errors"  # count of interface errors since last poll
+    INTERFACE_DOWN_COUNT = "interface_down_count"  # count of admin-up/oper-down interfaces this poll
+    FAN_FAILURE = "fan_failure"  # 1 if fan_status == "failed", else 0
+    POWER_SUPPLY_FAILURE = "power_supply_failure"  # 1 if power_supply_status == "failed", else 0
 
 
 class AlertRuleOperator(str, enum.Enum):

@@ -37,6 +37,10 @@ export interface Device {
   os_version?: string | null;
   capabilities?: string | null;
   device_role?: string | null;
+  // Explicit WAN/uplink flag -- see backend Device.is_uplink docstring.
+  // Independent of device_role; drives the Dashboard's "Uplinks & WAN
+  // Links" widget and elevates link-down / topology-change alerts.
+  is_uplink?: boolean;
   lifecycle_state?: DeviceLifecycleState;
   tags?: string[];
   custom_fields?: Record<string, string>;
@@ -980,6 +984,25 @@ export interface TopologyEdge {
   // backend's staleness window -- the neighbor data may no longer
   // reflect reality (device rebooted, recabled, etc).
   stale?: boolean;
+  // Physical members of this logical link. >1 means this line represents
+  // a real multi-cable trunk (e.g. LACP port-channel) -- every LLDP/CDP-
+  // confirmed port pair between the same two devices, previously
+  // collapsed into a single member and silently dropped. Empty for
+  // subnet/mgmt_subnet-inferred edges (no per-port data at all).
+  members?: LinkMember[];
+}
+
+export interface LinkMember {
+  local_port: string | null;
+  neighbor_port: string | null;
+  protocol: "lldp" | "cdp" | "gns3";
+  last_confirmed_at: string | null;
+  stale: boolean;
+  // "up": cabled and carrying traffic per the latest interface poll.
+  // "down": cabled but an active "Interface Down" alert is standing for
+  // that port. "unknown": no independent per-port poll data yet.
+  status: "up" | "down" | "unknown";
+  utilization_pct: number | null;
 }
 
 export interface TopologyResponse {
@@ -1039,9 +1062,18 @@ export interface Subnet {
   used_count: number;
   free_count: number;
   utilization_pct: number;
+  // Set after the first nmap scan (see SubnetScanResult) -- null means
+  // this subnet's utilization is still purely inventory/config-derived
+  // and has never had a live ping-sweep run against it.
+  last_scanned_at: string | null;
+  // How many "used" addresses were found *only* by the nmap sweep --
+  // i.e. unmanaged hosts (PCs, printers, phones) the device inventory
+  // and config-parsing signals alone would have missed and reported as
+  // falsely free.
+  scanned_only_count: number;
 }
 
-export type IPAddressState = "free" | "assigned" | "reserved" | "gateway" | "broadcast" | "network";
+export type IPAddressState = "free" | "assigned" | "interface" | "reserved" | "gateway" | "broadcast" | "network" | "scanned";
 
 export interface SubnetAddressEntry {
   ip_address: string;
@@ -1049,6 +1081,27 @@ export interface SubnetAddressEntry {
   device_id: string | null;
   hostname: string | null;
   note: string | null;
+  // Only ever set on "scanned" rows, and only after a fingerprint pass
+  // (not just a ping-sweep) has been run against the subnet.
+  os_guess?: string | null;
+  os_accuracy?: number | null;
+  device_type?: string | null;
+  mac_vendor?: string | null;
+  fingerprinted_at?: string | null;
+}
+
+export interface SubnetScanResult {
+  subnet_id: string;
+  scanned_at: string;
+  hosts_found: number;
+  addresses_scanned: number;
+}
+
+export interface SubnetFingerprintResult {
+  subnet_id: string;
+  fingerprinted_at: string;
+  hosts_fingerprinted: number;
+  addresses_scanned: number;
 }
 
 export interface IPReservation {
@@ -1412,6 +1465,26 @@ export interface AlertRule {
   created_by: string | null;
   created_at: string;
   updated_at: string | null;
+}
+
+// --- Notification Settings (DB-backed SMTP email alerts) ---
+
+export interface NotificationSettings {
+  smtp_enabled: boolean;
+  smtp_host: string | null;
+  smtp_port: number;
+  smtp_username: string | null;
+  smtp_password_set: boolean;
+  smtp_from_email: string | null;
+  smtp_use_tls: boolean;
+  recipients: string | null;
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+export interface NotificationTestResult {
+  success: boolean;
+  detail: string;
 }
 
 // --- Webhook Endpoints ---

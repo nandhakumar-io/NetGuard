@@ -22,11 +22,13 @@ import json
 import logging
 import smtplib
 import uuid
+from dataclasses import dataclass
 from email.message import EmailMessage
 
 import httpx
 from sqlalchemy.orm import Session
 
+from app.core import crypto
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.services import event_bus
@@ -34,6 +36,87 @@ from app.services import event_bus
 logger = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 3.0
+
+
+@dataclass
+class SmtpConfig:
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    from_email: str
+    use_tls: bool
+    recipients: list[str]
+
+
+def _smtp_config() -> SmtpConfig | None:
+    """Resolves the active SMTP configuration, DB settings (Integrations
+    page) taking priority over the SMTP_* env vars -- same priority order
+    as every other DB-vs-env credential in this codebase (see
+    app.services.credential_service). Returns None if email notifications
+    aren't configured through either path, so callers can treat "no SMTP"
+    as a normal, silent no-op rather than an error.
+    """
+    from app.models.notification_settings import SETTINGS_ROW_ID, NotificationSettings
+
+    db = SessionLocal()
+    try:
+        db_settings = db.get(NotificationSettings, SETTINGS_ROW_ID)
+        if db_settings is not None and db_settings.smtp_enabled and db_settings.smtp_host:
+            recipients = [r.strip() for r in (db_settings.recipients or "").split(",") if r.strip()]
+            if not recipients:
+                return None
+            password = None
+            if db_settings.smtp_password_encrypted:
+                password = crypto.decrypt(db_settings.smtp_password_encrypted)
+            return SmtpConfig(
+                host=db_settings.smtp_host,
+                port=db_settings.smtp_port or 587,
+                username=db_settings.smtp_username,
+                password=password,
+                from_email=db_settings.smtp_from_email or settings.SMTP_FROM_EMAIL,
+                use_tls=db_settings.smtp_use_tls,
+                recipients=recipients,
+            )
+    except Exception:
+        logger.warning("Failed to read DB notification settings, falling back to env vars", exc_info=True)
+    finally:
+        db.close()
+
+    if not settings.SMTP_HOST or not settings.NOTIFY_EMAIL_RECIPIENTS:
+        return None
+    recipients = [r.strip() for r in settings.NOTIFY_EMAIL_RECIPIENTS.split(",") if r.strip()]
+    if not recipients:
+        return None
+    return SmtpConfig(
+        host=settings.SMTP_HOST, port=settings.SMTP_PORT, username=settings.SMTP_USER,
+        password=settings.SMTP_PASSWORD, from_email=settings.SMTP_FROM_EMAIL,
+        use_tls=settings.SMTP_USE_TLS, recipients=recipients,
+    )
+
+
+def send_smtp(cfg: SmtpConfig, subject: str, body: str, attachments: list[tuple[str, bytes, str]] | None = None) -> None:
+    """Low-level SMTP send shared by the notify() email channel, the
+    compliance-report attachment sender, and the Integrations page's
+    "Send test email" action -- one place that actually talks to
+    smtplib so all three stay in sync on TLS/auth/timeout handling.
+    Raises on failure; callers decide whether to swallow (best-effort
+    notification) or surface (interactive test-send).
+    """
+    email_msg = EmailMessage()
+    email_msg["Subject"] = subject
+    email_msg["From"] = cfg.from_email
+    email_msg["To"] = ", ".join(cfg.recipients)
+    email_msg.set_content(body)
+    for filename, data, subtype in attachments or []:
+        email_msg.add_attachment(data, maintype="application", subtype=subtype, filename=filename)
+
+    with smtplib.SMTP(cfg.host, cfg.port, timeout=settings.SMTP_TIMEOUT_SECONDS) as smtp:
+        if cfg.use_tls:
+            smtp.starttls()
+        if cfg.username and cfg.password:
+            smtp.login(cfg.username, cfg.password)
+        smtp.send_message(email_msg)
 
 
 def _post_webhook(url: str | None, payload: dict) -> None:
@@ -76,12 +159,6 @@ def _resolve_event_type(event: str, severity: str) -> str:
     return event_type
 
 
-def _recipients() -> list[str]:
-    if not settings.NOTIFY_EMAIL_RECIPIENTS:
-        return []
-    return [r.strip() for r in settings.NOTIFY_EMAIL_RECIPIENTS.split(",") if r.strip()]
-
-
 def send_email_attachment(
     subject: str,
     body: str,
@@ -104,26 +181,11 @@ def send_email_attachment(
     a send failure -- logs and swallows it, same "notifications must never
     break the caller" policy as notify().
     """
-    recipients = _recipients()
-    if not settings.SMTP_HOST or not recipients:
+    cfg = _smtp_config()
+    if cfg is None:
         return False
-
-    email_msg = EmailMessage()
-    email_msg["Subject"] = subject
-    email_msg["From"] = settings.SMTP_FROM_EMAIL
-    email_msg["To"] = ", ".join(recipients)
-    email_msg.set_content(body)
-
-    for filename, data, subtype in attachments or []:
-        email_msg.add_attachment(data, maintype="application", subtype=subtype, filename=filename)
-
     try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=settings.SMTP_TIMEOUT_SECONDS) as smtp:
-            if settings.SMTP_USE_TLS:
-                smtp.starttls()
-            if settings.SMTP_USER and settings.SMTP_PASSWORD:
-                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            smtp.send_message(email_msg)
+        send_smtp(cfg, subject, body, attachments)
         return True
     except Exception:
         logger.warning("Compliance report email send failed", exc_info=True)
@@ -131,30 +193,16 @@ def send_email_attachment(
 
 
 def _send_email(event_type: str, event: str, message: str) -> None:
-    if not settings.SMTP_HOST or not settings.NOTIFY_EMAIL_RECIPIENTS:
-        return
-
-    recipients = _recipients()
-    if not recipients:
+    cfg = _smtp_config()
+    if cfg is None:
         return
 
     subject_tpl, body_tpl = _TEMPLATES.get(event_type, _TEMPLATES["generic"])
     subject = subject_tpl.format(event=event, message=message)
     body = body_tpl.format(event=event, message=message)
 
-    email_msg = EmailMessage()
-    email_msg["Subject"] = subject
-    email_msg["From"] = settings.SMTP_FROM_EMAIL
-    email_msg["To"] = ", ".join(recipients)
-    email_msg.set_content(body)
-
     try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=settings.SMTP_TIMEOUT_SECONDS) as smtp:
-            if settings.SMTP_USE_TLS:
-                smtp.starttls()
-            if settings.SMTP_USER and settings.SMTP_PASSWORD:
-                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            smtp.send_message(email_msg)
+        send_smtp(cfg, subject, body)
     except Exception:
         logger.warning("Notification email send failed", exc_info=True)
 

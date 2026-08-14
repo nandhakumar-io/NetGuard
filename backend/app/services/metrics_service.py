@@ -23,6 +23,7 @@ from app.models.health_color import HealthColor
 from app.models.interface_alert_config import InterfaceAlertConfig
 from app.models.interface_status import InterfaceOperStatus, InterfaceStatus
 from app.services import (
+    alert_rule_engine,
     alert_service,
     credential_service,
     notification_service,
@@ -175,6 +176,11 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                 event=category, message=f"{device.hostname}: {message}", severity=severity
             )
 
+    # Operator-defined custom rules (Alert Center > Custom Alert Rules) run
+    # against the same sample right after the built-in thresholds above --
+    # see app.services.alert_rule_engine for why this used to be a no-op.
+    alert_rule_engine.evaluate_rules(db, device, metrics)
+
 
 def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) -> None:
     """Diffs this poll's per-interface oper status against the latest
@@ -241,18 +247,25 @@ def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) ->
             # against, but an operationally-down port is worth surfacing
             # regardless of whether we caught the actual transition).
             if alerts_enabled:
+                # A down port on a device flagged as a WAN/uplink (see
+                # Device.is_uplink) is flagged distinctly in the message
+                # -- same critical severity as any other down port (this
+                # already pages), but the label makes it obvious at a
+                # glance in Alert Center / notifications that this is a
+                # site-affecting uplink, not an access port.
+                uplink_tag = " [WAN/UPLINK]" if device.is_uplink else ""
                 alert, is_new = alert_service.raise_alert(
                     db,
                     device_id=device.id,
                     severity="critical",
                     source=AlertSource.HEALTH_POLL,
                     category=category,
-                    message=f"{device.hostname}: interface {if_descr} is down",
+                    message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
                 )
                 if is_new:
                     notification_service.notify(
                         event="Interface Down",
-                        message=f"{device.hostname}: interface {if_descr} is down",
+                        message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
                         severity="critical",
                     )
         elif latest is not None:
