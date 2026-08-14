@@ -12,6 +12,7 @@ topic/key never blocks delivery to anyone else's, matching the existing
 "notifications must never break the caller" policy used throughout
 notification_service.
 """
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -82,9 +83,79 @@ def _send_pushover(sub: PushSubscription, title: str, message: str, severity: st
         return False
 
 
+def _send_browser(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
+    """Web Push (VAPID) delivery straight to the browser -- no mobile app
+    involved. `sub.target` holds the JSON {endpoint, p256dh, auth} captured
+    when the browser subscribed (see app.api.push_subscriptions), matching
+    the shape the browser's own PushSubscription.toJSON() produces. The
+    frontend's /sw.js service worker turns the resulting push event into
+    an OS-level notification.
+
+    Best-effort like every other provider here: a browser subscription
+    that's gone stale (browser data cleared, permission revoked, endpoint
+    expired) makes the push service respond 404/410 -- we disable the
+    subscription so it stops being retried on every future alert, the
+    same "quietly stop bothering a dead target" behavior a mobile OS's
+    own push service gives ntfy/Pushover for free.
+    """
+    if not settings.VAPID_PUBLIC_KEY or not settings.VAPID_PRIVATE_KEY:
+        logger.warning("Browser push subscription %s exists but VAPID keys are unset", sub.id)
+        return False
+    try:
+        subscription_info = json.loads(sub.target)
+    except (TypeError, ValueError):
+        logger.warning("Browser push subscription %s has malformed target JSON", sub.id)
+        return False
+
+    try:
+        from pywebpush import WebPushException, webpush
+    except ImportError:
+        logger.warning("pywebpush not installed -- cannot deliver browser push for subscription %s", sub.id)
+        return False
+
+    payload = json.dumps(
+        {
+            "title": title,
+            "body": message,
+            "severity": severity,
+            "url": url,
+        }
+    )
+    try:
+        webpush(
+            subscription_info={
+                "endpoint": subscription_info["endpoint"],
+                "keys": {
+                    "p256dh": subscription_info["p256dh"],
+                    "auth": subscription_info["auth"],
+                },
+            },
+            data=payload,
+            vapid_private_key=settings.VAPID_PRIVATE_KEY,
+            vapid_claims={"sub": f"mailto:{settings.VAPID_CONTACT_EMAIL}"},
+            timeout=TIMEOUT_SECONDS,
+        )
+        return True
+    except WebPushException as exc:
+        status_code = getattr(exc.response, "status_code", None)
+        if status_code in (404, 410):
+            # Push service says this endpoint is gone for good (browser
+            # unsubscribed, data cleared, etc.) -- disable rather than
+            # fail silently forever on every future alert.
+            sub.enabled = False
+        logger.warning("Browser push failed for subscription %s: %s", sub.id, exc, exc_info=True)
+        return False
+    except Exception:
+        logger.warning("Browser push failed for subscription %s", sub.id, exc_info=True)
+        return False
+
+
 def _send_one(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
-    if sub.provider.value == "pushover":
+    provider = sub.provider.value if hasattr(sub.provider, "value") else str(sub.provider)
+    if provider == "pushover":
         return _send_pushover(sub, title, message, severity, url)
+    if provider == "browser":
+        return _send_browser(sub, title, message, severity, url)
     return _send_ntfy(sub, title, message, severity, url)
 
 

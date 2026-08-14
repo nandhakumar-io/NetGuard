@@ -1,6 +1,6 @@
 """Network Topology view.
 
-Edges are built from three sources, in order of trust:
+Edges are built from four sources, in order of trust:
 
   1. Confirmed LLDP/CDP neighbor discovery (app.models.discovered_neighbor,
      populated by app.api.devices.discover_device via SNMP) -- real,
@@ -12,10 +12,19 @@ Edges are built from three sources, in order of trust:
      LLDP/CDP for lab devices, and catches links a lab node hasn't (or
      can't) run SNMP Discovery against yet.
   3. Shared-interface-subnet inference (risk_engine.parse_config over each
-     device's latest config snapshot) as a last-resort fallback for
-     devices with neither of the above -- two devices that each have an
-     interface configured into the same subnet are, by construction, on
-     the same L2/L3 segment.
+     device's latest config snapshot) for devices with a config on file --
+     two devices that each have an interface configured into the same
+     subnet are, by construction, on the same L2/L3 segment.
+  4. Shared-IPAM-subnet inference on management IPs (app.models.subnet)
+     as a last-resort fallback for devices with none of the above --
+     e.g. freshly added, reachable/online devices that haven't had SNMP
+     Discovery run yet and have no config backup on file. If two devices'
+     *management* IPs both fall inside the same operator-defined IPAM
+     subnet, they're presumed to share that segment. Weakest signal of
+     the four (a shared management VLAN doesn't guarantee a data-plane
+     adjacency), so it only fires for a device pair with no stronger
+     evidence, and is labeled distinctly in the UI so it's never mistaken
+     for a confirmed link.
 
 Devices with no snapshot on file yet still appear as nodes (inventory-only,
 no edges) rather than being dropped, so the graph always reflects the full
@@ -35,6 +44,7 @@ from app.models.alert import Alert, AlertSeverity
 from app.models.device import Device
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
+from app.models.subnet import Subnet
 from app.services import gns3_service, risk_engine, snapshot_service
 
 if TYPE_CHECKING:
@@ -96,7 +106,7 @@ class TopologyEdge:
     subnet: str | None  # e.g. "10.0.12.0/30" -- the shared subnet that ties them together (None for lldp/cdp/gns3 edges)
     source_ip: str | None
     target_ip: str | None
-    link_source: str = "subnet"  # "lldp" | "cdp" | "gns3" | "subnet" -- how this edge was inferred
+    link_source: str = "subnet"  # "lldp" | "cdp" | "gns3" | "subnet" | "mgmt_subnet" -- how this edge was inferred
     local_port: str | None = None  # source device's port, if known (lldp/cdp/gns3 only)
     neighbor_port: str | None = None  # target device's port, as reported by the source device
     # Best-effort link utilization for coloring, 0-100 or None if neither
@@ -447,6 +457,23 @@ def build_topology(db: Session) -> TopologyGraph:
         if e.link_source != "subnet" or tuple(sorted((e.source, e.target))) not in confirmed_pairs
     ]
 
+    # Tier 4 fallback: shared-IPAM-subnet inference on management IPs, for
+    # any device pair that's still edge-less after LLDP/CDP, GNS3, and
+    # config-parsed subnet inference all had a shot -- typically a
+    # freshly-added, reachable device that hasn't had SNMP Discovery run
+    # against it yet and has no config backup on file (so tier 3 has
+    # nothing to parse). Without this, such a device shows as a fully
+    # isolated node on the map even when it's plainly on the same segment
+    # as its neighbors, per the IPAM subnets an operator already defined.
+    # See this module's docstring for why this is weakest-signal and
+    # labeled `mgmt_subnet` rather than folded into the `subnet` tier.
+    strong_pairs: set[tuple[str, str]] = confirmed_pairs | {
+        tuple(sorted((e.source, e.target))) for e in edges if e.link_source == "subnet"
+    }
+    for edge in _mgmt_subnet_edges(db, devices, strong_pairs):
+        edges.append(edge)
+        strong_pairs.add(tuple(sorted((edge.source, edge.target))))
+
     # Stamp every edge with a best-effort utilization figure for the
     # Topology page's "color links by utilization" toggle -- see
     # TopologyEdge.utilization_pct's docstring for why this is the higher
@@ -520,6 +547,68 @@ def _gns3_edges(
             )
             already_confirmed.add(pair_key)
 
+    return edges
+
+
+def _mgmt_subnet_edges(
+    db: Session,
+    devices: list[Device],
+    already_linked: set[tuple[str, str]],
+) -> list[TopologyEdge]:
+    """Tier 4 fallback (see module docstring): for every operator-defined
+    IPAM subnet, any two managed devices whose *management* IPs both fall
+    inside it get an edge -- unless that pair already has a stronger-tier
+    edge (LLDP/CDP, GNS3, or config-parsed subnet overlap), or is missing
+    an IP/subnet to compare in the first place.
+
+    O(subnets * devices^2) worst case, same "fine at prototype fleet
+    sizes" tradeoff the rest of this module accepts. Devices without a
+    parseable ip_address, or that fall inside no configured subnet at
+    all, simply don't participate -- same tolerant, no-invented-data
+    posture as every other inference tier here.
+    """
+    subnets = db.query(Subnet).all()
+    if not subnets:
+        return []
+
+    nets: list[ipaddress.IPv4Network] = []
+    for s in subnets:
+        try:
+            nets.append(ipaddress.ip_network(s.cidr, strict=False))
+        except ValueError:
+            continue
+
+    device_ip: dict[str, ipaddress.IPv4Address] = {}
+    for d in devices:
+        if not d.ip_address:
+            continue
+        try:
+            device_ip[str(d.id)] = ipaddress.ip_address(d.ip_address)
+        except ValueError:
+            continue
+
+    device_ids = list(device_ip.keys())
+    edges: list[TopologyEdge] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for net in nets:
+        members = [did for did in device_ids if device_ip[did] in net]
+        for i, a_id in enumerate(members):
+            for b_id in members[i + 1 :]:
+                pair_key = tuple(sorted((a_id, b_id)))
+                if pair_key in already_linked or pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                edges.append(
+                    TopologyEdge(
+                        source=a_id,
+                        target=b_id,
+                        subnet=str(net),
+                        source_ip=str(device_ip[a_id]),
+                        target_ip=str(device_ip[b_id]),
+                        link_source="mgmt_subnet",
+                    )
+                )
     return edges
 
 

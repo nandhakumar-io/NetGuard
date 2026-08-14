@@ -2,12 +2,14 @@
 preferences: any authenticated user manages their own devices, nobody
 manages another user's. See app.services.push_service for delivery.
 """
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.webhooks import _validate_outbound_url
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.push_subscription import PushProvider, PushSubscription
@@ -17,10 +19,26 @@ from app.schemas.push_subscription import (
     PushSubscriptionRead,
     PushSubscriptionUpdate,
     PushTestResult,
+    VapidPublicKeyResponse,
 )
 from app.services import push_service
 
 router = APIRouter(prefix="/push-subscriptions", tags=["push-subscriptions"])
+
+
+@router.get("/vapid-public-key", response_model=VapidPublicKeyResponse)
+def get_vapid_public_key():
+    """The public half of the server's VAPID keypair, handed to the
+    frontend so it can call pushManager.subscribe({applicationServerKey}).
+    `configured: false` when no keypair is set (see settings.VAPID_*) --
+    the Push Notifications page uses this to hide the Browser option
+    entirely rather than let someone subscribe to a feature that can't
+    actually deliver anything server-side.
+    """
+    return VapidPublicKeyResponse(
+        configured=bool(settings.VAPID_PUBLIC_KEY),
+        public_key=settings.VAPID_PUBLIC_KEY,
+    )
 
 
 def _validate_target_if_url(provider: PushProvider, target: str) -> None:
@@ -56,15 +74,30 @@ def create_subscription(
     try:
         provider = PushProvider(payload.provider)
     except ValueError:
-        raise HTTPException(status_code=400, detail="provider must be 'ntfy' or 'pushover'")
+        raise HTTPException(status_code=400, detail="provider must be 'ntfy', 'pushover', or 'browser'")
 
-    _validate_target_if_url(provider, payload.target)
+    if provider == PushProvider.BROWSER:
+        # Built server-side from the browser's own PushSubscription
+        # object, not user-typed text -- no outbound-URL check needed
+        # (see _validate_target_if_url's docstring for why that check
+        # exists for ntfy in the first place: it's specifically about
+        # trusting a *user-typed* target).
+        if not payload.endpoint or not payload.p256dh or not payload.auth:
+            raise HTTPException(
+                status_code=400, detail="endpoint, p256dh, and auth are required for provider='browser'"
+            )
+        target = json.dumps({"endpoint": payload.endpoint, "p256dh": payload.p256dh, "auth": payload.auth})
+    else:
+        if not payload.target:
+            raise HTTPException(status_code=400, detail="target is required")
+        _validate_target_if_url(provider, payload.target)
+        target = payload.target
 
     subscription = PushSubscription(
         user_id=current_user.id,
         label=payload.label,
         provider=provider,
-        target=payload.target,
+        target=target,
         include_non_critical=payload.include_non_critical,
     )
     db.add(subscription)

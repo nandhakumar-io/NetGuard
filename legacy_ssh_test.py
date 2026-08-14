@@ -11,6 +11,7 @@ Usage:
     python3 legacy_ssh_test.py 172.17.1.21 admin <password>
 """
 import sys
+
 import paramiko
 
 if len(sys.argv) != 4:

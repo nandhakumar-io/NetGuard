@@ -135,6 +135,22 @@ class Settings(BaseSettings):
     # work the same way, just with a different host in that URL).
     PUSHOVER_APP_TOKEN: str | None = None
 
+    # Browser push (Web Push API / VAPID -- see app.services.push_service
+    # ._send_browser). VAPID_PUBLIC_KEY is handed to the frontend so it can
+    # call pushManager.subscribe(); VAPID_PRIVATE_KEY signs outbound pushes
+    # server-side and must never be exposed to a client. Both unset =
+    # GET /push-subscriptions/vapid-public-key reports the feature as
+    # unavailable and the Push Notifications page hides the Browser option,
+    # same "degrade gracefully" pattern as the other optional integrations
+    # in this file. Generate a pair with `vapid --gen` (py-vapid, a
+    # pywebpush dependency) or the equivalent openssl ES256 keypair.
+    VAPID_PUBLIC_KEY: str | None = None
+    VAPID_PRIVATE_KEY: str | None = None
+    # Contact URL/email required by the Web Push protocol's VAPID "sub"
+    # claim so a push service operator has a way to reach whoever's
+    # sending pushes if something goes wrong.
+    VAPID_CONTACT_EMAIL: str = "admin@example.com"
+
     # NetBox pull-sync (see app.services.netbox_service). Both unset =
     # sync endpoint returns a clear "not configured" error instead of
     # attempting a request with no credentials.

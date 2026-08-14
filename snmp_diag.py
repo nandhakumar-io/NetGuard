@@ -58,7 +58,7 @@ async def main():
 
 try:
     asyncio.run(main())
-except Exception:
+except Exception:  # noqa: BLE001
     import traceback
     print("\n>>> Raised an exception (this is what snmp_service.py's bare")
     print(">>> except swallows into 'did not respond'):\n")

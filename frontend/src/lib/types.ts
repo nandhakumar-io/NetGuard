@@ -963,7 +963,7 @@ export interface TopologyEdge {
   subnet: string | null;
   source_ip: string | null;
   target_ip: string | null;
-  link_source: "lldp" | "cdp" | "gns3" | "subnet";
+  link_source: "lldp" | "cdp" | "gns3" | "subnet" | "mgmt_subnet";
   local_port: string | null;
   neighbor_port: string | null;
   // Best-effort link utilization, 0-100, for the "color links by
@@ -1080,7 +1080,7 @@ export interface ConflictReport {
 export interface PushSubscription {
   id: string;
   label: string;
-  provider: "ntfy" | "pushover";
+  provider: "ntfy" | "pushover" | "browser";
   target: string;
   include_non_critical: boolean;
   enabled: boolean;

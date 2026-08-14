@@ -48,6 +48,7 @@ export default function Incidents() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [rootDeviceId, setRootDeviceId] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [detail, setDetail] = useState<Incident | null>(null);
   const [newNote, setNewNote] = useState("");

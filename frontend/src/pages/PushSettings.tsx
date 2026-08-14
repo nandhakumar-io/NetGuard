@@ -17,7 +17,7 @@ import { PushSubscription } from "../lib/types";
  *  not a silent failure.
  */
 
-type Provider = "ntfy" | "pushover";
+type Provider = "ntfy" | "pushover" | "browser";
 
 interface FormState {
   label: string;
@@ -34,10 +34,12 @@ const EMPTY_FORM: FormState = {
 };
 
 function targetPlaceholder(provider: Provider): string {
+  if (provider === "browser") return "Browser WebPush (Not Editable)";
   return provider === "ntfy" ? "https://ntfy.sh/your-private-topic" : "Pushover user key";
 }
 
 function targetHint(provider: Provider): string {
+  if (provider === "browser") return "Browser push token automatically populated by the browser.";
   return provider === "ntfy"
     ? "The full ntfy topic URL to publish to. Must be a public host -- internal/private addresses are rejected."
     : "Your Pushover user key, from your Pushover dashboard (not a URL).";

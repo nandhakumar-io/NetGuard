@@ -23,6 +23,15 @@ interface AuthContextValue {
   register: (email: string, full_name: string, password: string, role: UserRole) => Promise<void>;
   logout: () => Promise<void>;
   refreshMe: () => Promise<void>;
+  /** Redirects the browser to the backend's Google OIDC login endpoint.
+   *  See app/api/sso.py -- the whole round trip happens server-side;
+   *  the frontend only needs to kick it off and later read the token
+   *  back off the callback URL fragment (handled in App.tsx routing). */
+  loginWithGoogle: () => void;
+  /** Called by the SSO callback route once the backend has redirected
+   *  back with #access_token=... in the URL. Same effect as a normal
+   *  login/verifyMfa resolving. */
+  completeSsoLogin: (accessToken: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -101,8 +110,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const loginWithGoogle = () => {
+    const baseURL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1").replace(/\/$/, "");
+    // Full page navigation, not an axios call -- this has to leave the
+    // SPA entirely so Google's consent screen can render.
+    window.location.href = `${baseURL}/sso/google/login`;
+  };
+
+  const completeSsoLogin = async (accessToken: string) => {
+    setAccessToken(accessToken);
+    await fetchMe();
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, verifyMfa, register, logout, refreshMe: fetchMe }}>
+    <AuthContext.Provider value={{ user, loading, login, verifyMfa, register, logout, refreshMe: fetchMe, loginWithGoogle, completeSsoLogin }}>
       {children}
     </AuthContext.Provider>
   );

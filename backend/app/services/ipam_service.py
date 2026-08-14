@@ -13,13 +13,27 @@ subnets are capped at /16 for the "list every address" / "find free IP"
 endpoints (see MAX_ADDRESSES_FOR_ENUMERATION below) -- enumerating a /8
 address-by-address in a request/response cycle isn't useful for a fleet
 IPAM and would just tie up a worker.
+
+"Used" isn't just Device.ip_address, either. A device's *management* IP
+is only one address it holds -- every other interface configured with an
+`ip address` line in its running config (sub-interfaces, SVIs, secondary
+addresses, point-to-point links, etc.) is just as truly assigned, and
+until now IPAM had no idea those existed: an operator could "Find free
+IP", get back an address that's actually live on a router sub-interface,
+and hand out a duplicate. interface_ips_in_subnet() below closes that gap
+by reusing the same config-parsing path app.services.topology_service
+already relies on for the same underlying fact (which IPs are actually
+configured where) -- so IPAM and Topology can never disagree about what's
+in use on the wire.
 """
 import ipaddress
 
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
+from app.models.snapshot import ConfigSnapshot
 from app.models.subnet import IPAddressState, IPReservation, Subnet
+from app.services import risk_engine, snapshot_service
 
 # Above this many total addresses, per-address enumeration (list_addresses /
 # find_free_ip) is refused in favor of just the summary utilization -- a
@@ -60,6 +74,57 @@ def devices_in_subnet(db: Session, net: ipaddress.IPv4Network) -> list[Device]:
     return out
 
 
+def interface_ips_in_subnet(db: Session, net: ipaddress.IPv4Network) -> dict[str, Device]:
+    """Every IP address inside `net` that's actually configured on some
+    device's interface -- per the device's latest backed-up running
+    config -- keyed by address, mapped back to the device it's on.
+
+    This is deliberately separate from devices_in_subnet(): a device can
+    have interface addresses in `net` without its *management* IP being
+    in `net` at all (e.g. NetGuard manages it over a dedicated mgmt
+    subnet while its data-plane interfaces sit in the VLANs being
+    IPAM'd), and a single device can hold several addresses inside the
+    same subnet (secondary IPs, HSRP/VRRP virtuals declared as a second
+    `ip address ... secondary` line, sub-interfaces). Every managed
+    device is checked, not just ones whose mgmt IP already matched, so
+    an address doesn't have to also be someone's mgmt IP to count as
+    used.
+
+    Best-effort like every other config-derived fact in this codebase:
+    a device with no snapshot on file yet (never backed up) simply
+    contributes nothing here -- same "we can't invent data we don't
+    have" posture as topology_service's subnet-inference tier.
+    """
+    out: dict[str, Device] = {}
+    for device in db.query(Device).all():
+        snap = (
+            db.query(ConfigSnapshot)
+            .filter(ConfigSnapshot.device_id == device.id)
+            .order_by(ConfigSnapshot.seq.desc())
+            .first()
+        )
+        if not snap:
+            continue
+        try:
+            config_text = snapshot_service.decrypt_config(snap.running_config_encrypted)
+        except Exception:
+            continue
+        for ip, mask in risk_engine.parse_config(config_text).ip_addresses:
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if addr not in net:
+                continue
+            # First device found holding an address wins the label if two
+            # devices somehow both claim it -- that's a real conflict, not
+            # something to silently resolve here; fleet_conflicts()-style
+            # reporting for interface IPs is a reasonable follow-up but
+            # out of scope for "is this address free".
+            out.setdefault(ip, device)
+    return out
+
+
 def subnet_utilization(db: Session, subnet: Subnet) -> dict:
     net = network_for(subnet)
     total = net.num_addresses
@@ -67,13 +132,14 @@ def subnet_utilization(db: Session, subnet: Subnet) -> dict:
     usable = total - len(structural)
 
     assigned_ips = {d.ip_address for d in devices_in_subnet(db, net)}
+    interface_ips = set(interface_ips_in_subnet(db, net).keys())
     reservations = db.query(IPReservation).filter(IPReservation.subnet_id == subnet.id).all()
     reserved_ips = {r.ip_address for r in reservations}
 
     # Union so an assigned/reserved address that happens to coincide with
     # a structural one (e.g. someone statically set the gateway IP on a
     # device) isn't double counted.
-    used_ips = set(structural.keys()) | assigned_ips | reserved_ips
+    used_ips = set(structural.keys()) | assigned_ips | interface_ips | reserved_ips
     used = len(used_ips)
     free = max(total - used, 0)
 
@@ -93,6 +159,7 @@ def list_addresses(db: Session, subnet: Subnet) -> list[dict]:
 
     structural = _structural_addresses(net)
     devices_by_ip = {d.ip_address: d for d in devices_in_subnet(db, net)}
+    interface_devices_by_ip = interface_ips_in_subnet(db, net)
     reservations_by_ip = {r.ip_address: r for r in db.query(IPReservation).filter(IPReservation.subnet_id == subnet.id).all()}
 
     rows = []
@@ -103,6 +170,15 @@ def list_addresses(db: Session, subnet: Subnet) -> list[dict]:
         elif ip in devices_by_ip:
             d = devices_by_ip[ip]
             rows.append({"ip_address": ip, "state": "assigned", "device_id": d.id, "hostname": d.hostname, "note": None})
+        elif ip in interface_devices_by_ip:
+            d = interface_devices_by_ip[ip]
+            # Distinct state from "assigned" so the IPAM UI can tell "this
+            # is someone's management IP" apart from "this showed up on an
+            # interface in a backed-up config" -- both are equally taken,
+            # but the provenance is worth surfacing (e.g. in a tooltip).
+            rows.append(
+                {"ip_address": ip, "state": "interface", "device_id": d.id, "hostname": d.hostname, "note": None}
+            )
         elif ip in reservations_by_ip:
             r = reservations_by_ip[ip]
             rows.append({"ip_address": ip, "state": r.state.value, "device_id": None, "hostname": None, "note": r.note})
@@ -123,6 +199,7 @@ def find_free_ip(db: Session, subnet: Subnet) -> str | None:
 
     taken = set(_structural_addresses(net).keys())
     taken |= {d.ip_address for d in devices_in_subnet(db, net)}
+    taken |= set(interface_ips_in_subnet(db, net).keys())
     taken |= {r.ip_address for r in db.query(IPReservation).filter(IPReservation.subnet_id == subnet.id).all()}
 
     candidates = net.hosts() if net.prefixlen < 31 else net
@@ -161,14 +238,28 @@ def find_subnet_for_ip(db: Session, ip_address: str) -> Subnet | None:
 
 
 def check_conflict(db: Session, ip_address: str, exclude_device_id=None) -> list[Device]:
-    """Other active devices already sitting on `ip_address`. Used both as
-    a standalone "is this IP already in use" check (device create/update)
+    """Other active devices already sitting on `ip_address` -- either as
+    their management IP, or as an address configured on one of their
+    interfaces per their latest backed-up config. Used both as a
+    standalone "is this IP already in use" check (device create/update)
     and by the fleet-wide conflicts report below.
     """
     q = db.query(Device).filter(Device.ip_address == ip_address)
     if exclude_device_id is not None:
         q = q.filter(Device.id != exclude_device_id)
-    return q.all()
+    conflicting = {d.id: d for d in q.all()}
+
+    try:
+        addr = ipaddress.ip_address(ip_address)
+    except ValueError:
+        return list(conflicting.values())
+    single_host_net = ipaddress.ip_network(f"{addr}/32")
+    for ip, device in interface_ips_in_subnet(db, single_host_net).items():
+        if exclude_device_id is not None and device.id == exclude_device_id:
+            continue
+        conflicting.setdefault(device.id, device)
+
+    return list(conflicting.values())
 
 
 def fleet_conflicts(db: Session) -> list[dict]:

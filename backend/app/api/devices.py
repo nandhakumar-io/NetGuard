@@ -131,7 +131,24 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
             return match
         # Some LLDP implementations advertise the management IP as the
         # chassis/system name -- try it as an IP address too.
-        return by_ip.get(key)
+        match = by_ip.get(key)
+        if match:
+            return match
+        # Some neighbors report an FQDN (e.g. "core-sw1.corp.example.com")
+        # while NetGuard's inventory has the short hostname ("core-sw1"),
+        # or vice versa -- a real adjacency that was silently dropping to
+        # neighbor_device_id=NULL (and therefore no topology edge) purely
+        # over a domain-suffix mismatch. Compare short-name-only as a
+        # last resort before giving up.
+        short_key = key.split(".", 1)[0]
+        if short_key != key:
+            match = by_hostname.get(short_key)
+            if match:
+                return match
+        for hostname, device_id in by_hostname.items():
+            if hostname.split(".", 1)[0] == short_key:
+                return device_id
+        return None
 
     # Wipe stale rows for this device before inserting fresh ones.
     db.query(DiscoveredNeighbor).filter(

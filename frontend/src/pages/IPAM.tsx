@@ -24,6 +24,10 @@ const emptyReservationForm = {
 const stateStyle: Record<string, string> = {
   free: "bg-slate-100 text-slate-500 dark:bg-white/5 dark:text-slate-400",
   assigned: "bg-brandblue/10 text-brandblue",
+  // Address found live on a device interface via its latest backed-up
+  // config, not the device's management IP -- equally "used", distinct
+  // shade so it's clear at a glance where this address came from.
+  interface: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/60 dark:text-cyan-300",
   reserved: "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
   gateway: "bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300",
   broadcast: "bg-slate-200 text-slate-600 dark:bg-white/10 dark:text-slate-300",

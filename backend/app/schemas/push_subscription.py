@@ -6,9 +6,18 @@ from pydantic import BaseModel, ConfigDict
 
 class PushSubscriptionCreate(BaseModel):
     label: str = "My Phone"
-    provider: str = "ntfy"  # ntfy | pushover
-    target: str  # ntfy topic URL, or Pushover user key
+    provider: str = "ntfy"  # ntfy | pushover | browser
+    # ntfy topic URL, or Pushover user key. Not used for provider="browser"
+    # -- that shape comes from the browser's own PushSubscription object
+    # via endpoint/p256dh/auth below, not something a user types in.
+    target: str | None = None
     include_non_critical: bool = False
+    # Only used when provider="browser": the three fields off the
+    # browser's PushSubscription.toJSON() (endpoint, and keys.p256dh /
+    # keys.auth) captured right after pushManager.subscribe() succeeds.
+    endpoint: str | None = None
+    p256dh: str | None = None
+    auth: str | None = None
 
 
 class PushSubscriptionUpdate(BaseModel):
@@ -34,3 +43,8 @@ class PushSubscriptionRead(BaseModel):
 class PushTestResult(BaseModel):
     sent: bool
     message: str
+
+
+class VapidPublicKeyResponse(BaseModel):
+    configured: bool
+    public_key: str | None = None

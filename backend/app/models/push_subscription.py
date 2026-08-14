@@ -10,6 +10,12 @@ from app.core.database import Base
 class PushProvider(str, enum.Enum):
     NTFY = "ntfy"
     PUSHOVER = "pushover"
+    # Native browser push (Web Push API / VAPID) -- no separate mobile app
+    # needed, works via the service worker registered at /sw.js. See
+    # app.services.push_service._send_browser. `target` for this provider
+    # is a JSON blob (endpoint/p256dh/auth), not a bare URL or key, unlike
+    # the other two providers.
+    BROWSER = "browser"
 
 
 class PushSubscription(Base):
