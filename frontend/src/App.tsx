@@ -82,6 +82,7 @@ export default function App() {
           <Route path="/lab" element={withSuspense(<Lab />)} />
           <Route path="/audit-log" element={withSuspense(<AuditLog />)} />
           <Route path="/security" element={withSuspense(<Security />)} />
+          <Route path="/push-settings" element={withSuspense(<PushSettings />)} />
           <Route path="/integrations" element={withSuspense(<IntegrationsPage />)} />
         </Route>
       </Route>

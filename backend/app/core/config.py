@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # http://localhost (no port) covers the docker-compose stack, where
     # the frontend is now reached through Traefik on :80 rather than the
     # Vite dev server's :5173 directly -- see docker/docker-compose.yml.
-    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost,https://netguard.notoriousdev.in"
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost"
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:

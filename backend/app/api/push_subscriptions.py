@@ -7,6 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.webhooks import _validate_outbound_url
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.push_subscription import PushProvider, PushSubscription
@@ -20,6 +21,22 @@ from app.schemas.push_subscription import (
 from app.services import push_service
 
 router = APIRouter(prefix="/push-subscriptions", tags=["push-subscriptions"])
+
+
+def _validate_target_if_url(provider: PushProvider, target: str) -> None:
+    """ntfy's `target` is a URL the backend later httpx.posts to directly
+    (see push_service._send_ntfy) -- unlike webhooks.py, this endpoint has
+    no role restriction (any authenticated user manages their own push
+    subscriptions), so without this check any logged-in user could point
+    `target` at http://169.254.169.254/... or an internal-only service
+    and use POST /push-subscriptions/{id}/test (or any real alert) to
+    make the backend request it on their behalf. Pushover's `target` is
+    just an opaque user key, not a URL NetGuard connects to (the fixed
+    https://api.pushover.net endpoint is used instead -- see
+    push_service._send_pushover), so it's exempt from this check.
+    """
+    if provider == PushProvider.NTFY:
+        _validate_outbound_url(target, label="Push target")
 
 
 @router.get("", response_model=list[PushSubscriptionRead])
@@ -40,6 +57,8 @@ def create_subscription(
         provider = PushProvider(payload.provider)
     except ValueError:
         raise HTTPException(status_code=400, detail="provider must be 'ntfy' or 'pushover'")
+
+    _validate_target_if_url(provider, payload.target)
 
     subscription = PushSubscription(
         user_id=current_user.id,
@@ -65,7 +84,15 @@ def update_subscription(
     if not subscription or subscription.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Push subscription not found")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    new_provider = updates.get("provider", subscription.provider)
+    if isinstance(new_provider, str):
+        new_provider = PushProvider(new_provider)
+    new_target = updates.get("target", subscription.target)
+    if "provider" in updates or "target" in updates:
+        _validate_target_if_url(new_provider, new_target)
+
+    for field, value in updates.items():
         setattr(subscription, field, value)
 
     db.commit()

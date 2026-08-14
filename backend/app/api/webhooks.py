@@ -58,21 +58,29 @@ def _reject_unsafe_webhook_url(url: str) -> None:
     resolved IP through to the actual connection (e.g. a custom httpx
     transport), which is a larger change than this endpoint warrants on
     its own.
+
+    Shared with app.api.push_subscriptions (any authenticated user's
+    ntfy target URL needs the exact same guard -- see that module for
+    why it was missing there).
     """
+    _validate_outbound_url(url, label="Webhook")
+
+
+def _validate_outbound_url(url: str, label: str = "URL") -> None:
     try:
         parsed = httpx.URL(url)
     except Exception:
-        raise HTTPException(status_code=422, detail="Invalid webhook URL")
+        raise HTTPException(status_code=422, detail=f"Invalid {label.lower()} URL")
 
     if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=422, detail="Webhook URL must be http or https")
+        raise HTTPException(status_code=422, detail=f"{label} URL must be http or https")
     if not parsed.host:
-        raise HTTPException(status_code=422, detail="Webhook URL must include a host")
+        raise HTTPException(status_code=422, detail=f"{label} URL must include a host")
 
     try:
         infos = socket.getaddrinfo(parsed.host, None)
     except socket.gaierror as exc:
-        raise HTTPException(status_code=422, detail=f"Could not resolve webhook host: {exc}")
+        raise HTTPException(status_code=422, detail=f"Could not resolve {label.lower()} host: {exc}")
 
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
@@ -86,7 +94,7 @@ def _reject_unsafe_webhook_url(url: str) -> None:
         ):
             raise HTTPException(
                 status_code=422,
-                detail=f"Webhook URL resolves to a non-public address ({addr}) -- not allowed",
+                detail=f"{label} URL resolves to a non-public address ({addr}) -- not allowed",
             )
 
 
