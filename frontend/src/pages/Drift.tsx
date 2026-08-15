@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { BulkApproveResponse, ComplianceBaselineDetail, ComplianceBaselineSummary, Device, Drift, DriftBaseline, DriftFleetSummary, DriftScanResponse, DriftSeverity, DriftStatus, DriftTrendResponse, FlappingDevicesResponse, LowRiskDriftCandidate, WeeklyGoldenDriftReport } from "../lib/types";
 import ConfigDiff from "../components/ConfigDiff";
+import { ImpactClassificationBadge } from "../components/ImpactClassificationBadge";
 import StatCard from "../components/StatCard";
 import { useAuth } from "../lib/auth";
 import { useToast, errorMessage } from "../lib/toast";
@@ -775,6 +776,18 @@ export default function DriftPage() {
                             it can be auto-remediated by pushing that config straight back to the device, or you
                             can roll back manually via a specific snapshot on the Devices page instead.
                           </p>
+                          <div className="mt-1.5">
+                            <ImpactClassificationBadge
+                              classification={detail.risk_score >= 70 ? "danger" : detail.risk_score >= 40 ? "caution" : "safe"}
+                              label={
+                                detail.risk_score >= 70
+                                  ? `⛔ High risk score (${detail.risk_score}) -- review before pushing`
+                                  : detail.risk_score >= 40
+                                  ? `⚠ Moderate risk score (${detail.risk_score})`
+                                  : `✓ Low risk score (${detail.risk_score})`
+                              }
+                            />
+                          </div>
                           {canReview && detail.status === "open" && (
                             <button
                               onClick={async () => {

@@ -1058,6 +1058,7 @@ export interface GlobalSearchResponse {
   change_requests: GlobalSearchResultItem[];
   templates: GlobalSearchResultItem[];
   incidents: GlobalSearchResultItem[];
+  jit_requests: GlobalSearchResultItem[];
   configs: GlobalSearchResultItem[];
 }
 

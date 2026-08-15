@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../lib/api";
 import { useAuth, UserRole } from "../lib/auth";
+import { ImpactClassificationBadge, classificationDotClass } from "../components/ImpactClassificationBadge";
 
 interface JitElevation {
   id: string;
@@ -216,6 +217,12 @@ export default function JitAccess() {
             />
           </label>
         </div>
+        {role === "network_admin" && (
+          <ImpactClassificationBadge
+            classification="caution"
+            label="⚠ Admin elevation -- may require a second approver depending on blast radius"
+          />
+        )}
         <label className="text-xs text-slate-500 flex flex-col gap-1">
           Reason
           <textarea
@@ -295,10 +302,15 @@ export default function JitAccess() {
                     )}
                     <div className="text-slate-400">Requested {fmtDate(el.requested_at)}</div>
                     {el.requires_dual_approval && (
-                      <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold">
-                        {el.first_approved_by
-                          ? `1 of 2 approvals in — ${el.dual_approval_reason}`
-                          : `2 approvals required — ${el.dual_approval_reason}`}
+                      <div className="mt-1">
+                        <ImpactClassificationBadge
+                          classification="danger"
+                          label={
+                            el.first_approved_by
+                              ? `⛔ 1 of 2 approvals in — ${el.dual_approval_reason}`
+                              : `⛔ 2 approvals required — ${el.dual_approval_reason}`
+                          }
+                        />
                       </div>
                     )}
                   </div>
@@ -348,7 +360,15 @@ export default function JitAccess() {
               {mine.map((el) => (
                 <tr key={el.id} className="border-b border-slate-50 dark:border-slate-700/50">
                   <td className="py-1.5 pr-2 font-bold text-navy dark:text-white capitalize">
-                    {el.elevated_role.replace(/_/g, " ")}
+                    <span className="inline-flex items-center gap-1.5">
+                      {el.requires_dual_approval && (
+                        <span
+                          className={`inline-block w-1.5 h-1.5 rounded-full ${classificationDotClass.danger}`}
+                          title={el.dual_approval_reason || "Requires dual approval"}
+                        />
+                      )}
+                      {el.elevated_role.replace(/_/g, " ")}
+                    </span>
                   </td>
                   <td className="py-1.5 pr-2">
                     <span className={`px-2 py-0.5 rounded-full font-bold ${STATUS_BADGE[el.status]}`}>
@@ -406,7 +426,15 @@ export default function JitAccess() {
                   <tr key={el.id} className="border-b border-slate-50 dark:border-slate-700/50">
                     <td className="py-1.5 pr-2 text-slate-700 dark:text-slate-200">{el.user_email}</td>
                     <td className="py-1.5 pr-2 font-bold text-navy dark:text-white capitalize">
-                      {el.elevated_role.replace(/_/g, " ")}
+                      <span className="inline-flex items-center gap-1.5">
+                        {el.requires_dual_approval && (
+                          <span
+                            className={`inline-block w-1.5 h-1.5 rounded-full ${classificationDotClass.danger}`}
+                            title={el.dual_approval_reason || "Requires dual approval"}
+                          />
+                        )}
+                        {el.elevated_role.replace(/_/g, " ")}
+                      </span>
                     </td>
                     <td className="py-1.5 pr-2">
                       <span className={`px-2 py-0.5 rounded-full font-bold ${STATUS_BADGE[el.status]}`}>

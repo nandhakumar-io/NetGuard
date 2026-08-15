@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { Fragment, useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../lib/api";
 import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
@@ -19,6 +19,24 @@ const SOURCE_LABELS: Record<string, string> = {
   protocol_failure: "Protocol Failure",
   syslog: "Syslog",
 };
+
+// Card view reads well at low volume but each alert eats ~90px of
+// vertical space -- on a high-alert-volume day (a fleet-wide flap, a
+// noisy new rule) that means constant scrolling to triage. Compact
+// mode trades the card chrome for a dense table (one row per alert,
+// ~32px) so an operator can scan/select across dozens of alerts at
+// once. Persisted per-browser like the palette's recents, since it's
+// a per-operator/per-shift viewing preference, not fleet state.
+const ALERT_DENSITY_KEY = "netguard_alert_density_v1";
+type AlertDensity = "comfortable" | "compact";
+function loadAlertDensity(): AlertDensity {
+  try {
+    const v = localStorage.getItem(ALERT_DENSITY_KEY);
+    return v === "compact" ? "compact" : "comfortable";
+  } catch {
+    return "comfortable";
+  }
+}
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -42,6 +60,14 @@ type Tab = "alerts" | "rules" | "escalations" | "webhooks";
 
 export default function AlertCenter() {
   const navigate = useNavigate();
+  const [density, setDensity] = useState<AlertDensity>(loadAlertDensity);
+  useEffect(() => {
+    try {
+      localStorage.setItem(ALERT_DENSITY_KEY, density);
+    } catch {
+      // best-effort -- a failed write just means the choice doesn't stick across reloads
+    }
+  }, [density]);
   const toast = useToast();
   const confirm = useConfirm();
   const [tab, setTab] = useState<Tab>("alerts");
@@ -698,9 +724,38 @@ export default function AlertCenter() {
               }}
             />
 
+            <div
+              className="ml-auto flex items-center gap-0.5 bg-slate-100 dark:bg-slate-900 rounded-lg p-0.5"
+              role="group"
+              aria-label="Alert density"
+            >
+              <button
+                onClick={() => setDensity("comfortable")}
+                title="Card view -- one card per alert, more detail per row"
+                className={`text-xs font-bold px-2.5 py-1 rounded-md transition-colors ${
+                  density === "comfortable"
+                    ? "bg-white dark:bg-slate-700 text-navy dark:text-white shadow-sm"
+                    : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
+              >
+                ▤ Cards
+              </button>
+              <button
+                onClick={() => setDensity("compact")}
+                title="Compact table -- scan and select across many alerts at once"
+                className={`text-xs font-bold px-2.5 py-1 rounded-md transition-colors ${
+                  density === "compact"
+                    ? "bg-white dark:bg-slate-700 text-navy dark:text-white shadow-sm"
+                    : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
+              >
+                ☰ Table
+              </button>
+            </div>
+
             <button
               onClick={() => setShowSnoozeManager((v) => !v)}
-              className="ml-auto text-xs font-bold text-purple-600 hover:text-purple-800 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-950/60 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+              className="text-xs font-bold text-purple-600 hover:text-purple-800 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-950/60 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
             >
               🔕 Snoozes{activeSnoozes.length > 0 ? ` (${activeSnoozes.length})` : ""}
             </button>
@@ -946,6 +1001,153 @@ export default function AlertCenter() {
                     </div>
                   );
                 };
+
+                const renderAlertRow = (alert: Alert, nested: boolean) => {
+                  const sev = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.info;
+                  const impacted = impactedByRoot.get(alert.id) || [];
+                  const isExpanded = expandedRoots.has(alert.id);
+                  return (
+                    <tr
+                      key={alert.id}
+                      className={`border-b border-slate-100 dark:border-slate-700 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-700/40 ${
+                        alert.resolved ? "opacity-60" : ""
+                      }`}
+                    >
+                      <td className="pl-3 py-1.5 w-8">
+                        {!alert.resolved && (
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(alert.id)}
+                            onChange={() => toggleSelected(alert.id)}
+                            className="w-3.5 h-3.5 accent-brandblue cursor-pointer"
+                            aria-label={`Select alert: ${alert.category}`}
+                          />
+                        )}
+                      </td>
+                      <td className="py-1.5 pr-2 w-8 text-center">
+                        <span title={sev.label}>{sev.icon}</span>
+                      </td>
+                      <td className={`py-1.5 pr-3 min-w-0 ${nested ? "pl-6" : ""}`}>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-semibold text-navy dark:text-white text-xs truncate">{alert.category}</span>
+                          <span className="text-slate-400 dark:text-slate-500 text-xs truncate">— {alert.message}</span>
+                        </div>
+                      </td>
+                      <td className="py-1.5 pr-3 whitespace-nowrap">
+                        <span className="text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded-full">
+                          {SOURCE_LABELS[alert.source] || alert.source}
+                        </span>
+                      </td>
+                      <td className="py-1.5 pr-3 whitespace-nowrap">
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {alert.acknowledged && !alert.resolved && (
+                            <span className="text-[10px] font-medium text-brandblue bg-blue-50 px-1.5 py-0.5 rounded-full">Ack'd</span>
+                          )}
+                          {alert.resolved && (
+                            <span className="text-[10px] font-medium text-risklow bg-green-50 px-1.5 py-0.5 rounded-full">Resolved</span>
+                          )}
+                          {alert.suppressed && (
+                            <span className="text-[10px] font-medium text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 px-1.5 py-0.5 rounded-full">Impacted</span>
+                          )}
+                          {alert.muted_until && <span className="text-[10px] font-medium text-purple-600 bg-purple-50 dark:bg-purple-950/40 dark:text-purple-300 px-1.5 py-0.5 rounded-full">🔕</span>}
+                          {alert.escalated && <span className="text-[10px] font-medium text-orange-600 bg-orange-50 dark:bg-orange-950/40 dark:text-orange-300 px-1.5 py-0.5 rounded-full">📟{(alert.escalation_count ?? 0) > 1 ? `×${alert.escalation_count}` : ""}</span>}
+                        </div>
+                      </td>
+                      <td className="py-1.5 pr-3 whitespace-nowrap text-[11px] text-slate-400 dark:text-slate-500">{timeAgo(alert.created_at)}</td>
+                      <td className="py-1.5 pr-3 whitespace-nowrap">
+                        {alert.device_id ? (
+                          <button
+                            onClick={() => navigate(`/devices/${alert.device_id}`)}
+                            className="text-[11px] text-slate-400 hover:text-brandblue hover:underline"
+                          >
+                            {alert.device_id.slice(0, 8)}…
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-slate-300 dark:text-slate-600">—</span>
+                        )}
+                      </td>
+                      <td className="py-1.5 pr-3">
+                        {!nested && impacted.length > 0 && (
+                          <button
+                            onClick={() => toggleExpanded(alert.id)}
+                            className="text-[10px] font-semibold text-brandblue hover:text-navy dark:text-white whitespace-nowrap"
+                          >
+                            {isExpanded ? "▾" : "▸"} +{impacted.length}
+                          </button>
+                        )}
+                      </td>
+                      <td className="py-1.5 pr-3">
+                        {!alert.resolved && (
+                          <div className="flex items-center gap-1 justify-end">
+                            {!alert.acknowledged && (
+                              <button
+                                onClick={() => handleAcknowledge(alert.id)}
+                                title="Acknowledge"
+                                className="text-[10px] font-medium text-brandblue hover:text-navy dark:text-white bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded-md transition-colors"
+                              >
+                                Ack
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleResolve(alert.id)}
+                              title="Resolve"
+                              className="text-[10px] font-medium text-risklow hover:text-green-800 bg-green-50 hover:bg-green-100 px-2 py-1 rounded-md transition-colors"
+                            >
+                              Resolve
+                            </button>
+                            {alert.device_id && (
+                              <button
+                                onClick={() => {
+                                  const params = new URLSearchParams({
+                                    alert_id: alert.id,
+                                    device_id: alert.device_id!,
+                                    category: alert.category,
+                                  });
+                                  navigate(`/change-requests?${params.toString()}`);
+                                }}
+                                title="Create Change Request"
+                                className="text-[10px] font-medium text-navy dark:text-white hover:text-brandblue bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 px-2 py-1 rounded-md transition-colors"
+                              >
+                                CR
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                };
+
+                if (density === "compact") {
+                  return (
+                    <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 border-b border-slate-200 dark:border-slate-700">
+                            <th className="pl-3 py-2 w-8" />
+                            <th className="py-2 w-8" />
+                            <th className="py-2 pr-3">Alert</th>
+                            <th className="py-2 pr-3">Source</th>
+                            <th className="py-2 pr-3">Status</th>
+                            <th className="py-2 pr-3">Age</th>
+                            <th className="py-2 pr-3">Device</th>
+                            <th className="py-2 pr-3" />
+                            <th className="py-2 pr-3 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {topLevel.map((alert) => (
+                            <Fragment key={alert.id}>
+                              {renderAlertRow(alert, false)}
+                              {expandedRoots.has(alert.id) &&
+                                (impactedByRoot.get(alert.id) || []).map((child) => renderAlertRow(child, true))}
+                            </Fragment>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                }
 
                 return topLevel.map((alert) => (
                   <div key={alert.id} className="space-y-2">

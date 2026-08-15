@@ -38,6 +38,7 @@ import { WebTerminal } from "../components/WebTerminal";
 import SnmpCredentialsModal from "../components/SnmpCredentialsModal";
 import SshCredentialsModal from "../components/SshCredentialsModal";
 import BulkRotateCredentialsModal from "../components/BulkRotateCredentialModal";
+import { ImpactClassificationBadge, ImpactClassification } from "../components/ImpactClassificationBadge";
 
 const HEALTH_COLOR_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
   green: { dot: "bg-risklow", text: "text-risklow", bg: "bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800" },
@@ -3239,10 +3240,29 @@ export default function Devices() {
             Rotate credentials
           </button>
 
+          {(() => {
+            // Client-side blast-radius heuristic for the delete badge --
+            // no server round-trip needed since the signal (role +
+            // uplink flag) is already in the loaded device list. Same
+            // danger/caution/safe classification as the impact
+            // simulation panel elsewhere, so the color means the same
+            // thing everywhere an operator sees it.
+            const selected = devices.filter((d) => selectedIds.has(d.id));
+            const coreRoles = new Set(["core", "distribution", "firewall", "router"]);
+            const hasCoreOrUplink = selected.some((d) => (d.device_role && coreRoles.has(d.device_role.toLowerCase())) || d.is_uplink);
+            const classification: ImpactClassification = hasCoreOrUplink ? "danger" : selected.length > 5 ? "caution" : "safe";
+            const label = hasCoreOrUplink
+              ? "⛔ Includes core/uplink devices"
+              : selected.length > 5
+              ? `⚠ ${selected.length} devices at once`
+              : "✓ Low blast radius";
+            return <ImpactClassificationBadge classification={classification} label={label} className="ml-auto" />;
+          })()}
+
           <button
             onClick={bulkDelete}
             disabled={bulkBusy}
-            className="ml-auto text-xs font-bold bg-riskcrit hover:bg-red-700 text-white px-3 py-1.5 rounded-full disabled:opacity-50 whitespace-nowrap"
+            className="text-xs font-bold bg-riskcrit hover:bg-red-700 text-white px-3 py-1.5 rounded-full disabled:opacity-50 whitespace-nowrap"
           >
             {bulkBusy ? "Working…" : `Delete ${selectedIds.size}`}
           </button>

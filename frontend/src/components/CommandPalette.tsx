@@ -16,6 +16,7 @@ const SECTION_META: Array<{ key: keyof Omit<GlobalSearchResponse, "query" | "is_
   { key: "change_requests", label: "Change Requests", icon: "📝" },
   { key: "templates", label: "Config Templates", icon: "📄" },
   { key: "incidents", label: "Incidents", icon: "🔥" },
+  { key: "jit_requests", label: "JIT Requests", icon: "🔐" },
   { key: "configs", label: "Config matches", icon: "🔎" },
 ];
 
@@ -183,7 +184,7 @@ export default function CommandPalette() {
               setActiveIndex(0);
             }}
             onKeyDown={onKeyDownInput}
-            placeholder="Search devices, groups, alerts, change requests, templates, incidents, configs, or an IP/CIDR…"
+            placeholder="Search devices, groups, alerts, change requests, templates, incidents, JIT requests, configs, or an IP/CIDR…"
             className="flex-1 bg-transparent outline-none text-sm text-navy dark:text-white placeholder:text-slate-400"
           />
           {loading && <span className="text-[10px] text-slate-400">Searching…</span>}
@@ -192,8 +193,8 @@ export default function CommandPalette() {
         <div className="max-h-[60vh] overflow-y-auto py-2">
           {!query.trim() && recents.length === 0 && (
             <p className="px-4 py-6 text-center text-xs text-slate-400">
-              Start typing to search across devices, groups, alerts, change requests, templates, incidents, and
-              configs — or paste an IP/CIDR (e.g. 10.20.0.0/24) to see what's using it.
+              Start typing to search across devices, groups, alerts, change requests, templates, incidents, JIT
+              requests, and configs — or paste an IP/CIDR (e.g. 10.20.0.0/24) to see what's using it.
             </p>
           )}
           {showingRecents && (

@@ -1,4 +1,5 @@
 import { ImpactSimulationPreview } from "../lib/types";
+import { classificationBorderClass, classificationBadgeClass, ImpactClassification } from "./ImpactClassificationBadge";
 
 // Pre-deployment impact simulation panel ("what-if" dry run). Originally
 // shared between the New Change Request form (live, as the operator
@@ -29,30 +30,21 @@ export default function ImpactSimulationPanel({
   }
   if (!sim) return null;
 
-  const styleByClassification: Record<string, string> = {
-    danger: "border-red-300 bg-red-50 dark:bg-red-950/20 dark:border-red-800",
-    caution: "border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800",
-    safe: "border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-900",
-  };
-  const badgeByClassification: Record<string, string> = {
-    danger: "bg-red-100 text-red-700",
-    caution: "bg-amber-100 text-amber-700",
-    safe: "bg-green-100 text-green-700",
-  };
   const badgeLabel: Record<string, string> = {
     danger: "⛔ Would break reachability",
     caution: "⚠ Review before deploying",
     safe: "✓ No reachability impact",
   };
+  const classification = (sim.classification as ImpactClassification) in classificationBorderClass ? (sim.classification as ImpactClassification) : "safe";
 
   const allImpacted = [...sim.isolated_devices, ...sim.degraded_devices];
 
   return (
-    <div className={`border rounded-lg p-3 text-xs ${styleByClassification[sim.classification] || styleByClassification.safe}`}>
+    <div className={`border rounded-lg p-3 text-xs ${classificationBorderClass[classification]}`}>
       <div className="flex items-center justify-between mb-1">
         <p className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{title}</p>
-        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeByClassification[sim.classification] || badgeByClassification.safe}`}>
-          {badgeLabel[sim.classification] || badgeLabel.safe}
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${classificationBadgeClass[classification]}`}>
+          {badgeLabel[classification]}
         </span>
       </div>
       <p className="text-slate-700 dark:text-slate-200">{sim.summary}</p>

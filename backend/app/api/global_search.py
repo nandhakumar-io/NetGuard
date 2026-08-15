@@ -4,9 +4,10 @@ Unifies the fleet's existing, separately-built search surfaces into one
 endpoint instead of introducing a fourth: device inventory lookup
 (hostname/IP/site, already how Devices.tsx filters client-side), device
 groups, Alert Center (category/message), Change Requests (description),
-Config Templates (name/description), Incidents (title/summary), and
-Configuration Search (app.api.config_search's line-grep across every
-device's decrypted running config). Each category is capped and returned
+Config Templates (name/description), Incidents (title/summary), JIT
+elevation requests (role/reason/requester email), and Configuration
+Search (app.api.config_search's line-grep across every device's
+decrypted running config). Each category is capped and returned
 separately so the frontend palette can group results under headers rather
 than a single flat, unordered list.
 
@@ -29,6 +30,7 @@ from app.models.config_template import ConfigTemplate
 from app.models.device import Device
 from app.models.device_group import DeviceGroup
 from app.models.incident import Incident
+from app.models.jit_elevation import JitElevation
 
 router = APIRouter(prefix="/search", tags=["global-search"])
 
@@ -254,6 +256,26 @@ def global_search(
         for i in incidents
     ]
 
+    from app.models.user import User
+
+    jit_rows = (
+        db.query(JitElevation, User)
+        .join(User, User.id == JitElevation.user_id)
+        .filter(or_(JitElevation.elevated_role.ilike(like), JitElevation.reason.ilike(like), User.email.ilike(like)))
+        .order_by(JitElevation.requested_at.desc())
+        .limit(PER_CATEGORY_LIMIT)
+        .all()
+    )
+    jit_results = [
+        {
+            "id": str(j.id),
+            "title": f"{j.elevated_role} — {u.email}",
+            "subtitle": (j.reason[:100] + "…") if len(j.reason) > 100 else j.reason,
+            "url": f"/jit-access?request={j.id}",
+        }
+        for j, u in jit_rows
+    ]
+
     config_results: list[dict] = []
     if ip_network is None and len(q) >= CONFIG_MIN_QUERY_LENGTH:
         config_results = _search_configs_brief(db, q, limit=CONFIG_MATCH_LIMIT)
@@ -267,6 +289,7 @@ def global_search(
         "change_requests": change_results,
         "templates": template_results,
         "incidents": incident_results,
+        "jit_requests": jit_results,
         "configs": config_results,
     }
 
