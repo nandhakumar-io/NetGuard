@@ -5,16 +5,16 @@ import { useAuth } from "../lib/auth";
 import ImpactSimulationPanel from "../components/ImpactSimulationPanel";
 
 const statusStyle: Record<FirmwareUpgradeStatus, string> = {
-  pending: "bg-slate-100 text-slate-600",
-  scheduled: "bg-blue-100 text-blue-700",
-  downloading: "bg-indigo-100 text-indigo-700",
-  installing: "bg-indigo-100 text-indigo-700",
-  rebooting: "bg-amber-100 text-amber-700",
-  verifying: "bg-amber-100 text-amber-700",
-  completed: "bg-green-100 text-green-700",
-  failed: "bg-red-100 text-red-700",
-  rolled_back: "bg-orange-100 text-orange-700",
-  cancelled: "bg-slate-100 text-slate-500",
+  pending: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
+  scheduled: "bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300",
+  downloading: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300",
+  installing: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300",
+  rebooting: "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300",
+  verifying: "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300",
+  completed: "bg-green-100 text-green-700 dark:bg-green-950/40 dark:text-green-300",
+  failed: "bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300",
+  rolled_back: "bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300",
+  cancelled: "bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400",
 };
 
 const IN_FLIGHT: FirmwareUpgradeStatus[] = ["downloading", "installing", "rebooting", "verifying"];
@@ -161,8 +161,8 @@ export default function FirmwareUpgradesPage() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Firmware &amp; OS Upgrades</h1>
-          <p className="text-sm text-slate-500 mt-1">
+          <h1 className="text-2xl font-semibold text-navy dark:text-white">Firmware &amp; OS Upgrades</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Push a target image to one or many devices at once and track download → install → reboot → verify,
             with automatic rollback if a device doesn't come back healthy.
           </p>
@@ -174,11 +174,11 @@ export default function FirmwareUpgradesPage() {
         )}
       </div>
 
-      {error && <div className="p-3 bg-red-50 text-red-700 rounded-md text-sm">{error}</div>}
+      {error && <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400 rounded-md text-sm">{error}</div>}
 
-      <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
+      <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 overflow-x-auto">
         <table className="w-full text-sm min-w-[640px]">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+          <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase">
             <tr>
               <th className="text-left px-4 py-3">Device</th>
               <th className="text-left px-4 py-3">From → To</th>
@@ -189,45 +189,45 @@ export default function FirmwareUpgradesPage() {
               <th className="px-4 py-3" />
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
             {loading && (
               <tr>
-                <td colSpan={7} className="px-4 py-6 text-center text-slate-400">
+                <td colSpan={7} className="px-4 py-6 text-center text-slate-400 dark:text-slate-500">
                   Loading…
                 </td>
               </tr>
             )}
             {!loading && jobs.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-6 text-center text-slate-400">
+                <td colSpan={7} className="px-4 py-6 text-center text-slate-400 dark:text-slate-500">
                   No firmware upgrade jobs yet.
                 </td>
               </tr>
             )}
             {jobs.map((j) => (
               <tr key={j.id}>
-                <td className="px-4 py-3 font-medium text-slate-800">{deviceHostname(j.device_id)}</td>
-                <td className="px-4 py-3 text-slate-600">
+                <td className="px-4 py-3 font-medium text-navy dark:text-white">{deviceHostname(j.device_id)}</td>
+                <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
                   {j.from_version || "unknown"} → {j.target_version}
                 </td>
-                <td className="px-4 py-3 text-slate-500 font-mono text-xs">{j.image_filename}</td>
+                <td className="px-4 py-3 text-slate-500 dark:text-slate-400 font-mono text-xs">{j.image_filename}</td>
                 <td className="px-4 py-3">
                   <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusStyle[j.status]}`}>
                     {j.status.replace("_", " ")}
                   </span>
                 </td>
-                <td className="px-4 py-3 text-slate-500 text-xs max-w-xs truncate" title={j.error_message ?? j.current_step_detail ?? ""}>
+                <td className="px-4 py-3 text-slate-500 dark:text-slate-400 text-xs max-w-xs truncate" title={j.error_message ?? j.current_step_detail ?? ""}>
                   {j.error_message ?? j.current_step_detail ?? "—"}
                 </td>
-                <td className="px-4 py-3 text-slate-500">{j.started_at ? new Date(j.started_at).toLocaleString() : "—"}</td>
+                <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{j.started_at ? new Date(j.started_at).toLocaleString() : "—"}</td>
                 <td className="px-4 py-3 text-right space-x-3">
                   {canManage && (j.status === "failed" || j.status === "rolled_back") && (
-                    <button onClick={() => retry(j.id)} className="text-xs text-blue-600 hover:underline">
+                    <button onClick={() => retry(j.id)} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
                       Retry
                     </button>
                   )}
                   {canManage && (j.status === "pending" || j.status === "scheduled") && (
-                    <button onClick={() => cancelJob(j.id)} className="text-xs text-red-600 hover:underline">
+                    <button onClick={() => cancelJob(j.id)} className="text-xs text-red-600 dark:text-red-400 hover:underline">
                       Cancel
                     </button>
                   )}
@@ -240,23 +240,23 @@ export default function FirmwareUpgradesPage() {
 
       {showForm && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <form onSubmit={submit} className="bg-white rounded-lg p-6 w-full max-w-lg space-y-4">
-            <h2 className="text-lg font-semibold text-slate-900">Start firmware/OS upgrade</h2>
+          <form onSubmit={submit} className="bg-white dark:bg-slate-800 rounded-lg p-6 w-full max-w-lg space-y-4">
+            <h2 className="text-lg font-semibold text-navy dark:text-white">Start firmware/OS upgrade</h2>
 
             <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1">
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
                 Devices ({form.device_ids.length} selected)
               </label>
-              <div className="border border-slate-300 rounded-md max-h-40 overflow-y-auto divide-y divide-slate-100">
+              <div className="border border-slate-300 dark:border-slate-600 rounded-md max-h-40 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700 dark:divide-slate-700">
                 {devices.map((d) => (
-                  <label key={d.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer">
+                  <label key={d.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer">
                     <input type="checkbox" checked={form.device_ids.includes(d.id)} onChange={() => toggleDevice(d.id)} />
-                    <span className="font-medium text-slate-800">{d.hostname}</span>
-                    <span className="text-slate-400 text-xs">{d.ip_address}</span>
+                    <span className="font-medium text-navy dark:text-white">{d.hostname}</span>
+                    <span className="text-slate-400 dark:text-slate-500 text-xs">{d.ip_address}</span>
                   </label>
                 ))}
               </div>
-              <p className="text-xs text-slate-400 mt-1">Selecting more than one starts a batch job (one row per device).</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Selecting more than one starts a batch job (one row per device).</p>
             </div>
 
             {form.device_ids.length === 1 && (
@@ -269,42 +269,42 @@ export default function FirmwareUpgradesPage() {
             )}
 
             <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1">Target version</label>
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Target version</label>
               <input
                 required
                 value={form.target_version}
                 onChange={(e) => setForm({ ...form, target_version: e.target.value })}
-                className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
+                className="w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm"
                 placeholder="e.g. 17.9.4a"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1">Image filename</label>
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Image filename</label>
               <input
                 required
                 value={form.image_filename}
                 onChange={(e) => setForm({ ...form, image_filename: e.target.value })}
-                className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"
+                className="w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm font-mono"
                 placeholder="cat9k_iosxe.17.09.04a.SPA.bin"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1">Expected reboot wait (seconds)</label>
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Expected reboot wait (seconds)</label>
               <input
                 type="number"
                 min={10}
                 value={form.reboot_wait_seconds}
                 onChange={(e) => setForm({ ...form, reboot_wait_seconds: Number(e.target.value) })}
-                className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"
+                className="w-full border border-slate-300 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm"
               />
             </div>
 
-            {saveError && <div className="text-sm text-red-600">{saveError}</div>}
+            {saveError && <div className="text-sm text-red-600 dark:text-red-400">{saveError}</div>}
 
             <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900">
+              <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white">
                 Cancel
               </button>
               <button

@@ -171,7 +171,7 @@ export default function JitAccess() {
       </div>
 
       {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm px-3 py-2">{error}</div>
+        <div className="rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400 text-sm px-3 py-2">{error}</div>
       )}
 
       {/* --- Request form --- */}
@@ -181,7 +181,7 @@ export default function JitAccess() {
       >
         <h2 className="text-sm font-bold text-navy dark:text-white">Request elevation</h2>
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-          <label className="text-xs text-slate-500 flex flex-col gap-1">
+          <label className="text-xs text-slate-500 dark:text-slate-400 flex flex-col gap-1">
             Elevated role
             <select
               value={role}
@@ -195,7 +195,7 @@ export default function JitAccess() {
               ))}
             </select>
           </label>
-          <label className="text-xs text-slate-500 flex flex-col gap-1">
+          <label className="text-xs text-slate-500 dark:text-slate-400 flex flex-col gap-1">
             Duration (minutes)
             <input
               type="number"
@@ -206,7 +206,7 @@ export default function JitAccess() {
               className="border border-slate-200 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-2 py-1.5 text-sm"
             />
           </label>
-          <label className="text-xs text-slate-500 flex flex-col gap-1 sm:col-span-2">
+          <label className="text-xs text-slate-500 dark:text-slate-400 flex flex-col gap-1 sm:col-span-2">
             Change request ID (optional)
             <input
               type="text"
@@ -223,7 +223,7 @@ export default function JitAccess() {
             label="⚠ Admin elevation -- may require a second approver depending on blast radius"
           />
         )}
-        <label className="text-xs text-slate-500 flex flex-col gap-1">
+        <label className="text-xs text-slate-500 dark:text-slate-400 flex flex-col gap-1">
           Reason
           <textarea
             required
@@ -248,30 +248,30 @@ export default function JitAccess() {
       {isAdmin && metrics && (
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
           <h2 className="text-sm font-bold text-navy dark:text-white mb-3">
-            JIT metrics <span className="text-slate-400 font-normal">(last {metrics.window_days}d)</span>
+            JIT metrics <span className="text-slate-400 dark:text-slate-500 font-normal">(last {metrics.window_days}d)</span>
           </h2>
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
             <div>
               <p className="text-lg font-bold text-navy dark:text-white">{fmtDuration(metrics.median_seconds)}</p>
-              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Median time to approve</p>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">Median time to approve</p>
             </div>
             <div>
               <p className="text-lg font-bold text-navy dark:text-white">{fmtDuration(metrics.mean_seconds)}</p>
-              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Mean</p>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">Mean</p>
             </div>
             <div>
               <p className="text-lg font-bold text-navy dark:text-white">{fmtDuration(metrics.p90_seconds)}</p>
-              <p className="text-[11px] text-slate-400 uppercase tracking-wide">p90</p>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">p90</p>
             </div>
             <div>
               <p className="text-lg font-bold text-navy dark:text-white">{metrics.decided_count}</p>
-              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Approved ({metrics.rejected_count} rejected)</p>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">Approved ({metrics.rejected_count} rejected)</p>
             </div>
             <div>
               <p className={`text-lg font-bold ${metrics.stale_active_count > 0 ? "text-red-600" : "text-navy dark:text-white"}`}>
                 {metrics.stale_active_count}
               </p>
-              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Stale active grants</p>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">Stale active grants</p>
             </div>
           </div>
         </div>
@@ -284,7 +284,7 @@ export default function JitAccess() {
             Pending approvals {pending.length > 0 && <span className="text-amber-600">({pending.length})</span>}
           </h2>
           {pending.length === 0 ? (
-            <p className="text-xs text-slate-400">Nothing waiting on a decision.</p>
+            <p className="text-xs text-slate-400 dark:text-slate-500">Nothing waiting on a decision.</p>
           ) : (
             <div className="space-y-2">
               {pending.map((el) => (
@@ -296,11 +296,11 @@ export default function JitAccess() {
                     <div className="font-bold text-navy dark:text-white">
                       {el.user_email} → {el.elevated_role.replace(/_/g, " ")} for {el.requested_duration_minutes}m
                     </div>
-                    <div className="text-slate-500">{el.reason}</div>
+                    <div className="text-slate-500 dark:text-slate-400">{el.reason}</div>
                     {el.change_request_id && (
-                      <div className="text-slate-400">CR: {el.change_request_id}</div>
+                      <div className="text-slate-400 dark:text-slate-500">CR: {el.change_request_id}</div>
                     )}
-                    <div className="text-slate-400">Requested {fmtDate(el.requested_at)}</div>
+                    <div className="text-slate-400 dark:text-slate-500">Requested {fmtDate(el.requested_at)}</div>
                     {el.requires_dual_approval && (
                       <div className="mt-1">
                         <ImpactClassificationBadge
@@ -341,18 +341,18 @@ export default function JitAccess() {
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
         <h2 className="text-sm font-bold text-navy dark:text-white mb-3">My requests</h2>
         {loading ? (
-          <p className="text-xs text-slate-400">Loading…</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500">Loading…</p>
         ) : mine.length === 0 ? (
-          <p className="text-xs text-slate-400">No elevation requests yet.</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500">No elevation requests yet.</p>
         ) : (
           <div className="overflow-x-auto">
           <table className="w-full text-xs min-w-[480px]">
             <thead>
               <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-700">
-                <th className="py-1.5 pr-2">Role</th>
-                <th className="py-1.5 pr-2">Status</th>
-                <th className="py-1.5 pr-2">Window</th>
-                <th className="py-1.5 pr-2">Reason</th>
+                <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Role</th>
+                <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Status</th>
+                <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Window</th>
+                <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Reason</th>
                 <th className="py-1.5 pr-2"></th>
               </tr>
             </thead>
@@ -375,20 +375,20 @@ export default function JitAccess() {
                       {el.status}
                     </span>
                   </td>
-                  <td className="py-1.5 pr-2 text-slate-500">
+                  <td className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">
                     {el.is_active_now
                       ? fmtRemaining(el.seconds_remaining)
                       : el.expires_at
                       ? `expired ${fmtDate(el.expires_at)}`
                       : "—"}
                   </td>
-                  <td className="py-1.5 pr-2 text-slate-500 max-w-xs truncate">{el.reason}</td>
+                  <td className="py-1.5 pr-2 text-slate-500 dark:text-slate-400 max-w-xs truncate">{el.reason}</td>
                   <td className="py-1.5 pr-2">
                     {el.is_active_now && (
                       <button
                         onClick={() => decide(el.id, "revoke")}
                         disabled={actioningId === el.id}
-                        className="text-red-600 font-bold hover:underline disabled:opacity-50"
+                        className="text-red-600 dark:text-red-400 font-bold hover:underline disabled:opacity-50"
                       >
                         End now
                       </button>
@@ -407,17 +407,17 @@ export default function JitAccess() {
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
           <h2 className="text-sm font-bold text-navy dark:text-white mb-3">All elevations (org-wide)</h2>
           {all.length === 0 ? (
-            <p className="text-xs text-slate-400">No elevations on record.</p>
+            <p className="text-xs text-slate-400 dark:text-slate-500">No elevations on record.</p>
           ) : (
             <div className="overflow-x-auto">
             <table className="w-full text-xs min-w-[560px]">
               <thead>
                 <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-700">
-                  <th className="py-1.5 pr-2">User</th>
-                  <th className="py-1.5 pr-2">Role</th>
-                  <th className="py-1.5 pr-2">Status</th>
-                  <th className="py-1.5 pr-2">Requested</th>
-                  <th className="py-1.5 pr-2">Decided by</th>
+                  <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">User</th>
+                  <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Role</th>
+                  <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Status</th>
+                  <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Requested</th>
+                  <th className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">Decided by</th>
                   <th className="py-1.5 pr-2"></th>
                 </tr>
               </thead>
@@ -442,21 +442,21 @@ export default function JitAccess() {
                       </span>
                       {el.is_stale && (
                         <span
-                          className="ml-1 px-2 py-0.5 rounded-full font-bold bg-red-100 text-red-700"
+                          className="ml-1 px-2 py-0.5 rounded-full font-bold bg-red-100 dark:bg-red-950/40 text-red-700 dark:text-red-300"
                           title="Still marked active in the DB past its expected window -- the expiry sweep hasn't caught it yet."
                         >
                           stale
                         </span>
                       )}
                     </td>
-                    <td className="py-1.5 pr-2 text-slate-500">{fmtDate(el.requested_at)}</td>
-                    <td className="py-1.5 pr-2 text-slate-500">{el.decided_by ? fmtDate(el.decided_at) : "—"}</td>
+                    <td className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">{fmtDate(el.requested_at)}</td>
+                    <td className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">{el.decided_by ? fmtDate(el.decided_at) : "—"}</td>
                     <td className="py-1.5 pr-2">
                       {el.is_active_now && (
                         <button
                           onClick={() => decide(el.id, "revoke")}
                           disabled={actioningId === el.id}
-                          className="text-red-600 font-bold hover:underline disabled:opacity-50"
+                          className="text-red-600 dark:text-red-400 font-bold hover:underline disabled:opacity-50"
                         >
                           Revoke
                         </button>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Area,
@@ -71,6 +71,47 @@ const TIMELINE_ICON: Record<string, { fg: string; bg: string; icon: React.ReactN
   // confirmed alert the way the amber alert icon does.
   anomaly: { fg: "text-rose-500", bg: "bg-rose-50", icon: <path d="M13 2L3 14h7l-1 8 11-13h-8l1-7z" strokeLinecap="round" strokeLinejoin="round" /> },
 };
+
+// "What Changed" now spans 5 event types (alert/change/drift/deploy/
+// anomaly), so a host mid-incident -- flapping, getting remediated,
+// drifting and re-alerting -- can easily produce a run of events that
+// pushes everything else in the widget's fixed-height scroll area out
+// of view. Past this many events for the same host in the fetched
+// (recent, already time-bounded by the /dashboard/timeline limit)
+// window, collapse them into one "hostname: N events" row instead of
+// a flat list, so one noisy device doesn't dominate the timeline.
+const TIMELINE_GROUP_THRESHOLD = 3;
+
+type TimelineRow =
+  | { kind: "single"; event: TimelineEvent }
+  | { kind: "group"; hostname: string; events: TimelineEvent[] };
+
+const TIMELINE_TYPE_LABEL: Record<string, string> = {
+  alert: "alert",
+  change_request: "change",
+  drift: "drift",
+  deployment: "deploy",
+  anomaly: "anomaly",
+};
+
+function groupTimelineEvents(events: TimelineEvent[]): TimelineRow[] {
+  const counts = new Map<string, number>();
+  for (const ev of events) {
+    if (ev.hostname) counts.set(ev.hostname, (counts.get(ev.hostname) || 0) + 1);
+  }
+  const seen = new Set<string>();
+  const rows: TimelineRow[] = [];
+  for (const ev of events) {
+    if (ev.hostname && (counts.get(ev.hostname) || 0) > TIMELINE_GROUP_THRESHOLD) {
+      if (seen.has(ev.hostname)) continue;
+      seen.add(ev.hostname);
+      rows.push({ kind: "group", hostname: ev.hostname, events: events.filter((e) => e.hostname === ev.hostname) });
+    } else {
+      rows.push({ kind: "single", event: ev });
+    }
+  }
+  return rows;
+}
 
 interface GroupStat {
   id: string;
@@ -210,6 +251,8 @@ export default function Dashboard() {
   const [savingLayout, setSavingLayout] = useState(false);
   const [thresholds, setThresholds] = useState<DashboardThresholds>(DEFAULT_THRESHOLDS);
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [expandedTimelineGroups, setExpandedTimelineGroups] = useState<Set<string>>(new Set());
+  const timelineRows = useMemo(() => groupTimelineEvents(timelineEvents), [timelineEvents]);
   const [prefsError, setPrefsError] = useState<string | null>(null);
 
   const loadPreferences = () => {
@@ -525,28 +568,98 @@ export default function Dashboard() {
                 </div>
               ) : (
                 <div className="space-y-1 max-h-72 overflow-y-auto pr-1">
-                  {timelineEvents.map((ev, i) => {
-                    const ic = TIMELINE_ICON[ev.type] || TIMELINE_ICON.alert;
-                    return (
-                      <Link
-                        key={i}
-                        to={ev.link}
-                        className="flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
-                      >
-                        <span className={`w-6 h-6 rounded-md ${ic.bg} ${ic.fg} flex items-center justify-center shrink-0 mt-0.5`}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{ic.icon}</svg>
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-xs font-medium text-slate-700 truncate">{ev.title}</p>
-                            <span className="text-[10px] text-slate-400 shrink-0">{timeAgo(ev.timestamp)}</span>
+                  {timelineRows.map((row, i) => {
+                    if (row.kind === "single") {
+                      const ev = row.event;
+                      const ic = TIMELINE_ICON[ev.type] || TIMELINE_ICON.alert;
+                      return (
+                        <Link
+                          key={i}
+                          to={ev.link}
+                          className="flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
+                        >
+                          <span className={`w-6 h-6 rounded-md ${ic.bg} ${ic.fg} flex items-center justify-center shrink-0 mt-0.5`}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{ic.icon}</svg>
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate">{ev.title}</p>
+                              <span className="text-[10px] text-slate-400 shrink-0">{timeAgo(ev.timestamp)}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-400 truncate">
+                              {ev.hostname ? `${ev.hostname} · ` : ""}
+                              {ev.detail || ""}
+                            </p>
                           </div>
-                          <p className="text-[11px] text-slate-400 truncate">
-                            {ev.hostname ? `${ev.hostname} · ` : ""}
-                            {ev.detail || ""}
-                          </p>
-                        </div>
-                      </Link>
+                        </Link>
+                      );
+                    }
+
+                    // Grouped: several events on the same host in this
+                    // window -- one summary row with a type breakdown,
+                    // expandable to the individual (still-linkable) events.
+                    const isExpanded = expandedTimelineGroups.has(row.hostname);
+                    const typeCounts = new Map<string, number>();
+                    for (const ev of row.events) typeCounts.set(ev.type, (typeCounts.get(ev.type) || 0) + 1);
+                    const typeSummary = Array.from(typeCounts.entries())
+                      .map(([t, n]) => `${n} ${TIMELINE_TYPE_LABEL[t] || t}${n > 1 ? "s" : ""}`)
+                      .join(" · ");
+                    const mostRecent = row.events[0]?.timestamp;
+                    return (
+                      <div key={`group-${row.hostname}`}>
+                        <button
+                          onClick={() =>
+                            setExpandedTimelineGroups((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(row.hostname)) next.delete(row.hostname);
+                              else next.add(row.hostname);
+                              return next;
+                            })
+                          }
+                          className="w-full flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors text-left"
+                        >
+                          <span className="w-6 h-6 rounded-md bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300 flex items-center justify-center shrink-0 mt-0.5 text-[10px] font-bold">
+                            {row.events.length}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate">
+                                {row.hostname} <span className="text-slate-400 font-normal">— {row.events.length} events</span>
+                              </p>
+                              <span className="text-[10px] text-slate-400 shrink-0">
+                                {mostRecent ? timeAgo(mostRecent) : ""}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-400 truncate">{typeSummary}</p>
+                          </div>
+                          <span className="text-slate-400 text-xs shrink-0 mt-1">{isExpanded ? "▾" : "▸"}</span>
+                        </button>
+                        {isExpanded && (
+                          <div className="ml-8 border-l border-slate-100 dark:border-slate-700 pl-2 space-y-0.5">
+                            {row.events.map((ev, j) => {
+                              const ic = TIMELINE_ICON[ev.type] || TIMELINE_ICON.alert;
+                              return (
+                                <Link
+                                  key={j}
+                                  to={ev.link}
+                                  className="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
+                                >
+                                  <span className={`w-5 h-5 rounded-md ${ic.bg} ${ic.fg} flex items-center justify-center shrink-0 mt-0.5`}>
+                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{ic.icon}</svg>
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <p className="text-[11px] font-medium text-slate-700 dark:text-slate-200 truncate">{ev.title}</p>
+                                      <span className="text-[10px] text-slate-400 shrink-0">{timeAgo(ev.timestamp)}</span>
+                                    </div>
+                                    {ev.detail && <p className="text-[10px] text-slate-400 truncate">{ev.detail}</p>}
+                                  </div>
+                                </Link>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
