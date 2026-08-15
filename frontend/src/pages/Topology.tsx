@@ -588,6 +588,16 @@ export default function Topology() {
     return graph.edges.filter((e) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target));
   }, [graph, filteredNodeIds]);
 
+  // "Link" (edge) count collapses every physical cable between the same
+  // device pair into one line on the map -- this is the actual count of
+  // real cables (LLDP/CDP/GNS3 members), shown alongside the link count
+  // in the legend so a trunk/bundle doesn't quietly undercount how many
+  // physical connections are really there.
+  const totalMemberLinks = useMemo(
+    () => filteredEdges.reduce((sum, e) => sum + (e.members && e.members.length > 0 ? e.members.length : 1), 0),
+    [filteredEdges]
+  );
+
   const laidOut = useMemo(
     () => (viewMode === "layered" ? layoutNodesLayered(filteredNodes) : layoutNodes(filteredNodes, filteredEdges)),
     [filteredNodes, filteredEdges, viewMode]
@@ -1216,10 +1226,32 @@ export default function Topology() {
                     const midX = (a.x + b.x) / 2;
                     const midY = (a.y + b.y) / 2;
                     const hasIps = Boolean(e.source_ip && e.target_ip);
+                    // Real physical members (one row per confirmed LLDP/CDP/GNS3
+                    // cable) fan out as parallel lines rather than collapsing
+                    // to one -- a 4-cable LACP bundle should look like 4
+                    // cables, same as an enterprise NMS (Auvik/SolarWinds)
+                    // would draw it, each independently colored by its own
+                    // up/down state rather than the whole bundle sharing one
+                    // color. subnet/mgmt_subnet-inferred edges have no
+                    // per-port data at all, so they still render as the
+                    // single dashed/solid inference line they always did.
+                    const members = e.members && e.members.length > 0 ? e.members : null;
+                    const downMemberCount = members ? members.filter((m) => m.status === "down").length : 0;
+                    const dx = b.x - a.x;
+                    const dy = b.y - a.y;
+                    const segLen = Math.hypot(dx, dy) || 1;
+                    const nx = -dy / segLen;
+                    const ny = dx / segLen;
+                    const FAN_SPACING = 4.5;
+                    const memberOffsets = members
+                      ? members.map((_, i) => (i - (members.length - 1) / 2) * FAN_SPACING)
+                      : [0];
                     const linkLabel =
                       e.link_source === "subnet"
                         ? e.subnet || ""
-                        : `${e.link_source.toUpperCase()}${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
+                        : `${e.link_source.toUpperCase()}${members && members.length > 1 ? ` ×${members.length}` : ""}${
+                            downMemberCount > 0 ? ` (${downMemberCount} down)` : ""
+                          }${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
                     return (
                       <g
                         key={key}
@@ -1229,15 +1261,66 @@ export default function Topology() {
                       >
                         {/* fat invisible hit-area so thin lines are easy to click */}
                         <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={14} />
-                        <line
-                          x1={a.x}
-                          y1={a.y}
-                          x2={b.x}
-                          y2={b.y}
-                          stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : e.is_uplink ? "#0f766e" : utilColor || "#94a3b8"}
-                          strokeWidth={active ? 2.75 : e.is_uplink ? 3 : 1.5}
-                          strokeDasharray={isStaleLink ? "5 3" : undefined}
-                        />
+                        {members ? (
+                          members.map((member, i) => {
+                            const offset = memberOffsets[i];
+                            const mx1 = a.x + nx * offset;
+                            const my1 = a.y + ny * offset;
+                            const mx2 = b.x + nx * offset;
+                            const my2 = b.y + ny * offset;
+                            // Per-member color: down members are visibly
+                            // grayed-out/dashed rather than omitted or
+                            // looking identical to a live member -- that's
+                            // the whole point of drawing every real cable.
+                            // Alert/active/traced-path overrides still win
+                            // for the whole bundle so an alerting link
+                            // still reads as one incident.
+                            const memberColor = onTracedPath
+                              ? "#7c3aed"
+                              : edgeAlerting
+                              ? "#dc2626"
+                              : active
+                              ? "#2563eb"
+                              : member.status === "down"
+                              ? "#cbd5e1"
+                              : e.is_uplink
+                              ? "#0f766e"
+                              : member.status === "up"
+                              ? utilColor || "#16a34a"
+                              : utilColor || "#94a3b8";
+                            return (
+                              <line
+                                key={`${key}-m${i}`}
+                                x1={mx1}
+                                y1={my1}
+                                x2={mx2}
+                                y2={my2}
+                                stroke={memberColor}
+                                strokeWidth={active ? 2.5 : e.is_uplink ? 2.75 : 1.6}
+                                strokeDasharray={
+                                  member.status === "down" ? "3 3" : isStaleLink ? "5 3" : undefined
+                                }
+                                strokeLinecap="round"
+                              >
+                                <title>
+                                  {`${e.link_source.toUpperCase()} ${member.local_port || "?"} \u2194 ${
+                                    member.neighbor_port || "?"
+                                  } \u2014 ${member.status}${member.stale ? " (stale)" : ""}`}
+                                </title>
+                              </line>
+                            );
+                          })
+                        ) : (
+                          <line
+                            x1={a.x}
+                            y1={a.y}
+                            x2={b.x}
+                            y2={b.y}
+                            stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : e.is_uplink ? "#0f766e" : utilColor || "#94a3b8"}
+                            strokeWidth={active ? 2.75 : e.is_uplink ? 3 : 1.5}
+                            strokeDasharray={isStaleLink ? "5 3" : undefined}
+                          />
+                        )}
                         {/* Alert overlay: a pulsing red line laid on top so an actively
                             alerting link reads as "live incident", not just a static color. */}
                         {edgeAlerting && (
@@ -1539,9 +1622,17 @@ export default function Topology() {
                 />
                 Single point of failure
               </span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="inline-block w-4 h-0 border-t-2 border-dashed"
+                  style={{ borderColor: "#cbd5e1" }}
+                />
+                Down/inactive cable
+              </span>
               <span className="flex items-center gap-1.5 ml-auto text-slate-400">
                 {filteredNodes.length} device{filteredNodes.length === 1 ? "" : "s"} · {filteredEdges.length} link
                 {filteredEdges.length === 1 ? "" : "s"}
+                {totalMemberLinks !== filteredEdges.length ? ` (${totalMemberLinks} physical cables)` : ""}
               </span>
             </div>
           </>
@@ -1945,6 +2036,50 @@ export default function Topology() {
                         {e.neighbor_port && <p className="text-[10px] font-mono text-slate-400">port {e.neighbor_port}</p>}
                       </div>
                     </div>
+
+                    {e.members && e.members.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wide mb-1.5">
+                          Physical cables ({e.members.length}
+                          {e.members.filter((m) => m.status === "down").length > 0
+                            ? ` · ${e.members.filter((m) => m.status === "down").length} down`
+                            : ""}
+                          )
+                        </p>
+                        <ul className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                          {e.members.map((m, i) => (
+                            <li
+                              key={i}
+                              className={`text-[11px] rounded-md px-2 py-1.5 border flex items-center justify-between gap-2 ${
+                                m.status === "down"
+                                  ? "bg-slate-50 border-slate-200 text-slate-400"
+                                  : m.status === "up"
+                                  ? "bg-emerald-50 border-emerald-200 text-slate-700"
+                                  : "bg-slate-50 border-slate-200 text-slate-600"
+                              }`}
+                            >
+                              <span
+                                className={`font-mono truncate ${m.status === "down" ? "line-through decoration-slate-300" : ""}`}
+                              >
+                                {m.local_port || "?"} ↔ {m.neighbor_port || "?"}
+                              </span>
+                              <span className="flex items-center gap-1.5 shrink-0">
+                                {m.utilization_pct !== null && m.utilization_pct !== undefined && (
+                                  <span className="font-mono text-slate-400">{m.utilization_pct}%</span>
+                                )}
+                                {m.stale && <span className="text-amber-600">⚠</span>}
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                    m.status === "down" ? "bg-slate-300" : m.status === "up" ? "bg-emerald-500" : "bg-slate-300"
+                                  }`}
+                                />
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
                     <dl className="text-xs space-y-1.5">
                       <div className="flex justify-between">
                         <dt className="text-slate-500">{e.link_source === "subnet" ? "Subnet" : "Discovered via"}</dt>

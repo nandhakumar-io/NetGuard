@@ -171,6 +171,12 @@ LLDP_OIDS = {
     "lldpRemChassisId": "1.0.8802.1.1.2.1.4.1.1.5",
     "lldpRemSysName": "1.0.8802.1.1.2.1.4.1.1.9",
     "lldpRemPortId": "1.0.8802.1.1.2.1.4.1.1.7",
+    # Needed to interpret lldpRemPortId correctly -- see
+    # _discover_lldp_neighbors. Without this, a neighbor advertising its
+    # port as a raw ifIndex/MAC (subtype local/macAddress, common on
+    # Juniper) rendered as a meaningless bare number instead of being
+    # left for the caller to resolve, or shown misleadingly.
+    "lldpRemPortIdSubtype": "1.0.8802.1.1.2.1.4.1.1.6",
     "lldpRemSysDesc": "1.0.8802.1.1.2.1.4.1.1.10",
     # lldpLocPortTable, index: lldpLocPortNum -- this is the same local
     # port number lldpRemTable's 2nd index component refers to, but
@@ -186,9 +192,22 @@ LLDP_OIDS = {
     "lldpLocPortIdSubtype": "1.0.8802.1.1.2.1.3.7.1.2",
     "lldpLocPortId": "1.0.8802.1.1.2.1.3.7.1.3",
 }
-# lldpLocPortIdSubtype value meaning "the port ID is an interface name
-# string" (IEEE 802.1AB LldpPortIdSubtype ::= interfaceName(3)).
-LLDP_LOC_PORT_SUBTYPE_IFNAME = "3"
+# lldpLocPortIdSubtype/lldpRemPortIdSubtype value meaning "the port ID is
+# an interface name string". IEEE 802.1AB's LldpPortIdSubtype enumeration
+# is: interfaceAlias(1), portComponent(2), macAddress(3), networkAddress(4),
+# interfaceName(5), agentCircuitId(6), local(7). This was previously set to
+# "3" (macAddress) instead of "5" (interfaceName) -- since almost no real
+# device tags its port ID subtype as macAddress(3), that off-by-two bug
+# meant the interfaceName == "3" check essentially never matched, so both
+# the local *and* remote "Local Port"/"Neighbor Port" columns fell back to
+# raw LLDP port-number/ifIndex bookkeeping values (e.g. "550", "535")
+# instead of resolving to real interface names (e.g. "ge-0/0/22") on
+# Junos and IOS/IOS-XE, which both report subtype interfaceName(5) by
+# default.
+LLDP_PORT_SUBTYPE_IFNAME = "5"
+# Kept as an alias -- this constant used to be local-port-only before
+# remote-port subtype-aware resolution was added below.
+LLDP_LOC_PORT_SUBTYPE_IFNAME = LLDP_PORT_SUBTYPE_IFNAME
 CDP_OIDS = {
     # Index: ifIndex.cdpCacheDeviceIndex
     "cdpCacheDeviceId": "1.3.6.1.4.1.9.9.23.1.2.1.1.6",
@@ -959,11 +978,31 @@ def _resolve_lldp_local_port_names(ip_address: str, auth: "SnmpAuthConfig", time
         result: dict[str, str] = {}
         for local_port, port_id in port_ids.items():
             subtype = str(_parse_snmp_enum_int(subtypes.get(local_port)) or subtypes.get(local_port) or "")
-            if subtype == LLDP_LOC_PORT_SUBTYPE_IFNAME and port_id:
+            if subtype == LLDP_PORT_SUBTYPE_IFNAME and port_id:
                 result[str(local_port)] = str(port_id).strip()
         return result
     except Exception:
         return {}
+
+
+def resolve_ifindex_port_name(ip_address: str, auth: "SnmpAuthConfig", if_index: str | None, timeout: float = 3.0) -> str | None:
+    """Best-effort ifIndex -> ifDescr lookup against a *specific* device.
+
+    Used to turn a neighbor-reported LLDP port ID that's just a raw
+    ifIndex (lldpRemPortIdSubtype == local(7), common on Juniper) into
+    a real interface name, by walking ifDescr *on that neighbor device
+    itself* (not the device that discovered it) and looking up the
+    reported index. Any failure (device unreachable, SNMP not
+    configured, index not found) just returns the raw ifIndex string
+    unchanged so callers always have something to show.
+    """
+    if not if_index:
+        return if_index
+    try:
+        if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+        return if_descr.get(str(if_index)) or if_index
+    except Exception:
+        return if_index
 
 
 def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
@@ -991,6 +1030,7 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
         return []
     sys_names = _walk(ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
     port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
+    port_id_subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortIdSubtype"], timeout)
     chassis_id_subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpRemChassisIdSubtype"], timeout)
     local_port_names = _resolve_lldp_local_port_names(ip_address, auth, timeout)
 
@@ -999,11 +1039,28 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
         parts = index.split(".")
         local_port = parts[1] if len(parts) >= 2 else index
         sys_name = sys_names.get(index)
+        raw_neighbor_port = port_ids.get(index)
+        neighbor_port_subtype = str(
+            _parse_snmp_enum_int(port_id_subtypes.get(index)) or port_id_subtypes.get(index) or ""
+        )
+        # subtype interfaceName(5): the remote already told us its real
+        # interface name, use it as-is. subtype local(7) (Juniper's
+        # default): the value is just the *neighbor's own* ifIndex, not
+        # human-readable on its own -- flag it so the caller (which has
+        # the full device inventory and can look the neighbor up by
+        # identity) can resolve it via that neighbor's own ifDescr table.
+        # Anything else (macAddress, networkAddress, ...) is left as the
+        # raw reported value; there's no generic way to decode it further
+        # here.
+        neighbor_port_is_ifindex = neighbor_port_subtype == "7" and bool(
+            raw_neighbor_port and str(raw_neighbor_port).isdigit()
+        )
         rows.append({
             "local_port_index": local_port,
             "local_port": local_port_names.get(local_port) or local_port,
             "neighbor_name": sys_name or _format_chassis_id(chassis_id, chassis_id_subtypes.get(index)),
-            "neighbor_port": port_ids.get(index),
+            "neighbor_port": raw_neighbor_port,
+            "neighbor_port_is_ifindex": neighbor_port_is_ifindex,
             "neighbor_chassis_id": chassis_id,
         })
     return rows

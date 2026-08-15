@@ -345,6 +345,32 @@ def push_config(
         # No-op for anything that isn't a Junos <configuration> document.
         if (vendor or "").lower() == "juniper":
             config_xml = strip_junos_readonly_attrs(config_xml) or config_xml
+            # Junos's edit-config schema validator requires the payload's
+            # top-level element to be exactly <configuration> -- any XML
+            # fragment authored/rendered without that wrapper (e.g. a
+            # GitOps/config-template payload that's just
+            # "<interfaces>...</interfaces>") gets rejected with:
+            #   Element [{http://xml.juniper.net/xnm/1.1/xnm}configuration]
+            #   does not meet requirement
+            # which is the exact same error strip_junos_readonly_attrs's
+            # docstring documents for the *attribute* case, but this is
+            # the *missing element* case: Junos names "configuration" as
+            # the element that didn't meet its requirement because that's
+            # the element it expected at the top and didn't get. Wrap
+            # rather than reject so any well-formed Junos config fragment
+            # deploys correctly regardless of whether the caller
+            # remembered the outer tag.
+            try:
+                from lxml import etree as _lxml_etree
+
+                root = _lxml_etree.fromstring(config_xml.encode("utf-8"))
+                root_local = root.tag.rsplit("}", 1)[-1] if root.tag.startswith("{") else root.tag
+                if root_local != "configuration":
+                    config_xml = f"<configuration>{config_xml}</configuration>"
+            except Exception:
+                # Not parseable as XML at all -- leave as-is, edit_config
+                # will surface its own (unrelated) parser error.
+                pass
 
         # We do NOT add a <config> envelope here because ncclient's
         # `conn.edit_config(..., config=config_xml)` method AUTOMATICALLY

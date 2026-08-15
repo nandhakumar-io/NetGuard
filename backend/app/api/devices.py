@@ -161,6 +161,27 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
         name = lldp.get("neighbor_name") or ""
         if not name and not lldp.get("neighbor_chassis_id"):
             continue  # nothing to identify the neighbor -- skip
+        neighbor_device_id = _resolve_neighbor_id(name)
+        neighbor_port = lldp.get("neighbor_port")
+        # The neighbor advertised its port as a bare ifIndex (LLDP
+        # PortID subtype local(7), Junos's default) rather than a name
+        # -- see snmp_service._discover_lldp_neighbors. That ifIndex is
+        # only meaningful *on the neighbor itself*, so if the neighbor
+        # is already a managed device with SNMP configured, resolve it
+        # by walking that neighbor's own ifDescr table -- this is the
+        # same reason local_port needed a same-device ifIndex->name
+        # lookup, just against the other end of the link. Best-effort:
+        # any failure just leaves the raw ifIndex shown, same as before.
+        if lldp.get("neighbor_port_is_ifindex") and neighbor_device_id:
+            neighbor_device = next((d for d in all_devices if d.id == neighbor_device_id), None)
+            if neighbor_device and neighbor_device.snmp_version:
+                try:
+                    auth = metrics_service.build_snmp_auth(neighbor_device)
+                    neighbor_port = snmp_service.resolve_ifindex_port_name(
+                        neighbor_device.ip_address, auth, neighbor_port
+                    )
+                except Exception:
+                    pass
         new_rows.append(
             DiscoveredNeighbor(
                 device_id=device_id,
@@ -171,8 +192,8 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
                 # value when that lookup couldn't resolve a name.
                 local_port=str(lldp.get("local_port") or lldp.get("local_port_index") or ""),
                 neighbor_name=name or lldp.get("neighbor_chassis_id"),
-                neighbor_port=lldp.get("neighbor_port"),
-                neighbor_device_id=_resolve_neighbor_id(name),
+                neighbor_port=neighbor_port,
+                neighbor_device_id=neighbor_device_id,
             )
         )
 
