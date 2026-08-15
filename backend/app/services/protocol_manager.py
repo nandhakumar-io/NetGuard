@@ -387,6 +387,42 @@ class ProtocolManager:
         result.operation = "restore_config"
         return result
 
+    def get_junos_switchport_config(self) -> ProtocolResult:
+        """Juniper-only: port-mode/VLAN/RSTP-edge straight from the
+        device's own config (netconf_service.get_junos_switchport_config),
+        used by api.config_management.view_interfaces to fill in the
+        Interfaces tab's Port Mode / VLAN / Edge Port columns for
+        Juniper devices without depending on SNMP (see that function's
+        docstring for why the previous SNMP-only approach left these
+        blank for Juniper). Callers should only invoke this for
+        vendor == juniper over NETCONF; anything else returns a
+        not-applicable failure rather than guessing at another vendor's
+        config schema.
+        """
+        protocol = select_protocol(self.device)
+        is_juniper = (
+            self.device.vendor.value if hasattr(self.device.vendor, "value") else str(self.device.vendor)
+        ).lower() == "juniper"
+        if protocol != "netconf" or not is_juniper:
+            return self._record(
+                protocol=protocol, operation="get_junos_switchport_config", success=False,
+                request=None, response=None, http_status=None,
+                error="Switchport config lookup only supported for Juniper over NETCONF",
+                execution_time_ms=0.0,
+            )
+        creds = self._safe_credentials(protocol=protocol, operation="get_junos_switchport_config")
+        if isinstance(creds, ProtocolResult):
+            return creds
+        username, password = creds
+        result = netconf_service.get_junos_switchport_config(
+            self.device.ip_address, self.device.netconf_port, username, password
+        )
+        return self._record(
+            protocol="netconf", operation="get_junos_switchport_config", success=result.success,
+            request=result.request_xml, response=result.response_xml, http_status=None,
+            error=result.error, execution_time_ms=result.execution_time_ms,
+        )
+
     def get_interfaces(self) -> ProtocolResult:
         protocol = select_protocol(self.device)
         creds = self._safe_credentials(protocol=protocol, operation="get_interfaces")

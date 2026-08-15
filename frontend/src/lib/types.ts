@@ -231,12 +231,14 @@ export interface RouteEntry {
 
 export interface LldpNeighbor {
   local_port_index: string;
+  local_port?: string | null;
   neighbor_name: string | null;
   neighbor_port: string | null;
 }
 
 export interface CdpNeighbor {
   local_if_index: string;
+  local_port?: string | null;
   neighbor_id: string | null;
   neighbor_port: string | null;
   neighbor_platform: string | null;

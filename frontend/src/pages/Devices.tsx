@@ -25,6 +25,9 @@ import {
   RetentionPolicyResponse,
   DeviceLifecycleState,
   DeviceCsvImportResult,
+  Drift,
+  DriftDetail,
+  DriftScanResponse,
 } from "../lib/types";
 import { useAuth } from "../lib/auth";
 import { useToast, errorMessage } from "../lib/toast";
@@ -52,6 +55,13 @@ const ALERT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: st
   critical: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🚨" },
   warning: { text: "text-riskmed", bg: "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800", icon: "⚠️" },
   info: { text: "text-brandblue", bg: "bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800", icon: "ℹ️" },
+};
+
+const DRIFT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: string }> = {
+  critical: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🚨" },
+  high: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🔴" },
+  medium: { text: "text-riskmed", bg: "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800", icon: "⚠️" },
+  low: { text: "text-risklow", bg: "bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-800", icon: "🟢" },
 };
 
 function formatUptime(seconds: number | null): string {
@@ -395,6 +405,66 @@ function DeviceInlineDetails({
   const [deploymentsLoading, setDeploymentsLoading] = useState(false);
   const [deploymentsError, setDeploymentsError] = useState<string | null>(null);
 
+  // Drift tab state -- reuses the same GET /devices/{id}/drift history
+  // endpoint and POST .../drift/scan on-demand scan the fleet-wide Drift
+  // page (pages/Drift.tsx) already calls; this tab was previously a
+  // static "coming in next phase" placeholder even though the backend
+  // support existed the whole time.
+  const [deviceDrifts, setDeviceDrifts] = useState<Drift[]>([]);
+  const [driftsLoading, setDriftsLoading] = useState(false);
+  const [driftsError, setDriftsError] = useState<string | null>(null);
+  const [driftScanning, setDriftScanning] = useState(false);
+  const [driftScanNotice, setDriftScanNotice] = useState<string | null>(null);
+  const [expandedDriftId, setExpandedDriftId] = useState<string | null>(null);
+  const [driftDetail, setDriftDetail] = useState<DriftDetail | null>(null);
+  const [driftDetailLoading, setDriftDetailLoading] = useState(false);
+
+  const loadDeviceDrifts = () => {
+    setDriftsLoading(true);
+    setDriftsError(null);
+    api
+      .get<Drift[]>(`/devices/${device.id}/drift`)
+      .then((res) => setDeviceDrifts(res.data))
+      .catch((err: any) => setDriftsError(err?.response?.data?.detail || "Failed to load drift history."))
+      .finally(() => setDriftsLoading(false));
+  };
+
+  const runDriftScan = async () => {
+    setDriftScanning(true);
+    setDriftScanNotice(null);
+    try {
+      const res = await api.post<DriftScanResponse>(`/devices/${device.id}/drift/scan`, {
+        baseline: "previous_backup",
+      });
+      setDriftScanNotice(
+        res.data.findings.length > 0
+          ? `Scan complete: ${res.data.findings[0]}`
+          : "Scan complete -- no drift found against the previous backup."
+      );
+      loadDeviceDrifts();
+    } catch (err: any) {
+      setDriftScanNotice(err?.response?.data?.detail || "Drift scan failed.");
+    } finally {
+      setDriftScanning(false);
+    }
+  };
+
+  const toggleDriftDetail = (id: string) => {
+    if (expandedDriftId === id) {
+      setExpandedDriftId(null);
+      setDriftDetail(null);
+      return;
+    }
+    setExpandedDriftId(id);
+    setDriftDetail(null);
+    setDriftDetailLoading(true);
+    api
+      .get<DriftDetail>(`/drift/${id}`)
+      .then((res) => setDriftDetail(res.data))
+      .catch(() => setDriftDetail(null))
+      .finally(() => setDriftDetailLoading(false));
+  };
+
   const loadHealth = () => {
     setHealthLoading(true);
     setHealthError(null);
@@ -514,6 +584,9 @@ function DeviceInlineDetails({
     }
     if (activeTab === "Deployment History" && deployments.length === 0 && !deploymentsLoading) {
       loadDeployments();
+    }
+    if (activeTab === "Drift" && deviceDrifts.length === 0 && !driftsLoading && !driftsError) {
+      loadDeviceDrifts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, device.id]);
@@ -1420,7 +1493,7 @@ function DeviceInlineDetails({
                     empty="No LLDP neighbors reported (LLDP may be disabled on this device)."
                     columns={["Local Port", "Neighbor", "Neighbor Port"]}
                     rows={discovery.lldp_neighbors.map((n) => [
-                      n.local_port_index,
+                      n.local_port || n.local_port_index,
                       n.neighbor_name || "—",
                       n.neighbor_port || "—",
                     ])}
@@ -1431,7 +1504,7 @@ function DeviceInlineDetails({
                     empty="No CDP neighbors reported (CDP may be disabled, or this isn't a Cisco device)."
                     columns={["Local Interface", "Neighbor", "Neighbor Port", "Platform"]}
                     rows={discovery.cdp_neighbors.map((n) => [
-                      n.local_if_index,
+                      n.local_port || n.local_if_index,
                       n.neighbor_id || "—",
                       n.neighbor_port || "—",
                       n.neighbor_platform || "—",
@@ -1750,8 +1823,84 @@ function DeviceInlineDetails({
           </div>
         )}
 
+        {activeTab === "Drift" && (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                Configuration drift detected against golden config / previous backup / role baseline for this device.
+              </p>
+              <button
+                onClick={runDriftScan}
+                disabled={driftScanning}
+                className="text-[10px] uppercase tracking-wider font-bold text-white bg-brandblue hover:bg-brandblue/90 px-2.5 py-1.5 rounded-lg shadow-sm disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              >
+                {driftScanning ? "Scanning…" : "Scan Now"}
+              </button>
+            </div>
+            {driftScanNotice && (
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">{driftScanNotice}</p>
+            )}
+            {driftsLoading ? (
+              <p className="text-xs text-slate-400 dark:text-slate-500">Loading drift history…</p>
+            ) : driftsError ? (
+              <p className="text-xs text-riskcrit">{driftsError}</p>
+            ) : deviceDrifts.length === 0 ? (
+              <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-60">
+                <div className="text-3xl mb-2">🛡️</div>
+                <p className="text-sm font-medium">No drift detected for this device.</p>
+                <p className="text-xs mt-1">Run a scan to compare live config against a baseline.</p>
+              </div>
+            ) : (
+              <ul className="space-y-2 max-h-[32rem] overflow-y-auto pr-1">
+                {deviceDrifts.map((d) => {
+                  const style = DRIFT_SEVERITY_STYLES[d.severity] || DRIFT_SEVERITY_STYLES.low;
+                  const expanded = expandedDriftId === d.id;
+                  return (
+                    <li key={d.id} className={`border rounded-lg px-3 py-2.5 shadow-sm ${style.bg}`}>
+                      <button
+                        onClick={() => toggleDriftDetail(d.id)}
+                        className="w-full flex items-start justify-between gap-3 text-left"
+                      >
+                        <div className="flex items-start gap-2">
+                          <span className="text-base leading-none mt-0.5">{style.icon}</span>
+                          <div>
+                            <p className={`text-xs font-bold uppercase tracking-wide ${style.text}`}>
+                              {d.severity} drift · {d.baseline.replace("_", " ")}
+                            </p>
+                            <p className="text-sm text-navy dark:text-white mt-0.5">
+                              {d.added_lines} added, {d.removed_lines} removed, {d.modified_lines} modified
+                              {d.ai_summary ? ` — ${d.ai_summary}` : ""}
+                            </p>
+                            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+                              {timeAgo(d.detected_at)} · risk {d.risk_score}/100 · compliance {d.compliance_score}/100 · {d.status}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="text-[10px] uppercase tracking-wider font-bold text-slate-400 dark:text-slate-500 shrink-0">
+                          {expanded ? "Hide" : "View"}
+                        </span>
+                      </button>
+                      {expanded && (
+                        <div className="mt-3 border-t border-slate-200 dark:border-slate-700 pt-3">
+                          {driftDetailLoading ? (
+                            <p className="text-xs text-slate-400 dark:text-slate-500">Loading diff…</p>
+                          ) : driftDetail ? (
+                            <ConfigDiff diffText={driftDetail.cli_diff || driftDetail.diff_text} />
+                          ) : (
+                            <p className="text-xs text-riskcrit">Failed to load drift detail.</p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+
         {/* Placeholder for remaining tabs not yet wired to a dedicated data source */}
-        {["Drift"].includes(activeTab) && (
+        {([] as TabName[]).includes(activeTab) && (
           <div className="text-slate-500 dark:text-slate-400 flex flex-col items-center justify-center h-48 opacity-60">
             <div className="text-3xl mb-2">🚧</div>
             <p className="text-sm font-medium">{activeTab} data integration coming in next phase.</p>

@@ -344,6 +344,11 @@ class RouteEntry(BaseModel):
 
 class LldpNeighbor(BaseModel):
     local_port_index: str
+    # Real local interface name (e.g. "ge-0/0/0"), resolved from
+    # lldpLocPortTable in snmp_service._resolve_lldp_local_port_names.
+    # Falls back to local_port_index itself when that lookup couldn't
+    # resolve a name -- see that function's docstring.
+    local_port: str | None = None
     neighbor_name: str | None = None
     neighbor_port: str | None = None
     # Raw lldpRemChassisId -- always populated when a neighbor row exists
@@ -355,6 +360,10 @@ class LldpNeighbor(BaseModel):
 
 class CdpNeighbor(BaseModel):
     local_if_index: str
+    # Real local interface name, resolved from ifTable's ifDescr in
+    # snmp_service._discover_cdp_neighbors. Falls back to local_if_index
+    # itself when that lookup couldn't resolve a name.
+    local_port: str | None = None
     neighbor_id: str | None = None
     neighbor_port: str | None = None
     neighbor_platform: str | None = None

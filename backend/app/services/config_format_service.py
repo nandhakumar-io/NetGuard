@@ -93,6 +93,178 @@ def strip_rpc_envelope(raw: str | None) -> str | None:
         return raw
 
 
+def parse_junos_switchport_config(raw: str | None) -> dict[str, dict]:
+    """Parses the `<configuration>` blob returned by
+    netconf_service.get_junos_switchport_config (interfaces + protocols/
+    rstp subtree) into `{ifname: {"port_mode", "vlan", "trunk_vlans",
+    "edge_port"}}`, keyed by the interface's *unit* name (e.g.
+    "ge-0/0/0.0") to match how Junos operational interface names are
+    reported elsewhere in this app.
+
+    Reads straight from Junos's own configuration rather than SNMP:
+    - <family><ethernet-switching> under each interface unit carries
+      port-mode ("trunk"/"access") and the configured VLAN member(s).
+      Junos's default port-mode when unset but ethernet-switching is
+      configured is "access".
+    - <protocols><rstp><interface> carries the RSTP edge-port setting
+      (an <edge/> child element) per interface.
+
+    Any parse failure just returns {} -- callers fall back to leaving
+    these columns unpopulated, same as a failed SNMP walk would.
+    """
+    if not looks_like_xml(raw):
+        return {}
+    try:
+        from lxml import etree as _lxml_etree
+
+        root = _lxml_etree.fromstring(raw.encode("utf-8")) if isinstance(raw, str) else raw
+    except Exception:
+        return {}
+
+    def _find(el, name):
+        return el.find(name) if el is not None else None
+
+    def _children_local(el, name):
+        return [c for c in el if _local(c.tag) == name] if el is not None else []
+
+    def _text_of(el, name):
+        for c in _children_local(el, name):
+            if c.text:
+                return c.text.strip()
+        return None
+
+    # Keyed by *physical* interface name (e.g. "ge-0/0/0"), not
+    # "physical.unit" -- that's what api.config_management.view_interfaces
+    # looks these up by (i.name, from the physical-interface rows Junos's
+    # operational <get-interface-information> reply returns; see
+    # config_format_service._parse_interfaces_junos_opstate_xml). Most
+    # switchports only ever have a single unit 0, so collapsing to the
+    # physical name loses nothing in the common case; when a port has
+    # multiple units configured, unit 0's switchport settings win (it's
+    # the one actually carrying access/trunk config in virtually every
+    # real switchport deployment) rather than being overwritten
+    # unpredictably by whichever unit iterates last.
+    result: dict[str, dict] = {}
+
+    interfaces_el = next((c for c in root if _local(c.tag) == "interfaces"), None)
+    for iface in _children_local(interfaces_el, "interface"):
+        base_name = _text_of(iface, "name")
+        if not base_name:
+            continue
+        units = _children_local(iface, "unit")
+        target_units = units or [None]
+        for unit in target_units:
+            unit_name = _text_of(unit, "name") if unit is not None else None
+            family = next((c for c in (unit if unit is not None else iface) if _local(c.tag) == "family"), None)
+            eth_sw = next((c for c in family if _local(c.tag) == "ethernet-switching"), None) if family is not None else None
+            if eth_sw is None:
+                # Not a switchport at all -- if it's got an L3 family
+                # (inet/inet6), leave it to the routed-port inference
+                # already done in api.config_management.view_interfaces.
+                continue
+            if base_name in result and unit_name not in (None, "0"):
+                # Already have a (better) unit 0 entry for this physical
+                # port -- don't let a secondary unit clobber it.
+                continue
+            port_mode = _text_of(eth_sw, "port-mode") or "access"
+            vlan_el = next((c for c in eth_sw if _local(c.tag) == "vlan"), None)
+            members = [c.text.strip() for c in _children_local(vlan_el, "members") if c.text] if vlan_el is not None else []
+            is_trunk = port_mode == "trunk"
+            result[base_name] = {
+                "vlan": members[0] if members and not is_trunk else None,
+                "mode": port_mode,
+                "trunk_vlans": members if is_trunk and members else None,
+            }
+
+    protocols_el = next((c for c in root if _local(c.tag) == "protocols"), None)
+    rstp_el = next((c for c in _children_local(protocols_el, "rstp")), None) if protocols_el is not None else None
+    for rstp_if in _children_local(rstp_el, "interface"):
+        name = _text_of(rstp_if, "name")
+        if not name:
+            continue
+        # RSTP interface names are logical ("ge-0/0/0.0") or occasionally
+        # "all" -- strip the unit suffix to key by physical name, same as
+        # the ethernet-switching entries above. "all" (a wildcard meaning
+        # every interface) isn't a real port name and is skipped here;
+        # its effect isn't reflected per-port to avoid implying an
+        # explicit edge setting that isn't actually present on any one
+        # interface's own config stanza.
+        if name == "all":
+            continue
+        physical_name = name.split(".", 1)[0]
+        has_edge = any(_local(c.tag) == "edge" for c in rstp_if)
+        entry = result.setdefault(physical_name, {"vlan": None, "mode": None, "trunk_vlans": None})
+        entry["edge_port"] = has_edge
+
+    return result
+
+
+def strip_junos_readonly_attrs(raw: str | None) -> str | None:
+    """Strips Junos's read-only `junos:*` commit-metadata attributes
+    (junos:changed-seconds, junos:changed-localtime, junos:commit-seconds,
+    junos:commit-localtime, junos:commit-user, ...) from the top-level
+    <configuration> element.
+
+    Junos stamps these onto every <configuration> it hands back from
+    <get-config> (they're how "show | compare" / commit history work),
+    but they are NOT part of the writable configuration schema. Handing
+    the same blob straight back to <edit-config> -- which is exactly
+    what config restore/rollback does, feeding a prior snapshot's
+    running-config text back to push_config -- makes Junos's schema
+    validator reject the whole payload with:
+
+        Element [{http://xml.juniper.net/xnm/1.1/xnm}configuration]
+        does not meet requirement
+
+    which is a schema-validation error on the <configuration> element
+    itself, not on anything inside it. Without this, every Juniper
+    restore/rollback push failed at edit-config even though the
+    underlying config content was perfectly valid.
+
+    Only strips attributes in the recognized `junos:` (xnm) namespace on
+    the root <configuration> element -- leaves everything else (actual
+    config content, any other vendor's XML) untouched. Returns the input
+    unchanged if it doesn't parse as XML or isn't a <configuration>
+    document, so this is safe to call unconditionally on any push_config
+    payload.
+    """
+    if not looks_like_xml(raw):
+        return raw
+    try:
+        from lxml import etree as _lxml_etree
+
+        root = _lxml_etree.fromstring(raw.encode("utf-8"))
+    except Exception:
+        return raw
+    if _local(root.tag) != "configuration":
+        return raw
+    # Match by local attribute name rather than a hard-coded namespace
+    # URI -- real Junos <get-config> output binds these to the
+    # "http://xml.juniper.net/junos/1.1/junos" namespace (conventionally
+    # prefixed "junos:"), but relying on that exact URI string is
+    # fragile across Junos releases/platforms. Every attribute Junos
+    # attaches to the <configuration> root for commit/change bookkeeping
+    # is one of this fixed, well-known set -- strip any attribute whose
+    # local name matches one of these, regardless of which namespace
+    # it's actually bound to.
+    readonly_local_names = {
+        "changed-seconds",
+        "changed-localtime",
+        "commit-seconds",
+        "commit-localtime",
+        "commit-user",
+    }
+    for attr in list(root.attrib):
+        # attr is either a plain name or Clark notation "{uri}local"
+        local_name = attr.rsplit("}", 1)[-1] if attr.startswith("{") else attr
+        if local_name in readonly_local_names:
+            del root.attrib[attr]
+    try:
+        return _lxml_etree.tostring(root, encoding="unicode")
+    except Exception:
+        return raw
+
+
 def pretty_xml(raw: str | None) -> str | None:
     """Re-indents raw XML for display. Returns None (not an error string)
     if `raw` isn't parseable XML, so callers can fall back to showing the

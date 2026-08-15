@@ -19,6 +19,7 @@ from app.services.config_format_service import (
     cli_to_netconf_config,
     looks_like_xml,
     pretty_xml,
+    strip_junos_readonly_attrs,
     strip_rpc_envelope,
 )
 
@@ -146,6 +147,54 @@ def get_junos_interface_information(
             elapsed = (time.perf_counter() - start) * 1000
             content = strip_rpc_envelope(str(reply)) or str(reply)
             return NetconfResult(True, request_xml, _pretty_xml(content), elapsed)
+    except Exception as exc:  # noqa: BLE001
+        elapsed = (time.perf_counter() - start) * 1000
+        return NetconfResult(False, request_xml, "", elapsed, error=str(exc))
+
+
+def get_junos_switchport_config(
+    ip_address: str,
+    port: int,
+    username: str,
+    password: str,
+) -> NetconfResult:
+    """Junos-specific switchport (port mode / VLAN / RSTP edge) config via
+    a filtered <get-config>, used to populate the Interfaces tab's Port
+    Mode / VLAN / Edge Port columns for Juniper devices.
+
+    Why this exists: those columns were previously filled in only via
+    SNMP (snmp_service.walk_switchport_vlans / walk_stp_edge_ports),
+    which (a) requires SNMP to be configured on the device at all, (b)
+    depends on the SNMP-reported ifDescr lining up exactly with the
+    NETCONF-reported interface name to join the two data sets, and (c)
+    for edge-port specifically, only ever works on Cisco -- it walks
+    CISCO-STP-EXTENSIONS-MIB, which Juniper doesn't implement, so
+    edge_port was unconditionally empty for every Juniper device
+    regardless of SNMP config. Since NetGuard already talks NETCONF to
+    every Juniper device to get everything else on this tab, pulling
+    port-mode/VLAN/edge straight from the device's own configuration
+    sidesteps all three problems for Juniper specifically.
+
+    Uses a subtree filter scoped to just `interfaces` and `protocols
+    rstp` -- enough to answer port-mode/vlan/edge, without pulling (and
+    parsing) the entire running config just for this.
+    """
+    start = time.perf_counter()
+    filter_xml = (
+        "<filter type=\"subtree\">"
+        "<configuration>"
+        "<interfaces/>"
+        "<protocols><rstp/></protocols>"
+        "</configuration>"
+        "</filter>"
+    )
+    request_xml = f"<get-config><source><running/></source>{filter_xml}</get-config>"
+    try:
+        with _connect(ip_address, port, username, password, vendor="juniper") as conn:
+            reply = conn.get_config(source="running", filter=("subtree", filter_xml))
+            elapsed = (time.perf_counter() - start) * 1000
+            content = strip_rpc_envelope(str(reply)) or str(reply)
+            return NetconfResult(True, request_xml, content, elapsed)
     except Exception as exc:  # noqa: BLE001
         elapsed = (time.perf_counter() - start) * 1000
         return NetconfResult(False, request_xml, "", elapsed, error=str(exc))
@@ -284,6 +333,18 @@ def push_config(
         stripped = strip_rpc_envelope(config_xml)
         if stripped is not None and stripped != config_xml:
             config_xml = stripped
+
+        # Junos-specific: a <configuration> payload straight out of
+        # <get-config> (e.g. a restore/rollback pushing a prior snapshot's
+        # running-config text back to the device) still carries Junos's
+        # read-only junos:changed-*/commit-* attributes at this point --
+        # strip_rpc_envelope only removed the outer rpc-reply/data
+        # envelope, not these. Left in place, Junos's edit-config schema
+        # validator rejects the whole payload (see
+        # strip_junos_readonly_attrs's docstring for the exact error).
+        # No-op for anything that isn't a Junos <configuration> document.
+        if (vendor or "").lower() == "juniper":
+            config_xml = strip_junos_readonly_attrs(config_xml) or config_xml
 
         # We do NOT add a <config> envelope here because ncclient's
         # `conn.edit_config(..., config=config_xml)` method AUTOMATICALLY

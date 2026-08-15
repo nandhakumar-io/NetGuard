@@ -165,7 +165,11 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
             DiscoveredNeighbor(
                 device_id=device_id,
                 protocol="lldp",
-                local_port=str(lldp.get("local_port_index") or ""),
+                # Prefer the resolved real interface name (see
+                # snmp_service._resolve_lldp_local_port_names); only
+                # falls back to the raw LLDP local-port-number bookkeeping
+                # value when that lookup couldn't resolve a name.
+                local_port=str(lldp.get("local_port") or lldp.get("local_port_index") or ""),
                 neighbor_name=name or lldp.get("neighbor_chassis_id"),
                 neighbor_port=lldp.get("neighbor_port"),
                 neighbor_device_id=_resolve_neighbor_id(name),
@@ -180,7 +184,10 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
             DiscoveredNeighbor(
                 device_id=device_id,
                 protocol="cdp",
-                local_port=str(cdp.get("local_if_index") or ""),
+                # Prefer the resolved real interface name (ifDescr lookup
+                # in snmp_service._discover_cdp_neighbors); falls back to
+                # the raw ifIndex only if that lookup failed.
+                local_port=str(cdp.get("local_port") or cdp.get("local_if_index") or ""),
                 neighbor_name=name,
                 neighbor_port=cdp.get("neighbor_port"),
                 neighbor_platform=cdp.get("neighbor_platform"),

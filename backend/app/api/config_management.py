@@ -183,19 +183,47 @@ def view_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depen
 
     parsed = config_format_service.parse_interfaces(result.output, parse_protocol)
 
-    # Best-effort switchport (VLAN/mode) enrichment -- only meaningful for
-    # devices that have SNMP configured, and never allowed to fail the
-    # whole read: any error here just leaves port_mode/vlan unpopulated.
+    # Best-effort switchport (VLAN/mode/edge) enrichment.
+    #
+    # Juniper: read straight from the device's own config (family
+    # ethernet-switching / protocols rstp) over the NETCONF session we're
+    # already using for everything else on this tab -- see
+    # protocol_manager.get_junos_switchport_config's docstring. This is
+    # the primary source for Juniper devices, not a fallback: SNMP's
+    # edge-port MIB (CISCO-STP-EXTENSIONS-MIB) is Cisco-only and never
+    # returns anything for Juniper, and Q-BRIDGE-MIB port-mode/VLAN over
+    # SNMP additionally requires SNMP to be configured on the device at
+    # all and depends on its ifDescr lining up with the NETCONF interface
+    # name -- both of which made this tab come back empty for Juniper
+    # devices that had NETCONF working fine.
+    #
+    # Cisco (and anything else): unchanged SNMP-based enrichment.
     vlan_info: dict = {}
     edge_port_info: dict = {}
-    if parsed and device.snmp_version:
+    vendor_lower = (device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor)).lower()
+    if parsed and vendor_lower == "juniper" and protocol == "netconf":
         try:
-            auth = metrics_service.build_snmp_auth(device)
-            vlan_info = snmp_service.walk_switchport_vlans(device.ip_address, auth)
-            edge_port_info = snmp_service.walk_stp_edge_ports(device.ip_address, auth)
+            switchport_result = pm.get_junos_switchport_config()
+            if switchport_result.success:
+                parsed_switchport = config_format_service.parse_junos_switchport_config(switchport_result.output)
+                vlan_info = parsed_switchport
+                edge_port_info = {name: info.get("edge_port") for name, info in parsed_switchport.items() if "edge_port" in info}
         except Exception:
             vlan_info = {}
             edge_port_info = {}
+    if parsed and device.snmp_version and (vendor_lower != "juniper" or not vlan_info):
+        try:
+            auth = metrics_service.build_snmp_auth(device)
+            snmp_vlan_info = snmp_service.walk_switchport_vlans(device.ip_address, auth)
+            snmp_edge_port_info = snmp_service.walk_stp_edge_ports(device.ip_address, auth)
+            # Fill gaps only -- never let a partial/failed SNMP walk
+            # overwrite data already resolved straight from Junos config.
+            for name, info in snmp_vlan_info.items():
+                vlan_info.setdefault(name, info)
+            for name, edge in snmp_edge_port_info.items():
+                edge_port_info.setdefault(name, edge)
+        except Exception:
+            pass
 
     alert_config_by_if = {
         row.if_descr: row.enabled

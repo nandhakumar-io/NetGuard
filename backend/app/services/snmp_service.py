@@ -172,7 +172,23 @@ LLDP_OIDS = {
     "lldpRemSysName": "1.0.8802.1.1.2.1.4.1.1.9",
     "lldpRemPortId": "1.0.8802.1.1.2.1.4.1.1.7",
     "lldpRemSysDesc": "1.0.8802.1.1.2.1.4.1.1.10",
+    # lldpLocPortTable, index: lldpLocPortNum -- this is the same local
+    # port number lldpRemTable's 2nd index component refers to, but
+    # lldpLocPortNum is an *internal LLDP agent* port handle, not an
+    # ifIndex and not a human-readable name on its own. lldpLocPortId is
+    # the actual configured local-port identifier: when
+    # lldpLocPortIdSubtype == 3 (interfaceName, the common case on both
+    # Junos and IOS/IOS-XE), lldpLocPortId *is* the real interface name
+    # string (e.g. "ge-0/0/0", "GigabitEthernet1/0/1") -- exactly what
+    # was missing here before, which is why the Discovery tab's "Local
+    # Port" column showed raw LLDP port-number bookkeeping values
+    # instead of real ports.
+    "lldpLocPortIdSubtype": "1.0.8802.1.1.2.1.3.7.1.2",
+    "lldpLocPortId": "1.0.8802.1.1.2.1.3.7.1.3",
 }
+# lldpLocPortIdSubtype value meaning "the port ID is an interface name
+# string" (IEEE 802.1AB LldpPortIdSubtype ::= interfaceName(3)).
+LLDP_LOC_PORT_SUBTYPE_IFNAME = "3"
 CDP_OIDS = {
     # Index: ifIndex.cdpCacheDeviceIndex
     "cdpCacheDeviceId": "1.3.6.1.4.1.9.9.23.1.2.1.1.6",
@@ -924,10 +940,41 @@ def _format_chassis_id(raw: str | None, subtype: str | None) -> str | None:
     return raw
 
 
+def _resolve_lldp_local_port_names(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> dict[str, str]:
+    """Maps lldpLocPortNum -> a real, human-readable local interface name
+    (e.g. "ge-0/0/0", "GigabitEthernet1/0/1") via lldpLocPortTable.
+
+    Only lldpLocPortIdSubtype == interfaceName(3) rows are usable as a
+    name directly -- other subtypes (macAddress, local, ...) aren't
+    interface names and are left unresolved rather than shown as
+    something misleading. Any failure (table not implemented, agent
+    doesn't populate lldpLocPortTable) just yields {}, and callers fall
+    back to the raw port number.
+    """
+    try:
+        port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpLocPortId"], timeout)
+        if not port_ids:
+            return {}
+        subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpLocPortIdSubtype"], timeout)
+        result: dict[str, str] = {}
+        for local_port, port_id in port_ids.items():
+            subtype = str(_parse_snmp_enum_int(subtypes.get(local_port)) or subtypes.get(local_port) or "")
+            if subtype == LLDP_LOC_PORT_SUBTYPE_IFNAME and port_id:
+                result[str(local_port)] = str(port_id).strip()
+        return result
+    except Exception:
+        return {}
+
+
 def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
     """LLDP-MIB lldpRemTable. Index is 'timeMark.localPortNum.remIndex' --
-    the local port number (2nd component) is the useful, stable part; the
-    other two are bookkeeping values from the agent, not needed here.
+    the local port number (2nd component) identifies which local
+    interface saw the neighbor, but it's an internal LLDP agent handle,
+    not a name -- see _resolve_lldp_local_port_names for the
+    lldpLocPortTable lookup that turns it into the actual local port
+    (e.g. "ge-0/0/0"), which is what the Discovery UI's "Local Port"
+    column shows. `local_port_index` is kept alongside as a fallback for
+    when that lookup can't resolve a name.
 
     Anchored on lldpRemChassisId, not lldpRemSysName: System Name is an
     OPTIONAL TLV in LLDP (IEEE 802.1AB), while Chassis ID is mandatory on
@@ -945,6 +992,7 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
     sys_names = _walk(ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
     port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
     chassis_id_subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpRemChassisIdSubtype"], timeout)
+    local_port_names = _resolve_lldp_local_port_names(ip_address, auth, timeout)
 
     rows = []
     for index, chassis_id in list(chassis_ids.items())[:MAX_DISCOVERY_ROWS]:
@@ -953,6 +1001,7 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
         sys_name = sys_names.get(index)
         rows.append({
             "local_port_index": local_port,
+            "local_port": local_port_names.get(local_port) or local_port,
             "neighbor_name": sys_name or _format_chassis_id(chassis_id, chassis_id_subtypes.get(index)),
             "neighbor_port": port_ids.get(index),
             "neighbor_chassis_id": chassis_id,
@@ -963,12 +1012,16 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
 def _discover_cdp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:
     """CISCO-CDP-MIB cdpCacheTable. Index is 'ifIndex.deviceIndex' -- the
     local ifIndex (1st component) identifies which local interface saw
-    the neighbor."""
+    the neighbor. Resolved against ifTable's ifDescr (already walked
+    elsewhere in this module for the same device) to turn that ifIndex
+    into the real local interface name (e.g. "GigabitEthernet1/0/1")
+    instead of leaving the Discovery UI showing a bare numeric index."""
     device_ids = _walk(ip_address, auth, CDP_OIDS["cdpCacheDeviceId"], timeout)
     if not device_ids:
         return []
     ports = _walk(ip_address, auth, CDP_OIDS["cdpCacheDevicePort"], timeout)
     platforms = _walk(ip_address, auth, CDP_OIDS["cdpCachePlatform"], timeout)
+    if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout) or {}
 
     rows = []
     for index, neighbor_id in list(device_ids.items())[:MAX_DISCOVERY_ROWS]:
@@ -976,6 +1029,9 @@ def _discover_cdp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: fl
         local_if_index = parts[0] if parts else index
         rows.append({
             "local_if_index": local_if_index,
+            "local_port": (if_descr.get(local_if_index) or local_if_index).strip()
+            if isinstance(if_descr.get(local_if_index), str)
+            else local_if_index,
             "neighbor_id": neighbor_id,
             "neighbor_port": ports.get(index),
             "neighbor_platform": platforms.get(index),
