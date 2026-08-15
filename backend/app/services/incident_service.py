@@ -1,13 +1,19 @@
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models.alert import Alert
-from app.models.incident import Incident, IncidentStatus, IncidentTimelineEvent
+from app.models.alert import Alert, AlertSeverity
+from app.models.device import Device
+from app.models.incident import (
+    Incident,
+    IncidentSeverity,
+    IncidentStatus,
+    IncidentTimelineEvent,
+)
 from app.services import push_service
 
 
@@ -104,6 +110,78 @@ def create_incident(
             severity="critical",
         )
 
+    return incident
+
+
+# A root-cause alert that only fans out to a couple of dependents is
+# still probably worth investigating as a normal alert -- an Incident
+# record (with its own timeline, postmortem fields, and P1 push) is meant
+# for the "core switch went down and took a chunk of the network with it"
+# case. Below this count, correlation still suppresses the noise in
+# Alert Center; it just doesn't open a formal incident on its own.
+AUTO_INCIDENT_MIN_DOWNSTREAM = 3
+
+_ALERT_TO_INCIDENT_SEVERITY = {
+    AlertSeverity.CRITICAL: IncidentSeverity.CRITICAL,
+    AlertSeverity.WARNING: IncidentSeverity.MAJOR,
+    AlertSeverity.INFO: IncidentSeverity.MINOR,
+}
+
+
+def auto_create_from_correlation(
+    db: Session, root_alert: Alert, suppressed_alert_ids: List[uuid.UUID]
+) -> Optional[Incident]:
+    """Called by alert_correlation_service right after it fans a root-cause
+    alert's failure out to its topologically-stranded dependents. Opens an
+    Incident automatically once that fan-out is big enough to actually be
+    "a real outage" rather than one device tripping a neighbor's alert --
+    see AUTO_INCIDENT_MIN_DOWNSTREAM.
+
+    Idempotent: if an incident already exists for this root_cause_alert_id
+    (e.g. a later poll cycle correlates a few more stragglers into the same
+    failure), this tops up that incident's alert_ids and adds a timeline
+    note instead of opening a second one.
+    """
+    if len(suppressed_alert_ids) < AUTO_INCIDENT_MIN_DOWNSTREAM:
+        return None
+
+    existing = (
+        db.query(Incident)
+        .filter(Incident.root_cause_alert_id == root_alert.id)
+        .order_by(Incident.created_at.desc())
+        .first()
+    )
+    all_alert_ids = [root_alert.id, *suppressed_alert_ids]
+
+    if existing is not None:
+        merged = sorted({*alert_ids_list(existing), *all_alert_ids}, key=str)
+        if len(merged) > len(alert_ids_list(existing)):
+            existing.alert_ids = json.dumps([str(a) for a in merged])
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
+            add_timeline_event(
+                db,
+                incident=existing,
+                event_type="note",
+                description=f"Correlation grew this incident to {len(merged)} alerts.",
+                actor="system:correlation",
+            )
+        return existing
+
+    device = db.query(Device).filter(Device.id == root_alert.device_id).first()
+    hostname = device.hostname if device else "unknown device"
+
+    incident = create_incident(
+        db,
+        title=f"{hostname}: {root_alert.category} took {len(suppressed_alert_ids)} dependent device(s) down",
+        summary=root_alert.message,
+        severity=_ALERT_TO_INCIDENT_SEVERITY.get(root_alert.severity, IncidentSeverity.MAJOR).value,
+        root_cause_alert_id=root_alert.id,
+        alert_ids=all_alert_ids,
+        detected_at=root_alert.created_at or datetime.now(timezone.utc),
+        created_by="system:correlation",
+    )
     return incident
 
 

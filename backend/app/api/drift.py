@@ -218,14 +218,15 @@ def remediate_drift(
     db: Session = Depends(get_db),
     current_user: User = Depends(DRIFT_REVIEW_ROLES),
 ):
-    """One-click "push golden config to fix drift" -- queues a standard
-    change request/deployment pipeline run that restores this drift's
-    baseline (golden config or role baseline) to the device. Previously
-    drift was detect-only; this is the auto-remediation counterpart to
+    """One-click "push golden config to fix drift" -- submits a standard
+    change request that restores this drift's baseline (golden config or
+    role baseline) to the device, into the normal PENDING_APPROVAL review
+    queue. This only submits the change; it still needs a NETWORK_ADMIN
+    approval (a second, different one if it's Critical Risk) via the usual
+    change-request approve endpoint before anything deploys -- previously
+    drift was detect-only, this is the auto-fill/submit counterpart to
     GET .../drift/{id}/rollback-recommendation, which only advises.
     """
-    from app.tasks import run_deployment_pipeline_task
-
     drift = db.get(ConfigDrift, drift_id)
     if not drift:
         raise HTTPException(status_code=404, detail="Drift record not found")
@@ -239,11 +240,14 @@ def remediate_drift(
     except drift_service.RemediationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    run_deployment_pipeline_task.delay(str(cr.id), current_user.email)
     return {
-        "message": f"Auto-remediation queued for {device.hostname}.",
+        "message": (
+            f"Remediation change request submitted for {device.hostname} and awaiting approval"
+            + (" (dual approval required)." if cr.requires_dual_approval else ".")
+        ),
         "change_request_id": str(cr.id),
         "device_id": str(device.id),
+        "requires_dual_approval": cr.requires_dual_approval,
     }
 
 

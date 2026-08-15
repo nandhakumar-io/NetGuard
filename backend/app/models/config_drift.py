@@ -64,4 +64,14 @@ class ConfigDrift(Base):
     cli_diff = Column(Text, nullable=True)
     status = Column(Enum(DriftStatus), nullable=False, default=DriftStatus.OPEN)
 
+    # Set when the device was inside an active MaintenanceWindow at the
+    # moment this drift was detected (see
+    # app.services.maintenance_window_service.find_active_window, checked
+    # in drift_service.detect_drift). The drift is still recorded -- it's
+    # a real config change worth reviewing later -- but the UI should
+    # label it "expected -- device in maintenance" rather than showing it
+    # as an unplanned finding. The alert raised alongside it (if any) is
+    # separately suppressed via Alert.suppressed_by_window_id.
+    maintenance_window_id = Column(UUID(as_uuid=True), ForeignKey("maintenance_windows.id"), nullable=True)
+
     detected_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

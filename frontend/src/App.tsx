@@ -37,6 +37,7 @@ const RbacAudit = lazy(() => import("./pages/RbacAudit"));
 const JitAccess = lazy(() => import("./pages/JitAccess"));
 const Insights = lazy(() => import("./pages/Insights"));
 const IntegrationsPage = lazy(() => import("./pages/Integrations"));
+const MobileNOC = lazy(() => import("./pages/MobileNOC"));
 
 function RouteFallback() {
   return (
@@ -55,6 +56,10 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route element={<ProtectedRoute />}>
+        {/* Deliberately outside <Layout> -- no sidebar/topbar chrome, just
+            the stripped-down alert list an on-call engineer wants on a
+            phone. See pages/MobileNOC.tsx. */}
+        <Route path="/noc" element={withSuspense(<MobileNOC />)} />
         <Route element={<Layout />}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/change-requests" element={withSuspense(<ChangeRequests />)} />

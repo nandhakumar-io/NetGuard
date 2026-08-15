@@ -25,6 +25,7 @@ class DriftRead(BaseModel):
     ai_summary: str | None = None
     status: DriftStatus
     detected_at: datetime.datetime
+    maintenance_window_id: uuid.UUID | None = None
 
 
 class DriftDetail(DriftRead):

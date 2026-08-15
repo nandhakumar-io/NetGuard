@@ -43,3 +43,12 @@ class JitElevationRead(BaseModel):
     # capability the requester doesn't already have, else 0.
     capabilities_gained: list[str] = []
     blast_radius_devices: int = 0
+    # Danger feedback from the linked change request (see
+    # jit_service._danger_context) -- fleet-wide RBAC blast radius above
+    # is a separate, always-on signal; these two reflect only what this
+    # specific change request's own risk scoring flagged.
+    requires_dual_approval: bool = False
+    dual_approval_reason: str | None = None
+    first_approved_by: str | None = None
+    first_approved_at: str | None = None
+    is_first_approval_needed: bool = False

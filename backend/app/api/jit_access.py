@@ -97,6 +97,11 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
                 time_to_approve_seconds=jit_service.time_to_approve_seconds(r),
                 capabilities_gained=capabilities_gained,
                 blast_radius_devices=blast_radius_devices,
+                requires_dual_approval=r.requires_dual_approval,
+                dual_approval_reason=r.dual_approval_reason,
+                first_approved_by=str(r.first_approved_by) if r.first_approved_by else None,
+                first_approved_at=r.first_approved_at.isoformat() if r.first_approved_at else None,
+                is_first_approval_needed=r.requires_dual_approval and r.first_approved_by is None,
             )
         )
     return out
@@ -197,9 +202,12 @@ def approve_jit_access(
     elevation = _get_or_404(db, elevation_id)
     if elevation.status != JitElevationStatus.PENDING:
         raise HTTPException(409, f"Elevation is '{elevation.status.value}', not pending -- nothing to approve")
-    elevation = jit_service.approve_elevation(
-        db, elevation, approver_id=approver.id, approver_email=approver.email, note=payload.note
-    )
+    try:
+        elevation = jit_service.approve_elevation(
+            db, elevation, approver_id=approver.id, approver_email=approver.email, note=payload.note
+        )
+    except jit_service.JitAlreadyApprovedByYouError as exc:
+        raise HTTPException(400, str(exc))
     return _hydrate(db, [elevation])[0]
 
 

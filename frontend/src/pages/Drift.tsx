@@ -682,6 +682,14 @@ export default function DriftPage() {
                     <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${statusStyle[d.status]}`}>
                       {d.status.replace(/_/g, " ")}
                     </span>
+                    {d.maintenance_window_id && (
+                      <span
+                        title="Device was in an active maintenance window when this was detected"
+                        className="ml-1 px-2 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-500"
+                      >
+                        Expected — maintenance
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -704,9 +712,16 @@ export default function DriftPage() {
                     {new Date(detail.detected_at).toLocaleString()}
                   </p>
                 </div>
-                <span className={`shrink-0 px-2 py-1 rounded-full text-xs font-semibold capitalize ${severityStyle[detail.severity]}`}>
-                  {detail.severity}
-                </span>
+                <div className="shrink-0 flex flex-col items-end gap-1">
+                  <span className={`px-2 py-1 rounded-full text-xs font-semibold capitalize ${severityStyle[detail.severity]}`}>
+                    {detail.severity}
+                  </span>
+                  {detail.maintenance_window_id && (
+                    <span className="px-2 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 whitespace-nowrap">
+                      Expected — maintenance
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-3 gap-3 text-center">
@@ -765,15 +780,15 @@ export default function DriftPage() {
                               onClick={async () => {
                                 if (
                                   !(await confirm(
-                                    `Push the ${detail.baseline === "golden_config" ? "golden config" : "role baseline"} to this device now? This queues a normal deployment (snapshot, deploy, health checks, self-healing rollback if it fails).`,
-                                    { danger: false, confirmLabel: "Push config" }
+                                    `Submit a change request to push the ${detail.baseline === "golden_config" ? "golden config" : "role baseline"} to this device? This only submits it for approval -- it still needs a NETWORK_ADMIN to approve (a second, different one if it's Critical Risk) before anything deploys.`,
+                                    { danger: false, confirmLabel: "Submit for approval" }
                                   ))
                                 )
                                   return;
                                 setRemediating(true);
                                 setRemediationError(null);
                                 try {
-                                  const res = await api.post<{ message: string; change_request_id: string }>(
+                                  const res = await api.post<{ message: string; change_request_id: string; requires_dual_approval: boolean }>(
                                     `/drift/${detail.id}/remediate`
                                   );
                                   setRemediationNotice(res.data.message);
@@ -785,7 +800,7 @@ export default function DriftPage() {
                                   setRecommendation(recRes.data);
                                   load();
                                 } catch (err: any) {
-                                  setRemediationError(err?.response?.data?.detail || "Failed to queue auto-remediation.");
+                                  setRemediationError(err?.response?.data?.detail || "Failed to submit auto-remediation.");
                                 } finally {
                                   setRemediating(false);
                                 }
@@ -794,7 +809,7 @@ export default function DriftPage() {
                               className="mt-2 bg-riskcrit text-white rounded-lg px-3 py-1.5 text-xs font-bold uppercase tracking-wider hover:bg-red-700 disabled:opacity-50"
                             >
                               {remediating
-                                ? "Queuing…"
+                                ? "Submitting…"
                                 : `⚡ Push ${detail.baseline === "golden_config" ? "Golden Config" : "Role Baseline"} to Fix Drift`}
                             </button>
                           )}

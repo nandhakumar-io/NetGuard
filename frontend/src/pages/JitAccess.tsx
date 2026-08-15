@@ -22,6 +22,11 @@ interface JitElevation {
   seconds_remaining: number | null;
   is_stale: boolean;
   time_to_approve_seconds: number | null;
+  requires_dual_approval: boolean;
+  dual_approval_reason: string | null;
+  first_approved_by: string | null;
+  first_approved_at: string | null;
+  is_first_approval_needed: boolean;
 }
 
 interface JitApprovalMetrics {
@@ -289,6 +294,13 @@ export default function JitAccess() {
                       <div className="text-slate-400">CR: {el.change_request_id}</div>
                     )}
                     <div className="text-slate-400">Requested {fmtDate(el.requested_at)}</div>
+                    {el.requires_dual_approval && (
+                      <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold">
+                        {el.first_approved_by
+                          ? `1 of 2 approvals in — ${el.dual_approval_reason}`
+                          : `2 approvals required — ${el.dual_approval_reason}`}
+                      </div>
+                    )}
                   </div>
                   <div className="flex gap-2 shrink-0">
                     <button
@@ -296,7 +308,7 @@ export default function JitAccess() {
                       disabled={actioningId === el.id}
                       className="bg-emerald-600 text-white text-xs font-bold rounded-lg px-3 py-1.5 disabled:opacity-50"
                     >
-                      Approve
+                      {el.requires_dual_approval && !el.first_approved_by ? "Approve (1 of 2)" : "Approve"}
                     </button>
                     <button
                       onClick={() => decide(el.id, "reject")}

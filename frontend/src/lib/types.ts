@@ -342,6 +342,7 @@ export interface Drift {
   ai_summary?: string | null;
   status: DriftStatus;
   detected_at: string;
+  maintenance_window_id?: string | null;
 }
 
 export interface DriftDetail extends Drift {

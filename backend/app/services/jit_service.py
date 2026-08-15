@@ -18,10 +18,39 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from app.models.change_request import ChangeRequest
 from app.models.jit_elevation import JitElevation, JitElevationStatus
 from app.services import audit_service
 
 MAX_DURATION_MINUTES = 8 * 60  # 8 hours -- a JIT grant that "expires" next quarter isn't JIT
+
+# A JIT request tied to a change request that's itself been flagged
+# dangerous (Critical Risk and/or blast-radius, see
+# ChangeRequest.requires_dual_approval / api.change_requests._dual_approval,
+# which already reuses impact_simulation_service + topology_service.
+# compute_blast_radius) gets a much shorter leash than a routine grant:
+# capped duration, even if the requester asked for longer.
+DANGER_MAX_DURATION_MINUTES = 60
+
+
+class JitAlreadyApprovedByYouError(Exception):
+    """Raised when the same admin who gave the first approval on a
+    dual-approval elevation tries to give the second one too."""
+
+
+def _danger_context(db: Session, change_request_id: uuid.UUID | None) -> tuple[bool, str | None]:
+    """Looks up the linked change request's own risk classification and
+    reports whether this JIT request should inherit its danger status.
+    Reuses ChangeRequest.requires_dual_approval/dual_approval_reason
+    directly rather than re-deriving risk here, so JIT and the CR always
+    agree about what counts as dangerous -- one source of truth.
+    """
+    if change_request_id is None:
+        return False, None
+    cr = db.get(ChangeRequest, change_request_id)
+    if cr is None or not cr.requires_dual_approval:
+        return False, None
+    return True, cr.dual_approval_reason
 
 
 def is_active_now(elevation: JitElevation, now: datetime.datetime | None = None) -> bool:
@@ -164,18 +193,32 @@ def request_elevation(
     change_request_id: uuid.UUID | None,
     requested_by_email: str,
 ) -> JitElevation:
+    danger, danger_reason = _danger_context(db, change_request_id)
+    capped_duration = min(duration_minutes, DANGER_MAX_DURATION_MINUTES) if danger else duration_minutes
+
     elevation = JitElevation(
         user_id=user_id,
         elevated_role=elevated_role,
         reason=reason,
-        requested_duration_minutes=duration_minutes,
+        requested_duration_minutes=capped_duration,
         change_request_id=change_request_id,
         requested_by=user_id,
         status=JitElevationStatus.PENDING,
+        requires_dual_approval=danger,
+        dual_approval_reason=danger_reason,
     )
     db.add(elevation)
     db.commit()
     db.refresh(elevation)
+
+    detail = f"Requested {elevated_role} for {capped_duration}m: {reason}"
+    if danger:
+        detail += (
+            f" [linked change request is {danger_reason} -- window capped at "
+            f"{DANGER_MAX_DURATION_MINUTES}m"
+            + (f" (requested {duration_minutes}m)" if duration_minutes != capped_duration else "")
+            + ", second approver required]"
+        )
 
     audit_service.record_event(
         db,
@@ -183,7 +226,7 @@ def request_elevation(
         action="JIT Access Requested",
         result="Pending",
         change_request_id=change_request_id,
-        detail=f"Requested {elevated_role} for {duration_minutes}m: {reason}",
+        detail=detail,
     )
     return elevation
 
@@ -192,6 +235,38 @@ def approve_elevation(
     db: Session, elevation: JitElevation, *, approver_id: uuid.UUID, approver_email: str, note: str | None
 ) -> JitElevation:
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    # Dual approval (fed from the linked change request's risk
+    # classification -- see _danger_context/request_elevation): the first
+    # admin's approval is recorded but does not activate the grant. A
+    # second, *different* admin has to approve again -- same shape as
+    # ChangeRequest.first_approved_by/at, so the two approval flows read
+    # consistently for anyone who's used either.
+    if elevation.requires_dual_approval and elevation.first_approved_by is None:
+        elevation.first_approved_by = approver_id
+        elevation.first_approved_at = now
+        db.commit()
+        db.refresh(elevation)
+
+        audit_service.record_event(
+            db,
+            actor=approver_email,
+            action=f"JIT Access First Approval ({elevation.dual_approval_reason or 'Critical Change'})",
+            result="Awaiting Second Approval",
+            change_request_id=elevation.change_request_id,
+            detail=(
+                f"{elevation.dual_approval_reason}: a second, different Network Administrator must "
+                f"approve before {elevation.elevated_role} is granted to user {elevation.user_id}."
+            ),
+        )
+        return elevation
+
+    if elevation.requires_dual_approval and elevation.first_approved_by == approver_id:
+        raise JitAlreadyApprovedByYouError(
+            f"{elevation.dual_approval_reason}: the second approval must come from a different "
+            "Network Administrator."
+        )
+
     duration = min(elevation.requested_duration_minutes, MAX_DURATION_MINUTES)
     elevation.status = JitElevationStatus.ACTIVE
     elevation.decided_by = approver_id
@@ -202,10 +277,11 @@ def approve_elevation(
     db.commit()
     db.refresh(elevation)
 
+    action = "JIT Access Approved" if not elevation.requires_dual_approval else "JIT Access Approved (2nd of 2)"
     audit_service.record_event(
         db,
         actor=approver_email,
-        action="JIT Access Approved",
+        action=action,
         result="Approved",
         change_request_id=elevation.change_request_id,
         detail=f"Granted {elevation.elevated_role} to user {elevation.user_id} until {elevation.expires_at.isoformat()}",

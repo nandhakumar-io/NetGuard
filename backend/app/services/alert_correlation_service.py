@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity
 from app.models.device import Device
-from app.services import event_bus, topology_service
+from app.services import event_bus, incident_service, topology_service
 
 # Categories that mean "this device itself is down / unreachable", as
 # opposed to a threshold breach on a device that's still up and talking --
@@ -141,6 +141,12 @@ def correlate_downstream(db: Session, root_alert: Alert) -> list[uuid.UUID]:
             suppressed_count=len(suppressed_ids),
             channel=event_bus.ALERTS_CHANNEL,
         )
+        # A big enough fan-out is treated as a real outage, not just a
+        # noisy alert -- open (or top up) the incident automatically so
+        # on-call lands on one P1 record instead of having to notice the
+        # storm and file one by hand. See incident_service for the size
+        # threshold and idempotency behavior.
+        incident_service.auto_create_from_correlation(db, root_alert, suppressed_ids)
     return suppressed_ids
 
 

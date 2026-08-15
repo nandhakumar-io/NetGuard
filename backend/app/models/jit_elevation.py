@@ -1,7 +1,17 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -57,6 +67,23 @@ class JitElevation(Base):
     requested_duration_minutes = Column(Integer, nullable=False)  # requested window length, echoed back for the reviewer
 
     status = Column(Enum(JitElevationStatus), nullable=False, default=JitElevationStatus.PENDING, index=True)
+
+    # Fed from the linked ChangeRequest's own risk scoring (blast radius +
+    # reachability impact -- app.services.impact_simulation_service /
+    # topology_service.compute_blast_radius, same computation
+    # ChangeRequest.requires_dual_approval already keys off). Set once, at
+    # request time, by jit_service.request_elevation -- see its
+    # _danger_context helper. dual_approval_reason mirrors
+    # ChangeRequest.dual_approval_reason's convention ("Critical Risk",
+    # "Blast Radius", or both) so the two surfaces read consistently.
+    requires_dual_approval = Column(Boolean, nullable=False, default=False, server_default="false")
+    dual_approval_reason = Column(String, nullable=True)
+    # Same two-step shape as ChangeRequest.first_approved_by/at: the first
+    # NETWORK_ADMIN's approval is recorded here without activating the
+    # grant; a second, *different* admin must approve again (see
+    # jit_service.approve_elevation).
+    first_approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    first_approved_at = Column(DateTime(timezone=True), nullable=True)
 
     decided_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     decided_at = Column(DateTime(timezone=True), nullable=True)

@@ -55,6 +55,7 @@ from app.services import (
     audit_service,
     diff_engine,
     event_bus,
+    maintenance_window_service,
     notification_service,
     risk_engine,
     snapshot_service,
@@ -211,6 +212,13 @@ def detect_drift(
     severity = _classify_severity(drift_analysis.risk_score, compliance_score)
     ai_summary = drift_analysis.ai_summary
 
+    # A device inside a planned maintenance window (firmware push, config
+    # rollout, etc.) is *expected* to drift from its baseline -- tag the
+    # finding so the Drift page can label it accordingly instead of it
+    # reading like an unplanned change; the alert path below independently
+    # suppresses the paired alert via the same window.
+    active_window = maintenance_window_service.find_active_window(db, device.id)
+
     drift = ConfigDrift(
         device_id=device.id,
         baseline=baseline,
@@ -224,6 +232,7 @@ def detect_drift(
         ai_summary=ai_summary,
         cli_diff="\n".join(drift_analysis.cli_diff) if drift_analysis.cli_diff else None,
         status=DriftStatus.OPEN,
+        maintenance_window_id=active_window.id if active_window else None,
     )
     db.add(drift)
     db.commit()
@@ -323,12 +332,19 @@ class RemediationError(Exception):
 
 
 def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "User") -> "ChangeRequest":
-    """One-click "push golden config to fix drift": builds and auto-approves
-    a ChangeRequest that redeploys the drift's own baseline config back to
-    the device, then queues it on the standard Snapshot -> Deploy -> Health
-    Monitor -> Success/Self-Healing-Rollback pipeline -- same safety net as
-    any other change, not a drift-specific shortcut that skips validation
-    or health checks.
+    """One-click "push golden config to fix drift": builds a ChangeRequest
+    that redeploys the drift's own baseline config back to the device and
+    submits it into the normal review queue -- PENDING_APPROVAL, same as
+    a hand-authored change. It does NOT self-approve or deploy on its own:
+    the click only fills out and submits the change; a NETWORK_ADMIN still
+    has to approve it (via the standard PATCH .../approve endpoint) before
+    anything reaches the device, and that approval is what actually queues
+    the Snapshot -> Deploy -> Health Monitor pipeline. CRITICAL-severity
+    drift is submitted as Critical Risk, which routes through the same
+    two-distinct-admin dual-approval gate any other Critical Risk change
+    does (see api.change_requests._dual_approval /
+    cr.requires_dual_approval) -- a fast path to *submit* the fix, not a
+    shortcut around review.
 
     Only meaningful for GOLDEN_CONFIG and ROLE_BASELINE drift: those
     baselines are an intentional "this is what should be running" target
@@ -361,7 +377,7 @@ def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "Use
         .filter(
             ChangeRequest.device_id == device.id,
             ChangeRequest.status.in_(
-                (ChangeStatus.APPROVED, ChangeStatus.DEPLOYING, ChangeStatus.MONITORING)
+                (ChangeStatus.PENDING_APPROVAL, ChangeStatus.APPROVED, ChangeStatus.DEPLOYING, ChangeStatus.MONITORING)
             ),
         )
         .first()
@@ -391,10 +407,21 @@ def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "Use
 
     priority = ChangePriority.EMERGENCY if drift.severity == DriftSeverity.CRITICAL else ChangePriority.HIGH
 
+    # Gated behind approval, same as any other change: a CRITICAL-severity
+    # drift auto-remediation is submitted as Critical Risk, which the
+    # standard CR approve() flow already routes through its two-distinct-
+    # admin dual-approval gate (app.api.change_requests._dual_approval /
+    # cr.requires_dual_approval) -- one click here queues the fix for
+    # review, it does not push it to the device on its own. Anything below
+    # CRITICAL still goes through ordinary single-admin review. Either way
+    # this no longer self-approves: the clicking user is only ever the
+    # submitter, never recorded as the approver of their own change.
+    is_critical = drift.severity == DriftSeverity.CRITICAL
+    dual_approval_reason = "Critical Risk (Drift Auto-Remediation)" if is_critical else None
+
     cr = ChangeRequest(
         device_id=device.id,
         submitted_by=actor.id,
-        approved_by=actor.id,  # auto-remediation: requester is the approver, recorded explicitly
         priority=priority,
         description=f"Auto-remediate drift on {device.hostname}: push {baseline_label} to fix drift",
         business_justification=(
@@ -404,24 +431,27 @@ def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "Use
         ),
         current_config=current_config,
         proposed_config=baseline_config,
-        status=ChangeStatus.APPROVED,
+        risk_score=drift.risk_score,
+        risk_classification="Critical Risk" if is_critical else None,
+        status=ChangeStatus.PENDING_APPROVAL,
+        requires_dual_approval=is_critical,
+        dual_approval_reason=dual_approval_reason,
     )
     db.add(cr)
     db.commit()
     db.refresh(cr)
 
-    drift.status = DriftStatus.ROLLED_BACK
-    db.commit()
-
     audit_service.record_event(
-        db, actor=actor.email, action="Drift Auto-Remediation Queued", result="Approved",
+        db, actor=actor.email, action="Drift Auto-Remediation Submitted", result="Pending Approval",
         device_hostname=device.hostname, change_request_id=cr.id,
-        detail=f"drift_id={drift.id} baseline={baseline_label} severity={drift.severity.value}",
+        detail=(
+            f"drift_id={drift.id} baseline={baseline_label} severity={drift.severity.value}"
+            + (f" -- requires dual approval ({dual_approval_reason})" if is_critical else " -- awaiting admin approval")
+        ),
     )
     event_bus.publish_event(
         "change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id)
     )
-    event_bus.publish_event("drift_detected", device_id=str(device.id), drift_id=str(drift.id), severity=drift.severity.value, compliance_score=drift.compliance_score)
 
     return cr
 
