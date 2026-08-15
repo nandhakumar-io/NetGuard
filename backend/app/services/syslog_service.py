@@ -356,6 +356,65 @@ async def start_syslog_listener(host: str = "0.0.0.0", port: int | None = None) 
 # --- Query helpers (for the API layer) -----------------------------------
 
 
+# --- Anomaly detection ("this device suddenly started logging a lot") ----
+#
+# Same rationale as flow_service.detect_bandwidth_anomalies: the Syslog
+# Viewer is easy to forget to check, so this gives it a cheap signal that
+# api.dashboard._compute_timeline can pull into the unified feed instead
+# of requiring someone to remember it exists.
+ANOMALY_MIN_BASELINE_COUNT = 5  # ignore near-silent baselines; a device going 1 msg -> 8 msgs isn't a real spike
+ANOMALY_SPIKE_MULTIPLIER = 5.0
+
+
+def detect_message_rate_anomalies(db: Session, *, recent_minutes: int = 15, baseline_minutes: int = 60 * 6) -> list[dict]:
+    """Compares each device's message count in the most recent
+    `recent_minutes` against its average over an equal-length window
+    ending right before it. Flags a device logging at
+    ANOMALY_SPIKE_MULTIPLIER times its normal rate -- a flapping
+    interface, a reboot loop, or an auth-failure flood usually shows up
+    here well before it's obvious from the raw feed.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    recent_cutoff = now - datetime.timedelta(minutes=recent_minutes)
+    baseline_start = recent_cutoff - datetime.timedelta(minutes=baseline_minutes)
+
+    recent_counts = _counts_by_device(db, since=recent_cutoff, until=now)
+    baseline_counts = _counts_by_device(db, since=baseline_start, until=recent_cutoff)
+
+    baseline_window_ratio = recent_minutes / baseline_minutes if baseline_minutes else 1.0
+    anomalies = []
+    for device_id, recent in recent_counts.items():
+        baseline = baseline_counts.get(device_id, 0)
+        if baseline < ANOMALY_MIN_BASELINE_COUNT:
+            continue
+        expected_for_window = baseline * baseline_window_ratio
+        if expected_for_window <= 0:
+            continue
+        ratio = recent / expected_for_window
+        if ratio >= ANOMALY_SPIKE_MULTIPLIER:
+            device = db.get(Device, device_id) if device_id else None
+            anomalies.append({
+                "device_id": str(device_id) if device_id else None,
+                "hostname": device.hostname if device else None,
+                "recent_count": recent,
+                "expected_count": round(expected_for_window, 1),
+                "multiplier": round(ratio, 1),
+                "detected_at": now.isoformat(),
+            })
+    anomalies.sort(key=lambda a: a["multiplier"], reverse=True)
+    return anomalies
+
+
+def _counts_by_device(db: Session, *, since: datetime.datetime, until: datetime.datetime) -> dict:
+    rows = (
+        db.query(SyslogMessage.device_id, func.count(SyslogMessage.id).label("c"))
+        .filter(SyslogMessage.received_at >= since, SyslogMessage.received_at < until, SyslogMessage.device_id.isnot(None))
+        .group_by(SyslogMessage.device_id)
+        .all()
+    )
+    return {r.device_id: int(r.c or 0) for r in rows}
+
+
 def fleet_syslog_summary(db: Session, *, since: datetime.datetime) -> dict:
     """Counts + hourly volume for the Syslog view's summary strip."""
     base = db.query(SyslogMessage).filter(SyslogMessage.received_at >= since)

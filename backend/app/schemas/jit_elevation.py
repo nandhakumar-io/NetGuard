@@ -34,6 +34,8 @@ class JitElevationRead(BaseModel):
     revoked_at: str | None = None
     is_active_now: bool = False
     seconds_remaining: int | None = None
+    is_stale: bool = False  # ACTIVE in the DB but expires_at has already lapsed (sweep hasn't caught it yet)
+    time_to_approve_seconds: float | None = None  # requested_at -> decided_at, null while still pending
     # Blast radius: this app's RBAC is role-based with no per-device
     # scoping (see app.api.rbac.PERMISSION_MATRIX), so any capability a
     # role gains applies fleet-wide. blast_radius_devices is the current

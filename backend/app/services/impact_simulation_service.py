@@ -174,6 +174,37 @@ def _bfs_hop_counts(adjacency: dict[str, set[str]], start: str) -> dict[str, int
     return dist
 
 
+def simulate_reboot_impact(db: Session, device: Device) -> ImpactSimulationResult:
+    """Blast-radius preview for a firmware push, reusing simulate_impact
+    rather than a separate model.
+
+    A firmware upgrade doesn't come with a proposed config diff the way a
+    change request does, but the effect on the topology graph is the same
+    shape of question: while `device` reboots, every confirmed link on it
+    goes dark for the duration of the reload, so this synthesizes a
+    `shutdown` on each of the device's currently-confirmed interfaces (as
+    seen in the live topology graph, same trust ordering topology_service
+    already applies -- LLDP/CDP/GNS3/subnet-inference) and feeds that
+    through the same interface-shutdown -> removed-edges -> BFS isolation
+    check simulate_impact uses for a real config push. Isolated/degraded
+    results here mean "loses reachability for the reboot window", not
+    permanently -- same caveat a change-request reviewer already has to
+    apply to a `shutdown` line's isolated/degraded verdict.
+    """
+    device_id = str(device.id)
+    graph = topology_service.build_topology(db)
+
+    local_ports: set[str] = set()
+    for edge in graph.edges:
+        if edge.source == device_id and edge.local_port:
+            local_ports.add(edge.local_port)
+        elif edge.target == device_id and edge.neighbor_port:
+            local_ports.add(edge.neighbor_port)
+
+    synthetic_config = "\n".join(f"interface {port}\n shutdown\nexit" for port in sorted(local_ports))
+    return simulate_impact(db, device, synthetic_config, current_config=None)
+
+
 def simulate_impact(db: Session, device: Device, proposed_config: str, current_config: str | None = None) -> ImpactSimulationResult:
     """Runs the dry-run simulation for a proposed config against `device`.
     Safe to call before a change request even exists (New Change Request

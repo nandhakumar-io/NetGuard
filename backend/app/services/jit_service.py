@@ -41,6 +41,80 @@ def is_active_now(elevation: JitElevation, now: datetime.datetime | None = None)
     return expires_at > now
 
 
+def is_stale(elevation: JitElevation, now: datetime.datetime | None = None) -> bool:
+    """True if the DB row still says ACTIVE but its window has already
+    lapsed -- i.e. mark_expired_elevations hasn't swept it yet. Doesn't
+    affect enforcement (is_active_now already re-checks expires_at on
+    every gate), but it's a signal worth surfacing on its own: a grant
+    sitting stale for a while usually means the Celery beat sweep isn't
+    running, which is worth knowing about independent of any one grant's
+    correctness. Same staleness shape as topology_service's link
+    `stale` flag -- a live re-check overriding a DB column that only
+    gets updated lazily.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if elevation.status != JitElevationStatus.ACTIVE or elevation.expires_at is None:
+        return False
+    expires_at = elevation.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    return expires_at <= now
+
+
+def time_to_approve_seconds(elevation: JitElevation) -> float | None:
+    """Seconds between request and decision for a row that's actually
+    been decided on. None for still-pending rows (nothing to measure
+    yet) and for rows with no requested_at (shouldn't happen -- server
+    default -- but the column is nullable at the type level)."""
+    if elevation.decided_at is None or elevation.requested_at is None:
+        return None
+    requested_at, decided_at = elevation.requested_at, elevation.decided_at
+    if requested_at.tzinfo is None:
+        requested_at = requested_at.replace(tzinfo=datetime.timezone.utc)
+    if decided_at.tzinfo is None:
+        decided_at = decided_at.replace(tzinfo=datetime.timezone.utc)
+    return max((decided_at - requested_at).total_seconds(), 0.0)
+
+
+def approval_metrics(db: Session, *, days: int = 30) -> dict:
+    """Time-to-approve summary (mean/median/p90, in seconds) over decided
+    requests in the last `days`, plus the current count of stale grants
+    -- backs a small RBAC/JIT dashboard card. Rejections are excluded
+    from the timing stats (an admin sitting on a request they're going
+    to reject isn't the same signal as slow approval turnaround) but
+    counted separately so a spike in rejections is still visible.
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    decided = (
+        db.query(JitElevation)
+        .filter(JitElevation.decided_at.isnot(None), JitElevation.requested_at >= since)
+        .all()
+    )
+    approved_times = sorted(
+        t for row in decided if row.status != JitElevationStatus.REJECTED
+        for t in [time_to_approve_seconds(row)] if t is not None
+    )
+    rejected_count = sum(1 for row in decided if row.status == JitElevationStatus.REJECTED)
+
+    def _pct(sorted_vals: list[float], pct: float) -> float | None:
+        if not sorted_vals:
+            return None
+        idx = min(int(len(sorted_vals) * pct), len(sorted_vals) - 1)
+        return sorted_vals[idx]
+
+    stale_count = sum(1 for row in db.query(JitElevation).filter(JitElevation.status == JitElevationStatus.ACTIVE).all() if is_stale(row))
+
+    return {
+        "window_days": days,
+        "decided_count": len(approved_times),
+        "rejected_count": rejected_count,
+        "mean_seconds": (sum(approved_times) / len(approved_times)) if approved_times else None,
+        "median_seconds": _pct(approved_times, 0.5),
+        "p90_seconds": _pct(approved_times, 0.9),
+        "stale_active_count": stale_count,
+    }
+
+
 def active_roles_for_user(db: Session, user_id) -> set[str]:
     """Every role currently JIT-granted to this user, right now -- what
     require_roles() unions with the user's base User.role. Small fleets /

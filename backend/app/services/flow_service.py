@@ -708,6 +708,66 @@ def bandwidth_timeseries(db: Session, *, minutes: int = 60, bucket_minutes: int 
     ]
 
 
+# --- Anomaly detection ("who suddenly started pushing 10x normal") -------
+#
+# The Traffic Analysis page is one of the least-visited pages in the app
+# because nothing else points at it -- you only see a bandwidth spike if
+# you happen to load this page while it's happening. This gives it a
+# cheap, self-contained signal (recent window vs. a same-length baseline
+# window immediately before it) that api.dashboard._compute_timeline can
+# pull into the unified "what changed" feed, so a real spike surfaces on
+# the dashboard instead of requiring someone to remember to check.
+ANOMALY_MIN_BASELINE_BYTES = 1_000_000  # ignore near-zero baselines; anything looks like "10x" against noise
+ANOMALY_SPIKE_MULTIPLIER = 5.0
+
+
+def detect_bandwidth_anomalies(db: Session, *, recent_minutes: int = 15, baseline_minutes: int = 60 * 6) -> list[dict]:
+    """Compares each host's total bytes in the most recent `recent_minutes`
+    against its average over an equal-length window ending right before
+    it, drawn from the preceding `baseline_minutes`. Flags a host whose
+    recent rate is at least ANOMALY_SPIKE_MULTIPLIER times its baseline
+    rate -- deliberately simple (no seasonality modeling) so it's cheap
+    to run on every dashboard load rather than needing a background job.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    recent_cutoff = now - datetime.timedelta(minutes=recent_minutes)
+    baseline_start = recent_cutoff - datetime.timedelta(minutes=baseline_minutes)
+
+    recent_bytes = _bytes_by_host(db, since=recent_cutoff, until=now)
+    baseline_bytes = _bytes_by_host(db, since=baseline_start, until=recent_cutoff)
+
+    baseline_window_ratio = recent_minutes / baseline_minutes if baseline_minutes else 1.0
+    anomalies = []
+    for ip, recent in recent_bytes.items():
+        baseline = baseline_bytes.get(ip, 0)
+        if baseline < ANOMALY_MIN_BASELINE_BYTES:
+            continue
+        expected_for_window = baseline * baseline_window_ratio
+        if expected_for_window <= 0:
+            continue
+        ratio = recent / expected_for_window
+        if ratio >= ANOMALY_SPIKE_MULTIPLIER:
+            anomalies.append({
+                "ip_address": ip,
+                "recent_bytes": recent,
+                "expected_bytes": round(expected_for_window),
+                "multiplier": round(ratio, 1),
+                "detected_at": now.isoformat(),
+            })
+    anomalies.sort(key=lambda a: a["multiplier"], reverse=True)
+    return anomalies
+
+
+def _bytes_by_host(db: Session, *, since: datetime.datetime, until: datetime.datetime) -> dict[str, int]:
+    rows = (
+        db.query(FlowRecord.src_ip.label("ip"), func.sum(FlowRecord.bytes).label("b"))
+        .filter(FlowRecord.received_at >= since, FlowRecord.received_at < until)
+        .group_by(FlowRecord.src_ip)
+        .all()
+    )
+    return {r.ip: int(r.b or 0) for r in rows}
+
+
 def exporters(db: Session, *, minutes: int = 60) -> list[dict]:
     """Which flow exporters are actively sending, resolved to a managed
     Device where possible -- lets an admin confirm an exporter config

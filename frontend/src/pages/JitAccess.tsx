@@ -20,6 +20,26 @@ interface JitElevation {
   expires_at: string | null;
   is_active_now: boolean;
   seconds_remaining: number | null;
+  is_stale: boolean;
+  time_to_approve_seconds: number | null;
+}
+
+interface JitApprovalMetrics {
+  window_days: number;
+  decided_count: number;
+  rejected_count: number;
+  mean_seconds: number | null;
+  median_seconds: number | null;
+  p90_seconds: number | null;
+  stale_active_count: number;
+}
+
+function fmtDuration(seconds: number | null): string {
+  if (seconds === null) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = seconds / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  return `${(m / 60).toFixed(1)}h`;
 }
 
 const ROLE_OPTIONS: UserRole[] = ["network_admin", "network_engineer", "noc_engineer", "security", "auditor"];
@@ -63,6 +83,8 @@ export default function JitAccess() {
   const [duration, setDuration] = useState(60);
   const [changeRequestId, setChangeRequestId] = useState("");
 
+  const [metrics, setMetrics] = useState<JitApprovalMetrics | null>(null);
+
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
@@ -81,6 +103,12 @@ export default function JitAccess() {
       })
       .catch((err) => setError(err?.response?.data?.detail || "Failed to load JIT access data."))
       .finally(() => setLoading(false));
+    if (isAdmin) {
+      api
+        .get<JitApprovalMetrics>("/jit-access/metrics", { params: { days: 30 } })
+        .then((res) => setMetrics(res.data))
+        .catch(() => setMetrics(null));
+    }
   }, [isAdmin]);
 
   useEffect(() => {
@@ -203,6 +231,39 @@ export default function JitAccess() {
           {submitting ? "Submitting…" : "Request access"}
         </button>
       </form>
+
+      {/* --- Approval time-to-approve + stale-access metrics --- */}
+      {isAdmin && metrics && (
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+          <h2 className="text-sm font-bold text-navy dark:text-white mb-3">
+            JIT metrics <span className="text-slate-400 font-normal">(last {metrics.window_days}d)</span>
+          </h2>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
+            <div>
+              <p className="text-lg font-bold text-navy dark:text-white">{fmtDuration(metrics.median_seconds)}</p>
+              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Median time to approve</p>
+            </div>
+            <div>
+              <p className="text-lg font-bold text-navy dark:text-white">{fmtDuration(metrics.mean_seconds)}</p>
+              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Mean</p>
+            </div>
+            <div>
+              <p className="text-lg font-bold text-navy dark:text-white">{fmtDuration(metrics.p90_seconds)}</p>
+              <p className="text-[11px] text-slate-400 uppercase tracking-wide">p90</p>
+            </div>
+            <div>
+              <p className="text-lg font-bold text-navy dark:text-white">{metrics.decided_count}</p>
+              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Approved ({metrics.rejected_count} rejected)</p>
+            </div>
+            <div>
+              <p className={`text-lg font-bold ${metrics.stale_active_count > 0 ? "text-red-600" : "text-navy dark:text-white"}`}>
+                {metrics.stale_active_count}
+              </p>
+              <p className="text-[11px] text-slate-400 uppercase tracking-wide">Stale active grants</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* --- Admin approval queue --- */}
       {isAdmin && (
@@ -339,6 +400,14 @@ export default function JitAccess() {
                       <span className={`px-2 py-0.5 rounded-full font-bold ${STATUS_BADGE[el.status]}`}>
                         {el.status}
                       </span>
+                      {el.is_stale && (
+                        <span
+                          className="ml-1 px-2 py-0.5 rounded-full font-bold bg-red-100 text-red-700"
+                          title="Still marked active in the DB past its expected window -- the expiry sweep hasn't caught it yet."
+                        >
+                          stale
+                        </span>
+                      )}
                     </td>
                     <td className="py-1.5 pr-2 text-slate-500">{fmtDate(el.requested_at)}</td>
                     <td className="py-1.5 pr-2 text-slate-500">{el.decided_by ? fmtDate(el.decided_at) : "—"}</td>

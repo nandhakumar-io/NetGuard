@@ -29,7 +29,13 @@ from app.schemas.dashboard_preference import (
     DashboardPreferenceUpdate,
     DashboardWidgetInfo,
 )
-from app.services import dashboard_widgets, event_bus, ipam_service
+from app.services import (
+    dashboard_widgets,
+    event_bus,
+    flow_service,
+    ipam_service,
+    syslog_service,
+)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 logger = logging.getLogger(__name__)
@@ -798,6 +804,49 @@ def _compute_timeline(db: Session, limit: int, since: "datetime.datetime | None"
             "hostname": hostname,
             "link": "/deployments",
         })
+
+    # Syslog message-rate and traffic bandwidth anomalies -- both pages are
+    # otherwise "invisible" unless someone happens to load them while the
+    # spike is happening (see the module docstrings on
+    # syslog_service.detect_message_rate_anomalies and
+    # flow_service.detect_bandwidth_anomalies). Detection always runs
+    # against a fixed recent/baseline window rather than `since`, since an
+    # anomaly is inherently "right now", not something to page back
+    # through -- `since` only gates whether it's included in this
+    # response, same as every other event type here.
+    try:
+        for a in syslog_service.detect_message_rate_anomalies(db):
+            ts = a["detected_at"]
+            if since is not None and ts < since.isoformat():
+                continue
+            events.append({
+                "type": "anomaly",
+                "severity": "warning",
+                "timestamp": ts,
+                "title": "Syslog anomaly detected",
+                "detail": f"{a['hostname'] or 'Unknown device'} logging {a['multiplier']}x its normal rate ({a['recent_count']} msgs)",
+                "hostname": a["hostname"],
+                "link": "/syslog",
+            })
+    except SQLAlchemyError:
+        logging.getLogger(__name__).exception("syslog anomaly detection failed for dashboard timeline")
+
+    try:
+        for a in flow_service.detect_bandwidth_anomalies(db):
+            ts = a["detected_at"]
+            if since is not None and ts < since.isoformat():
+                continue
+            events.append({
+                "type": "anomaly",
+                "severity": "warning",
+                "timestamp": ts,
+                "title": "Traffic anomaly detected",
+                "detail": f"{a['ip_address']} pushing {a['multiplier']}x its normal bandwidth",
+                "hostname": None,
+                "link": "/traffic",
+            })
+    except SQLAlchemyError:
+        logging.getLogger(__name__).exception("flow anomaly detection failed for dashboard timeline")
 
     events = [e for e in events if e["timestamp"]]
     events.sort(key=lambda e: e["timestamp"], reverse=True)

@@ -64,6 +64,12 @@ const TIMELINE_ICON: Record<string, { fg: string; bg: string; icon: React.ReactN
   change_request: { fg: "text-indigo-500", bg: "bg-indigo-50", icon: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z" strokeLinecap="round" strokeLinejoin="round" /> },
   drift: { fg: "text-cyan-500", bg: "bg-cyan-50", icon: <path d="M8 3v4M16 3v4M3 9h18M5 5h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" strokeLinecap="round" strokeLinejoin="round" /> },
   deployment: { fg: "text-emerald-500", bg: "bg-emerald-50", icon: <path d="M4 12l8-8 8 8M12 4v16" strokeLinecap="round" strokeLinejoin="round" /> },
+  // Syslog message-rate spikes and traffic bandwidth spikes both land here
+  // as "anomaly" -- see syslog_service.detect_message_rate_anomalies /
+  // flow_service.detect_bandwidth_anomalies. Distinct color so a spike
+  // reads as "something worth a second look" without implying a
+  // confirmed alert the way the amber alert icon does.
+  anomaly: { fg: "text-rose-500", bg: "bg-rose-50", icon: <path d="M13 2L3 14h7l-1 8 11-13h-8l1-7z" strokeLinecap="round" strokeLinejoin="round" /> },
 };
 
 interface GroupStat {
@@ -510,7 +516,7 @@ export default function Dashboard() {
             <Card className="p-6 h-full">
               <div className="flex items-center justify-between mb-4">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">What Changed</p>
-                <span className="text-[11px] text-slate-300">alerts · changes · drift · deploys</span>
+                <span className="text-[11px] text-slate-300">alerts · changes · drift · deploys · anomalies</span>
               </div>
               {timelineEvents.length === 0 ? (
                 <div className="text-center py-8">

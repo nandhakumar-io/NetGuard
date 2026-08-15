@@ -6,6 +6,9 @@
   GET    /firmware-upgrades/{id}         — single job, with live status/progress
   POST   /firmware-upgrades/{id}/cancel  — cancel before it starts
   POST   /firmware-upgrades/{id}/retry   — re-run a failed/rolled-back job
+  GET    /firmware-upgrades/preview/{device_id} — blast-radius/reachability
+                                            preview for the reboot window,
+                                            before the job is even created
 """
 import uuid
 
@@ -15,14 +18,16 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles
+from app.models.device import Device
 from app.models.firmware_upgrade import FirmwareUpgrade, FirmwareUpgradeStatus
 from app.models.user import User, UserRole
+from app.schemas.change_request import ImpactSimulationPreview
 from app.schemas.firmware_upgrade import (
     FirmwareUpgradeBatchCreate,
     FirmwareUpgradeCreate,
     FirmwareUpgradeRead,
 )
-from app.services import firmware_upgrade_service
+from app.services import firmware_upgrade_service, impact_simulation_service
 
 router = APIRouter(prefix="/firmware-upgrades", tags=["firmware-upgrades"])
 
@@ -35,6 +40,68 @@ def _enqueue(job_id: uuid.UUID) -> None:
     from app.tasks import run_firmware_upgrade_task
 
     run_firmware_upgrade_task.delay(str(job_id))
+
+
+@router.get("/preview/{device_id}", response_model=ImpactSimulationPreview)
+def preview_reboot_impact(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Reachability preview for the reboot window a firmware push causes,
+    shown on the firmware push form before the job is created -- same
+    isolated/degraded/unaffected verdict a change-request reviewer sees
+    from POST /change-requests/simulate-impact, reused here via
+    impact_simulation_service.simulate_reboot_impact rather than a
+    separate blast-radius model, since a reload takes every confirmed
+    link on the device down for the same reason a `shutdown` line would.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    result = impact_simulation_service.simulate_reboot_impact(db, device)
+    return ImpactSimulationPreview(
+        device_id=result.device_id,
+        hostname=result.hostname,
+        affected_interfaces=result.affected_interfaces,
+        removed_links=[
+            {
+                "interface": link.interface,
+                "reason": link.reason,
+                "neighbor_device_id": link.neighbor_device_id,
+                "neighbor_hostname": link.neighbor_hostname,
+                "neighbor_port": link.neighbor_port,
+            }
+            for link in result.removed_links
+        ],
+        isolated_devices=[
+            {
+                "device_id": d.device_id,
+                "hostname": d.hostname,
+                "device_role": d.device_role,
+                "before_hop_count": d.before_hop_count,
+                "after_hop_count": d.after_hop_count,
+                "status": d.status,
+            }
+            for d in result.isolated_devices
+        ],
+        degraded_devices=[
+            {
+                "device_id": d.device_id,
+                "hostname": d.hostname,
+                "device_role": d.device_role,
+                "before_hop_count": d.before_hop_count,
+                "after_hop_count": d.after_hop_count,
+                "status": d.status,
+            }
+            for d in result.degraded_devices
+        ],
+        reachable_unaffected_count=result.reachable_unaffected_count,
+        total_dependent_count=result.total_dependent_count,
+        classification=result.classification,
+        summary=result.summary,
+    )
 
 
 @router.get("", response_model=list[FirmwareUpgradeRead])

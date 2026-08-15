@@ -93,6 +93,8 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
                 revoked_at=r.revoked_at.isoformat() if r.revoked_at else None,
                 is_active_now=active_now,
                 seconds_remaining=seconds_remaining,
+                is_stale=jit_service.is_stale(r, now),
+                time_to_approve_seconds=jit_service.time_to_approve_seconds(r),
                 capabilities_gained=capabilities_gained,
                 blast_radius_devices=blast_radius_devices,
             )
@@ -151,6 +153,18 @@ def list_my_elevations(db: Session = Depends(get_db), user: User = Depends(get_c
         .all()
     )
     return _hydrate(db, rows)
+
+
+@router.get("/metrics")
+def get_approval_metrics(days: int = 30, db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+    """Time-to-approve (mean/median/p90) over the last `days`, plus a
+    live count of stale-active grants -- backs a small card on the
+    RBAC/JIT audit page. Sweeps expired rows first so the stale count
+    reflects grants the sweep genuinely hasn't caught yet, not ones that
+    just haven't been viewed since lapsing.
+    """
+    jit_service.mark_expired_elevations(db)
+    return jit_service.approval_metrics(db, days=days)
 
 
 @router.get("/pending", response_model=list[JitElevationRead])

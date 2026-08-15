@@ -628,7 +628,7 @@ export interface DashboardSummary {
 
 // --- "What changed" timeline ---
 
-export type TimelineEventType = "alert" | "change_request" | "drift" | "deployment";
+export type TimelineEventType = "alert" | "change_request" | "drift" | "deployment" | "anomaly";
 
 export interface TimelineEvent {
   type: TimelineEventType;

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { Device, FirmwareUpgrade, FirmwareUpgradeStatus } from "../lib/types";
+import { Device, FirmwareUpgrade, FirmwareUpgradeStatus, ImpactSimulationPreview } from "../lib/types";
 import { useAuth } from "../lib/auth";
+import ImpactSimulationPanel from "../components/ImpactSimulationPanel";
 
 const statusStyle: Record<FirmwareUpgradeStatus, string> = {
   pending: "bg-slate-100 text-slate-600",
@@ -38,6 +39,31 @@ export default function FirmwareUpgradesPage() {
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Reboot-window reachability preview (GET /firmware-upgrades/preview/{id}),
+  // reusing app.services.impact_simulation_service the same way the New
+  // Change Request form does. Only meaningful for a single target device
+  // -- a batch job's devices are previewed independently rather than
+  // trying to fold N reboots into one combined graph mutation.
+  const [preview, setPreview] = useState<ImpactSimulationPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  useEffect(() => {
+    if (!showForm || form.device_ids.length !== 1) {
+      setPreview(null);
+      return;
+    }
+    const deviceId = form.device_ids[0];
+    setPreviewLoading(true);
+    const t = setTimeout(() => {
+      api
+        .get<ImpactSimulationPreview>(`/firmware-upgrades/preview/${deviceId}`)
+        .then((res) => setPreview(res.data))
+        .catch(() => setPreview(null))
+        .finally(() => setPreviewLoading(false));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [showForm, form.device_ids]);
 
   const load = () => {
     api
@@ -232,6 +258,15 @@ export default function FirmwareUpgradesPage() {
               </div>
               <p className="text-xs text-slate-400 mt-1">Selecting more than one starts a batch job (one row per device).</p>
             </div>
+
+            {form.device_ids.length === 1 && (
+              <ImpactSimulationPanel
+                sim={preview}
+                loading={previewLoading}
+                title="Reboot-Window Impact Preview"
+                loadingLabel="Checking who loses reachability while this device reloads…"
+              />
+            )}
 
             <div>
               <label className="block text-xs font-medium text-slate-500 mb-1">Target version</label>
