@@ -159,6 +159,16 @@ celery_app.conf.update(
             "task": "app.tasks.run_escalation_sweep_task",
             "schedule": float(settings.ESCALATION_SWEEP_INTERVAL_SECONDS),
         },
+        # JIT Access: warns holders whose grant is about to lapse
+        # (JIT_EXPIRY_WARNING_MINUTES out) and notifies when a grant
+        # actually expires, via the standard Slack/Teams/webhook/email/
+        # in-app fan-out -- previously a grant just silently stopped
+        # working with no notice, see app.services.jit_service.
+        # sweep_expiry_notifications.
+        "jit-expiry-notify-sweep": {
+            "task": "app.tasks.run_jit_expiry_notify_sweep_task",
+            "schedule": float(settings.JIT_EXPIRY_SWEEP_INTERVAL_SECONDS),
+        },
         # Approval SLA Slack/Teams reminders: posts a "due soon"/"overdue"
         # countdown for any PENDING_APPROVAL change request that just
         # crossed a new SLA stage, so approvers see it where they work

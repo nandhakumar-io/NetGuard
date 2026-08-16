@@ -38,6 +38,8 @@ const JitAccess = lazy(() => import("./pages/JitAccess"));
 const Insights = lazy(() => import("./pages/Insights"));
 const IntegrationsPage = lazy(() => import("./pages/Integrations"));
 const MobileNOC = lazy(() => import("./pages/MobileNOC"));
+const Users = lazy(() => import("./pages/Users"));
+const Backups = lazy(() => import("./pages/Backups"));
 
 function RouteFallback() {
   return (
@@ -89,6 +91,8 @@ export default function App() {
           <Route path="/security" element={withSuspense(<Security />)} />
           <Route path="/push-settings" element={withSuspense(<PushSettings />)} />
           <Route path="/integrations" element={withSuspense(<IntegrationsPage />)} />
+          <Route path="/users" element={withSuspense(<Users />)} />
+          <Route path="/backups" element={withSuspense(<Backups />)} />
         </Route>
       </Route>
     </Routes>

@@ -8,6 +8,7 @@ from app.api import (
     approval_delegates,
     audit,
     auth,
+    backups,
     change_requests,
     chatops,
     compliance_baselines,
@@ -45,6 +46,7 @@ from app.api import (
     syslog,
     terminal,
     topology,
+    user_management,
     war_room,
     webhooks,
 )
@@ -97,3 +99,5 @@ api_router.include_router(chatops.router)
 api_router.include_router(gitops.router)
 api_router.include_router(ipam.router)
 api_router.include_router(push_subscriptions.router)
+api_router.include_router(user_management.router)
+api_router.include_router(backups.router)

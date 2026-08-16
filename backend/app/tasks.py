@@ -592,6 +592,24 @@ def run_approval_sla_notify_sweep_task() -> int:
         db.close()
 
 
+@celery_app.task(name="app.tasks.run_jit_expiry_notify_sweep_task")
+def run_jit_expiry_notify_sweep_task() -> dict:
+    """Celery beat entry point (see celery_app "jit-expiry-notify-sweep"):
+    warns JIT Access holders whose grant is about to lapse
+    (JIT_EXPIRY_WARNING_MINUTES out) and notifies when a grant actually
+    expires, via the standard Slack/Teams/webhook/email/in-app fan-out --
+    see app.services.jit_service.sweep_expiry_notifications. Returns
+    {"warned": N, "expired": N} for this tick.
+    """
+    from app.services import jit_service
+
+    db = SessionLocal()
+    try:
+        return jit_service.sweep_expiry_notifications(db)
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.run_recurring_window_generation_task")
 def run_recurring_window_generation_task() -> int:
     """Celery beat entry point (see celery_app

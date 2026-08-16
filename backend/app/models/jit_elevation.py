@@ -95,3 +95,9 @@ class JitElevation(Base):
 
     revoked_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Set the first (and only) time the "expiring soon" notification fires
+    # for this row (see jit_service.sweep_expiry_notifications) -- keeps a
+    # periodic sweep from re-sending the same warning every tick. Untouched
+    # by revoke/reject/actual-expiry; those are separate one-shot events.
+    expiry_warning_sent_at = Column(DateTime(timezone=True), nullable=True)

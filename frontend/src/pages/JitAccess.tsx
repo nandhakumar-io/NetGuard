@@ -40,6 +40,13 @@ interface JitApprovalMetrics {
   stale_active_count: number;
 }
 
+// Mirrors backend settings.JIT_EXPIRY_WARNING_MINUTES (app.core.config) --
+// same threshold the jit-expiry-notify-sweep Celery beat task uses to fire
+// the "expiring soon" Slack/Teams/email notification, so a grant's row
+// turns amber here at the same moment that notification goes out, not on
+// some independently-tuned frontend cutoff.
+const EXPIRY_WARNING_SECONDS = 10 * 60;
+
 function fmtDuration(seconds: number | null): string {
   if (seconds === null) return "—";
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -375,12 +382,23 @@ export default function JitAccess() {
                       {el.status}
                     </span>
                   </td>
-                  <td className="py-1.5 pr-2 text-slate-500 dark:text-slate-400">
-                    {el.is_active_now
-                      ? fmtRemaining(el.seconds_remaining)
-                      : el.expires_at
-                      ? `expired ${fmtDate(el.expires_at)}`
-                      : "—"}
+                  <td
+                    className={`py-1.5 pr-2 ${
+                      el.is_active_now && el.seconds_remaining !== null && el.seconds_remaining <= EXPIRY_WARNING_SECONDS
+                        ? "text-riskwarn font-bold"
+                        : "text-slate-500 dark:text-slate-400"
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1">
+                      {el.is_active_now && el.seconds_remaining !== null && el.seconds_remaining <= EXPIRY_WARNING_SECONDS && (
+                        <span title={`Expiring within ${EXPIRY_WARNING_SECONDS / 60}m — a notification has been sent`}>⚠️</span>
+                      )}
+                      {el.is_active_now
+                        ? fmtRemaining(el.seconds_remaining)
+                        : el.expires_at
+                        ? `expired ${fmtDate(el.expires_at)}`
+                        : "—"}
+                    </span>
                   </td>
                   <td className="py-1.5 pr-2 text-slate-500 dark:text-slate-400 max-w-xs truncate">{el.reason}</td>
                   <td className="py-1.5 pr-2">

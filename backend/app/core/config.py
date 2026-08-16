@@ -309,6 +309,20 @@ class Settings(BaseSettings):
     # close to the threshold instead of up to a full sweep interval late.
     ESCALATION_SWEEP_INTERVAL_SECONDS: int = 60
 
+    # JIT Access: how often app.tasks.run_jit_expiry_notify_sweep_task scans
+    # ACTIVE elevations for ones about to lapse / already lapsed. Kept short
+    # relative to JIT_EXPIRY_WARNING_MINUTES so the "expiring soon" notice
+    # arrives with most of that window still intact, not seconds before.
+    JIT_EXPIRY_SWEEP_INTERVAL_SECONDS: int = 60
+
+    # How far ahead of expires_at to fire the "grant expiring soon"
+    # notification (see jit_service.sweep_expiry_notifications). 8h is the
+    # longest a grant can ever run (jit_service.MAX_DURATION_MINUTES), so 10
+    # minutes' notice is proportionate even for the shortest routine grants;
+    # dangerous grants are capped at 60m (DANGER_MAX_DURATION_MINUTES) and
+    # still get the same flat warning window.
+    JIT_EXPIRY_WARNING_MINUTES: int = 10
+
     # GitOps (config-as-code): how often the periodic safety-net re-pull
     # (app.tasks.run_gitops_auto_sync_sweep_task) runs, independent of any
     # webhook. Webhook-triggered syncs happen immediately regardless of

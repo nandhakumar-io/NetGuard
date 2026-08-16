@@ -149,6 +149,10 @@ const groups: NavGroup[] = [
         to: "/integrations", label: "Integrations",
         icon: <svg {...iconProps}><path d="M9 3H5a2 2 0 00-2 2v4" /><path d="M15 3h4a2 2 0 012 2v4" /><path d="M9 21H5a2 2 0 01-2-2v-4" /><path d="M15 21h4a2 2 0 002-2v-4" /><rect x="9" y="9" width="6" height="6" rx="1" /></svg>,
       },
+      {
+        to: "/users", label: "Users",
+        icon: <svg {...iconProps}><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" /></svg>,
+      },
     ],
   },
   {
@@ -168,6 +172,10 @@ const groups: NavGroup[] = [
       {
         to: "/jobs", label: "Jobs",
         icon: <svg {...iconProps}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>,
+      },
+      {
+        to: "/backups", label: "Backups",
+        icon: <svg {...iconProps}><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0018 0V5" /><path d="M3 12a9 3 0 0018 0" /></svg>,
       },
     ],
   },

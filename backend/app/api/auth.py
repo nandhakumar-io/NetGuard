@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from jose import JWTError
 from sqlalchemy.orm import Session
@@ -70,6 +72,12 @@ def _issue_token_pair(db: Session, user: User, response: Response, request: Requ
         user_agent=request.headers.get("user-agent") if request else None,
         ip_address=session_device.client_ip(request) if request else None,
     ))
+    # Shared choke point for both the plain-password and post-MFA login
+    # paths (login() and mfa_verify() both end here), so this is the one
+    # place that needs to stamp "last login" rather than duplicating it in
+    # both -- backs the User Management page's Last Login column (see
+    # app.api.user_management).
+    user.last_login_at = datetime.utcnow()
     db.commit()
 
     _set_refresh_cookie(response, raw_refresh)
@@ -113,6 +121,13 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     if not user or not verify_password(payload.password, user.hashed_password):
         rate_limiter.record_failed_attempt(payload.email)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Same is_active gate app.api.sso already applies for Google SSO login
+    # -- previously only the SSO path actually enforced a disabled account,
+    # so disabling a user via User Management (app.api.user_management)
+    # would have silently done nothing for anyone still using a password.
+    if user.is_active in (False, "false", "False"):
+        raise HTTPException(status_code=403, detail="This account has been disabled")
 
     rate_limiter.reset_attempts(payload.email)
 

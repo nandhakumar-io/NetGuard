@@ -18,9 +18,11 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.change_request import ChangeRequest
 from app.models.jit_elevation import JitElevation, JitElevationStatus
-from app.services import audit_service
+from app.models.user import User
+from app.services import audit_service, notification_service
 
 MAX_DURATION_MINUTES = 8 * 60  # 8 hours -- a JIT grant that "expires" next quarter isn't JIT
 
@@ -181,6 +183,88 @@ def mark_expired_elevations(db: Session) -> int:
     if rows:
         db.commit()
     return len(rows)
+
+
+def _user_label(db: Session, user_id: uuid.UUID) -> str:
+    """Best-effort human-readable identifier for a notification body --
+    falls back to the raw id if the user row is somehow gone, since a
+    notification failing to resolve a name shouldn't block the sweep."""
+    user = db.get(User, user_id)
+    return user.email if user is not None else str(user_id)
+
+
+def sweep_expiry_notifications(db: Session, *, now: datetime.datetime | None = None) -> dict:
+    """Celery beat entry point (see app.tasks.run_jit_expiry_notify_sweep_task
+    / celery_app "jit-expiry-notify-sweep"). Two independent passes over
+    ACTIVE elevations, each posting through the standard
+    notification_service.notify() Slack/Teams/webhook/email/in-app fan-out
+    so a grant lapsing mid-task doesn't go unnoticed until the holder's
+    next API call gets a 403:
+
+      1. "Expiring soon" -- any ACTIVE row within JIT_EXPIRY_WARNING_MINUTES
+         of expires_at that hasn't already been warned
+         (expiry_warning_sent_at is None). Fired at most once per row --
+         see the column's docstring on the model.
+      2. "Expired" -- delegates the actual status flip to
+         mark_expired_elevations (single source of truth for that
+         transition) but, unlike a bare call to it, also notifies for each
+         row that just flipped, so "your access just ended" is pushed out
+         rather than only ever visible on next look at the JIT Access page.
+
+    Returns {"warned": N, "expired": N}. Safe to call on every tick even
+    with nothing due -- both passes are empty-query no-ops in that case.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    warning_cutoff = now + datetime.timedelta(minutes=settings.JIT_EXPIRY_WARNING_MINUTES)
+
+    # --- Pass 1: expiring soon -------------------------------------------------
+    soon_rows = (
+        db.query(JitElevation)
+        .filter(
+            JitElevation.status == JitElevationStatus.ACTIVE,
+            JitElevation.expires_at.isnot(None),
+            JitElevation.expires_at > now,
+            JitElevation.expires_at <= warning_cutoff,
+            JitElevation.expiry_warning_sent_at.is_(None),
+        )
+        .all()
+    )
+    for row in soon_rows:
+        remaining_minutes = max(int((row.expires_at - now).total_seconds() // 60), 0)
+        link = f"{settings.FRONTEND_URL.rstrip('/')}/jit-access"
+        notification_service.notify(
+            event="JIT Access Expiring Soon",
+            message=(
+                f"{_user_label(db, row.user_id)}'s temporary {row.elevated_role} access expires in "
+                f"~{remaining_minutes}m ({row.expires_at.isoformat()}). Extend or wrap up before it "
+                f"lapses -- <{link}|JIT Access>"
+            ),
+            severity="warning",
+            change_request_id=row.change_request_id,
+        )
+        row.expiry_warning_sent_at = now
+    if soon_rows:
+        db.commit()
+
+    # --- Pass 2: just expired ---------------------------------------------------
+    expiring_now = (
+        db.query(JitElevation)
+        .filter(JitElevation.status == JitElevationStatus.ACTIVE, JitElevation.expires_at <= now)
+        .all()
+    )
+    # Snapshot what we need before mark_expired_elevations re-queries and
+    # flips status underneath us.
+    expired_info = [(row.id, row.user_id, row.elevated_role, row.change_request_id) for row in expiring_now]
+    expired_count = mark_expired_elevations(db)
+    for _row_id, user_id, elevated_role, change_request_id in expired_info:
+        notification_service.notify(
+            event="JIT Access Expired",
+            message=f"{_user_label(db, user_id)}'s temporary {elevated_role} access has expired.",
+            severity="info",
+            change_request_id=change_request_id,
+        )
+
+    return {"warned": len(soon_rows), "expired": expired_count}
 
 
 def request_elevation(

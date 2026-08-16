@@ -48,3 +48,11 @@ class User(Base):
     msteams_user_id = Column(String, unique=True, index=True, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Stamped by app.api.auth._issue_token_pair -- the one choke point
+    # every successful login path (plain password, post-MFA, SSO) already
+    # runs through, so this is set in exactly one place rather than
+    # duplicated per login route. Backs User Management's Last Login
+    # column (app.api.user_management) -- previously there was no way to
+    # tell a genuinely stale account from one that logs in weekly.
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
