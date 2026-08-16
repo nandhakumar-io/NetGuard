@@ -279,6 +279,13 @@ class Settings(BaseSettings):
     COMPLIANCE_REPORT_WEEKLY_WINDOW_DAYS: int = 7
     COMPLIANCE_REPORT_MONTHLY_WINDOW_DAYS: int = 30
 
+    # Weekly Change Request Digest (app.services.change_request_digest) --
+    # separate on/off switch and delivery hour from the compliance report
+    # above so either can be toggled or retimed independently.
+    CHANGE_REQUEST_DIGEST_WEEKLY_ENABLED: bool = True
+    CHANGE_REQUEST_DIGEST_HOUR_UTC: int = 7
+    CHANGE_REQUEST_DIGEST_WEEKLY_WINDOW_DAYS: int = 7
+
     # Deployment pipeline circuit breaker: a device that fails deployment
     # (FAILED or ROLLED_BACK outcome) this many times in a row -- counting
     # only the latest attempt per distinct ChangeRequest, so Celery infra

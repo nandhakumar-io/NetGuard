@@ -40,6 +40,7 @@ const IntegrationsPage = lazy(() => import("./pages/Integrations"));
 const MobileNOC = lazy(() => import("./pages/MobileNOC"));
 const Users = lazy(() => import("./pages/Users"));
 const Backups = lazy(() => import("./pages/Backups"));
+const WallBoard = lazy(() => import("./pages/WallBoard"));
 
 function RouteFallback() {
   return (
@@ -62,6 +63,10 @@ export default function App() {
             the stripped-down alert list an on-call engineer wants on a
             phone. See pages/MobileNOC.tsx. */}
         <Route path="/noc" element={withSuspense(<MobileNOC />)} />
+        {/* Same rationale as /noc above -- a wall-mounted monitor wants
+            fullscreen kiosk chrome, not the sidebar/topbar. See
+            pages/WallBoard.tsx. */}
+        <Route path="/wallboard" element={withSuspense(<WallBoard />)} />
         <Route element={<Layout />}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/change-requests" element={withSuspense(<ChangeRequests />)} />

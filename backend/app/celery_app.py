@@ -142,6 +142,15 @@ celery_app.conf.update(
             "task": "app.tasks.run_monthly_compliance_report_task",
             "schedule": crontab(day_of_month=1, hour=settings.COMPLIANCE_REPORT_HOUR_UTC, minute=0),
         },
+        # Weekly Change Request Digest: volume/status/risk/approval-time
+        # rollup of the week's change requests, emailed to
+        # NOTIFY_EMAIL_RECIPIENTS (see app.services.change_request_digest).
+        # Independent enable flag and hour from the compliance report above
+        # -- different audience/cadence, same delivery mechanism.
+        "weekly-change-request-digest": {
+            "task": "app.tasks.run_weekly_change_request_digest_task",
+            "schedule": crontab(day_of_week="mon", hour=settings.CHANGE_REQUEST_DIGEST_HOUR_UTC, minute=0),
+        },
         # Configuration Snapshot retention sweep: enforces
         # SNAPSHOT_RETENTION_DAYS / SNAPSHOT_RETENTION_MIN_PER_DEVICE
         # nightly so snapshot history (taken automatically before every

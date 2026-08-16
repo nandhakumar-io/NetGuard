@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "../lib/api";
 import { useAuth, UserRole } from "../lib/auth";
 import { ImpactClassificationBadge, classificationDotClass } from "../components/ImpactClassificationBadge";
+import { downloadCsv, exportButtonClass, toCsv, todayStamp } from "../lib/csv";
 
 interface JitElevation {
   id: string;
@@ -423,7 +424,36 @@ export default function JitAccess() {
       {/* --- Full history (admin only) --- */}
       {isAdmin && (
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
-          <h2 className="text-sm font-bold text-navy dark:text-white mb-3">All elevations (org-wide)</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-bold text-navy dark:text-white">All elevations (org-wide)</h2>
+            <button
+              onClick={() =>
+                downloadCsv(
+                  `netguard-jit-history-${todayStamp()}.csv`,
+                  toCsv(all, [
+                    { header: "User", value: (r) => r.user_email || r.user_id },
+                    { header: "Elevated Role", value: (r) => r.elevated_role },
+                    { header: "Status", value: (r) => r.status },
+                    { header: "Reason", value: (r) => r.reason },
+                    { header: "Requested Duration (min)", value: (r) => r.requested_duration_minutes },
+                    { header: "Requested At", value: (r) => (r.requested_at ? new Date(r.requested_at).toISOString() : "") },
+                    { header: "Decided By", value: (r) => r.decided_by || "" },
+                    { header: "Decided At", value: (r) => (r.decided_at ? new Date(r.decided_at).toISOString() : "") },
+                    { header: "Activated At", value: (r) => (r.activated_at ? new Date(r.activated_at).toISOString() : "") },
+                    { header: "Expires At", value: (r) => (r.expires_at ? new Date(r.expires_at).toISOString() : "") },
+                    { header: "Dual Approval", value: (r) => (r.requires_dual_approval ? "Yes" : "No") },
+                  ])
+                )
+              }
+              disabled={all.length === 0}
+              className={`${exportButtonClass} !px-2.5 !py-1 text-xs disabled:opacity-40`}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" />
+              </svg>
+              Export CSV
+            </button>
+          </div>
           {all.length === 0 ? (
             <p className="text-xs text-slate-400 dark:text-slate-500">No elevations on record.</p>
           ) : (

@@ -116,6 +116,10 @@ const groups: NavGroup[] = [
         icon: <svg {...iconProps}><rect x="6" y="2" width="12" height="20" rx="2" /><path d="M11 18h2" /></svg>,
       },
       {
+        to: "/wallboard", label: "Wall Board (TV)",
+        icon: <svg {...iconProps}><rect x="2" y="4" width="20" height="14" rx="2" /><path d="M8 21h8M12 18v3" /></svg>,
+      },
+      {
         to: "/incidents", label: "Incidents",
         icon: <svg {...iconProps}><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9L1.8 18a1.5 1.5 0 001.3 2.3h17.8a1.5 1.5 0 001.3-2.3L13.7 3.9a1.5 1.5 0 00-2.6 0z" /></svg>,
       },
@@ -498,4 +502,4 @@ export default function Layout() {
       <CommandPalette />
     </div>
   );
-}
+}cd

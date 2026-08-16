@@ -7,6 +7,7 @@ import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
 import { useAuth } from "../lib/auth";
 import { useSearchParams } from "react-router-dom";
+import { downloadCsv, exportButtonClass, toCsv, todayStamp } from "../lib/csv";
 
 const statusStyle: Record<string, string> = {
   draft: "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300",
@@ -145,6 +146,7 @@ export default function ChangeRequests() {
   const { user } = useAuth();
   const canApprove = user?.role === "network_admin";
   const [requests, setRequests] = useState<ChangeRequest[]>([]);
+  const [digestDownloading, setDigestDownloading] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selected, setSelected] = useState<ChangeRequest | null>(null);
 
@@ -597,6 +599,44 @@ export default function ChangeRequests() {
 
   const pendingCount = requests.filter((r) => r.status === "pending_approval").length;
 
+  const exportCsv = () => {
+    downloadCsv(
+      `netguard-change-requests-${todayStamp()}.csv`,
+      toCsv(filtered, [
+        { header: "Device", value: (r) => hostnameFor(r.device_id) },
+        { header: "Status", value: (r) => r.status },
+        { header: "Priority", value: (r) => r.priority },
+        { header: "Description", value: (r) => r.description },
+        { header: "Risk Classification", value: (r) => r.risk_classification || "" },
+        { header: "Risk Score", value: (r) => r.risk_score ?? "" },
+        { header: "Submitted By", value: (r) => r.submitted_by_name || r.submitted_by },
+        { header: "Approved By", value: (r) => r.approved_by_name || r.approved_by || "" },
+        { header: "Approved At", value: (r) => (r.approved_at ? new Date(r.approved_at).toISOString() : "") },
+        { header: "Dual Approval", value: (r) => (r.requires_dual_approval ? "Yes" : "No") },
+        { header: "Is Rollback", value: (r) => (r.is_rollback === "true" ? "Yes" : "No") },
+        { header: "Created At", value: (r) => new Date(r.created_at).toISOString() },
+      ])
+    );
+  };
+
+  const downloadWeeklyDigest = async () => {
+    setDigestDownloading(true);
+    try {
+      const res = await api.get("/reports/change-request-digest", { params: { days: 7 }, responseType: "blob" as any });
+      const blob = new Blob([res.data], { type: "text/csv" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `netguard-change-request-digest-${todayStamp()}.csv`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to download digest");
+    } finally {
+      setDigestDownloading(false);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -606,13 +646,32 @@ export default function ChangeRequests() {
             Submit configuration changes for AI risk analysis, validation, and approval.
           </p>
         </div>
-        <button
-          onClick={() => setShowForm((s) => !s)}
-          disabled={!devices.length}
-          className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy dark:bg-slate-950 transition-colors disabled:opacity-50"
-        >
-          {showForm ? "Cancel" : "+ New Change Request"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={exportCsv} disabled={filtered.length === 0} className={`${exportButtonClass} disabled:opacity-40`}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" />
+            </svg>
+            Export CSV
+          </button>
+          <button
+            onClick={downloadWeeklyDigest}
+            disabled={digestDownloading}
+            title="Server-computed weekly digest: volume, status breakdown, risk, approval time, and the full org-wide pending queue — not just what's on screen"
+            className={`${exportButtonClass} disabled:opacity-40`}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18" /><path d="M8 3v3M16 3v3" />
+            </svg>
+            {digestDownloading ? "Preparing…" : "Weekly Digest"}
+          </button>
+          <button
+            onClick={() => setShowForm((s) => !s)}
+            disabled={!devices.length}
+            className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy dark:bg-slate-950 transition-colors disabled:opacity-50"
+          >
+            {showForm ? "Cancel" : "+ New Change Request"}
+          </button>
+        </div>
       </div>
 
       {!devices.length && !initialLoading && (

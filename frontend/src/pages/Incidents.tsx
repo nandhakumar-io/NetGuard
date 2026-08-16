@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { downloadCsv, exportButtonClass, toCsv, todayStamp } from "../lib/csv";
 
 interface Incident {
   id: string;
@@ -141,13 +142,39 @@ export default function Incidents() {
     openDetail(selectedId);
   };
 
+  const exportCsv = () => {
+    downloadCsv(
+      `netguard-incidents-${todayStamp()}.csv`,
+      toCsv(incidents, [
+        { header: "Title", value: (r) => r.title },
+        { header: "Severity", value: (r) => r.severity },
+        { header: "Status", value: (r) => r.status },
+        { header: "Detected At", value: (r) => (r.detected_at ? new Date(r.detected_at).toISOString() : "") },
+        { header: "Resolved At", value: (r) => (r.resolved_at ? new Date(r.resolved_at).toISOString() : "") },
+        { header: "Alert Count", value: (r) => r.alert_ids?.length ?? 0 },
+        { header: "Root Cause", value: (r) => r.root_cause_summary || "" },
+        { header: "Impact", value: (r) => r.impact_summary || "" },
+        { header: "Created By", value: (r) => r.created_by || "" },
+        { header: "Created At", value: (r) => new Date(r.created_at).toISOString() },
+      ])
+    );
+  };
+
   return (
     <div>
-      <div>
-        <h1 className="text-2xl font-bold text-navy dark:text-white">Incidents</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Correlated alert groups promoted to formal incidents for retros — timeline, root cause, and follow-ups.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-navy dark:text-white">Incidents</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Correlated alert groups promoted to formal incidents for retros — timeline, root cause, and follow-ups.
+          </p>
+        </div>
+        <button onClick={exportCsv} disabled={incidents.length === 0} className={`${exportButtonClass} disabled:opacity-40`}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" />
+          </svg>
+          Export CSV
+        </button>
       </div>
 
       {preview && (

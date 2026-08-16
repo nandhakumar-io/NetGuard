@@ -507,6 +507,41 @@ def run_monthly_compliance_report_task(self) -> bool:
         db.close()
 
 @celery_app.task(
+    name="app.tasks.run_weekly_change_request_digest_task",
+    bind=True,
+    # Same rationale as the compliance report tasks above: infra retries
+    # only, an SMTP failure is already handled (logged + swallowed) inside
+    # notification_service.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_weekly_change_request_digest_task(self) -> bool:
+    """Celery beat entry point (see app.celery_app.conf.beat_schedule
+    "weekly-change-request-digest"): emails a rollup of the week's change
+    request activity -- volume, status breakdown, Critical Risk count,
+    time-to-approve, top submitters, and anything still stuck in the
+    pending queue -- to NOTIFY_EMAIL_RECIPIENTS via
+    app.services.change_request_digest.deliver_scheduled_digest. No-ops
+    (returns False without building/sending anything) if
+    CHANGE_REQUEST_DIGEST_WEEKLY_ENABLED is off.
+    """
+    from app.core.config import settings
+    from app.services import change_request_digest
+
+    if not settings.CHANGE_REQUEST_DIGEST_WEEKLY_ENABLED:
+        return False
+
+    db = SessionLocal()
+    try:
+        return change_request_digest.deliver_scheduled_digest(
+            db, window_days=settings.CHANGE_REQUEST_DIGEST_WEEKLY_WINDOW_DAYS
+        )
+    finally:
+        db.close()
+
+
+@celery_app.task(
     name="app.tasks.run_firmware_upgrade_task",
     bind=True,
     # Same rationale as deploy_device_task: retries here cover infra
