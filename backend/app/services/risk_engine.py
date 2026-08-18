@@ -67,6 +67,44 @@ _OSPF_NETWORK_RE = re.compile(
 _OSPF_PASSIVE_RE = re.compile(r"passive-interface\s+(\S+)", re.IGNORECASE)
 _OSPF_PROCESS_RE = re.compile(r"router\s+ospf\s+\d+", re.IGNORECASE)
 
+# --- BGP / EVPN-VXLAN structured facts -----------------------------------
+# Two dialect families are parsed rather than one:
+#   - "curly"/indented CLI (IOS, IOS-XE, NX-OS, EOS): `router bgp <asn>` /
+#     `neighbor <ip> remote-as <asn>`
+#   - Junos `set` syntax: `set protocols bgp group <g> neighbor <ip>
+#     peer-as <asn>`
+# so BGP/EVPN risk isn't only detected on Cisco-family text the way the
+# original keyword rules (RISK_RULES `no router bgp` / `no neighbor`) are --
+# those still fire for IOS-style removals, but a Junos `delete protocols
+# bgp group X neighbor Y` previously produced *no* structured finding at
+# all, only whatever a bare keyword regex happened to catch.
+_BGP_ASN_RE = re.compile(r"^\s*router\s+bgp\s+(\d+)", re.IGNORECASE | re.MULTILINE)
+_BGP_NEIGHBOR_REMOTE_AS_RE = re.compile(
+    r"^\s*neighbor\s+(\S+)\s+remote-as\s+(\d+)", re.IGNORECASE | re.MULTILINE
+)
+_BGP_NEIGHBOR_RM_RE = re.compile(
+    r"^\s*neighbor\s+(\S+)\s+route-map\s+(\S+)\s+(in|out)", re.IGNORECASE | re.MULTILINE
+)
+_BGP_NEIGHBOR_PL_RE = re.compile(
+    r"^\s*neighbor\s+(\S+)\s+prefix-list\s+(\S+)\s+(in|out)", re.IGNORECASE | re.MULTILINE
+)
+_JUNOS_BGP_ASN_RE = re.compile(r"^set\s+routing-options\s+autonomous-system\s+(\d+)", re.IGNORECASE | re.MULTILINE)
+_JUNOS_BGP_NEIGHBOR_RE = re.compile(
+    r"^(set|delete)\s+protocols\s+bgp\s+group\s+\S+\s+neighbor\s+(\S+)\s+peer-as\s+(\d+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_NO_BGP_NEIGHBOR_RE = re.compile(r"\bno\s+neighbor\s+(\S+)\b", re.IGNORECASE)
+
+# EVPN/VXLAN overlay -- a change here silently breaks Type-2/Type-3 route
+# exchange or the data-plane VTEP mesh without ever touching "underlay"
+# constructs (interfaces, static routes) that the older checks look at.
+_VNI_RE = re.compile(r"\b(?:vni|vxlan-id)\s+(\d+)\b", re.IGNORECASE)
+_NVE_INTERFACE_RE = re.compile(r"^interface\s+nve\s*\d+", re.IGNORECASE | re.MULTILINE)
+_EVPN_AF_RE = re.compile(r"\baddress-family\s+l2vpn\s+evpn\b", re.IGNORECASE)
+_JUNOS_EVPN_RE = re.compile(r"^set\s+.*\bprotocols\s+evpn\b", re.IGNORECASE | re.MULTILINE)
+_JUNOS_VNI_RE = re.compile(r"^set\s+.*\bvni\s+(\d+)\b", re.IGNORECASE | re.MULTILINE)
+_NO_VNI_RE = re.compile(r"\bno\s+(?:vni|member\s+vni)\s+(\d+)\b", re.IGNORECASE)
+
 
 @dataclass
 class ParsedConfig:
@@ -85,6 +123,26 @@ class ParsedConfig:
     ospf_networks: list[tuple[str, str, str]] = field(default_factory=list)
     ospf_passive_interfaces: set[str] = field(default_factory=set)
     has_ospf_process: bool = False
+
+    # -- BGP --
+    bgp_asn: str | None = None
+    has_bgp_process: bool = False
+    # neighbor_ip -> remote_as. Populated from both IOS-family
+    # `neighbor X remote-as Y` and Junos `set ... neighbor X peer-as Y`,
+    # so a caller comparing current vs proposed sees the same shape of
+    # fact regardless of which dialect the device speaks.
+    bgp_neighbors: dict[str, str] = field(default_factory=dict)
+    bgp_neighbors_removed: set[str] = field(default_factory=set)  # explicit `no neighbor` / Junos `delete ... neighbor`
+    # neighbor_ip -> set of (policy_kind, name, direction), policy_kind in
+    # {"route-map", "prefix-list"} -- used to flag a neighbor losing its
+    # inbound/outbound policy filter rather than just losing the session.
+    bgp_neighbor_policies: dict[str, set[tuple[str, str, str]]] = field(default_factory=lambda: defaultdict(set))
+
+    # -- EVPN / VXLAN overlay --
+    has_evpn_process: bool = False
+    nve_interfaces: set[str] = field(default_factory=set)
+    vnis_declared: set[int] = field(default_factory=set)
+    vnis_removed: set[int] = field(default_factory=set)
 
 
 def parse_config(text: str) -> ParsedConfig:
@@ -107,6 +165,40 @@ def parse_config(text: str) -> ParsedConfig:
     for m in _OSPF_PASSIVE_RE.finditer(text):
         parsed.ospf_passive_interfaces.add(m.group(1).lower())
     parsed.has_ospf_process = bool(_OSPF_PROCESS_RE.search(text))
+
+    # -- BGP (IOS-family + Junos set-style) --
+    asn_match = _BGP_ASN_RE.search(text) or _JUNOS_BGP_ASN_RE.search(text)
+    if asn_match:
+        parsed.bgp_asn = asn_match.group(1)
+        parsed.has_bgp_process = True
+    for m in _BGP_NEIGHBOR_REMOTE_AS_RE.finditer(text):
+        parsed.bgp_neighbors[m.group(1).lower()] = m.group(2)
+        parsed.has_bgp_process = True
+    for m in _JUNOS_BGP_NEIGHBOR_RE.finditer(text):
+        action, neighbor, remote_as = m.group(1).lower(), m.group(2).lower(), m.group(3)
+        parsed.has_bgp_process = True
+        if action == "delete":
+            parsed.bgp_neighbors_removed.add(neighbor)
+        else:
+            parsed.bgp_neighbors[neighbor] = remote_as
+    for m in _NO_BGP_NEIGHBOR_RE.finditer(text):
+        parsed.bgp_neighbors_removed.add(m.group(1).lower())
+    for m in _BGP_NEIGHBOR_RM_RE.finditer(text):
+        parsed.bgp_neighbor_policies[m.group(1).lower()].add(("route-map", m.group(2), m.group(3).lower()))
+    for m in _BGP_NEIGHBOR_PL_RE.finditer(text):
+        parsed.bgp_neighbor_policies[m.group(1).lower()].add(("prefix-list", m.group(2), m.group(3).lower()))
+
+    # -- EVPN / VXLAN overlay (IOS/NX-OS/EOS-style + Junos set-style) --
+    parsed.has_evpn_process = bool(_EVPN_AF_RE.search(text) or _JUNOS_EVPN_RE.search(text))
+    if _NVE_INTERFACE_RE.search(text):
+        parsed.nve_interfaces.add("nve")
+    for m in _VNI_RE.finditer(text):
+        parsed.vnis_declared.add(int(m.group(1)))
+    for m in _JUNOS_VNI_RE.finditer(text):
+        parsed.vnis_declared.add(int(m.group(1)))
+    for m in _NO_VNI_RE.finditer(text):
+        parsed.vnis_removed.add(int(m.group(1)))
+
     return parsed
 
 
@@ -179,6 +271,68 @@ class NetworkAwareChecks:
         findings += self._routing_loop_risk()
         findings += self._acl_conflicts()
         findings += self._ospf_adjacency_impact()
+        findings += self._bgp_impact()
+        findings += self._evpn_vxlan_impact()
+        return findings
+
+    # -- BGP impact ------------------------------------------------------
+    # Weighted above VLAN/interface/ACL findings on purpose: a BGP session
+    # or policy change is fleet-wide (every downstream prefix learned via
+    # that peer) rather than local to one device/port, and generic
+    # diff-based keyword scoring can't tell "neighbor policy swapped" from
+    # "neighbor description edited" -- both are just lines that changed.
+
+    def _bgp_impact(self) -> list[tuple[str, int]]:
+        findings: list[tuple[str, int]] = []
+        if not self.current or not (self.current.has_bgp_process or self.proposed.has_bgp_process):
+            return findings
+
+        if self.current.bgp_asn and self.proposed.bgp_asn and self.current.bgp_asn != self.proposed.bgp_asn:
+            findings.append(
+                (f"BGP local AS changed ({self.current.bgp_asn} -> {self.proposed.bgp_asn}) -- every eBGP session on this device will reset", 35)
+            )
+
+        removed = (set(self.current.bgp_neighbors) - set(self.proposed.bgp_neighbors)) | self.proposed.bgp_neighbors_removed
+        for neighbor in sorted(removed):
+            remote_as = self.current.bgp_neighbors.get(neighbor, "unknown")
+            findings.append((f"BGP neighbor {neighbor} (AS {remote_as}) removed -- prefixes learned/advertised via this peer will be lost", 30))
+
+        for neighbor, remote_as in self.proposed.bgp_neighbors.items():
+            prior_as = self.current.bgp_neighbors.get(neighbor)
+            if prior_as and prior_as != remote_as:
+                findings.append((f"BGP neighbor {neighbor} remote-as changed ({prior_as} -> {remote_as}) -- session will flap and may form with an unintended peer", 25))
+
+        # Policy attached to a *surviving* neighbor going away (route-map /
+        # prefix-list removed while the session itself stays up) is the
+        # dangerous, easy-to-miss case: the peer stays adjacent but starts
+        # sending/receiving prefixes with no filter at all.
+        for neighbor, current_policies in self.current.bgp_neighbor_policies.items():
+            if neighbor in removed:
+                continue
+            proposed_policies = self.proposed.bgp_neighbor_policies.get(neighbor, set())
+            dropped = current_policies - proposed_policies
+            for kind, name, direction in dropped:
+                findings.append((f"BGP neighbor {neighbor} lost its {direction}bound {kind} '{name}' -- route filtering on this peer is now weaker or absent", 20))
+
+        return findings
+
+    # -- EVPN / VXLAN overlay impact --------------------------------------
+
+    def _evpn_vxlan_impact(self) -> list[tuple[str, int]]:
+        findings: list[tuple[str, int]] = []
+        if not self.current:
+            return findings
+
+        if self.current.has_evpn_process and not self.proposed.has_evpn_process:
+            findings.append(("EVPN address-family/protocol removed -- Type-2/Type-3 route exchange for all overlay VNIs on this device stops", 35))
+
+        removed_vnis = (self.current.vnis_declared - self.proposed.vnis_declared) | self.proposed.vnis_removed
+        for vni in sorted(removed_vnis):
+            findings.append((f"VXLAN VNI {vni} removed -- Layer-2 overlay reachability for this segment is lost fleet-wide, not just on this device", 25))
+
+        if self.current.nve_interfaces and not self.proposed.nve_interfaces:
+            findings.append(("NVE (VTEP) interface removed -- this device drops out of the VXLAN overlay entirely", 30))
+
         return findings
 
     # -- Duplicate IPs -----------------------------------------------------
