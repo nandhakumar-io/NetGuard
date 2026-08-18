@@ -16,6 +16,7 @@ from migration_helpers import (
     create_index_if_missing,
     create_table_if_missing,
     drop_index_if_exists,
+    enum_type_exists,
 )
 
 revision = "0008"
@@ -43,8 +44,10 @@ notification_severity = postgresql.ENUM(
 
 def upgrade() -> None:
     bind = op.get_bind()
-    notification_event_type.create(bind, checkfirst=True)
-    notification_severity.create(bind, checkfirst=True)
+    if not enum_type_exists("notificationeventtype"):
+        notification_event_type.create(bind, checkfirst=True)
+    if not enum_type_exists("notificationseverity"):
+        notification_severity.create(bind, checkfirst=True)
 
     create_table_if_missing(
         "notifications",
