@@ -134,6 +134,30 @@ def set_ssh_password(device: Device, password: str) -> None:
         device.credentials_rotated_at = datetime.now(timezone.utc)
 
 
+def get_gnmi_password(device: Device) -> str:
+    """Resolve the gNMI (username/password) auth secret for a device.
+    Same DB-encrypted-first pattern as get_ssh_password; gNMI has no
+    legacy env-ref column since it's a new integration, so this is just
+    the encrypted-column lookup with a clear error when unset.
+    """
+    if device.gnmi_password_encrypted:
+        password = crypto.decrypt(device.gnmi_password_encrypted)
+        if password:
+            return password
+    raise CredentialNotFoundError(
+        f"Device '{device.hostname}' has no gNMI credential configured. "
+        "Set one via POST /devices/{id}/gnmi-credentials."
+    )
+
+
+def set_gnmi_password(device: Device, password: str) -> None:
+    """Encrypts and stores the gNMI password directly on the device row.
+    Pass "" to explicitly clear it. Caller is responsible for db.commit()."""
+    device.gnmi_password_encrypted = crypto.encrypt(password) if password else None
+    if password:
+        device.credentials_rotated_at = datetime.now(timezone.utc)
+
+
 def get_secret(credential_ref: str | None, *, device: Device, label: str) -> str:
     """Generic secret-store lookup for the non-SSH credential refs added
     for NETCONF/SNMP (SNMP community string, SNMP v3 auth/privacy

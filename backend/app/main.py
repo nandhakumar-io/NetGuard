@@ -181,6 +181,15 @@ async def lifespan(app: FastAPI):
             host=settings.SFLOW_UDP_HOST, port=settings.SFLOW_UDP_PORT
         )
 
+    if settings.GNMI_INPROCESS_STREAMING_ENABLED:
+        from app.services import gnmi_service
+
+        await gnmi_service.start_gnmi_supervisor()
+        logger.info(
+            "gNMI streaming-telemetry supervisor started (roster refresh every %ss)",
+            settings.GNMI_DEVICE_ROSTER_REFRESH_SECONDS,
+        )
+
     global _topology_snapshot_loop_task
     if settings.TOPOLOGY_SNAPSHOT_ENABLED and _topology_snapshot_loop_task is None:
         _topology_snapshot_loop_task = asyncio.create_task(_topology_snapshot_loop())
@@ -202,6 +211,11 @@ async def lifespan(app: FastAPI):
     if _sflow_transport is not None:
         _sflow_transport.close()
         _sflow_transport = None
+
+    if settings.GNMI_INPROCESS_STREAMING_ENABLED:
+        from app.services import gnmi_service
+
+        await gnmi_service.stop_gnmi_supervisor()
 
     if _topology_snapshot_loop_task is not None:
         _topology_snapshot_loop_task.cancel()

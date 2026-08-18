@@ -426,6 +426,34 @@ class Settings(BaseSettings):
     SFLOW_LISTENER_ENABLED: bool = True
     SFLOW_UDP_HOST: str = "0.0.0.0"
     SFLOW_UDP_PORT: int = 6343
+
+    # --- gNMI streaming telemetry (dial-in, alongside SNMP polling) ---
+    # Unlike NetFlow/sFlow above (devices dial *out* to us on a fixed
+    # port) gNMI is dial-in: NetGuard opens one long-lived SUBSCRIBE
+    # session per gnmi-enabled device (see app.services.gnmi_service),
+    # so there's no shared listener port to configure here -- only the
+    # supervisor loop's own behavior.
+    GNMI_INPROCESS_STREAMING_ENABLED: bool = True
+    # Wire-level default for Device.gnmi_sample_interval_ms when a
+    # device doesn't override it -- 1s is a large step down from
+    # SNMP_POLL_INTERVAL_SECONDS's 60s default without being so tight
+    # it floods slower control-plane CPUs on a big interface count.
+    GNMI_DEFAULT_SAMPLE_INTERVAL_MS: int = 1000
+    # A dropped SUBSCRIBE session (device reboot, TCP reset, transient
+    # network blip) reconnects on this backoff rather than busy-looping
+    # a TCP+TLS handshake against an unreachable device every second.
+    GNMI_RECONNECT_BACKOFF_SECONDS: int = 10
+    # How often the supervisor loop re-reads the device table to notice
+    # a device newly flagged supports_gnmi=true (or flipped off) without
+    # requiring a process restart.
+    GNMI_DEVICE_ROSTER_REFRESH_SECONDS: int = 30
+    # gnmi_service buffers streamed updates and flushes to
+    # InterfaceMetric on this cadence rather than one INSERT per
+    # SUBSCRIBE update -- a device streaming at a 1s sample interval
+    # across dozens of interfaces would otherwise write far more rows/
+    # sec than the Health/Interface pages need to render a smooth
+    # sub-minute graph, and far more than the DB needs to absorb.
+    GNMI_METRIC_FLUSH_INTERVAL_SECONDS: int = 5
     # Raw flow-record volume is far higher than DeviceMetric/syslog
     # volume (every conversation, not every poll interval), so retention
     # defaults short -- long enough for "what happened this week"

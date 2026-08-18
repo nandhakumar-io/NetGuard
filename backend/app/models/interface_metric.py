@@ -36,4 +36,15 @@ class InterfaceMetric(Base):
     utilization_pct = Column(Float, nullable=True)
     error_delta = Column(Integer, nullable=True)
 
+    # Which collection path produced this row: "snmp" (default, polled on
+    # SNMP_POLL_INTERVAL_SECONDS -- unchanged historical behavior) or
+    # "gnmi" (pushed by app.services.gnmi_service off a device's own
+    # SUBSCRIBE sample interval, typically sub-second to a few seconds).
+    # Lets the Health/Interface UI and any query distinguish "this
+    # reading is fresh because a poll happened to land 3s ago" from
+    # "this reading is fresh because the device is actively streaming" --
+    # and lets a device with both SNMP and gNMI enabled keep both series
+    # instead of one silently overwriting the other.
+    source = Column(String, nullable=False, default="snmp", server_default="snmp")
+
     polled_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

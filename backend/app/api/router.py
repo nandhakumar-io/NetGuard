@@ -26,6 +26,7 @@ from app.api import (
     flows,
     gitops,
     global_search,
+    gnmi,
     gns3,
     health,
     incidents,
@@ -93,6 +94,7 @@ api_router.include_router(maintenance_windows.router)
 api_router.include_router(recurring_maintenance_schedules.router)
 api_router.include_router(firmware_upgrades.router)
 api_router.include_router(flows.router)
+api_router.include_router(gnmi.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(config_intents.router)
 api_router.include_router(chatops.router)

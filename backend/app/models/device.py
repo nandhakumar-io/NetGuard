@@ -388,3 +388,51 @@ class Device(Base):
     # automatically by a later success.
     flagged_unstable = Column(Boolean, nullable=False, default=False, server_default="false")
     unstable_since = Column(DateTime(timezone=True), nullable=True)
+
+    # --- gNMI streaming telemetry (dial-in subscribe) ---
+    # SNMP polling (SNMP_POLL_INTERVAL_SECONDS, default 60s) is fine for
+    # capacity trending but too coarse for catching a flapping interface
+    # or a sub-second traffic burst between polls. gNMI SUBSCRIBE (STREAM
+    # mode, target-defined or sample interval) pushes updates as they
+    # happen instead of NetGuard having to ask -- see
+    # app.services.gnmi_service, which opens one long-lived SUBSCRIBE per
+    # gNMI-enabled device. Independent of supports_snmp: a device can run
+    # both (SNMP for the fleet-wide sweep + slower-changing counters,
+    # gNMI for the interfaces that need sub-second visibility), gNMI
+    # only, or neither -- gnmi_service only starts a session for devices
+    # with supports_gnmi=true.
+    supports_gnmi = Column(Boolean, nullable=False, default=False, server_default="false")
+    gnmi_port = Column(Integer, nullable=True, default=9339)  # gNMI's IANA-assigned default
+    # TLS is effectively mandatory for gNMI in practice (every major
+    # implementation -- Arista EOS, Juniper Junos, Cisco IOS-XE/XR --
+    # requires it by default and most won't serve gNMI in cleartext at
+    # all), so this defaults on rather than mirroring NETCONF's opt-in
+    # pattern. gnmi_skip_verify exists for the common lab/self-signed-cert
+    # case (same trust-on-first-use spirit as ssh_host_key_fingerprint
+    # above, but gNMI/TLS verification isn't pin-on-first-use -- it's a
+    # blunt "don't verify" switch an operator opts into knowingly for a
+    # non-production target) rather than pinning a cert automatically.
+    gnmi_use_tls = Column(Boolean, nullable=False, default=True, server_default="true")
+    gnmi_skip_verify = Column(Boolean, nullable=False, default=False, server_default="false")
+    gnmi_username = Column(String, nullable=True)  # not secret, stored plain like ssh_username
+    # Fernet-encrypted (app.core.crypto), same at-rest pattern as
+    # ssh_password_encrypted / snmp_*_encrypted above. See
+    # credential_service.get_gnmi_password / set_gnmi_password.
+    gnmi_password_encrypted = Column(Text, nullable=True)
+    # How often the device should push updates for sampled (non-event-
+    # driven) paths, e.g. interface counters -- passed as the gNMI
+    # SubscriptionList sample_interval (nanoseconds on the wire; stored
+    # here in milliseconds for readability, converted in gnmi_service).
+    # NULL means "use settings.GNMI_DEFAULT_SAMPLE_INTERVAL_MS". This is
+    # the actual differentiator over SNMP: 1000ms (or lower, hardware
+    # permitting) here vs. a 60s SNMP walk is two orders of magnitude
+    # finer-grained interface visibility for the same device.
+    gnmi_sample_interval_ms = Column(Integer, nullable=True)
+    # Set/cleared by gnmi_service's subscribe-supervisor loop on every
+    # connect attempt, success or failure -- same "why is this empty"
+    # visibility pattern as last_snmp_poll_at/last_snmp_poll_error above,
+    # surfaced on the Devices/Health pages so a broken gNMI session (bad
+    # cert, wrong port, auth failure) doesn't look identical to "no gNMI
+    # updates have arrived yet".
+    last_gnmi_update_at = Column(DateTime(timezone=True), nullable=True)
+    last_gnmi_error = Column(Text, nullable=True)

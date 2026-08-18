@@ -35,6 +35,11 @@ pysnmp==6.2.5
 pyasn1==0.4.8  # pysnmp 6.2.5 imports pyasn1.compat.octets directly; unpinned pyasn1
                 # can resolve to 0.6.1, a broken PyPI release that shipped without
                 # that module entirely and breaks every pysnmp import.
+# gNMI SUBSCRIBE client (streaming telemetry, app.services.gnmi_service) --
+# alongside pysnmp above rather than replacing it: SNMP stays the fleet-
+# wide polling path, gNMI is opt-in per device (Device.supports_gnmi) for
+# sub-second interface visibility on platforms that support it.
+pygnmi==0.8.13
 ncclient==0.6.15
 lxml>=4.9
 reportlab==4.2.5
