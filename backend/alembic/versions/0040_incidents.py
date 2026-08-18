@@ -19,6 +19,7 @@ from migration_helpers import (
     create_index_if_missing,
     create_table_if_missing,
     drop_index_if_exists,
+    enum_type_exists,
 )
 
 revision = "0040"
@@ -34,8 +35,10 @@ _STATUS_ENUM = postgresql.ENUM(
 
 def upgrade():
     bind = op.get_bind()
-    _SEVERITY_ENUM.create(bind, checkfirst=True)
-    _STATUS_ENUM.create(bind, checkfirst=True)
+    if not enum_type_exists("incidentseverity"):
+        _SEVERITY_ENUM.create(bind, checkfirst=True)
+    if not enum_type_exists("incidentstatus"):
+        _STATUS_ENUM.create(bind, checkfirst=True)
 
     create_table_if_missing(
         "incidents",

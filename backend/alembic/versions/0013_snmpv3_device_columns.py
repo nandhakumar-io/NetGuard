@@ -13,7 +13,11 @@ credential_service all assume these columns exist.
 import sqlalchemy as sa
 
 from alembic import op
-from migration_helpers import add_column_if_missing, drop_column_if_exists
+from migration_helpers import (
+    add_column_if_missing,
+    drop_column_if_exists,
+    enum_type_exists,
+)
 
 revision = "0013"
 down_revision = "0012"
@@ -36,9 +40,12 @@ def upgrade() -> None:
 
     columns = {c["name"] for c in inspector.get_columns("devices")}
 
-    _SECURITY_LEVEL_ENUM.create(bind, checkfirst=True)
-    _AUTH_PROTOCOL_ENUM.create(bind, checkfirst=True)
-    _PRIV_PROTOCOL_ENUM.create(bind, checkfirst=True)
+    if not enum_type_exists("snmpsecuritylevel"):
+        _SECURITY_LEVEL_ENUM.create(bind, checkfirst=True)
+    if not enum_type_exists("snmpauthprotocol"):
+        _AUTH_PROTOCOL_ENUM.create(bind, checkfirst=True)
+    if not enum_type_exists("snmpprivprotocol"):
+        _PRIV_PROTOCOL_ENUM.create(bind, checkfirst=True)
 
     if "snmp_port" not in columns:
         add_column_if_missing("devices", sa.Column("snmp_port", sa.Integer(), nullable=True))

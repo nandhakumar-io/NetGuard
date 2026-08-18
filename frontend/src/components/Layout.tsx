@@ -116,6 +116,14 @@ const groups: NavGroup[] = [
         icon: <svg {...iconProps}><path d="M4 19.5A2.5 2.5 0 016.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" /></svg>,
       },
       {
+        to: "/escalation-policies", label: "Escalation Policies",
+        icon: <svg {...iconProps}><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8" /><circle cx="12" cy="12" r="3" /></svg>,
+      },
+      {
+        to: "/on-call-schedules", label: "On-Call Schedules",
+        icon: <svg {...iconProps}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /><path d="M8 2l-2 2M18 2l2 2" /></svg>,
+      },
+      {
         to: "/noc", label: "NOC Mode (mobile)",
         icon: <svg {...iconProps}><rect x="6" y="2" width="12" height="20" rx="2" /><path d="M11 18h2" /></svg>,
       },
@@ -144,6 +152,10 @@ const groups: NavGroup[] = [
       {
         to: "/audit-log", label: "Audit Log",
         icon: <svg {...iconProps}><path d="M4 4h16v16H4z" /><path d="M8 8h8M8 12h8M8 16h4" /></svg>,
+      },
+      {
+        to: "/auditor-export", label: "Auditor Export",
+        icon: <svg {...iconProps}><path d="M12 3v12" /><path d="M7 10l5 5 5-5" /><path d="M4 19h16" /></svg>,
       },
       {
         to: "/terminal-recordings", label: "Session Recordings",

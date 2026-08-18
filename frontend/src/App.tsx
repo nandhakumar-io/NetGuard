@@ -43,6 +43,9 @@ const MobileNOC = lazy(() => import("./pages/MobileNOC"));
 const Users = lazy(() => import("./pages/Users"));
 const Backups = lazy(() => import("./pages/Backups"));
 const WallBoard = lazy(() => import("./pages/WallBoard"));
+const OnCallSchedules = lazy(() => import("./pages/OnCallSchedules"));
+const EscalationPolicies = lazy(() => import("./pages/EscalationPolicies"));
+const AuditorExport = lazy(() => import("./pages/AuditorExport"));
 
 function RouteFallback() {
   return (
@@ -88,6 +91,8 @@ export default function App() {
           <Route path="/drift" element={withSuspense(<DriftPage />)} />
           <Route path="/alerts" element={withSuspense(<AlertCenter />)} />
           <Route path="/alert-runbooks" element={withSuspense(<AlertRunbooks />)} />
+          <Route path="/on-call-schedules" element={withSuspense(<OnCallSchedules />)} />
+          <Route path="/escalation-policies" element={withSuspense(<EscalationPolicies />)} />
           <Route path="/maintenance-windows" element={withSuspense(<MaintenanceWindowsPage />)} />
           <Route path="/firmware-upgrades" element={withSuspense(<FirmwareUpgradesPage />)} />
           <Route path="/incidents" element={withSuspense(<Incidents />)} />
@@ -96,6 +101,7 @@ export default function App() {
           <Route path="/jit-access" element={withSuspense(<JitAccess />)} />
           <Route path="/lab" element={withSuspense(<Lab />)} />
           <Route path="/audit-log" element={withSuspense(<AuditLog />)} />
+          <Route path="/auditor-export" element={withSuspense(<AuditorExport />)} />
           <Route path="/terminal-recordings" element={withSuspense(<TerminalRecordings />)} />
           <Route path="/security" element={withSuspense(<Security />)} />
           <Route path="/push-settings" element={withSuspense(<PushSettings />)} />

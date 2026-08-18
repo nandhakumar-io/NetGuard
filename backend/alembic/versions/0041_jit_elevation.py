@@ -19,6 +19,7 @@ from migration_helpers import (
     create_index_if_missing,
     create_table_if_missing,
     drop_index_if_exists,
+    enum_type_exists,
 )
 
 revision = "0041"
@@ -33,7 +34,7 @@ _STATUS_ENUM = postgresql.ENUM(
 
 def upgrade():
     bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
+    if bind.dialect.name == "postgresql" and not enum_type_exists("jitelevationstatus"):
         _STATUS_ENUM.create(bind, checkfirst=True)
 
     create_table_if_missing(
