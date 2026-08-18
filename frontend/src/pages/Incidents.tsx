@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { downloadCsv, exportButtonClass, toCsv, todayStamp } from "../lib/csv";
+import { RunbookRef } from "../lib/types";
 
 interface Incident {
   id: string;
@@ -18,6 +19,7 @@ interface Incident {
   action_items: string | null;
   created_by: string | null;
   created_at: string;
+  runbook?: RunbookRef | null;
 }
 
 interface TimelineEvent {
@@ -280,6 +282,19 @@ export default function Incidents() {
                   </button>
                 )}
               </div>
+
+              {detail.runbook && (
+                <a
+                  href={detail.runbook.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 rounded-lg px-3 py-2 text-sm text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100"
+                >
+                  <span aria-hidden>📖</span>
+                  <span className="font-medium">Runbook: {detail.runbook.title}</span>
+                  <span className="ml-auto text-xs">Open ↗</span>
+                </a>
+              )}
 
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Timeline</h3>

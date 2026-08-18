@@ -67,4 +67,12 @@ class MaintenanceWindow(Base):
     # POST /maintenance-windows. See app.services.recurring_window_service.
     recurrence_id = Column(UUID(as_uuid=True), ForeignKey("recurring_maintenance_schedules.id"), nullable=True, index=True)
 
+    # Set when this window was auto-generated from an approved ChangeRequest's
+    # declared maintenance_window_start/end (see app.services.
+    # maintenance_window_service.sync_for_change_request), so an in-flight
+    # change's own device doesn't page NOC for the alert noise its own
+    # deployment causes. NULL for windows created directly by a person or by
+    # a RecurringMaintenanceSchedule.
+    change_request_id = Column(UUID(as_uuid=True), ForeignKey("change_requests.id"), nullable=True, index=True)
+
     device = relationship("Device")

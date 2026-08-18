@@ -37,12 +37,14 @@ from app.services import (
     diff_engine,
     event_bus,
     impact_simulation_service,
+    maintenance_window_service,
     protocol_manager,
     risk_engine,
     snapshot_service,
     topology_service,
     validation_engine,
 )
+from app.services.pipeline_service import target_device_ids
 from app.tasks import run_deployment_pipeline_task
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
@@ -842,6 +844,25 @@ def approve_change_request(
                 "It has been recorded as approved, but deployment was not scheduled -- resubmit with a "
                 "current maintenance window to deploy it."
             ),
+        )
+
+    # Alert-suppression tie-in: a declared window here only ever gated *when
+    # the deployment task fires* above -- it never touched the separate
+    # MaintenanceWindow table alert_service actually checks, so a device
+    # being deployed to during its own approved change still paged NOC for
+    # the alert noise that change caused. Auto-create a suppression window
+    # per target device covering the same declared start/end; see
+    # maintenance_window_service.sync_for_change_request for the no-op case
+    # (no window declared) and cancel_for_change_request for the cleanup
+    # side when a deployment ends up FAILED/ROLLED_BACK.
+    windows = maintenance_window_service.sync_for_change_request(
+        db, cr, target_device_ids(cr), actor_email=current_user.email
+    )
+    if windows:
+        audit_service.record_event(
+            db, actor=current_user.email, action="Alert Suppression Window Created", result="Created",
+            device_hostname=device.hostname if device else None, change_request_id=cr.id,
+            detail=f"{len(windows)} device(s) suppressed {window_start} - {window_end} for this change.",
         )
 
     if window_start is not None and now < window_start:

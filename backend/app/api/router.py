@@ -46,6 +46,7 @@ from app.api import (
     sso,
     syslog,
     terminal,
+    terminal_recordings,
     topology,
     user_management,
     war_room,
@@ -86,6 +87,7 @@ api_router.include_router(secrets_rotation.router)
 api_router.include_router(topology.router)
 api_router.include_router(war_room.router)
 api_router.include_router(terminal.router)
+api_router.include_router(terminal_recordings.router)
 api_router.include_router(compliance_baselines.router)
 api_router.include_router(config_templates.router)
 api_router.include_router(syslog.router)

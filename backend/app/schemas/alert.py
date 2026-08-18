@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.schemas.alert_runbook import RunbookRef
+
 
 class AlertRead(BaseModel):
     id: uuid.UUID
@@ -34,6 +36,11 @@ class AlertRead(BaseModel):
     escalation_count: int = 0
     escalation_policy_id: uuid.UUID | None = None
     created_at: datetime
+    # Populated in app.api.alerts from alert_runbook.resolve_runbook_map --
+    # not a DB column on Alert itself, resolved by category(+source) at
+    # read time so a runbook added/edited later immediately applies to
+    # every existing alert of that category instead of needing a backfill.
+    runbook: RunbookRef | None = None
 
     class Config:
         from_attributes = True

@@ -815,3 +815,117 @@ def purge_expired(db: Session) -> int:
     deleted = db.query(FlowRecord).filter(FlowRecord.received_at < cutoff).delete(synchronize_session=False)
     db.commit()
     return deleted
+
+
+# --- Post-deployment traffic-impact verification ---------------------
+#
+# health_monitor's post-deploy suite (ping, BGP/OSPF adjacency, DNS/
+# DHCP/HTTP/VPN) all answer "is the control plane / management path
+# healthy" -- none of them can catch an ACL, route-map, or VLAN change
+# that leaves the device pingable and its BGP session adjacent while
+# silently blackholing real data-plane traffic to a specific downstream
+# subnet. That failure mode only shows up in flow data. The functions
+# below capture a pre-deploy traffic baseline for the device being
+# changed (and the subnets it fronts) and re-measure it during the
+# post-deploy monitoring window, so health_monitor.check_traffic_impact
+# can turn "traffic to subnet X dropped 40%" into an actual rollback
+# trigger instead of something someone has to notice on the Traffic
+# Analysis page after the fact.
+
+
+def traffic_bytes_for_device(db: Session, device_id, *, since: datetime.datetime, until: datetime.datetime) -> int:
+    """Total bytes exported by this device (as flow exporter) in
+    [since, until). This is traffic *observed on* the device's own
+    exported interfaces, not just management-plane reachability."""
+    total = (
+        db.query(func.sum(FlowRecord.bytes))
+        .filter(FlowRecord.device_id == device_id, FlowRecord.received_at >= since, FlowRecord.received_at < until)
+        .scalar()
+    )
+    return int(total or 0)
+
+
+def traffic_bytes_for_subnet(
+    db: Session, cidr: str, *, since: datetime.datetime, until: datetime.datetime, device_id=None
+) -> int:
+    """Total bytes where src_ip or dst_ip falls inside `cidr`, in
+    [since, until). Best-effort / Python-side filtering (FlowRecord
+    doesn't store src/dst as indexed network ranges, so this can't be
+    done as a single SQL range predicate the way the byte/timestamp
+    filters above are) -- scoped by device_id when given (the device
+    actually being changed) to keep the row count bounded to that
+    exporter's flows rather than scanning the whole fleet's traffic in
+    the window. Fine for the pre/post-deploy comparison this backs,
+    which only ever needs one device's flows; not intended as a general
+    fleet-wide subnet-traffic query.
+    """
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return 0
+    query = db.query(FlowRecord.src_ip, FlowRecord.dst_ip, FlowRecord.bytes).filter(
+        FlowRecord.received_at >= since, FlowRecord.received_at < until
+    )
+    if device_id is not None:
+        query = query.filter(FlowRecord.device_id == device_id)
+    total = 0
+    for src_ip, dst_ip, flow_bytes in query.all():
+        try:
+            in_subnet = ipaddress.ip_address(src_ip) in network or ipaddress.ip_address(dst_ip) in network
+        except ValueError:
+            continue
+        if in_subnet:
+            total += int(flow_bytes or 0)
+    return total
+
+
+@dataclass
+class TrafficBaseline:
+    device_id: str
+    device_bytes: int
+    subnet_bytes: dict[str, int]  # cidr -> bytes, over window_minutes ending at captured_at
+    window_minutes: int
+    captured_at: datetime.datetime
+
+
+def capture_traffic_baseline(
+    db: Session, device_id, subnet_cidrs: list[str], *, window_minutes: int
+) -> TrafficBaseline:
+    """Snapshots current traffic volume for `device_id` and each subnet
+    in `subnet_cidrs`, over the `window_minutes` immediately preceding
+    now. Called by the deployment pipeline right before a config push,
+    so `check_traffic_impact` has something concrete to compare the
+    post-deploy monitoring window's traffic against. A device/subnet
+    with no recent flow data simply baselines at 0 -- the comparison
+    check treats a near-zero baseline as "nothing to compare" rather
+    than flagging a drop against noise (see
+    health_monitor.MIN_BASELINE_BYTES_FOR_TRAFFIC_CHECK).
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    since = now - datetime.timedelta(minutes=window_minutes)
+    device_bytes = traffic_bytes_for_device(db, device_id, since=since, until=now)
+    subnet_bytes = {
+        cidr: traffic_bytes_for_subnet(db, cidr, since=since, until=now, device_id=device_id)
+        for cidr in subnet_cidrs
+    }
+    return TrafficBaseline(
+        device_id=str(device_id), device_bytes=device_bytes, subnet_bytes=subnet_bytes,
+        window_minutes=window_minutes, captured_at=now,
+    )
+
+
+def measure_traffic_since_baseline(db: Session, baseline: TrafficBaseline) -> tuple[int, dict[str, int]]:
+    """Re-measures the same device/subnet traffic volumes baseline
+    captured, over an equal-length window ending now -- so the
+    comparison in health_monitor.check_traffic_impact is apples-to-
+    apples (same window size) regardless of how long it's been since
+    baseline.captured_at.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    since = now - datetime.timedelta(minutes=baseline.window_minutes)
+    device_bytes = traffic_bytes_for_device(db, baseline.device_id, since=since, until=now)
+    subnet_bytes = {
+        cidr: traffic_bytes_for_subnet(db, cidr, since=since, until=now, device_id=baseline.device_id)
+        for cidr in baseline.subnet_bytes
+    }
+    return device_bytes, subnet_bytes

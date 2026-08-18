@@ -5,12 +5,16 @@ approved work.
 """
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
 from app.models.maintenance_window import MaintenanceScope, MaintenanceWindow
+
+if TYPE_CHECKING:
+    from app.models.change_request import ChangeRequest
 
 
 def find_active_window(db: Session, device_id: uuid.UUID | None, *, now: datetime | None = None) -> MaintenanceWindow | None:
@@ -50,3 +54,81 @@ def find_active_window(db: Session, device_id: uuid.UUID | None, *, now: datetim
 
 def is_device_in_maintenance(db: Session, device_id: uuid.UUID | None, *, now: datetime | None = None) -> bool:
     return find_active_window(db, device_id, now=now) is not None
+
+
+def sync_for_change_request(
+    db: Session, cr: "ChangeRequest", device_ids: list[uuid.UUID], *, actor_email: str
+) -> list[MaintenanceWindow]:
+    """Auto-creates one DEVICE-scoped MaintenanceWindow per target device
+    covering an approved change request's declared maintenance_window_
+    start/end, tagged `change_request_id=cr.id`.
+
+    Without this, the two "maintenance window" concepts in the schema
+    never touched each other: ChangeRequest.maintenance_window_start/end
+    only gated *when the deployment task fires* (see api.change_requests.
+    approve_change_request), while alert_service only ever checked the
+    separate MaintenanceWindow table to decide suppression. A device
+    being deployed to during its own approved change's declared window
+    still paged NOC for the alert noise that change caused.
+
+    No-op if the change request didn't declare a window (not every shop
+    uses one -- same "deploys immediately" behavior as before applies to
+    suppression too: nothing to suppress against). Idempotent per device:
+    re-approval flows / retries won't pile up duplicate windows for the
+    same change request.
+    """
+    if cr.maintenance_window_start is None or cr.maintenance_window_end is None:
+        return []
+
+    existing_device_ids = {
+        w.device_id
+        for w in db.query(MaintenanceWindow.device_id)
+        .filter(MaintenanceWindow.change_request_id == cr.id, MaintenanceWindow.cancelled == False)
+        .all()
+    }
+
+    created: list[MaintenanceWindow] = []
+    for device_id in device_ids:
+        if device_id in existing_device_ids:
+            continue
+        window = MaintenanceWindow(
+            id=uuid.uuid4(),
+            name=f"Change request {cr.id} deployment window",
+            reason=f"Auto-created on approval of change request {cr.id} so its own deployment "
+                    "doesn't page NOC for alerts caused by the planned change.",
+            scope=MaintenanceScope.DEVICE,
+            device_id=device_id,
+            starts_at=cr.maintenance_window_start,
+            ends_at=cr.maintenance_window_end,
+            change_request_id=cr.id,
+            created_by=f"change-request:{actor_email}",
+        )
+        db.add(window)
+        created.append(window)
+    if created:
+        db.commit()
+    return created
+
+
+def cancel_for_change_request(db: Session, change_request_id: uuid.UUID, *, reason: str, actor_email: str) -> int:
+    """Cancels (does not delete -- keeps the audit trail, same as manual
+    cancellation) any still-active windows this change request auto-
+    created. Called when a change ends up FAILED or ROLLED_BACK: the
+    device didn't end up in the planned state, so it should go back to
+    paging normally instead of staying silently suppressed for the rest
+    of a window that no longer reflects what's actually happening on it.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(MaintenanceWindow)
+        .filter(MaintenanceWindow.change_request_id == change_request_id, MaintenanceWindow.cancelled == False)
+        .all()
+    )
+    for row in rows:
+        row.cancelled = True
+        row.cancelled_at = now
+        row.cancelled_by = actor_email
+        row.reason = f"{row.reason or ''}\n\nAuto-cancelled: {reason}".strip()
+    if rows:
+        db.commit()
+    return len(rows)

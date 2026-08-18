@@ -58,6 +58,7 @@ from app.models.config_template import (
     TemplateVersionStatus,
 )
 from app.models.git_repo_config import GitRepoConfig, GitSyncStatus
+from app.services import secret_scan_service
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,22 @@ def _sync_one_file(db: Session, path: Path) -> str:
         raise GitSyncError("front-matter is missing required 'name' field")
     body = body.strip("\n") + "\n"
 
+    # Refuse to import a template whose body already contains a
+    # secret-shaped value (SNMP community, PSK, plaintext password,
+    # etc.) -- someone committed it to the watched repo before this
+    # scan existed, or bypassed a client-side hook. Importing it into
+    # NetGuard as a PENDING_APPROVAL version would (a) leave the secret
+    # sitting in the ConfigTemplateVersion table too, and (b) mean the
+    # next push_template_version round-trip re-commits it right back --
+    # so this has to be a hard stop here, not just on the push side.
+    findings = secret_scan_service.scan_text(body)
+    if findings:
+        raise GitSyncError(
+            f"refusing to import '{name}': possible secret(s) in template body -- "
+            f"{secret_scan_service.format_findings(findings)}. Remove the literal value and "
+            f"parameterize it as a Jinja variable resolved via credential_service at deploy time."
+        )
+
     template = db.query(ConfigTemplate).filter(ConfigTemplate.name == name).first()
     if not template:
         template = ConfigTemplate(
@@ -311,7 +328,27 @@ def push_template_version(db: Session, repo: GitRepoConfig, template: ConfigTemp
     raises GitSyncError on failure so the caller (approve_template_version)
     can log it without blocking the approval itself -- the approval in
     NetGuard is the source of truth regardless of whether the mirror
-    commit succeeds."""
+    commit succeeds.
+
+    Secret-scans the body before it ever touches disk in the working
+    copy. This is the hard gate: unlike the pull side (which can also
+    just skip a bad file and keep going), this raises unconditionally --
+    a caller that swallowed this exception would silently leave the
+    published version out of sync with the repo, which is a much safer
+    failure mode than a community string or PSK landing in a public or
+    semi-public git history. There is deliberately no bypass flag here;
+    the fix is to remove the literal value from the template and
+    parameterize it, same as any other credential in NetGuard.
+    """
+    findings = secret_scan_service.scan_text(version.body)
+    if findings:
+        raise GitSyncError(
+            f"refusing to push '{template.name}' v{version.version_number} to git: possible "
+            f"secret(s) in template body -- {secret_scan_service.format_findings(findings)}. "
+            f"Remove the literal value and parameterize it as a Jinja variable resolved via "
+            f"credential_service at deploy time before publishing this version."
+        )
+
     work_dir = _ensure_clone(repo)
     template_dir = _resolve_template_dir(work_dir, repo.template_path)
     template_dir.mkdir(parents=True, exist_ok=True)

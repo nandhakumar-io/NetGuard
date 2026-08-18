@@ -293,6 +293,79 @@ def check_vpn(netmiko_type: str, ip_address: str, username: str, password: str) 
 
 
 # ---------------------------------------------------------------------
+# traffic: post-deploy data-plane impact vs. a pre-deploy baseline
+# ---------------------------------------------------------------------
+# Every check above answers "is the control/management plane healthy" --
+# a device stays pingable, its BGP session stays adjacent, DNS/HTTP still
+# answer, even when an ACL/route-map/VLAN change has silently blackholed
+# real traffic to a downstream subnet. That failure mode only shows up
+# in flow data (app.services.flow_service), which is why this check is
+# deliberately DB-/network-free itself (a pure comparison function, kept
+# testable the same way every other check here is) -- the caller
+# (app.services.pipeline_service) is responsible for capturing a
+# TrafficBaseline before the deploy via flow_service.capture_traffic_
+# baseline and re-measuring it during the monitoring window via
+# flow_service.measure_traffic_since_baseline, then building the
+# TrafficComparison list this function actually scores.
+DEFAULT_TRAFFIC_DROP_THRESHOLD_PCT = 30.0
+# A baseline below this is treated as "nothing to compare" rather than
+# scored -- a device/subnet that was already near-idle before the change
+# makes any post-deploy traffic level look like a huge relative "drop"
+# (or spike) against noise, which isn't the failure this check exists to
+# catch.
+MIN_BASELINE_BYTES_FOR_TRAFFIC_CHECK = 100_000
+
+
+@dataclass
+class TrafficComparison:
+    label: str  # "device" for the device's own exported traffic, or a subnet CIDR
+    baseline_bytes: int
+    current_bytes: int
+
+
+def check_traffic_impact(
+    comparisons: list[TrafficComparison], drop_threshold_pct: float = DEFAULT_TRAFFIC_DROP_THRESHOLD_PCT
+) -> CheckOutcome:
+    """Flags a deployment as unhealthy when observed traffic volume for
+    the changed device -- or any subnet it fronts -- has dropped by at
+    least `drop_threshold_pct` versus its pre-deploy baseline. This is
+    what turns "BGP session flapped and traffic to subnet X dropped 40%"
+    into an actual rollback trigger rather than only ever something a
+    human notices on the Traffic Analysis page after the fact.
+
+    Comparisons with a baseline under MIN_BASELINE_BYTES_FOR_TRAFFIC_CHECK
+    are skipped (nothing meaningful to compare); if every comparison is
+    skipped that way, the check passes trivially rather than failing on
+    an empty finding set -- an idle device/subnet before the change isn't
+    evidence of anything.
+    """
+    findings: list[str] = []
+    worst_drop_pct = 0.0
+    any_scored = False
+
+    for c in comparisons:
+        if c.baseline_bytes < MIN_BASELINE_BYTES_FOR_TRAFFIC_CHECK:
+            continue
+        any_scored = True
+        drop_pct = 100.0 * (c.baseline_bytes - c.current_bytes) / c.baseline_bytes
+        worst_drop_pct = max(worst_drop_pct, drop_pct)
+        if drop_pct >= drop_threshold_pct:
+            findings.append(
+                f"{c.label}: traffic dropped {drop_pct:.0f}% ({c.baseline_bytes:,} -> {c.current_bytes:,} bytes)"
+            )
+
+    if not any_scored:
+        return CheckOutcome(
+            "traffic", "traffic_impact", True,
+            "No traffic baseline available (device/subnet was idle before deploy) -- check skipped",
+        )
+
+    passed = not findings
+    detail = "; ".join(findings) if findings else f"Traffic volume within normal range (largest change: {worst_drop_pct:.0f}%)"
+    return CheckOutcome("traffic", "traffic_impact", passed, detail)
+
+
+# ---------------------------------------------------------------------
 # suite orchestration
 # ---------------------------------------------------------------------
 # Registry of every check the suite can run, keyed by the same
@@ -309,6 +382,7 @@ ALL_CHECKS: dict[str, dict] = {
     "dhcp": {"category": "services", "label": "DHCP lease"},
     "http": {"category": "services", "label": "HTTP(S) reachability"},
     "vpn": {"category": "services", "label": "VPN tunnel status"},
+    "traffic_impact": {"category": "traffic", "label": "Traffic-impact vs. pre-deploy baseline"},
 }
 
 
@@ -319,12 +393,19 @@ def run_health_suite(
     password: str = "",
     hostname: str | None = None,
     enabled_checks: set[str] | None = None,
+    traffic_impact_fn=None,
 ) -> list[CheckOutcome]:
     """Runs the post-deployment health suite described in SRS 6.9:
 
       infrastructure - ping, packet loss %, latency
       routing        - BGP neighbor adjacency, OSPF neighbor adjacency
       services       - DNS, DHCP, HTTP(S), VPN tunnel state
+      traffic        - data-plane traffic-impact vs. pre-deploy baseline
+                        (only run when `traffic_impact_fn` is supplied --
+                        see check_traffic_impact's module docstring for
+                        why this one needs a caller-supplied closure
+                        instead of connection params like every other
+                        check here)
 
     Each check is isolated (wrapped in try/except at the individual-check
     level) so one check erroring doesn't prevent the rest of the suite
@@ -336,6 +417,14 @@ def run_health_suite(
     installed, etc.) can be turned off instead of failing verification,
     and triggering a rollback, over something that was never going to
     pass. None/empty means "run everything", the historical behavior.
+
+    `traffic_impact_fn`, when given, is a zero-arg callable returning a
+    CheckOutcome (typically a closure over a pre-captured
+    flow_service.TrafficBaseline -- see app.services.pipeline_service)
+    -- included in the suite as the "traffic_impact" check. Omitted by
+    default (None) since, unlike every other check, it needs a DB
+    session and a baseline captured before the deploy started, which
+    this network-only module deliberately doesn't own itself.
     """
     all_checks: dict[str, callable] = {
         "ping": lambda: check_ping(ip_address),
@@ -347,6 +436,8 @@ def run_health_suite(
         "http": lambda: check_http(ip_address),
         "vpn": lambda: check_vpn(netmiko_type, ip_address, username, password),
     }
+    if traffic_impact_fn is not None:
+        all_checks["traffic_impact"] = traffic_impact_fn
 
     selection = set(enabled_checks) if enabled_checks else set(all_checks.keys())
     return [fn() for name, fn in all_checks.items() if name in selection]
@@ -401,6 +492,7 @@ def run_monitoring_window(
     poll_interval_seconds: int | None = None,
     sleep_fn=time.sleep,
     enabled_checks: set[str] | None = None,
+    traffic_impact_fn=None,
 ) -> MonitoringResult:
     """Real-Time Health Monitoring (FR-9 / SRS 6.7).
 
@@ -445,7 +537,7 @@ def run_monitoring_window(
         round_number += 1
         outcomes = run_health_suite(
             ip_address, netmiko_type=netmiko_type, username=username, password=password, hostname=hostname,
-            enabled_checks=enabled_checks,
+            enabled_checks=enabled_checks, traffic_impact_fn=traffic_impact_fn,
         )
         passed = suite_passed(outcomes)
         rounds.append(PollRound(round_number, elapsed, outcomes, passed))

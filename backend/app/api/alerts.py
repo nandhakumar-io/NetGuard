@@ -32,7 +32,8 @@ from app.core.deps import get_current_user, get_current_user_ws
 from app.models.alert import Alert, AlertSeverity, AlertSource
 from app.models.user import User
 from app.schemas.alert import AlertRead, AlertSummary
-from app.services import alert_service, alert_snooze_service, event_bus
+from app.schemas.alert_runbook import RunbookRef
+from app.services import alert_runbook, alert_service, alert_snooze_service, event_bus
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -94,10 +95,13 @@ def list_alerts(
     # Pydantic conversion, and the `muted` filter (which needs the same
     # "is this snooze still actually active" check) is applied after.
     mute_map = alert_snooze_service.active_mute_map(db, results)
+    runbook_map = alert_runbook.resolve_runbook_map(db, results)
     read_results = []
     for alert in results:
         obj = AlertRead.model_validate(alert)
         obj.muted_until = mute_map.get(alert.id)
+        if runbook := runbook_map.get(alert.id):
+            obj.runbook = RunbookRef(title=runbook.title, url=runbook.url)
         if muted is not None and (obj.muted_until is not None) != muted:
             continue
         read_results.append(obj)
@@ -157,6 +161,8 @@ def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depe
         raise HTTPException(status_code=404, detail="Alert not found")
     obj = AlertRead.model_validate(alert)
     obj.muted_until = alert_snooze_service.active_mute_map(db, [alert]).get(alert.id)
+    if runbook := alert_runbook.resolve_runbook_map(db, [alert]).get(alert.id):
+        obj.runbook = RunbookRef(title=runbook.title, url=runbook.url)
     return obj
 
 

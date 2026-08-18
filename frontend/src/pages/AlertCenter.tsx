@@ -928,6 +928,18 @@ export default function AlertCenter() {
                                 )}
                                 {alert.acknowledged_by && <span>Ack'd by {alert.acknowledged_by}</span>}
                                 {alert.resolved_by && <span>Resolved by {alert.resolved_by}</span>}
+                                {alert.runbook && (
+                                  <a
+                                    href={alert.runbook.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    title={alert.runbook.title}
+                                    className="flex items-center gap-1 text-indigo-600 dark:text-indigo-300 hover:underline font-medium"
+                                  >
+                                    📖 Runbook
+                                  </a>
+                                )}
                               </div>
                               {!nested && impacted.length > 0 && (
                                 <button
@@ -1031,6 +1043,18 @@ export default function AlertCenter() {
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="font-semibold text-navy dark:text-white text-xs truncate">{alert.category}</span>
                           <span className="text-slate-400 dark:text-slate-500 text-xs truncate">— {alert.message}</span>
+                          {alert.runbook && (
+                            <a
+                              href={alert.runbook.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              title={alert.runbook.title}
+                              className="text-indigo-600 dark:text-indigo-300 hover:underline shrink-0"
+                            >
+                              📖
+                            </a>
+                          )}
                         </div>
                       </td>
                       <td className="py-1.5 pr-3 whitespace-nowrap">

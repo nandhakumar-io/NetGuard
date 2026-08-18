@@ -520,6 +520,35 @@ class Settings(BaseSettings):
         r"^system\s+halt\b",
     ]
 
+    # Backup storage (app.services.backup_service): where on-demand/
+    # scheduled `pg_dump` backups of NetGuard's own application database
+    # are written -- referenced by backup_service and BackupJob.file_path
+    # but was missing from Settings entirely (an undeclared attribute
+    # access on a pydantic BaseSettings instance raises AttributeError,
+    # not a default) -- every backup attempt was failing before it wrote
+    # a single byte. Defaults under the app's working directory; point it
+    # at a mounted volume in production the same way BACKUP_RETENTION_*
+    # below assumes persistent storage across container restarts.
+    BACKUP_STORAGE_DIR: str = "./data/backups"
+    BACKUP_RETENTION_DAYS: int = 30
+    BACKUP_RETENTION_MIN_COUNT: int = 5
+
+    # Privileged terminal session recording (app.services.
+    # session_recording_service, app.api.terminal): every interactive
+    # SSH/Telnet device terminal session is transcribed (keystrokes in,
+    # device output out, both timestamped) to a JSON-Lines file under
+    # this directory, with a TerminalSessionRecording row pointing at it
+    # -- see that model's docstring for why (PCI/SOC2 privileged-access
+    # session recording, not just start/stop audit log entries). Kept as
+    # its own directory rather than reusing BACKUP_STORAGE_DIR since
+    # these have a different (typically much longer, compliance-driven)
+    # retention policy and access-control surface -- only SECURITY/
+    # NETWORK_ADMIN can read recordings back, vs. any admin for DB
+    # backups.
+    TERMINAL_SESSION_RECORDING_ENABLED: bool = True
+    TERMINAL_RECORDING_DIR: str = "./data/terminal-recordings"
+    TERMINAL_RECORDING_RETENTION_DAYS: int = 365
+
     GNS3_ENABLED: bool = False
     GNS3_BASE_URL: str = "http://localhost:3080"
     GNS3_USERNAME: str | None = None

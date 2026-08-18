@@ -23,6 +23,7 @@ be dispatched as Celery tasks (see app.tasks) -- see `run_deployment_pipeline`
 at the bottom, kept as a thin synchronous entry point for tests/CLI use.
 """
 import datetime
+import logging
 import uuid
 
 from sqlalchemy.orm import Session
@@ -41,12 +42,26 @@ from app.services import (
     audit_service,
     credential_service,
     event_bus,
+    flow_service,
     health_monitor,
+    maintenance_window_service,
     notification_service,
     protocol_manager,
     snapshot_service,
     validation_engine,
 )
+
+# How far back (and, symmetrically, how far into the monitoring window)
+# the traffic-impact baseline/comparison looks -- see
+# health_monitor.check_traffic_impact and flow_service.capture_traffic_
+# baseline. Independent of HEALTH_MONITOR_WINDOW_SECONDS: that's how
+# long verification *polls*, this is how much traffic history each
+# poll's comparison is based on. Kept short (5 min) since it only needs
+# to establish "was this device/subnet actually carrying traffic right
+# before the change", not a long-term trend.
+TRAFFIC_BASELINE_WINDOW_MINUTES = 5
+
+logger = logging.getLogger("netguard.pipeline")
 
 DEVICE_TYPE_MAP = {
     "cisco": "cisco_ios",
@@ -54,6 +69,36 @@ DEVICE_TYPE_MAP = {
     "arista": "arista_eos",
     "linux": "linux",
 }
+
+
+def _make_traffic_impact_fn(db: Session, baseline: flow_service.TrafficBaseline):
+    """Builds the zero-arg closure health_monitor.run_health_suite expects
+    for its "traffic_impact" check (see that module's docstring on
+    check_traffic_impact for why it takes a closure instead of connection
+    params like every other check). Re-measures the same device/subnet
+    windows the baseline captured via flow_service.measure_traffic_since_
+    baseline, converts them into health_monitor.TrafficComparison rows,
+    and scores them -- deferred to call time (not built eagerly) so each
+    monitoring round in run_monitoring_window re-measures current traffic
+    fresh rather than comparing against a single stale snapshot taken
+    right after deploy.
+    """
+    def _fn() -> health_monitor.CheckOutcome:
+        device_bytes, subnet_bytes = flow_service.measure_traffic_since_baseline(db, baseline)
+        comparisons = [
+            health_monitor.TrafficComparison(
+                label="device", baseline_bytes=baseline.device_bytes, current_bytes=device_bytes,
+            )
+        ]
+        comparisons += [
+            health_monitor.TrafficComparison(
+                label=cidr, baseline_bytes=baseline.subnet_bytes.get(cidr, 0), current_bytes=current,
+            )
+            for cidr, current in subnet_bytes.items()
+        ]
+        return health_monitor.check_traffic_impact(comparisons)
+
+    return _fn
 
 
 def target_device_ids(cr: ChangeRequest) -> list[uuid.UUID]:
@@ -267,6 +312,41 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         detail=f"version={snapshot.version} checksum={snapshot.checksum[:12]}...",
     )
 
+    # --- 1b. Traffic baseline (feeds the post-deploy traffic_impact check) ---
+    # Captured now, right before the config touches the device -- not
+    # inside the monitoring loop below -- so "before" genuinely means
+    # before, not "whatever traffic looked like a few seconds after the
+    # push already happened". Subnets are approximated as every IPAM
+    # subnet sharing this device's `site`: NetGuard doesn't model which
+    # specific subnets a given device routes for, and site is the
+    # closest existing signal for "subnets this device plausibly
+    # fronts". Capped to a handful of subnets so a device at a large
+    # site doesn't turn this into dozens of flow_records scans per
+    # deploy; a device with no site (or no subnets at that site) still
+    # gets a device-level traffic baseline, just no subnet-level ones.
+    traffic_baseline = None
+    try:
+        from app.models.subnet import Subnet
+        from app.services import (
+            ipam_service,  # noqa: F401  (import kept local: only needed on this path)
+        )
+
+        subnet_cidrs = []
+        if device.site:
+            subnet_cidrs = [
+                s.cidr for s in db.query(Subnet.cidr).filter(Subnet.site == device.site).limit(5).all()
+            ]
+        traffic_baseline = flow_service.capture_traffic_baseline(
+            db, device.id, subnet_cidrs, window_minutes=TRAFFIC_BASELINE_WINDOW_MINUTES
+        )
+    except Exception:
+        # Never let baseline capture itself block a deployment -- the
+        # traffic_impact check below degrades to "skipped" (via
+        # traffic_impact_fn staying None) if this failed, same as every
+        # other optional/best-effort step in this pipeline.
+        logger.exception("Failed to capture traffic baseline for device %s -- traffic_impact check will be skipped", device.hostname)
+        traffic_baseline = None
+
     # --- 2. Automated Validation Engine gate (SRS 6.4 / FR-5) ---
     # Final hard check immediately before the config actually touches the
     # device. The change request already passed validation at submission
@@ -363,6 +443,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         password=ssh_password,
         hostname=device.hostname,
         enabled_checks=enabled_checks,
+        traffic_impact_fn=_make_traffic_impact_fn(db, traffic_baseline) if traffic_baseline else None,
     )
     for round_ in monitoring.rounds:
         _log_deployment(db, deployment.id, "VERIFY", f"Completed verification round {round_.round_number} (t+{round_.elapsed_seconds}s). Passed: {len([o for o in round_.outcomes if o.passed])}/{len(round_.outcomes)}")
@@ -462,6 +543,16 @@ def aggregate_change_request_status(db: Session, cr: ChangeRequest) -> ChangeReq
         cr.status = ChangeStatus.SUCCESS
     else:
         cr.status = ChangeStatus.MONITORING  # still in flight / unexpected mix
+
+    if cr.status in (ChangeStatus.FAILED, ChangeStatus.ROLLED_BACK):
+        # The device didn't end up in the planned state -- put it back in
+        # front of NOC instead of leaving it silently suppressed for the
+        # rest of a window that no longer reflects what's actually
+        # happening on it. See maintenance_window_service.
+        # cancel_for_change_request.
+        maintenance_window_service.cancel_for_change_request(
+            db, cr.id, reason=f"change request ended {cr.status.value}", actor_email="system:pipeline",
+        )
 
     db.commit()
     db.refresh(cr)

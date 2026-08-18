@@ -19,6 +19,8 @@ const Groups = lazy(() => import("./pages/Groups"));
 const IPAMPage = lazy(() => import("./pages/IPAM"));
 const PushSettings = lazy(() => import("./pages/PushSettings"));
 const AuditLog = lazy(() => import("./pages/AuditLog"));
+const TerminalRecordings = lazy(() => import("./pages/TerminalRecordings"));
+const AlertRunbooks = lazy(() => import("./pages/AlertRunbooks"));
 const Security = lazy(() => import("./pages/Security"));
 const DriftPage = lazy(() => import("./pages/Drift"));
 const AlertCenter = lazy(() => import("./pages/AlertCenter"));
@@ -85,6 +87,7 @@ export default function App() {
           <Route path="/traffic-analysis" element={withSuspense(<TrafficAnalysis />)} />
           <Route path="/drift" element={withSuspense(<DriftPage />)} />
           <Route path="/alerts" element={withSuspense(<AlertCenter />)} />
+          <Route path="/alert-runbooks" element={withSuspense(<AlertRunbooks />)} />
           <Route path="/maintenance-windows" element={withSuspense(<MaintenanceWindowsPage />)} />
           <Route path="/firmware-upgrades" element={withSuspense(<FirmwareUpgradesPage />)} />
           <Route path="/incidents" element={withSuspense(<Incidents />)} />
@@ -93,6 +96,7 @@ export default function App() {
           <Route path="/jit-access" element={withSuspense(<JitAccess />)} />
           <Route path="/lab" element={withSuspense(<Lab />)} />
           <Route path="/audit-log" element={withSuspense(<AuditLog />)} />
+          <Route path="/terminal-recordings" element={withSuspense(<TerminalRecordings />)} />
           <Route path="/security" element={withSuspense(<Security />)} />
           <Route path="/push-settings" element={withSuspense(<PushSettings />)} />
           <Route path="/integrations" element={withSuspense(<IntegrationsPage />)} />

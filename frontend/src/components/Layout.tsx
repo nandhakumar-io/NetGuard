@@ -112,6 +112,10 @@ const groups: NavGroup[] = [
         icon: <svg {...iconProps}><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></svg>,
       },
       {
+        to: "/alert-runbooks", label: "Alert Runbooks",
+        icon: <svg {...iconProps}><path d="M4 19.5A2.5 2.5 0 016.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" /></svg>,
+      },
+      {
         to: "/noc", label: "NOC Mode (mobile)",
         icon: <svg {...iconProps}><rect x="6" y="2" width="12" height="20" rx="2" /><path d="M11 18h2" /></svg>,
       },
@@ -140,6 +144,10 @@ const groups: NavGroup[] = [
       {
         to: "/audit-log", label: "Audit Log",
         icon: <svg {...iconProps}><path d="M4 4h16v16H4z" /><path d="M8 8h8M8 12h8M8 16h4" /></svg>,
+      },
+      {
+        to: "/terminal-recordings", label: "Session Recordings",
+        icon: <svg {...iconProps}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M6 9l4 3-4 3M12 15h6" /></svg>,
       },
       {
         to: "/push-settings", label: "Push Notifications",

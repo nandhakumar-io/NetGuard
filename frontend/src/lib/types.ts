@@ -701,6 +701,24 @@ export interface Alert {
   escalation_count?: number;
   escalation_policy_id?: string | null;
   created_at: string;
+  runbook?: RunbookRef | null;
+}
+
+export interface RunbookRef {
+  title: string;
+  url: string;
+}
+
+export interface AlertRunbook {
+  id: string;
+  category: string;
+  source: AlertSourceType | null;
+  title: string;
+  url: string;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string | null;
 }
 
 export interface AlertSummary {
@@ -774,6 +792,9 @@ export interface MaintenanceWindow {
   created_by: string;
   created_at: string;
   is_active: boolean;
+  // Set when this window was auto-created from an approved change request's
+  // declared maintenance window rather than by a person.
+  change_request_id: string | null;
 }
 
 // --- Firmware / OS Upgrade Orchestration ---
@@ -1644,6 +1665,27 @@ export interface DeviceOverview {
   notable_syslog_count: number;
   deployment_count: number;
   timeline: DeviceTimelineEvent[];
+}
+
+export interface TerminalSessionRecording {
+  id: string;
+  device_id: string;
+  device_hostname: string | null;
+  actor_email: string;
+  jit_elevation_id: string | null;
+  protocol: string | null;
+  byte_count: number;
+  redacted: boolean;
+  started_at: string;
+  ended_at: string | null;
+  close_reason: string | null;
+  in_progress: boolean;
+}
+
+export interface TerminalRecordingRecord {
+  t: number;
+  dir: "in" | "out";
+  data: string;
 }
 
 export interface ImpactSimulationPreview {

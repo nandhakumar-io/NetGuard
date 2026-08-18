@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { Device, MaintenanceScope, MaintenanceWindow } from "../lib/types";
 import { useAuth } from "../lib/auth";
@@ -157,7 +158,18 @@ export default function MaintenanceWindowsPage() {
             {windows.map((w) => (
               <tr key={w.id}>
                 <td className="px-4 py-3 font-medium text-slate-800">
-                  {w.name}
+                  <div className="flex items-center gap-2">
+                    {w.name}
+                    {w.change_request_id && (
+                      <Link
+                        to="/change-requests"
+                        className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-700 hover:bg-indigo-200"
+                        title={`Auto-created from approved change request ${w.change_request_id}`}
+                      >
+                        auto · CR
+                      </Link>
+                    )}
+                  </div>
                   {w.reason && <div className="text-xs text-slate-400">{w.reason}</div>}
                 </td>
                 <td className="px-4 py-3">

@@ -19,7 +19,13 @@ from app.core.database import get_db
 from app.core.deps import get_current_user_ws, require_roles
 from app.models.device import Device
 from app.models.user import User, UserRole
-from app.services import audit_service, command_guard, credential_service
+from app.services import (
+    audit_service,
+    command_guard,
+    credential_service,
+    jit_service,
+    session_recording_service,
+)
 
 router = APIRouter(prefix="/devices", tags=["terminal"])
 
@@ -36,7 +42,7 @@ TELNET_CONNECT_TIMEOUT_SECONDS = 8
 TERMINAL_ALLOWED_ROLES = (UserRole.NETWORK_ADMIN, UserRole.NETWORK_ENGINEER, UserRole.NOC_ENGINEER)
 
 
-async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket) -> None:
+async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket, recorder: "session_recording_service.SessionRecorder | None" = None) -> None:
     """Pumps device -> browser. Deliberately does NOT close the websocket
     itself on exit (device EOF, SSH channel drop, etc.) -- it used to, but
     that raced with read_from_ws below: if this task closed the socket
@@ -54,6 +60,8 @@ async def read_from_ssh(process: asyncssh.SSHClientProcess, websocket: WebSocket
             data = await process.stdout.read(4096)
             if not data:
                 break
+            if recorder is not None:
+                recorder.record_output(data)
             await websocket.send_text(data)
     except (asyncssh.Error, OSError, ConnectionError) as e:
         print(f"SSH stream read error: {e}")
@@ -68,6 +76,7 @@ async def read_from_ws(
     db: Session | None = None,
     user: User | None = None,
     device: Device | None = None,
+    recorder: "session_recording_service.SessionRecorder | None" = None,
 ) -> None:
     """Pumps browser -> device. When guard_state is provided, typed lines
     are held and checked against the destructive-command deny-list (see
@@ -79,6 +88,8 @@ async def read_from_ws(
     try:
         while True:
             data = await websocket.receive_text()
+            if recorder is not None:
+                recorder.record_input(data)
 
             if guard_state is None:
                 process.stdin.write(data)
@@ -120,12 +131,14 @@ async def read_from_ws(
             process.stdin.close()
 
 
-async def read_from_telnet(reader: telnetlib3.TelnetReader, websocket: WebSocket) -> None:
+async def read_from_telnet(reader: telnetlib3.TelnetReader, websocket: WebSocket, recorder: "session_recording_service.SessionRecorder | None" = None) -> None:
     try:
         while True:
             data = await reader.read(4096)
             if not data:
                 break
+            if recorder is not None:
+                recorder.record_output(data)
             await websocket.send_text(data)
     except Exception as e:  # noqa: BLE001
         print(f"Telnet stream read error: {e}")
@@ -138,12 +151,15 @@ async def read_from_ws_telnet(
     db: Session | None = None,
     user: User | None = None,
     device: Device | None = None,
+    recorder: "session_recording_service.SessionRecorder | None" = None,
 ) -> None:
     """Same deny-list gating as read_from_ws, for the Telnet fallback path
     (lab devices) -- see command_guard module docstring."""
     try:
         while True:
             data = await websocket.receive_text()
+            if recorder is not None:
+                recorder.record_input(data)
 
             if guard_state is None:
                 writer.write(data)
@@ -372,6 +388,7 @@ async def _try_ssh(
     password: str | None = None,
     client_keys: list | None = None,
     user: User | None = None,
+    recorder: "session_recording_service.SessionRecorder | None" = None,
 ) -> bool:
     """Returns True if an SSH session ran (successfully or not, but far
     enough that telnet should NOT also be attempted -- e.g. the user
@@ -394,13 +411,15 @@ async def _try_ssh(
         ) as conn:
             process = await conn.create_process(term_type="xterm-256color", term_size=(120, 40))
             await websocket.send_text(f"\r\n\x1b[32mConnected via SSH to {device.ip_address}.\x1b[0m\r\n")
+            if recorder is not None:
+                recorder.set_protocol("ssh")
             guard_state = command_guard.LineGuardState(
                 device_id=str(device.id), username=username,
             )
             await _run_pumped_session(
                 websocket,
-                read_from_ssh(process, websocket),
-                read_from_ws(process, websocket, guard_state, db, user, device),
+                read_from_ssh(process, websocket, recorder),
+                read_from_ws(process, websocket, guard_state, db, user, device, recorder),
                 protocol_label="SSH",
             )
         return True
@@ -434,6 +453,7 @@ async def _try_ssh(
 async def _try_telnet(
     websocket: WebSocket, device: Device, username: str, password: str,
     db: Session | None = None, user: User | None = None,
+    recorder: "session_recording_service.SessionRecorder | None" = None,
 ) -> None:
     # Lab devices (see Device.console_host/console_port) expose their
     # console only via the GNS3 controller's per-node telnet port -- that's
@@ -462,11 +482,13 @@ async def _try_telnet(
         f"\r\n\x1b[36mConnected via Telnet to {host}:{port}. "
         f"Log in manually below (username: {username}).\x1b[0m\r\n"
     )
+    if recorder is not None:
+        recorder.set_protocol("telnet")
     guard_state = command_guard.LineGuardState(device_id=str(device.id), username=username)
     await _run_pumped_session(
         websocket,
-        read_from_telnet(reader, websocket),
-        read_from_ws_telnet(writer, websocket, guard_state, db, user, device),
+        read_from_telnet(reader, websocket, recorder),
+        read_from_ws_telnet(writer, websocket, guard_state, db, user, device, recorder),
         protocol_label="Telnet",
     )
 
@@ -590,12 +612,19 @@ async def device_terminal(
         device_hostname=device.hostname,
     )
 
+    active_elevation = jit_service.current_active_elevation(db, user.id)
+    recorder = session_recording_service.SessionRecorder(
+        db, device_id=device.id, device_hostname=device.hostname,
+        user_id=user.id, actor_email=user.email,
+        jit_elevation_id=active_elevation.id if active_elevation else None,
+    )
+
     await websocket.send_text(f"\r\n\x1b[36mInitiating secure shell connection to {device.ip_address}...\x1b[0m\r\n")
 
     try:
         ssh_ran = await _try_ssh(
             websocket, device, username, db,
-            password=password, client_keys=ssh_client_keys, user=user,
+            password=password, client_keys=ssh_client_keys, user=user, recorder=recorder,
         )
         if not ssh_ran:
             # Telnet is unencrypted -- credentials and full session
@@ -615,7 +644,7 @@ async def device_terminal(
                 # manual login over Telnet (password shown as empty -- the
                 # operator logs in by hand, same as any lab device without
                 # credentials on file).
-                await _try_telnet(websocket, device, username, password or "", db, user)
+                await _try_telnet(websocket, device, username, password or "", db, user, recorder)
             else:
                 await websocket.send_text(
                     "\r\n\x1b[31mSSH is unavailable for this device and it is not a lab "
@@ -630,3 +659,5 @@ async def device_terminal(
             await websocket.close()
         except Exception:
             pass
+    finally:
+        recorder.close(reason="session_ended")

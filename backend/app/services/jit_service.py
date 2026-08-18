@@ -165,6 +165,28 @@ def active_roles_for_user(db: Session, user_id) -> set[str]:
     return {row.elevated_role for row in rows}
 
 
+def current_active_elevation(db: Session, user_id) -> JitElevation | None:
+    """The single most-recently-granted currently-active elevation for
+    this user, if any -- used to tag a terminal session recording
+    (TerminalSessionRecording.jit_elevation_id) with the grant it was
+    opened under. Most-recent rather than "any" in the (rare) case a
+    user somehow holds more than one active elevation at once, so the
+    recording links to the grant that's actually relevant right now.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (
+        db.query(JitElevation)
+        .filter(
+            JitElevation.user_id == user_id,
+            JitElevation.status == JitElevationStatus.ACTIVE,
+            JitElevation.expires_at.isnot(None),
+            JitElevation.expires_at > now,
+        )
+        .order_by(JitElevation.first_approved_at.desc().nullslast())
+        .first()
+    )
+
+
 def mark_expired_elevations(db: Session) -> int:
     """Flips any ACTIVE row whose window has lapsed to EXPIRED. Cosmetic
     housekeeping for list/history views -- see module docstring for why

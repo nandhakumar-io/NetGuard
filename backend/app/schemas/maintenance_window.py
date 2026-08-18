@@ -38,3 +38,7 @@ class MaintenanceWindowRead(MaintenanceWindowBase):
     created_by: str
     created_at: datetime
     is_active: bool = False
+    # Set when this window was auto-created from an approved change request's
+    # declared maintenance window rather than by a person -- lets the UI show
+    # "auto-created from CR ..." instead of implying someone opened it by hand.
+    change_request_id: uuid.UUID | None = None

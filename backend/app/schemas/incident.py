@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.schemas.alert_runbook import RunbookRef
+
 
 class IncidentCreate(BaseModel):
     """Open an incident from a correlated alert group. `root_cause_alert_id`
@@ -67,6 +69,12 @@ class IncidentRead(BaseModel):
     created_by: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
+    # Resolved in app.api.incidents from the root-cause alert's
+    # category(+source), same lookup AlertRead.runbook uses -- lets the
+    # incident view surface the same remediation doc that would've shown
+    # on the alert itself, without needing category/source stored again
+    # on Incident.
+    runbook: RunbookRef | None = None
 
 
 class IncidentDetailRead(IncidentRead):
