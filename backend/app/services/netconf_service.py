@@ -180,18 +180,28 @@ def get_junos_switchport_config(
     parsing) the entire running config just for this.
     """
     start = time.perf_counter()
-    filter_xml = (
-        "<filter type=\"subtree\">"
+    # NOTE: this is the *criteria* only -- ncclient's get_config(filter=...)
+    # wraps whatever's passed here in its own <filter type="subtree">...
+    # </filter> element. Passing an already-wrapped <filter> (as this used
+    # to) made ncclient nest a second <filter> around it, which every real
+    # Junos device rejects as a malformed subtree filter -- so this call
+    # always raised and Port Mode/VLAN/Edge Port silently fell through to
+    # SNMP (or stayed blank for devices with no SNMP configured), even
+    # though the NETCONF session itself was working fine for everything
+    # else on the Interfaces tab.
+    filter_criteria = (
         "<configuration>"
         "<interfaces/>"
         "<protocols><rstp/></protocols>"
         "</configuration>"
-        "</filter>"
     )
-    request_xml = f"<get-config><source><running/></source>{filter_xml}</get-config>"
+    request_xml = (
+        f"<get-config><source><running/></source>"
+        f'<filter type="subtree">{filter_criteria}</filter></get-config>'
+    )
     try:
         with _connect(ip_address, port, username, password, vendor="juniper") as conn:
-            reply = conn.get_config(source="running", filter=("subtree", filter_xml))
+            reply = conn.get_config(source="running", filter=("subtree", filter_criteria))
             elapsed = (time.perf_counter() - start) * 1000
             content = strip_rpc_envelope(str(reply)) or str(reply)
             return NetconfResult(True, request_xml, content, elapsed)

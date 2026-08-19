@@ -361,7 +361,7 @@ export default function Backups() {
           <div>
             <h2 className="font-bold text-navy dark:text-white text-sm">Cloud &amp; Remote Destinations</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Every completed backup is also pushed to each enabled destination below (AWS S3, Azure Blob Storage, or a remote server over SFTP).
+              Every completed database backup and device config backup below is also pushed to each enabled destination (AWS S3, Azure Blob Storage, or a remote server over SFTP).
             </p>
           </div>
           <button

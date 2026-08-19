@@ -23,6 +23,7 @@ import gzip
 import json
 import logging
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -273,6 +274,76 @@ class DeviceBackupError(Exception):
     doesn't abort the rest of a bulk run."""
 
 
+def _push_device_config_to_destinations(db: Session, device, snapshot, operator_email: str) -> None:
+    """Pushes one just-taken device config snapshot to every enabled
+    BackupDestination, same off-site copy every database backup already
+    gets (see _upload_to_destinations) -- device config backups were
+    previously never forwarded anywhere, only written to the encrypted
+    ConfigSnapshot row in NetGuard's own DB, so a destination configured
+    on the Backups page silently only ever received database dumps.
+
+    Best-effort and never raises: the snapshot itself already succeeded
+    and is safely on file in NetGuard's DB by the time this runs, so a
+    broken off-site destination shouldn't be reported as the backup
+    having failed -- same posture as _upload_to_destinations. Shares
+    each BackupDestination's last_run_at/last_run_status/last_error
+    fields with the database-backup path rather than adding a parallel
+    per-snapshot tracking column, since the Backups page already reads
+    those to show "last run" on the destination itself.
+    """
+    from app.services import snapshot_service
+
+    destinations = db.query(BackupDestination).filter(BackupDestination.enabled.is_(True)).all()
+    if not destinations:
+        return
+
+    try:
+        raw_config = snapshot_service.decrypt_config(snapshot.running_config_encrypted)
+    except Exception:
+        logger.warning("Could not decrypt snapshot %s for off-site push", snapshot.id, exc_info=True)
+        return
+
+    remote_filename = f"{device.hostname}-{snapshot.version}.cfg"
+    now = datetime.datetime.now(datetime.timezone.utc)
+    failures = []
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False) as tmp:
+        tmp.write(raw_config)
+        tmp_path = Path(tmp.name)
+
+    try:
+        for dest in destinations:
+            config = backup_destination_service.decrypt_config(dest.config_encrypted)
+            try:
+                backup_destination_service.upload_to_destination(dest.type, config, tmp_path, remote_filename)
+                dest.last_run_status = "success"
+                dest.last_error = None
+            except backup_destination_service.DestinationError as exc:
+                dest.last_run_status = "failed"
+                dest.last_error = str(exc)[:500]
+                failures.append(f"{dest.name}: {str(exc)[:200]}")
+                logger.warning(
+                    "Off-site push of device config backup (%s) to %s (%s) failed: %s",
+                    device.hostname, dest.name, dest.type, exc,
+                )
+            dest.last_run_at = now
+        db.commit()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    if failures:
+        notification_service.notify(
+            event="Off-Site Device Config Backup Upload Failed",
+            message=f"{device.hostname} config backup ({snapshot.version}) failed to reach: " + "; ".join(failures),
+            severity="warning",
+        )
+        audit_service.record_event(
+            db, actor=operator_email, action="Off-Site Device Config Backup Upload",
+            result="Partial Failure", device_hostname=device.hostname,
+            detail=f"snapshot={snapshot.id}; failed: {', '.join(f.split(':')[0] for f in failures)}",
+        )
+
+
 def run_device_config_backup(db: Session, device, operator_email: str, label: str | None = None):
     """Reads `device`'s live running config over its configured protocol and
     persists it as a new ConfigSnapshot. Raises DeviceBackupError on any
@@ -303,6 +374,7 @@ def run_device_config_backup(db: Session, device, operator_email: str, label: st
         device_hostname=device.hostname,
         detail=f"snapshot={snapshot.id} version={snapshot.version} label={label or 'manual backup'}",
     )
+    _push_device_config_to_destinations(db, device, snapshot, operator_email)
     return snapshot
 
 
