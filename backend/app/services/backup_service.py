@@ -250,3 +250,158 @@ def delete_backup(db: Session, job: BackupJob) -> None:
         Path(job.file_path).unlink(missing_ok=True)
     db.delete(job)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Device configuration backups
+#
+# Everything above this point is NetGuard's *own* database backup. The
+# functions below are the device-config counterpart the Backups page also
+# surfaces: an on-demand read of each managed device's live running config,
+# persisted as an app.models.snapshot.ConfigSnapshot -- the exact same
+# storage the pre-deployment auto-snapshot and rollback history already use
+# (see app.api.config_management.backup_config, which now just calls
+# run_device_config_backup so there's one code path for "take a config
+# backup of this device" regardless of whether it was triggered from the
+# device's own Config tab or the fleet-wide Backups page).
+# ---------------------------------------------------------------------------
+
+
+class DeviceBackupError(Exception):
+    """Raised when a single device's config couldn't be read for backup --
+    caught per-device by run_fleet_config_backup so one unreachable device
+    doesn't abort the rest of a bulk run."""
+
+
+def run_device_config_backup(db: Session, device, operator_email: str, label: str | None = None):
+    """Reads `device`'s live running config over its configured protocol and
+    persists it as a new ConfigSnapshot. Raises DeviceBackupError on any
+    read failure -- callers decide whether that's a hard stop (single-device
+    backup) or just one failed row in a fleet-wide sweep."""
+    from app.models.snapshot import ConfigSnapshot
+    from app.services import audit_service as _audit_service
+    from app.services import snapshot_service
+    from app.services.protocol_manager import ProtocolManager
+
+    pm = ProtocolManager(db, device, operator=operator_email)
+    result = pm.backup_config()
+    if not result.success:
+        raise DeviceBackupError(result.error or "Failed to read device configuration for backup")
+
+    version = str(int(datetime.datetime.utcnow().timestamp()))
+    payload_dict = snapshot_service.build_snapshot_payload(result.output, result.startup_config, version)
+    snapshot = ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **payload_dict)
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+
+    _audit_service.record_event(
+        db,
+        actor=operator_email,
+        action="Configuration Backup",
+        result="Success",
+        device_hostname=device.hostname,
+        detail=f"snapshot={snapshot.id} version={snapshot.version} label={label or 'manual backup'}",
+    )
+    return snapshot
+
+
+def device_backup_summary(db: Session) -> list[dict]:
+    """One row per managed device for the Backups page's Device Config
+    Backups panel: latest snapshot's timestamp/version/checksum, a running
+    count of how many backups are on file, and how many days it's been
+    since the last one -- so an operator can see at a glance which devices
+    haven't been backed up recently (or ever) without opening each one's
+    Config tab individually.
+
+    `never_backed_up` devices sort first, then oldest-last-backup-first --
+    the devices most in need of attention naturally bubble to the top
+    instead of the operator having to hunt for them alphabetically.
+    """
+    from sqlalchemy import func as _func
+
+    from app.models.device import Device
+    from app.models.snapshot import ConfigSnapshot
+
+    devices = db.query(Device).order_by(Device.hostname).all()
+    latest_by_device: dict = {}
+    count_by_device: dict = {}
+    for device_id, count in db.query(ConfigSnapshot.device_id, _func.count(ConfigSnapshot.id)).group_by(
+        ConfigSnapshot.device_id
+    ):
+        count_by_device[device_id] = count
+    # One query per device for "the latest row" would be N+1 on a fleet
+    # page -- instead pull every snapshot's (device_id, created_at, id)
+    # ordered so the first time we see a device_id is its newest row.
+    for snap in db.query(ConfigSnapshot).order_by(ConfigSnapshot.device_id, ConfigSnapshot.seq.desc()).all():
+        latest_by_device.setdefault(snap.device_id, snap)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    rows = []
+    for device in devices:
+        latest = latest_by_device.get(device.id)
+        days_since = None
+        if latest and latest.created_at:
+            created = latest.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=datetime.timezone.utc)
+            days_since = (now - created).days
+        rows.append(
+            {
+                "device_id": device.id,
+                "hostname": device.hostname,
+                "ip_address": device.ip_address,
+                "vendor": device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor),
+                "backup_count": count_by_device.get(device.id, 0),
+                "last_backup_at": latest.created_at if latest else None,
+                "last_backup_version": latest.version if latest else None,
+                "last_backup_snapshot_id": latest.id if latest else None,
+                "days_since_backup": days_since,
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            r["days_since_backup"] is not None,  # False (never backed up) sorts before True
+            -(r["days_since_backup"] or -1),
+        )
+    )
+    return rows
+
+
+def run_fleet_config_backup(db: Session, operator_email: str, device_ids: list | None = None) -> dict:
+    """Bulk "back up every device's config right now" sweep for the Backups
+    page's fleet-wide button -- device_ids=None means every managed device.
+    Each device is independently best-effort (an unreachable device just
+    lands in `failed`, same as a single manual backup failing wouldn't stop
+    anyone else's), so one down switch never blocks the rest of the fleet
+    from getting a fresh backup.
+    """
+    from app.models.device import Device
+
+    query = db.query(Device)
+    if device_ids:
+        query = query.filter(Device.id.in_(device_ids))
+    devices = query.all()
+
+    succeeded: list[str] = []
+    failed: dict[str, str] = {}
+    for device in devices:
+        try:
+            run_device_config_backup(db, device, operator_email, label="fleet backup")
+            succeeded.append(device.hostname)
+        except DeviceBackupError as exc:
+            failed[device.hostname] = str(exc)
+        except Exception as exc:  # pragma: no cover - defensive, mirrors bulk_device_action's catch-all
+            failed[device.hostname] = str(exc)
+
+    from app.services import audit_service as _audit_service
+
+    _audit_service.record_event(
+        db,
+        actor=operator_email,
+        action="Fleet Configuration Backup",
+        result="Success" if not failed else ("Partial Failure" if succeeded else "Failure"),
+        detail=f"{len(succeeded)}/{len(devices)} device(s) backed up"
+        + (f"; failed: {', '.join(failed.keys())}" if failed else ""),
+    )
+    return {"succeeded": succeeded, "failed": failed, "total": len(devices)}

@@ -59,6 +59,7 @@ from app.schemas.rollback import (
 )
 from app.services import (
     audit_service,
+    config_format_service,
     credential_service,
     device_csv_service,
     device_overview_service,
@@ -194,6 +195,9 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
                 neighbor_name=name or lldp.get("neighbor_chassis_id"),
                 neighbor_port=neighbor_port,
                 neighbor_device_id=neighbor_device_id,
+                port_mode=lldp.get("port_mode"),
+                vlan=lldp.get("vlan"),
+                trunk_vlans=",".join(lldp["trunk_vlans"]) if lldp.get("trunk_vlans") else None,
             )
         )
 
@@ -213,6 +217,9 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
                 neighbor_port=cdp.get("neighbor_port"),
                 neighbor_platform=cdp.get("neighbor_platform"),
                 neighbor_device_id=_resolve_neighbor_id(name),
+                port_mode=cdp.get("port_mode"),
+                vlan=cdp.get("vlan"),
+                trunk_vlans=",".join(cdp["trunk_vlans"]) if cdp.get("trunk_vlans") else None,
             )
         )
 
@@ -1329,6 +1336,41 @@ def discover_device(
     result = snmp_service.discover_inventory(
         device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS, vendor=device.vendor.value
     )
+
+    # Best-effort switchport (trunk/access mode + VLAN) enrichment for every
+    # local port a neighbor was seen on -- same source the device Interfaces
+    # tab uses (see api.config_management.view_interfaces): Junos config for
+    # Juniper devices, Q-BRIDGE-MIB SNMP walk for everything else. Without
+    # this the Discovery page's LLDP/CDP tables could only ever show *that*
+    # a link exists, never whether the local end is trunking and which
+    # VLAN(s) ride it -- both swallowed on failure, same as the Interfaces
+    # tab, so one bad walk doesn't break the rest of discovery.
+    switchport_info: dict[str, dict] = {}
+    vendor_lower = device.vendor.value.lower() if hasattr(device.vendor, "value") else str(device.vendor).lower()
+    if vendor_lower == "juniper":
+        try:
+            pm = protocol_manager.ProtocolManager(db, device)
+            switchport_result = pm.get_junos_switchport_config()
+            if switchport_result.success:
+                switchport_info = config_format_service.parse_junos_switchport_config(switchport_result.output)
+        except Exception:
+            switchport_info = {}
+    if not switchport_info:
+        try:
+            switchport_info = snmp_service.walk_switchport_vlans(device.ip_address, auth)
+        except Exception:
+            switchport_info = {}
+
+    def _apply_switchport(neighbor: dict) -> dict:
+        local_port = neighbor.get("local_port") or ""
+        info = switchport_info.get(local_port) or switchport_info.get(local_port.split(".", 1)[0]) or {}
+        neighbor["port_mode"] = info.get("mode")
+        neighbor["vlan"] = info.get("vlan")
+        neighbor["trunk_vlans"] = info.get("trunk_vlans")
+        return neighbor
+
+    result["lldp_neighbors"] = [_apply_switchport(dict(n)) for n in result.get("lldp_neighbors") or []]
+    result["cdp_neighbors"] = [_apply_switchport(dict(n)) for n in result.get("cdp_neighbors") or []]
 
     # Backfill Device.platform/model/serial_number/os_version from
     # discovery whenever they're still blank -- these were being computed

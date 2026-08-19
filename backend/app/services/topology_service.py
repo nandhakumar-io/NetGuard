@@ -174,6 +174,13 @@ class LinkMember:
     # operationally down, instead of a single link-wide status.
     status: str = "unknown"
     utilization_pct: int | None = None
+    # Best-effort trunk/access mode + VLAN for the *local* (source-device)
+    # end of this member, carried straight over from DiscoveredNeighbor
+    # (see app.api.devices._persist_discovered_neighbors) -- None when the
+    # discovery run couldn't resolve switchport info for that platform.
+    port_mode: str | None = None  # "access" | "trunk" | "routed" | None
+    vlan: str | None = None
+    trunk_vlans: list[str] | None = None
 
 
 @dataclass
@@ -619,6 +626,9 @@ def build_topology(db: Session) -> TopologyGraph:
                     stale=is_stale,
                     status=status,
                     utilization_pct=member_util,
+                    port_mode=row.port_mode,
+                    vlan=row.vlan,
+                    trunk_vlans=row.trunk_vlans.split(",") if row.trunk_vlans else None,
                 )
             )
         members.sort(key=lambda m: (m.local_port or "", m.neighbor_port or ""))

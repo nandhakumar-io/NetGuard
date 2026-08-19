@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -41,5 +41,16 @@ class DiscoveredNeighbor(Base):
     # match against the neighbor_name at write time. Null = unmanaged/
     # unrecognized neighbor.
     neighbor_device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True, index=True)
+
+    # Best-effort switchport enrichment for the *local* port -- same
+    # Junos-config/Q-BRIDGE-MIB lookup that backs the device Interfaces
+    # tab (see snmp_service.walk_switchport_vlans /
+    # config_format_service.parse_junos_switchport_config), applied to
+    # LLDP/CDP neighbor rows in app.api.devices._persist_discovered_neighbors
+    # so the Discovery and Topology pages can show trunk/access mode and
+    # VLAN alongside each confirmed link, not just that it exists.
+    port_mode = Column(String(16), nullable=True)  # "access" | "trunk" | "routed" | None
+    vlan = Column(String(32), nullable=True)  # access/native VLAN ID
+    trunk_vlans = Column(Text, nullable=True)  # comma-separated tagged VLAN IDs, only set when port_mode == "trunk"
 
     discovered_at = Column(DateTime(timezone=True), server_default=func.now())

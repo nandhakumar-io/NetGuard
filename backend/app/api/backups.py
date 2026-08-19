@@ -13,12 +13,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_roles
 from app.models.backup_destination import BackupDestination
 from app.models.backup_job import BackupJob
+from app.models.device import Device
 from app.models.user import User, UserRole
 from app.schemas.backup_destination import (
     BackupDestinationCreate,
@@ -30,6 +32,14 @@ from app.services import audit_service, backup_destination_service, backup_servi
 router = APIRouter(prefix="/backups", tags=["backups"])
 
 _admin_only = require_roles(UserRole.NETWORK_ADMIN)
+
+
+class FleetConfigBackupRequest(BaseModel):
+    # None (the default) means "every managed device" -- matches the
+    # fleet-wide "Back Up All Devices Now" button on the Backups page.
+    # A specific list lets the same endpoint back a "back up these
+    # selected devices" flow later without a second route.
+    device_ids: list[uuid.UUID] | None = None
 
 
 def _serialize(job: BackupJob) -> dict:
@@ -97,6 +107,78 @@ def trigger_database_backup(db: Session = Depends(get_db), current_user: User = 
     except backup_service.BackupError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return _serialize(job)
+
+
+# ---------------------------------------------------------------------------
+# Device configuration backups
+#
+# Complements the /devices/{device_id}/config/backup single-device endpoint
+# (app.api.config_management, unchanged for the device's own Config tab)
+# with the fleet-wide view the Backups page needs: which devices have been
+# backed up, when, and a one-click "back up everything now" sweep -- see
+# app.services.backup_service.device_backup_summary / run_fleet_config_backup.
+# ---------------------------------------------------------------------------
+@router.get("/devices")
+def list_device_backups(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+    """Per-device config backup coverage for the Backups page: last backup
+    time/version, how many are on file, and days since the last one --
+    sorted so devices needing attention (never backed up, or most overdue)
+    come first."""
+    rows = backup_service.device_backup_summary(db)
+    never_backed_up = sum(1 for r in rows if r["last_backup_at"] is None)
+    return {
+        "devices": [
+            {
+                "device_id": str(r["device_id"]),
+                "hostname": r["hostname"],
+                "ip_address": r["ip_address"],
+                "vendor": r["vendor"],
+                "backup_count": r["backup_count"],
+                "last_backup_at": r["last_backup_at"].isoformat() if r["last_backup_at"] else None,
+                "last_backup_version": r["last_backup_version"],
+                "last_backup_snapshot_id": str(r["last_backup_snapshot_id"]) if r["last_backup_snapshot_id"] else None,
+                "days_since_backup": r["days_since_backup"],
+            }
+            for r in rows
+        ],
+        "total_devices": len(rows),
+        "never_backed_up": never_backed_up,
+    }
+
+
+@router.post("/devices/{device_id}", status_code=201)
+def trigger_device_backup(device_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+    """Backs up a single device's config right now -- same underlying call
+    as the device Config tab's Backup button, just reachable from the
+    fleet-wide Backups page too."""
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    try:
+        snapshot = backup_service.run_device_config_backup(db, device, current_user.email, label="backups page")
+    except backup_service.DeviceBackupError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {
+        "device_id": str(device.id),
+        "hostname": device.hostname,
+        "snapshot_id": str(snapshot.id),
+        "version": snapshot.version,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+    }
+
+
+@router.post("/devices/bulk", status_code=201)
+def trigger_fleet_backup(
+    payload: FleetConfigBackupRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_admin_only),
+):
+    """"Back Up All Devices Now" -- runs a config backup against every
+    managed device (or just `device_ids` if given), best-effort per device.
+    Returns which hostnames succeeded/failed so the UI can show a real
+    summary instead of a single pass/fail toast."""
+    device_ids = payload.device_ids if payload else None
+    return backup_service.run_fleet_config_backup(db, current_user.email, device_ids=device_ids)
 
 
 @router.get("/destinations", response_model=list[BackupDestinationRead])

@@ -1492,23 +1492,35 @@ function DeviceInlineDetails({
                 {discoverySubTab === "lldp" && (
                   <DiscoveryTable
                     empty="No LLDP neighbors reported (LLDP may be disabled on this device)."
-                    columns={["Local Port", "Neighbor", "Neighbor Port"]}
+                    columns={["Local Port", "Neighbor", "Neighbor Port", "Port Mode", "VLAN"]}
                     rows={discovery.lldp_neighbors.map((n) => [
                       n.local_port || n.local_port_index,
                       n.neighbor_name || "—",
                       n.neighbor_port || "—",
+                      n.port_mode
+                        ? n.port_mode === "trunk"
+                          ? `trunk${n.trunk_vlans?.length ? ` (${n.trunk_vlans.join(", ")})` : ""}`
+                          : n.port_mode
+                        : "—",
+                      n.vlan || "—",
                     ])}
                   />
                 )}
                 {discoverySubTab === "cdp" && (
                   <DiscoveryTable
                     empty="No CDP neighbors reported (CDP may be disabled, or this isn't a Cisco device)."
-                    columns={["Local Interface", "Neighbor", "Neighbor Port", "Platform"]}
+                    columns={["Local Interface", "Neighbor", "Neighbor Port", "Platform", "Port Mode", "VLAN"]}
                     rows={discovery.cdp_neighbors.map((n) => [
                       n.local_port || n.local_if_index,
                       n.neighbor_id || "—",
                       n.neighbor_port || "—",
                       n.neighbor_platform || "—",
+                      n.port_mode
+                        ? n.port_mode === "trunk"
+                          ? `trunk${n.trunk_vlans?.length ? ` (${n.trunk_vlans.join(", ")})` : ""}`
+                          : n.port_mode
+                        : "—",
+                      n.vlan || "—",
                     ])}
                   />
                 )}

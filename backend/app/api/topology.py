@@ -82,6 +82,9 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                         "stale": m.stale,
                         "status": m.status,
                         "utilization_pct": m.utilization_pct,
+                        "port_mode": m.port_mode,
+                        "vlan": m.vlan,
+                        "trunk_vlans": m.trunk_vlans,
                     }
                     for m in e.members
                 ],

@@ -332,31 +332,17 @@ def backup_config(
     manual backup shows up in Backup History / snapshot history either way.
     """
     device = _get_device(db, device_id)
-    pm = ProtocolManager(db, device, operator=current_user.email)
-    result = pm.backup_config()
-    if not result.success:
-        raise HTTPException(status_code=502, detail=result.error or "Failed to read device configuration for backup")
+    label = payload.label if payload else None
+    try:
+        from app.services import backup_service
 
-    version = str(int(datetime.datetime.utcnow().timestamp()))
-    payload_dict = snapshot_service.build_snapshot_payload(result.output, result.startup_config, version)
-    snapshot = ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **payload_dict)
-    db.add(snapshot)
-    db.commit()
-    db.refresh(snapshot)
-
-    label = (payload.label if payload else None) or "manual backup"
-    audit_service.record_event(
-        db,
-        actor=current_user.email,
-        action="Configuration Backup",
-        result="Success",
-        device_hostname=device.hostname,
-        detail=f"snapshot={snapshot.id} version={snapshot.version} label={label}",
-    )
+        snapshot = backup_service.run_device_config_backup(db, device, current_user.email, label=label)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or "Failed to read device configuration for backup")
 
     return BackupConfigResponse(
         snapshot=_to_history_entry(snapshot),
-        protocol=result.protocol.value if hasattr(result.protocol, "value") else str(result.protocol),
+        protocol=None,
         message=f"Backed up {device.hostname} configuration (v{snapshot.version}).",
     )
 

@@ -115,7 +115,7 @@ class BackupConfigRequest(BaseModel):
 
 class BackupConfigResponse(BaseModel):
     snapshot: BackupHistoryEntry
-    protocol: str
+    protocol: str | None = None
     message: str
 
 

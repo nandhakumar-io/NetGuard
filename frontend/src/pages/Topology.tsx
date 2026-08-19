@@ -1305,7 +1305,17 @@ export default function Topology() {
                                 <title>
                                   {`${e.link_source.toUpperCase()} ${member.local_port || "?"} \u2194 ${
                                     member.neighbor_port || "?"
-                                  } \u2014 ${member.status}${member.stale ? " (stale)" : ""}`}
+                                  } \u2014 ${member.status}${member.stale ? " (stale)" : ""}${
+                                    member.port_mode
+                                      ? ` \u2014 ${member.port_mode}${
+                                          member.port_mode === "trunk" && member.trunk_vlans?.length
+                                            ? ` (VLANs ${member.trunk_vlans.join(", ")})`
+                                            : member.vlan
+                                            ? ` (VLAN ${member.vlan})`
+                                            : ""
+                                        }`
+                                      : ""
+                                  }`}
                                 </title>
                               </line>
                             );
@@ -2064,6 +2074,34 @@ export default function Topology() {
                                 {m.local_port || "?"} ↔ {m.neighbor_port || "?"}
                               </span>
                               <span className="flex items-center gap-1.5 shrink-0">
+                                {m.port_mode && (
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase ${
+                                      m.port_mode === "trunk"
+                                        ? "bg-purple-100 text-purple-700"
+                                        : m.port_mode === "access"
+                                        ? "bg-blue-100 text-blue-700"
+                                        : "bg-slate-100 text-slate-600"
+                                    }`}
+                                    title={
+                                      m.port_mode === "trunk" && m.trunk_vlans?.length
+                                        ? `Trunk carrying VLANs ${m.trunk_vlans.join(", ")}`
+                                        : m.vlan
+                                        ? `VLAN ${m.vlan}`
+                                        : undefined
+                                    }
+                                  >
+                                    {m.port_mode}
+                                    {m.port_mode !== "routed" &&
+                                      (m.port_mode === "trunk"
+                                        ? m.trunk_vlans?.length
+                                          ? ` ${m.trunk_vlans.join(",")}`
+                                          : ""
+                                        : m.vlan
+                                        ? ` ${m.vlan}`
+                                        : "")}
+                                  </span>
+                                )}
                                 {m.utilization_pct !== null && m.utilization_pct !== undefined && (
                                   <span className="font-mono text-slate-400">{m.utilization_pct}%</span>
                                 )}
