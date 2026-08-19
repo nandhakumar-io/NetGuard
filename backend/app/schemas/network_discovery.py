@@ -140,3 +140,17 @@ class DiscoveryScheduleRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DiscoveryIgnoreRuleRead(BaseModel):
+    id: uuid.UUID
+    schedule_id: uuid.UUID
+    ip_address: str
+    vendor_guess: str | None = None
+    ignored_by: str
+    ignored_at: datetime
+    note: str | None = None
+
+    class Config:
+        from_attributes = True
+
