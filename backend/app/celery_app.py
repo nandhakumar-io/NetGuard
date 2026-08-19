@@ -207,6 +207,15 @@ celery_app.conf.update(
             "task": "app.tasks.run_subnet_rescan_sweep_task",
             "schedule": float(settings.IPAM_RESCAN_SWEEP_INTERVAL_SECONDS),
         },
+        # Network Discovery: fires any DiscoverySchedule whose
+        # interval_minutes cadence has elapsed, same "beat ticks often,
+        # per-entity cadence decides who's due" shape as
+        # ipam-subnet-rescan-sweep above. See
+        # app.tasks.run_discovery_schedule_sweep_task.
+        "discovery-schedule-sweep": {
+            "task": "app.tasks.run_discovery_schedule_sweep_task",
+            "schedule": float(settings.DISCOVERY_SCHEDULE_SWEEP_INTERVAL_SECONDS),
+        },
         # IPAM conflict alerting: turns ipam_service.fleet_conflicts from
         # a pull-only check (someone has to open the IPAM page) into a
         # real alert in the same pipeline topology snapshot diffs use.

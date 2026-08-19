@@ -20,6 +20,7 @@ make the backend probe arbitrary internal ranges on demand).
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import crypto
@@ -29,6 +30,7 @@ from app.models.device import Device, DeviceVendor
 from app.models.network_discovery import (
     DiscoveredHost,
     DiscoveredHostIpamStatus,
+    DiscoveryIgnoreRule,
     DiscoveryScan,
     DiscoveryScanStatus,
     DiscoverySchedule,
@@ -240,6 +242,8 @@ def import_host(
 
     host.imported = True
     host.imported_device_id = device.id
+    host.imported_by = user.email
+    host.imported_at = func.now()
     db.add(host)
     db.commit()
     db.refresh(host)
@@ -247,12 +251,48 @@ def import_host(
 
 
 @router.post("/hosts/{host_id}/ignore", response_model=DiscoveredHostRead)
-def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     host = db.get(DiscoveredHost, host_id)
     if not host:
         raise HTTPException(status_code=404, detail="Discovered host not found")
     host.ignored = True
+    host.ignored_by = user.email
+    host.ignored_at = func.now()
     db.add(host)
+
+    # If this host came from a scheduled scan, remember the decision at
+    # the schedule level too -- not just on this one host row -- so the
+    # next sweep of the same range doesn't re-flag it. Fingerprinted on
+    # (schedule_id, ip, vendor_guess); see DiscoveryIgnoreRule's docstring
+    # for why vendor_guess is part of the key.
+    scan = db.get(DiscoveryScan, host.scan_id)
+    if scan and scan.schedule_id:
+        rule = (
+            db.query(DiscoveryIgnoreRule)
+            .filter(
+                DiscoveryIgnoreRule.schedule_id == scan.schedule_id,
+                DiscoveryIgnoreRule.ip_address == host.ip_address,
+                DiscoveryIgnoreRule.vendor_guess == host.vendor_guess,
+            )
+            .first()
+        )
+        if rule is None:
+            db.add(
+                DiscoveryIgnoreRule(
+                    schedule_id=scan.schedule_id,
+                    ip_address=host.ip_address,
+                    vendor_guess=host.vendor_guess,
+                    ignored_by=user.email,
+                )
+            )
+        else:
+            # Someone re-ignored (e.g. after the rule's fingerprint match
+            # briefly lapsed) -- refresh who/when rather than leaving a
+            # stale attribution on record.
+            rule.ignored_by = user.email
+            rule.ignored_at = func.now()
+            db.add(rule)
+
     db.commit()
     db.refresh(host)
     return host

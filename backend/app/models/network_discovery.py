@@ -207,8 +207,68 @@ class DiscoveredHost(Base):
 
     imported = Column(Boolean, nullable=False, default=False, server_default="false")
     imported_device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True)
+    # Who actioned this row and when -- separate from DiscoveryScan.started_by,
+    # which only says who kicked off the *scan*. A scan can be started by a
+    # schedule (started_by="schedule:<name>") or run unattended, so without
+    # these an incident review ("who imported this rogue device without
+    # review") has no answer for anything actioned outside a manual scan.
+    # Both pairs are set exactly once, at the moment of that action, by
+    # app.api.network_discovery.import_host / ignore_host -- never touched
+    # by run_scan itself except when it auto-applies a DiscoveryIgnoreRule
+    # (see that model), in which case it copies the rule's original actor
+    # rather than attributing the auto-ignore to "the scan".
+    imported_by = Column(String, nullable=True)  # user email
+    imported_at = Column(DateTime(timezone=True), nullable=True)
+
     ignored = Column(Boolean, nullable=False, default=False, server_default="false")
+    ignored_by = Column(String, nullable=True)  # user email, or "schedule:<name>" for an auto-applied rule
+    ignored_at = Column(DateTime(timezone=True), nullable=True)
 
     discovered_at = Column(DateTime(timezone=True), server_default=func.now())
 
     scan = relationship("DiscoveryScan", back_populates="hosts")
+
+
+class DiscoveryIgnoreRule(Base):
+    """A persisted "I looked at this and it's not interesting" decision,
+    scoped to one DiscoverySchedule so it only suppresses re-flagging on
+    sweeps of the *same* range, not globally.
+
+    Without this, an ignore on DiscoveredHost only lives on that one
+    scan's rows -- the next scheduled sweep of the same CIDR creates a
+    brand new DiscoveredHost for the same responsive IP with ignored
+    defaulting back to False, so a recurring schedule re-surfaces the
+    exact same "reviewed, not interesting" device every single run
+    forever. Fingerprinted on (schedule_id, ip_address, vendor_guess)
+    rather than IP alone, since IP alone would keep suppressing the
+    address even if a *different* device (different vendor_guess) later
+    takes it over via DHCP -- that's a genuinely new fact worth
+    resurfacing, not a repeat of the old decision.
+
+    Applied in app.services.network_discovery_service.run_scan: when a
+    scan has a schedule_id, each newly-discovered host is checked
+    against this table and pre-marked ignored (with ignored_by/at
+    copied from the rule, not attributed to the scan) before it's ever
+    shown to anyone, and is excluded from DiscoveryScan.new_hosts /
+    the "new host" notification. Written in
+    app.api.network_discovery.ignore_host when the host being ignored
+    belongs to a scheduled scan.
+    """
+
+    __tablename__ = "discovery_ignore_rules"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    schedule_id = Column(UUID(as_uuid=True), ForeignKey("discovery_schedules.id"), nullable=False, index=True)
+
+    ip_address = Column(String, nullable=False)
+    # Snapshot of DiscoveredHost.vendor_guess at ignore time; NULL is a
+    # valid fingerprint value (host had no vendor guess) and still
+    # matches consistently on future sweeps as long as identification
+    # stays equally inconclusive.
+    vendor_guess = Column(String, nullable=True)
+
+    ignored_by = Column(String, nullable=False)  # user email that made the original decision
+    ignored_at = Column(DateTime(timezone=True), server_default=func.now())
+    note = Column(String, nullable=True)
+
+    schedule = relationship("DiscoverySchedule")

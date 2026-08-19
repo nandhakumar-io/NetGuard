@@ -851,3 +851,123 @@ def run_network_discovery_scan_task(self, scan_id: str, community: str | None = 
         return scan.status.value
     finally:
         db.close()
+
+
+@celery_app.task(name="app.tasks.run_discovery_schedule_sweep_task")
+def run_discovery_schedule_sweep_task() -> dict:
+    """Celery beat entry point (see celery_app "discovery-schedule-sweep"):
+    fires any enabled DiscoverySchedule whose interval_minutes cadence has
+    elapsed, turning it into a normal DiscoveryScan the same way
+    POST /discovery/schedules/{id}/run-now does -- except this updates
+    last_run_at (run-now deliberately doesn't, so a manual trigger never
+    disturbs the schedule's own timer).
+
+    Runs each due schedule's scan synchronously, on the beat worker,
+    rather than fanning out via run_network_discovery_scan_task.apply_async
+    like the manual/run-now paths do: those return immediately because an
+    HTTP client is waiting; this has no caller to return to; and running
+    inline keeps "was this new since last time" and the ignore-rule check
+    working against a DiscoveredHost set that's fully written before this
+    tick moves to the next schedule, rather than racing a separate queued
+    task.
+
+    A schedule with any genuinely new host fans out a notification through
+    app.services.notification_service.notify -- "new since inventory AND
+    not suppressed by an existing DiscoveryIgnoreRule for this schedule"
+    (run_scan already applies those rules before this runs), so a device
+    someone already reviewed and dismissed doesn't keep re-alerting on
+    every sweep.
+
+    One schedule's failure (bad CIDR that somehow slipped past validation,
+    a probe crash, etc.) is logged and skipped rather than aborting the
+    whole tick, same as every other per-entity sweep in this file.
+    Returns {"swept": N, "notified": M} for this tick.
+    """
+    import logging
+
+    from app.core import crypto
+    from app.models.network_discovery import (
+        DiscoveredHost,
+        DiscoveryScan,
+        DiscoveryScanStatus,
+        DiscoverySchedule,
+    )
+    from app.services import network_discovery_service, notification_service
+
+    logger = logging.getLogger("netguard.tasks")
+    db = SessionLocal()
+    swept = 0
+    notified = 0
+    try:
+        now = datetime.now(timezone.utc)
+        candidates = db.query(DiscoverySchedule).filter(DiscoverySchedule.enabled.is_(True)).all()
+        for schedule in candidates:
+            if schedule.last_run_at is not None:
+                elapsed_minutes = (now - schedule.last_run_at).total_seconds() / 60
+                if elapsed_minutes < schedule.interval_minutes:
+                    continue
+
+            community = crypto.decrypt(schedule.snmp_community_ref) if schedule.snmp_community_ref else None
+            scan = DiscoveryScan(
+                cidr=schedule.cidr,
+                ports=schedule.ports,
+                snmp_community_ref=schedule.snmp_community_ref,
+                status=DiscoveryScanStatus.RUNNING,
+                started_by=f"schedule:{schedule.name}",
+                schedule_id=schedule.id,
+            )
+            db.add(scan)
+            db.commit()
+            db.refresh(scan)
+
+            try:
+                network_discovery_service.run_scan(db, scan, community)
+                scan.status = DiscoveryScanStatus.COMPLETED
+            except Exception as exc:  # noqa: BLE001 -- one bad schedule shouldn't block the rest
+                scan.status = DiscoveryScanStatus.FAILED
+                scan.error = str(exc)[:500]
+                logger.warning("Scheduled discovery sweep failed for schedule %s", schedule.id, exc_info=True)
+                db.add(scan)
+                db.commit()
+                schedule.last_run_at = now
+                schedule.last_scan_id = scan.id
+                db.add(schedule)
+                db.commit()
+                continue
+
+            scan.completed_at = datetime.now(timezone.utc)
+            db.add(scan)
+            db.commit()
+            swept += 1
+
+            # run_scan already applied this schedule's DiscoveryIgnoreRules,
+            # marking previously-dismissed fingerprints ignored=True before
+            # we get here, so this query naturally excludes them.
+            new_hosts = (
+                db.query(DiscoveredHost)
+                .filter(
+                    DiscoveredHost.scan_id == scan.id,
+                    DiscoveredHost.matched_device_id.is_(None),
+                    DiscoveredHost.ignored.is_(False),
+                )
+                .all()
+            )
+            if new_hosts:
+                sample = ", ".join(h.ip_address for h in new_hosts[:5])
+                more = f" (+{len(new_hosts) - 5} more)" if len(new_hosts) > 5 else ""
+                notification_service.notify(
+                    "New Device Discovered",
+                    f"Schedule '{schedule.name}' ({schedule.cidr}) found {len(new_hosts)} "
+                    f"new host(s) not yet in inventory: {sample}{more}",
+                    severity="warning",
+                )
+                notified += 1
+
+            schedule.last_run_at = now
+            schedule.last_scan_id = scan.id
+            db.add(schedule)
+            db.commit()
+
+        return {"swept": swept, "notified": notified}
+    finally:
+        db.close()

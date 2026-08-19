@@ -76,6 +76,7 @@ from app.models.maintenance_window import (  # noqa: F401
 )
 from app.models.network_discovery import (  # noqa: F401
     DiscoveredHost,
+    DiscoveryIgnoreRule,
     DiscoveryScan,
     DiscoveryScanStatus,
     DiscoverySchedule,

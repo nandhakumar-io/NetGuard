@@ -346,6 +346,11 @@ class Settings(BaseSettings):
     # above). Keeps subnet utilization/scanned-host data from silently
     # going stale between someone manually clicking "Scan" on the IPAM page.
     IPAM_RESCAN_SWEEP_INTERVAL_SECONDS: int = 900
+    # How often beat checks for due DiscoverySchedule rows -- individual
+    # schedules fire on their own interval_minutes cadence (see
+    # app.tasks.run_discovery_schedule_sweep_task), this just bounds the
+    # worst-case delay between a schedule becoming due and actually firing.
+    DISCOVERY_SCHEDULE_SWEEP_INTERVAL_SECONDS: int = 300
     # IPAM: how often app.tasks.run_ipam_conflict_alert_sweep_task calls
     # app.services.ipam_service.fleet_conflicts and raises an alert for
     # any newly-seen conflict, so a duplicate static IP assignment shows

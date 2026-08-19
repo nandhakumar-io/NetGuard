@@ -54,7 +54,11 @@ class DiscoveredHostRead(BaseModel):
     )
     imported: bool
     imported_device_id: uuid.UUID | None = None
+    imported_by: str | None = None
+    imported_at: datetime | None = None
     ignored: bool
+    ignored_by: str | None = None
+    ignored_at: datetime | None = None
     discovered_at: datetime
 
     class Config:
