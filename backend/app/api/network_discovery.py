@@ -8,6 +8,8 @@ the device inventory.
   POST   /discovery/hosts/{id}/import     — create a Device from a discovered host
   POST   /discovery/hosts/{id}/ignore     — mark a host as reviewed/not-of-interest
   DELETE /discovery/scans/{id}            — delete a scan and its results
+  GET    /discovery/schedules/{id}/ignore-rules            — list persisted ignore decisions
+  DELETE /discovery/schedules/{id}/ignore-rules/{rule_id}  — revoke a persisted ignore decision
 
 A scan actively probes machines on the network (TCP connect attempts
 across a range of IPs) -- same trust boundary as the reachability sweep
@@ -42,6 +44,7 @@ from app.schemas.network_discovery import (
     DiscoveredHostImport,
     DiscoveredHostRead,
     DiscoveredHostReserve,
+    DiscoveryIgnoreRuleRead,
     DiscoveryScanCreate,
     DiscoveryScanRead,
     DiscoveryScheduleCreate,
@@ -441,6 +444,55 @@ def delete_schedule(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: Us
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     db.delete(schedule)
+    db.commit()
+
+
+@router.get("/schedules/{schedule_id}/ignore-rules", response_model=list[DiscoveryIgnoreRuleRead])
+def list_schedule_ignore_rules(
+    schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+):
+    """Every persisted ignore decision for this schedule -- what
+    run_scan is currently auto-suppressing on each sweep. Without this,
+    the effect of DiscoveryIgnoreRule is invisible: an admin has no way
+    to see why a host that should be new never triggered a notification,
+    or to review a growing list of suppressions for staleness (a
+    decommissioned device whose old IP would otherwise stay silently
+    ignored forever -- see the rule's own note field for context on why
+    it was made).
+    """
+    schedule = db.get(DiscoverySchedule, schedule_id)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return (
+        db.query(DiscoveryIgnoreRule)
+        .filter(DiscoveryIgnoreRule.schedule_id == schedule_id)
+        .order_by(DiscoveryIgnoreRule.ignored_at.desc())
+        .all()
+    )
+
+
+@router.delete("/schedules/{schedule_id}/ignore-rules/{rule_id}", status_code=204)
+def delete_schedule_ignore_rule(
+    schedule_id: uuid.UUID,
+    rule_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(_discovery_admin),
+):
+    """Revokes one persisted ignore decision -- the direct undo for a
+    rule created via POST /discovery/hosts/{id}/ignore. Deleting the
+    rule doesn't retroactively un-ignore any DiscoveredHost row already
+    written under it (those are historical scan results, same as every
+    other discovery field); it only means the *next* sweep of this
+    schedule will surface that IP+vendor fingerprint again if it's still
+    responsive. NETWORK_ADMIN-only, same restriction as everything else
+    that changes what a scan does -- ignoring one host is a
+    per-result review action anyone can do, but revoking a standing
+    suppression rule is closer to reconfiguring the schedule itself.
+    """
+    rule = db.get(DiscoveryIgnoreRule, rule_id)
+    if not rule or rule.schedule_id != schedule_id:
+        raise HTTPException(status_code=404, detail="Ignore rule not found")
+    db.delete(rule)
     db.commit()
 
 
