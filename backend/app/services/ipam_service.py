@@ -571,3 +571,101 @@ def fleet_conflicts(db: Session) -> list[dict]:
         for ip, devices in sorted(by_ip.items())
         if len(devices) > 1
     ]
+
+
+def stale_reservations(db: Session, subnet: Subnet | None = None) -> list[dict]:
+    """RESERVED IPReservations that discovery scans haven't found a live
+    host at -- the natural complement to the discovery-side rogue/expected
+    split (app.services.network_discovery_service._classify_ipam_status):
+    that side flags "something's here IPAM didn't plan for", this flags
+    "IPAM planned for something here and it never showed up" (a rollout
+    that stalled, or a reservation nobody cleaned up after the project
+    that needed it wrapped or moved).
+
+    Only ever compares against completed DiscoveryScan/DiscoveredHost
+    data already on file -- never triggers a scan itself, since this is a
+    read/report endpoint, not an action. A reservation whose address was
+    never covered by any scan's CIDR is reported as coverage="never_scanned"
+    rather than lumped in with "scanned and nothing answered": those are
+    very different situations for an admin (go run a scan vs. this is
+    genuinely looking stale) and conflating them would make the stale
+    list untrustworthy.
+    """
+    query = db.query(IPReservation).filter(IPReservation.state == IPAddressState.RESERVED)
+    if subnet is not None:
+        query = query.filter(IPReservation.subnet_id == subnet.id)
+    reservations = query.order_by(IPReservation.ip_address.asc()).all()
+    if not reservations:
+        return []
+
+    from app.models.network_discovery import (
+        DiscoveredHost,
+        DiscoveryScan,
+        DiscoveryScanStatus,
+    )
+
+    subnets_by_id = {subnet.id: subnet} if subnet is not None else {s.id: s for s in db.query(Subnet).all()}
+    completed_scans = (
+        db.query(DiscoveryScan)
+        .filter(DiscoveryScan.status == DiscoveryScanStatus.COMPLETED)
+        .order_by(DiscoveryScan.completed_at.desc())
+        .all()
+    )
+    # Pre-parse each scan's CIDR once rather than per-reservation.
+    scan_networks = []
+    for scan in completed_scans:
+        try:
+            scan_networks.append((scan, ipaddress.ip_network(scan.cidr, strict=False)))
+        except ValueError:
+            continue
+
+    results: list[dict] = []
+    for reservation in reservations:
+        sub = subnets_by_id.get(reservation.subnet_id)
+        if sub is None:
+            continue
+        try:
+            addr = ipaddress.ip_address(reservation.ip_address)
+        except ValueError:
+            continue
+
+        # Most recently completed scan whose range covers this address --
+        # "most recent" so a reservation that was genuinely fulfilled
+        # after an older, narrower scan missed it isn't reported stale
+        # forever just because some other scan once covered the range.
+        covering_scan = next((scan for scan, net in scan_networks if addr in net), None)
+        if covering_scan is None:
+            results.append(
+                {
+                    "reservation_id": reservation.id,
+                    "subnet_id": sub.id,
+                    "subnet_cidr": sub.cidr,
+                    "ip_address": reservation.ip_address,
+                    "note": reservation.note,
+                    "reserved_at": reservation.created_at,
+                    "coverage": "never_scanned",
+                    "last_scan_at": None,
+                }
+            )
+            continue
+
+        seen = (
+            db.query(DiscoveredHost)
+            .filter(DiscoveredHost.scan_id == covering_scan.id, DiscoveredHost.ip_address == reservation.ip_address)
+            .first()
+        )
+        if seen is None:
+            results.append(
+                {
+                    "reservation_id": reservation.id,
+                    "subnet_id": sub.id,
+                    "subnet_cidr": sub.cidr,
+                    "ip_address": reservation.ip_address,
+                    "note": reservation.note,
+                    "reserved_at": reservation.created_at,
+                    "coverage": "scanned_no_response",
+                    "last_scan_at": covering_scan.completed_at,
+                }
+            )
+
+    return results

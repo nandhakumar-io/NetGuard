@@ -28,15 +28,18 @@ from app.core.deps import get_current_user, require_roles
 from app.models.device import Device, DeviceVendor
 from app.models.network_discovery import (
     DiscoveredHost,
+    DiscoveredHostIpamStatus,
     DiscoveryScan,
     DiscoveryScanStatus,
     DiscoverySchedule,
 )
+from app.models.subnet import IPAddressState, IPReservation
 from app.models.user import User, UserRole
 from app.schemas.network_discovery import (
     CredentialSuggestion,
     DiscoveredHostImport,
     DiscoveredHostRead,
+    DiscoveredHostReserve,
     DiscoveryScanCreate,
     DiscoveryScanRead,
     DiscoveryScheduleCreate,
@@ -46,6 +49,7 @@ from app.schemas.network_discovery import (
 from app.services import (
     credential_service,
     event_bus,
+    ipam_service,
     network_discovery_service,
     reachability_service,
 )
@@ -248,6 +252,69 @@ def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Dep
     if not host:
         raise HTTPException(status_code=404, detail="Discovered host not found")
     host.ignored = True
+    db.add(host)
+    db.commit()
+    db.refresh(host)
+    return host
+
+
+@router.post("/hosts/{host_id}/reserve", response_model=DiscoveredHostRead)
+def reserve_host(
+    host_id: uuid.UUID,
+    body: DiscoveredHostReserve,
+    db: Session = Depends(get_db),
+    user: User = Depends(_discovery_admin),
+):
+    """Acknowledges a discovered host in place by creating an IPAM
+    IPReservation for its address, so "this is fine, I know about it"
+    doesn't require a separate trip to the IPAM page to hand-enter the
+    same IP a second time. This is the direct complement to /import: use
+    /import when the host should become a managed Device, use /reserve
+    when it's a real, expected thing on the network that NetGuard
+    shouldn't manage as a device (someone else's endpoint, a vendor
+    appliance, etc.) but IPAM should still know is spoken for.
+
+    Requires a managed Subnet to already cover this address -- reserving
+    into IPAM only means something if IPAM is tracking that range at
+    all; a host outside any configured subnet should be brought under a
+    Subnet first (or just ignored here).
+    """
+    host = db.get(DiscoveredHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="Discovered host not found")
+    if host.imported or host.ignored:
+        raise HTTPException(status_code=409, detail="This host has already been actioned")
+    if host.matched_device_id:
+        raise HTTPException(status_code=409, detail="This IP already matches an existing device")
+
+    subnet = ipam_service.find_subnet_for_ip(db, host.ip_address)
+    if subnet is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No IPAM subnet covers {host.ip_address} -- add one under IPAM before reserving.",
+        )
+
+    reservation = (
+        db.query(IPReservation)
+        .filter(IPReservation.subnet_id == subnet.id, IPReservation.ip_address == host.ip_address)
+        .first()
+    )
+    if reservation is None:
+        reservation = IPReservation(
+            subnet_id=subnet.id,
+            ip_address=host.ip_address,
+            state=IPAddressState.RESERVED,
+            note=body.note or f"Acknowledged from discovery scan {host.scan_id}",
+        )
+        db.add(reservation)
+    elif reservation.state != IPAddressState.RESERVED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{host.ip_address} is already reserved in IPAM as {reservation.state.value}, not reservable here",
+        )
+
+    host.ipam_status = DiscoveredHostIpamStatus.EXPECTED
+    host.ipam_reservation_note = reservation.note
     db.add(host)
     db.commit()
     db.refresh(host)

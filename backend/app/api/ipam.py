@@ -18,6 +18,7 @@ from app.schemas.subnet import (
     IPConflict,
     IPReservationCreate,
     IPReservationRead,
+    StaleReservation,
     SubnetAddressEntry,
     SubnetCreate,
     SubnetFingerprintResult,
@@ -133,6 +134,16 @@ def lookup_ip(ip_address: str, db: Session = Depends(get_db), _=Depends(get_curr
         "subnet_cidr": subnet.cidr if subnet else None,
         "in_use_by": [{"device_id": d.id, "hostname": d.hostname} for d in conflict_devices],
     }
+
+
+@router.get("/reservations/stale", response_model=list[StaleReservation])
+def list_stale_reservations(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Fleet-wide: RESERVED reservations discovery scans haven't found a
+    live host at -- the reverse of Network Discovery's rogue/expected
+    split. Registered ahead of GET /{subnet_id} so "reservations" and
+    "stale" in the path aren't swallowed as a subnet_id.
+    """
+    return [StaleReservation(**r) for r in ipam_service.stale_reservations(db)]
 
 
 @router.get("/{subnet_id}", response_model=SubnetRead)

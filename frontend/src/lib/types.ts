@@ -1194,6 +1194,17 @@ export interface ConflictReport {
   conflicts: IPConflict[];
 }
 
+export interface StaleReservation {
+  reservation_id: string;
+  subnet_id: string;
+  subnet_cidr: string;
+  ip_address: string;
+  note: string | null;
+  reserved_at: string | null;
+  coverage: "never_scanned" | "scanned_no_response";
+  last_scan_at: string | null;
+}
+
 export interface PushSubscription {
   id: string;
   label: string;

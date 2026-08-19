@@ -98,6 +98,12 @@ class CredentialSuggestion(BaseModel):
     snmp_security_level: str | None = None
 
 
+class DiscoveredHostReserve(BaseModel):
+    note: str | None = Field(
+        None, description="Optional note for the created IPReservation, e.g. a ticket/rollout reference."
+    )
+
+
 class DiscoveryScheduleCreate(BaseModel):
     name: str
     cidr: str

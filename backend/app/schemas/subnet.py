@@ -80,6 +80,21 @@ class IPReservationRead(BaseModel):
     created_at: datetime.datetime | None = None
 
 
+class StaleReservation(BaseModel):
+    """A RESERVED IPReservation discovery scans haven't confirmed a live
+    host for -- see services.ipam_service.stale_reservations."""
+
+    reservation_id: uuid.UUID
+    subnet_id: uuid.UUID
+    subnet_cidr: str
+    ip_address: str
+    note: str | None = None
+    reserved_at: datetime.datetime | None = None
+    coverage: str = Field(description="'never_scanned' (no discovery scan has covered this address) or "
+                           "'scanned_no_response' (a scan covered it and found nothing)")
+    last_scan_at: datetime.datetime | None = None
+
+
 class SubnetAddressEntry(BaseModel):
     """One row in the "show every address" view for a subnet -- used by
     the free-IP finder and the subnet detail page's address table alike.

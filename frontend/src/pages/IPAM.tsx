@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useConfirm } from "../lib/confirm";
 import { useToast } from "../lib/toast";
-import { ConflictReport, FreeIPResult, IPReservation, Subnet, SubnetAddressEntry, SubnetFingerprintResult, SubnetScanResult } from "../lib/types";
+import { ConflictReport, FreeIPResult, IPReservation, StaleReservation, Subnet, SubnetAddressEntry, SubnetFingerprintResult, SubnetScanResult } from "../lib/types";
 import { EmptyState, LoadingRows } from "../components/EmptyState";
 
 const emptySubnetForm = {
@@ -63,6 +63,8 @@ export default function IPAMPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<ConflictReport>({ conflicts: [] });
+  const [staleReservations, setStaleReservations] = useState<StaleReservation[]>([]);
+  const [showStale, setShowStale] = useState(false);
 
   const [siteFilter, setSiteFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -79,10 +81,12 @@ export default function IPAMPage() {
     Promise.all([
       api.get<Subnet[]>("/ipam", { params: siteFilter ? { site: siteFilter } : {} }),
       api.get<ConflictReport>("/ipam/conflicts"),
+      api.get<StaleReservation[]>("/ipam/reservations/stale"),
     ])
-      .then(([subnetsRes, conflictsRes]) => {
+      .then(([subnetsRes, conflictsRes, staleRes]) => {
         setSubnets(subnetsRes.data);
         setConflicts(conflictsRes.data);
+        setStaleReservations(staleRes.data);
         setError(null);
       })
       .catch(() => setError("Failed to load IPAM data."))
@@ -197,6 +201,47 @@ export default function IPAMPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {staleReservations.length > 0 && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 dark:bg-amber-400/10 p-4">
+          <button
+            className="flex items-center justify-between w-full text-left"
+            onClick={() => setShowStale((v) => !v)}
+          >
+            <div>
+              <p className="text-sm font-semibold text-amber-700 dark:text-amber-400">
+                {staleReservations.length} reserved {staleReservations.length === 1 ? "address" : "addresses"} with no
+                confirmed host
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                IPAM planned for these — discovery scans haven't found anything live there yet.
+              </p>
+            </div>
+            <span className="text-xs text-amber-700 dark:text-amber-400">{showStale ? "Hide" : "Show"}</span>
+          </button>
+          {showStale && (
+            <div className="space-y-1.5 mt-3">
+              {staleReservations.map((r) => (
+                <div key={r.reservation_id} className="text-xs flex items-center gap-2 flex-wrap">
+                  <span className="font-mono font-semibold text-slate-700 dark:text-slate-200">{r.ip_address}</span>
+                  <span className="text-slate-400">in</span>
+                  <span className="font-mono text-slate-500 dark:text-slate-400">{r.subnet_cidr}</span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full border ${
+                      r.coverage === "never_scanned"
+                        ? "bg-white dark:bg-slate-800 border-slate-300 text-slate-500"
+                        : "bg-white dark:bg-slate-800 border-amber-400/40 text-amber-700 dark:text-amber-400"
+                    }`}
+                  >
+                    {r.coverage === "never_scanned" ? "never scanned" : "scanned, no response"}
+                  </span>
+                  {r.note && <span className="text-slate-400 italic">— {r.note}</span>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

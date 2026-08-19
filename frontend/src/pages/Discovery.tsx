@@ -209,6 +209,27 @@ export default function Discovery() {
     }
   };
 
+  const reserveHost = async (host: DiscoveredHost) => {
+    // "This is fine, I know about it" -- creates an IPAM IPReservation
+    // for the host's address in place, without making it a managed
+    // Device. Complements Import (which does create a Device) and
+    // Ignore (which doesn't touch IPAM at all).
+    const note = window.prompt(
+      `Reserve ${host.ip_address} in IPAM as expected? Optional note (e.g. ticket/owner):`,
+      ""
+    );
+    if (note === null) return; // cancelled
+    setActioningHostId(host.id);
+    try {
+      await api.post(`/discovery/hosts/${host.id}/reserve`, { note: note.trim() || undefined });
+      if (selectedScan) await loadHosts(selectedScan.id);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to reserve this address in IPAM");
+    } finally {
+      setActioningHostId(null);
+    }
+  };
+
   const openImport = async (host: DiscoveredHost) => {
     setImportTarget(host);
     setImportHostname(host.hostname?.replace(/\.$/, "") || host.snmp_sys_name || "");
@@ -459,6 +480,16 @@ export default function Discovery() {
                           >
                             Import
                           </button>
+                          {host.ipam_status === "rogue" && (
+                            <button
+                              className="text-xs text-sky-700 hover:underline disabled:opacity-50"
+                              disabled={actioningHostId === host.id}
+                              onClick={() => reserveHost(host)}
+                              title="Acknowledge this as expected and hold its IP in IPAM, without adding it as a managed device"
+                            >
+                              Reserve
+                            </button>
+                          )}
                           <button
                             className="text-xs text-slate-400 hover:underline disabled:opacity-50"
                             disabled={actioningHostId === host.id}
