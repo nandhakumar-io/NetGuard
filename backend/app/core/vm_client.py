@@ -229,6 +229,11 @@ def latest_device_metrics(device_id: uuid.UUID) -> dict | None:
         return None
 
     row: dict = {"device_id": device_id, "polled_at": None}
+    # Per-field timestamp of whatever's currently in `row[field]`, so a
+    # later series in the response never overwrites an already-newer
+    # value for that same field -- see field_ts's docstring note below
+    # for why this matters specifically for the info fields.
+    field_ts: dict[str, datetime.datetime] = {}
     latest_ts = None
     for series in results:
         name = series["metric"].get("__name__", "")
@@ -236,15 +241,36 @@ def latest_device_metrics(device_id: uuid.UUID) -> dict | None:
         ts_dt = _from_ms(float(ts) * 1000)
         if latest_ts is None or ts_dt > latest_ts:
             latest_ts = ts_dt
+
+        matched_field = None
+        value = None
         for field in DEVICE_METRIC_FIELDS:
             if name == _DEVICE_METRIC_NAME(field=field):
-                row[field] = float(value_str)
+                matched_field, value = field, float(value_str)
                 break
         else:
             for field, metric_name in DEVICE_INFO_FIELDS.items():
                 if name == metric_name:
-                    row[field] = series["metric"].get("value")
+                    matched_field, value = field, series["metric"].get("value")
                     break
+        if matched_field is None:
+            continue
+        # Info fields (fan_status/power_supply_status/health_color) are
+        # written as a constant-1 sample with the *value itself* as a
+        # label (see DEVICE_INFO_FIELDS's comment) -- every time the
+        # value changes, that's a brand new, distinct Prometheus series,
+        # and the old one doesn't vanish; it keeps satisfying
+        # last_over_time() for the rest of _LATEST_LOOKBACK. Without this
+        # per-field freshness check, whichever stale series happened to
+        # land last in this (arbitrarily ordered) API response would
+        # silently win -- e.g. a device that was briefly "red" hours ago
+        # and is "green" right now could still read back as "red"
+        # depending on response ordering. Plain gauges only ever have one
+        # live series per device, so this check is a no-op for them.
+        if matched_field in field_ts and field_ts[matched_field] >= ts_dt:
+            continue
+        field_ts[matched_field] = ts_dt
+        row[matched_field] = value
     row["polled_at"] = latest_ts or datetime.datetime.now(datetime.timezone.utc)
     _cast_int_fields(row, DEVICE_INT_FIELDS)
     row["id"] = uuid.uuid5(uuid.NAMESPACE_URL, f"netguard-metric:{device_id}:{int(row['polled_at'].timestamp() * 1000)}")
@@ -256,17 +282,30 @@ def fleet_latest_health() -> dict[uuid.UUID, dict]:
     (avoids an N-device query loop in fleet_health_summary) -> {device_id:
     {"health_score": ..., "health_color": ...}}."""
     out: dict[uuid.UUID, dict] = {}
+    ts_by_device: dict[uuid.UUID, datetime.datetime] = {}
     for series in _instant_query(f"last_over_time(netguard_device_health_score[{_LATEST_LOOKBACK}])"):
         dev_id = series["metric"].get("device_id")
         if not dev_id:
             continue
         _, value_str = series["value"]
         out.setdefault(uuid.UUID(dev_id), {})["health_score"] = float(value_str)
+    # health_color is an info metric (see DEVICE_INFO_FIELDS) -- every
+    # past color value for a device is its own still-live Prometheus
+    # series within the lookback window, so this query can return
+    # several results per device_id. Keep only the one with the newest
+    # sample timestamp per device, same fix as latest_device_metrics,
+    # or a stale color can silently win depending on response ordering.
     for series in _instant_query(f"last_over_time(netguard_device_health_color[{_LATEST_LOOKBACK}])"):
-        dev_id = series["metric"].get("device_id")
-        if not dev_id:
+        dev_id_str = series["metric"].get("device_id")
+        if not dev_id_str:
             continue
-        out.setdefault(uuid.UUID(dev_id), {})["health_color"] = series["metric"].get("value")
+        dev_id = uuid.UUID(dev_id_str)
+        ts, value_str = series["value"]
+        ts_dt = _from_ms(float(ts) * 1000)
+        if dev_id in ts_by_device and ts_by_device[dev_id] >= ts_dt:
+            continue
+        ts_by_device[dev_id] = ts_dt
+        out.setdefault(dev_id, {})["health_color"] = series["metric"].get("value")
     return out
 
 
@@ -282,6 +321,13 @@ def fleet_latest_metrics() -> dict[uuid.UUID, dict]:
     per-device HTTP round trip.
     """
     rows: dict[uuid.UUID, dict] = {}
+    # Per (device_id, field) timestamp of whatever's currently in that
+    # row's field -- see latest_device_metrics for why this is needed:
+    # info fields (fan_status/power_supply_status/health_color) leave
+    # every past value as its own still-live series within the lookback
+    # window, so without this a stale reading can win purely on response
+    # ordering.
+    field_ts: dict[tuple[uuid.UUID, str], datetime.datetime] = {}
 
     for series in _instant_query(f'last_over_time({{__name__=~"netguard_device_.*"}}[{_LATEST_LOOKBACK}])'):
         labels = series["metric"]
@@ -298,15 +344,25 @@ def fleet_latest_metrics() -> dict[uuid.UUID, dict]:
         ts_dt = _from_ms(float(ts) * 1000)
         if row["polled_at"] is None or ts_dt > row["polled_at"]:
             row["polled_at"] = ts_dt
+
+        matched_field = None
+        value = None
         for field in DEVICE_METRIC_FIELDS:
             if name == _DEVICE_METRIC_NAME(field=field):
-                row[field] = float(value_str)
+                matched_field, value = field, float(value_str)
                 break
         else:
             for field, metric_name in DEVICE_INFO_FIELDS.items():
                 if name == metric_name:
-                    row[field] = labels.get("value")
+                    matched_field, value = field, labels.get("value")
                     break
+        if matched_field is None:
+            continue
+        key = (dev_id, matched_field)
+        if key in field_ts and field_ts[key] >= ts_dt:
+            continue
+        field_ts[key] = ts_dt
+        row[matched_field] = value
 
     for row in rows.values():
         _cast_int_fields(row, DEVICE_INT_FIELDS)

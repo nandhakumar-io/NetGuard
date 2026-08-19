@@ -574,15 +574,34 @@ def build_topology(db: Session) -> TopologyGraph:
         first = rows[0]
         source_id, target_id = str(first.device_id), str(first.neighbor_device_id)
         members: list[LinkMember] = []
-        seen_ports: set[tuple[str | None, str | None]] = set()
+        # Keyed on the UNORDERED pair of physical endpoints -- i.e.
+        # {(this device, this row's local_port), (neighbor, this row's
+        # neighbor_port)} -- not on (local_port, neighbor_port) in this
+        # row's own order. LLDP is reported from both ends: device A's
+        # poll writes a row with local_port=A-side, neighbor_port=B-side,
+        # and device B's own poll writes a *separate* row for the exact
+        # same cable with local_port=B-side, neighbor_port=A-side. Keying
+        # on the ordered tuple treated those as two different members,
+        # so every real physical link was counted twice (a genuine
+        # 5-member trunk rendered as "LLDP x10") -- keying on the
+        # unordered endpoint pair collapses both sides' reports of the
+        # same cable back into the one member it actually is.
+        seen_links: dict[frozenset, DiscoveredNeighbor] = {}
         for row in rows:
-            # A device can re-report the same physical port pair across
-            # multiple discovery runs (history), not just once -- only
-            # keep the newest row per local/neighbor port combination.
-            port_key = (row.local_port, row.neighbor_port)
-            if port_key in seen_ports:
+            link_key = frozenset({
+                (str(row.device_id), row.local_port),
+                (str(row.neighbor_device_id), row.neighbor_port),
+            })
+            existing = seen_links.get(link_key)
+            # A device can also re-report the same physical link across
+            # multiple discovery runs (history) from the *same* side --
+            # keep whichever row was confirmed most recently.
+            if existing is not None and (existing.discovered_at or datetime.min.replace(tzinfo=timezone.utc)) >= (
+                row.discovered_at or datetime.min.replace(tzinfo=timezone.utc)
+            ):
                 continue
-            seen_ports.add(port_key)
+            seen_links[link_key] = row
+        for row in seen_links.values():
             confirmed_at = row.discovered_at
             is_stale = bool(
                 confirmed_at
