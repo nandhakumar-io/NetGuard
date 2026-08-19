@@ -34,6 +34,7 @@ from app.models.network_discovery import (
 )
 from app.models.user import User, UserRole
 from app.schemas.network_discovery import (
+    CredentialSuggestion,
     DiscoveredHostImport,
     DiscoveredHostRead,
     DiscoveryScanCreate,
@@ -42,7 +43,12 @@ from app.schemas.network_discovery import (
     DiscoveryScheduleRead,
     DiscoveryScheduleUpdate,
 )
-from app.services import event_bus, network_discovery_service, reachability_service
+from app.services import (
+    credential_service,
+    event_bus,
+    network_discovery_service,
+    reachability_service,
+)
 
 router = APIRouter(prefix="/discovery", tags=["network-discovery"])
 
@@ -122,9 +128,51 @@ _VENDOR_ALIASES = {v.value: v for v in DeviceVendor}
 
 
 def _resolve_vendor(guess: str | None) -> DeviceVendor:
+    """Best-effort mapping of network_discovery_service._guess_vendor's
+    free-text guess onto the (deliberately small) DeviceVendor enum.
+
+    NOTE: DeviceVendor only covers cisco/juniper/arista/linux today, but
+    _guess_vendor can identify several others it has no enum slot for
+    (Fortinet, Aruba, MikroTik, HP -- see its sysDescr keyword list).
+    Those currently fall through to the CISCO default below, which
+    silently mislabels a discovered Fortinet/Aruba/etc. device as Cisco
+    on import. That's a real gap, not intentional: it doesn't break
+    anything (vendor only drives which config-parsing/OS-detection path
+    gets used later), but it does mean an imported non-Cisco device may
+    get the wrong parser. Flagging here rather than fixing by widening
+    DeviceVendor, since that enum is referenced throughout config
+    parsing/backups/compliance and adding a value is a larger, separate
+    change than this discovery feature.
+    """
     if not guess:
         return DeviceVendor.CISCO
     return _VENDOR_ALIASES.get(guess.lower(), DeviceVendor.CISCO)
+
+
+@router.get("/hosts/{host_id}/suggested-credentials", response_model=CredentialSuggestion | None)
+def suggested_credentials(
+    host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+):
+    """Best-effort SSH/SNMP credential-profile suggestion for this host's
+    guessed vendor, for the import form to pre-fill (see
+    credential_service.suggest_credentials_for_vendor). Returns null when
+    there isn't a confident enough match -- the import form should just
+    leave the credential fields blank in that case, not treat it as an
+    error.
+    """
+    host = db.get(DiscoveredHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="Discovered host not found")
+
+    # Only suggest against a vendor we're actually confident about --
+    # _resolve_vendor's CISCO fallback is meant for import-time device
+    # creation (every Device needs *some* vendor value), not for deciding
+    # whose credentials to hand out. A host with no vendor_guess, or one
+    # DeviceVendor can't represent (see _resolve_vendor's docstring),
+    # should get no suggestion rather than a false-confidence Cisco one.
+    if not host.vendor_guess or host.vendor_guess.lower() not in _VENDOR_ALIASES:
+        return None
+    return credential_service.suggest_credentials_for_vendor(db, _VENDOR_ALIASES[host.vendor_guess.lower()])
 
 
 @router.post("/hosts/{host_id}/import", response_model=DiscoveredHostRead)
@@ -152,6 +200,8 @@ def import_host(
     if db.query(Device).filter(Device.hostname == body.hostname).first():
         raise HTTPException(status_code=400, detail="Device with this hostname already exists")
 
+    from app.models.device import SnmpVersion
+
     device = Device(
         hostname=body.hostname,
         ip_address=host.ip_address,
@@ -159,6 +209,17 @@ def import_host(
         site=body.site,
         device_type=body.device_type,
         device_role=body.device_role,
+        # Credential *pointers* only (ref names, usernames, SNMP dialect)
+        # -- typically pre-filled by the UI from
+        # GET /discovery/hosts/{id}/suggested-credentials. No secret
+        # material is ever set here; an operator still has to set the
+        # actual password/community via POST /devices/{id}/ssh-credentials
+        # or /snmp-credentials, same as any other newly created device.
+        ssh_credential_ref=body.ssh_credential_ref,
+        ssh_username=body.ssh_username,
+        snmp_community_ref=body.snmp_community_ref,
+        snmp_username=body.snmp_username,
+        snmp_version=SnmpVersion(body.snmp_version) if body.snmp_version else None,
     )
     db.add(device)
     db.commit()

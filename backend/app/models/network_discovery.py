@@ -48,6 +48,39 @@ class DiscoveryScanStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class DiscoveredHostIpamStatus(str, enum.Enum):
+    """Cross-reference of a DiscoveredHost against app.services.ipam_service
+    (Subnet / IPReservation), computed once at scan time (see
+    network_discovery_service._classify_ipam_status). Distinct from
+    matched_device_id, which answers "is this already a Device NetGuard
+    manages" -- this answers "does IPAM's plan for this address space
+    say this IP should exist", which matters even for hosts that aren't
+    (yet) a managed Device:
+
+      UNMANAGED -- no Subnet in IPAM covers this address at all, so
+        there's no plan to compare against. Not an anomaly; most fleets
+        don't have every VLAN entered into IPAM on day one.
+      EXPECTED -- IPAM has this address held with an IPReservation
+        (state=RESERVED), i.e. an operator already planned for something
+        to show up here (a pending rollout, a DHCP scope boundary, etc.)
+        but no Device has been created for it yet. Finding it responsive
+        is confirmation the plan happened, not a surprise.
+      ROGUE -- a managed Subnet covers this address, IPAM has *no*
+        reservation for it, and it's not an already-known Device either.
+        This is the case worth an operator's attention: something is
+        alive on a subnet IPAM is supposed to have full visibility into,
+        that nobody planned for or entered into inventory.
+      ASSIGNED -- IPAM already shows this exact address as a Device's
+        management IP (mirrors matched_device_id; kept as its own status
+        so the UI has one field to render instead of two).
+    """
+
+    UNMANAGED = "unmanaged"
+    EXPECTED = "expected"
+    ROGUE = "rogue"
+    ASSIGNED = "assigned"
+
+
 class DiscoveryScan(Base):
     __tablename__ = "discovery_scans"
 
@@ -158,6 +191,19 @@ class DiscoveredHost(Base):
     # lets the results screen say "already in inventory as <hostname>"
     # instead of offering to re-import a device NetGuard already tracks.
     matched_device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True)
+
+    # See DiscoveredHostIpamStatus for what each value means. Computed
+    # once when the host row is written (network_discovery_service.run_scan)
+    # against IPAM state *at that moment* -- like every other discovery
+    # field, this is a point-in-time read, not a live join, so a
+    # reservation added/removed after the scan won't retroactively change
+    # an already-written host's status until the next scan.
+    ipam_status = Column(Enum(DiscoveredHostIpamStatus), nullable=False, default=DiscoveredHostIpamStatus.UNMANAGED)
+    # Free-text note copied from the matching IPReservation.note when
+    # ipam_status == EXPECTED, so the results screen can show *why* the
+    # address was expected (e.g. "pending rollout - ticket NET-4821")
+    # without a second lookup back into IPAM.
+    ipam_reservation_note = Column(String, nullable=True)
 
     imported = Column(Boolean, nullable=False, default=False, server_default="false")
     imported_device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True)

@@ -26,11 +26,39 @@ interface DiscoveredHost {
   vendor_guess: string | null;
   response_time_ms: number | null;
   matched_device_id: string | null;
+  ipam_status: "unmanaged" | "expected" | "rogue" | "assigned";
+  ipam_reservation_note: string | null;
   imported: boolean;
   imported_device_id: string | null;
   ignored: boolean;
   discovered_at: string;
 }
+
+interface CredentialSuggestion {
+  vendor: string;
+  sample_size: number;
+  total_vendor_devices: number;
+  ssh_credential_ref: string | null;
+  ssh_username: string | null;
+  snmp_community_ref: string | null;
+  snmp_username: string | null;
+  snmp_version: string | null;
+  snmp_security_level: string | null;
+}
+
+const IPAM_BADGE: Record<string, string> = {
+  rogue: "bg-red-100 text-red-700",
+  expected: "bg-sky-100 text-sky-700",
+  assigned: "bg-slate-100 text-slate-500",
+  unmanaged: "",
+};
+
+const IPAM_LABEL: Record<string, string> = {
+  rogue: "rogue — unexpected on managed subnet",
+  expected: "expected — reserved in IPAM",
+  assigned: "already tracked",
+  unmanaged: "",
+};
 
 const STATUS_BADGE: Record<string, string> = {
   pending: "bg-slate-100 text-slate-700",
@@ -69,6 +97,8 @@ export default function Discovery() {
   const [actioningHostId, setActioningHostId] = useState<string | null>(null);
   const [importTarget, setImportTarget] = useState<DiscoveredHost | null>(null);
   const [importHostname, setImportHostname] = useState("");
+  const [suggestion, setSuggestion] = useState<CredentialSuggestion | null>(null);
+  const [suggestionLoading, setSuggestionLoading] = useState(false);
 
   const pollRef = useRef<number | null>(null);
 
@@ -179,9 +209,22 @@ export default function Discovery() {
     }
   };
 
-  const openImport = (host: DiscoveredHost) => {
+  const openImport = async (host: DiscoveredHost) => {
     setImportTarget(host);
     setImportHostname(host.hostname?.replace(/\.$/, "") || host.snmp_sys_name || "");
+    setSuggestion(null);
+    // Best-effort credential-profile suggestion for this host's guessed
+    // vendor -- a 404/null response just means "nothing to pre-fill",
+    // never blocks the import form from opening.
+    setSuggestionLoading(true);
+    try {
+      const res = await api.get<CredentialSuggestion | null>(`/discovery/hosts/${host.id}/suggested-credentials`);
+      setSuggestion(res.data || null);
+    } catch {
+      setSuggestion(null);
+    } finally {
+      setSuggestionLoading(false);
+    }
   };
 
   const confirmImport = async () => {
@@ -195,8 +238,18 @@ export default function Discovery() {
       await api.post(`/discovery/hosts/${importTarget.id}/import`, {
         hostname: importHostname.trim(),
         vendor: importTarget.vendor_guess?.toLowerCase(),
+        // Credential *pointers* only (ref names / usernames / SNMP
+        // dialect) pre-filled from the suggestion above -- no secret
+        // material is ever sent here. The operator still sets the real
+        // password/community after import, same as any other device.
+        ssh_credential_ref: suggestion?.ssh_credential_ref || undefined,
+        ssh_username: suggestion?.ssh_username || undefined,
+        snmp_community_ref: suggestion?.snmp_community_ref || undefined,
+        snmp_username: suggestion?.snmp_username || undefined,
+        snmp_version: suggestion?.snmp_version || undefined,
       });
       setImportTarget(null);
+      setSuggestion(null);
       if (selectedScan) await loadHosts(selectedScan.id);
     } catch (err: any) {
       alert(err?.response?.data?.detail || "Failed to import device");
@@ -383,7 +436,17 @@ export default function Discovery() {
                       ) : host.ignored ? (
                         <span className="text-slate-400">ignored</span>
                       ) : (
-                        <span className="text-amber-700">new</span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-amber-700">new</span>
+                          {(host.ipam_status === "rogue" || host.ipam_status === "expected") && (
+                            <span
+                              className={`inline-block w-fit px-1.5 py-0.5 rounded text-[11px] ${IPAM_BADGE[host.ipam_status]}`}
+                              title={host.ipam_status === "expected" ? host.ipam_reservation_note || undefined : undefined}
+                            >
+                              {IPAM_LABEL[host.ipam_status]}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
@@ -432,10 +495,38 @@ export default function Discovery() {
                 Vendor detected as <span className="font-medium">{importTarget.vendor_guess}</span>.
               </p>
             )}
+            {(importTarget.ipam_status === "rogue" || importTarget.ipam_status === "expected") && (
+              <p className={`text-xs rounded px-2 py-1 ${IPAM_BADGE[importTarget.ipam_status]}`}>
+                {IPAM_LABEL[importTarget.ipam_status]}
+                {importTarget.ipam_status === "expected" && importTarget.ipam_reservation_note && (
+                  <> — {importTarget.ipam_reservation_note}</>
+                )}
+              </p>
+            )}
+            {suggestionLoading ? (
+              <p className="text-xs text-slate-400">Checking for a matching credential profile…</p>
+            ) : (
+              suggestion && (
+                <p className="text-xs text-slate-500 bg-slate-50 rounded px-2 py-1">
+                  Matches the credential profile used by {suggestion.sample_size} other{" "}
+                  {suggestion.vendor} device{suggestion.sample_size === 1 ? "" : "s"}
+                  {suggestion.ssh_credential_ref && (
+                    <> — SSH ref <span className="font-mono">{suggestion.ssh_credential_ref}</span></>
+                  )}
+                  {suggestion.snmp_community_ref && (
+                    <>, SNMP ref <span className="font-mono">{suggestion.snmp_community_ref}</span></>
+                  )}
+                  {" "}will be pre-filled on this device (secrets still need to be set after import).
+                </p>
+              )
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 className="px-3 py-1.5 rounded text-sm text-slate-600"
-                onClick={() => setImportTarget(null)}
+                onClick={() => {
+                  setImportTarget(null);
+                  setSuggestion(null);
+                }}
               >
                 Cancel
               </button>

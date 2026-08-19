@@ -43,6 +43,15 @@ class DiscoveredHostRead(BaseModel):
     vendor_guess: str | None = None
     response_time_ms: float | None = None
     matched_device_id: uuid.UUID | None = None
+    ipam_status: str = Field(
+        "unmanaged",
+        description="unmanaged (no IPAM subnet covers this IP) / expected (IPAM has a reservation, "
+        "not yet provisioned) / rogue (IPAM manages this subnet, no reservation, no matching device) "
+        "/ assigned (already a known device).",
+    )
+    ipam_reservation_note: str | None = Field(
+        None, description="Note copied from the matching IPReservation when ipam_status == 'expected'."
+    )
     imported: bool
     imported_device_id: uuid.UUID | None = None
     ignored: bool
@@ -58,6 +67,35 @@ class DiscoveredHostImport(BaseModel):
     site: str | None = None
     device_type: str | None = None
     device_role: str | None = None
+    # Optional credential *pointers* (legacy env-var ref names / usernames /
+    # SNMP dialect), never raw secrets -- typically pre-filled from
+    # GET /discovery/hosts/{id}/suggested-credentials and left editable by
+    # the operator. The actual secret (if any) still has to be set
+    # afterwards via POST /devices/{id}/ssh-credentials or
+    # /snmp-credentials, same as any other device -- this only saves
+    # re-typing the *ref*/username/version an existing fleet already
+    # agreed on.
+    ssh_credential_ref: str | None = None
+    ssh_username: str | None = None
+    snmp_community_ref: str | None = None
+    snmp_username: str | None = None
+    snmp_version: str | None = Field(None, description="v1/v2c/v3")
+
+
+class CredentialSuggestion(BaseModel):
+    """Metadata-only credential profile suggestion for a discovered host's
+    guessed vendor -- see services.credential_service.suggest_credentials_for_vendor
+    for why this never includes decrypted secret material."""
+
+    vendor: str
+    sample_size: int
+    total_vendor_devices: int
+    ssh_credential_ref: str | None = None
+    ssh_username: str | None = None
+    snmp_community_ref: str | None = None
+    snmp_username: str | None = None
+    snmp_version: str | None = None
+    snmp_security_level: str | None = None
 
 
 class DiscoveryScheduleCreate(BaseModel):

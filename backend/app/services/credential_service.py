@@ -31,13 +31,25 @@ still need migrating to the encrypted DB path.
 import logging
 import os
 import re
+from collections import Counter
 from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.config import settings
-from app.models.device import Device
+from app.models.device import Device, DeviceVendor
 
 logger = logging.getLogger("netguard.credential_service")
+
+# Below this many same-vendor devices sharing a ref, a suggestion is more
+# likely coincidence (one device someone happened to name the same way)
+# than an actual fleet-wide "profile" worth defaulting a brand-new,
+# unauthenticated discovered host into. Two independent devices already
+# agreeing is a low bar deliberately -- most sites don't have huge same-
+# vendor fleets to begin with, and the suggestion is always a pre-fill an
+# operator reviews before import, never an auto-apply.
+MIN_SAMPLE_SIZE_FOR_SUGGESTION = 2
 
 # Default rotation policy: credentials older than this are considered
 # "overdue" and older than (policy - warning window) are "due soon".
@@ -332,4 +344,73 @@ def credential_expiry(
         "days_since_rotation": days_since,
         "days_until_due": days_until_due,
         "policy_days": policy_days,
+    }
+
+
+# ---------------------------------------------------------------------
+# Discovery credential suggestion -- "this vendor's existing devices
+# mostly use this credential profile" for app.api.network_discovery's
+# import flow. See MIN_SAMPLE_SIZE_FOR_SUGGESTION above.
+#
+# Deliberately never touches ssh_password_encrypted / snmp_*_encrypted:
+# those are per-device DB-encrypted secrets (app.core.crypto), and
+# decrypting one just to echo it back through an API response so a
+# discovery import form can pre-fill it would be a real secret-handling
+# regression -- it would let anyone who can run a discovery scan (any
+# NETWORK_ADMIN) recover another device's live password by fingerprinting
+# its vendor and importing a look-alike host, and it would leak the
+# secret into browser memory/devtools/network logs for a device that
+# doesn't even exist yet. What's suggested here is metadata only: which
+# *named* legacy credential ref / username / SNMP dialect this vendor's
+# fleet already agrees on -- the same class of information already
+# visible on every existing Device's detail page, not a secret.
+# ---------------------------------------------------------------------
+
+
+def suggest_credentials_for_vendor(db: Session, vendor: DeviceVendor) -> dict | None:
+    """Looks at existing devices of `vendor` and, when enough of them
+    agree, suggests the SSH/SNMP credential *profile* (ref pointers and
+    protocol metadata, never decrypted secret material -- see module
+    note above) a newly discovered host of the same vendor most likely
+    belongs to.
+
+    Returns None when there's no non-empty ref to suggest at all (e.g. a
+    fleet that only uses DB-encrypted per-device secrets with no shared
+    ref, or no devices of this vendor yet) -- callers should treat that
+    as "nothing to pre-fill", not an error.
+    """
+    devices = db.query(Device).filter(Device.vendor == vendor).all()
+    if not devices:
+        return None
+
+    def _mode(values: list[str]) -> tuple[str | None, int]:
+        values = [v for v in values if v]
+        if not values:
+            return None, 0
+        ref, count = Counter(values).most_common(1)[0]
+        return ref, count
+
+    ssh_ref, ssh_count = _mode([d.ssh_credential_ref for d in devices])
+    ssh_user, _ = _mode([d.ssh_username for d in devices])
+    snmp_ref, snmp_count = _mode([d.snmp_community_ref for d in devices])
+    snmp_user, _ = _mode([d.snmp_username for d in devices])
+    snmp_version, _ = _mode([d.snmp_version.value if d.snmp_version else None for d in devices])
+    snmp_security_level, _ = _mode(
+        [d.snmp_security_level.value if d.snmp_security_level else None for d in devices]
+    )
+
+    sample_size = max(ssh_count, snmp_count)
+    if sample_size < MIN_SAMPLE_SIZE_FOR_SUGGESTION:
+        return None
+
+    return {
+        "vendor": vendor.value,
+        "sample_size": sample_size,
+        "total_vendor_devices": len(devices),
+        "ssh_credential_ref": ssh_ref,
+        "ssh_username": ssh_user,
+        "snmp_community_ref": snmp_ref,
+        "snmp_username": snmp_user,
+        "snmp_version": snmp_version,
+        "snmp_security_level": snmp_security_level,
     }

@@ -742,6 +742,20 @@ export interface CorrelatedAlertGroup {
 export type EscalationSeverityScope = "critical" | "warning" | "all";
 export type EscalationChannel = "email" | "webhook" | "slack" | "teams";
 
+export interface OnCallSchedule {
+  id: string;
+  name: string;
+  description?: string | null;
+  primary_user_email: string;
+  secondary_user_email?: string | null;
+  rotation_type?: string | null;
+  shift_handover_time?: string | null;
+  timezone?: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at?: string | null;
+}
+
 export interface EscalationPolicy {
   id: string;
   name: string;
@@ -750,6 +764,7 @@ export interface EscalationPolicy {
   unack_minutes: number;
   repeat_minutes?: number | null;
   secondary_contacts?: string | null;
+  on_call_schedule_id?: string | null;
   channel: EscalationChannel;
   webhook_url?: string | null;
   enabled: boolean;

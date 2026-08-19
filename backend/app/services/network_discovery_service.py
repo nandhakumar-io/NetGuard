@@ -30,8 +30,13 @@ import time
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
-from app.models.network_discovery import DiscoveredHost, DiscoveryScan
-from app.services import oui_lookup
+from app.models.network_discovery import (
+    DiscoveredHost,
+    DiscoveredHostIpamStatus,
+    DiscoveryScan,
+)
+from app.models.subnet import IPAddressState, IPReservation
+from app.services import ipam_service, oui_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +203,43 @@ def _probe_and_enrich(ip_address: str, ports: tuple[int, ...], community: str | 
     }
 
 
+def _classify_ipam_status(
+    db: Session, ip_address: str, matched_device_id
+) -> tuple[DiscoveredHostIpamStatus, str | None]:
+    """Cross-references a responsive IP against IPAM (app.services.ipam_service)
+    to tell "expected but not yet provisioned" (IPAM already holds this
+    address with a RESERVED IPReservation) apart from "rogue/unexpected"
+    (a managed Subnet covers this address and has no reservation for it,
+    and it's not an already-known Device either). See
+    DiscoveredHostIpamStatus's docstring for the full breakdown -- this
+    is deliberately conservative: an address is only ever called ROGUE
+    when IPAM actually manages the covering subnet, since "nobody
+    entered this /24 into IPAM yet" and "something showed up that
+    shouldn't be here" are very different operational situations and
+    conflating them would train operators to ignore the rogue flag.
+    """
+    if matched_device_id:
+        return DiscoveredHostIpamStatus.ASSIGNED, None
+
+    subnet = ipam_service.find_subnet_for_ip(db, ip_address)
+    if subnet is None:
+        return DiscoveredHostIpamStatus.UNMANAGED, None
+
+    reservation = (
+        db.query(IPReservation)
+        .filter(
+            IPReservation.subnet_id == subnet.id,
+            IPReservation.ip_address == ip_address,
+            IPReservation.state == IPAddressState.RESERVED,
+        )
+        .first()
+    )
+    if reservation:
+        return DiscoveredHostIpamStatus.EXPECTED, reservation.note
+
+    return DiscoveredHostIpamStatus.ROGUE, None
+
+
 def run_scan(db: Session, scan: DiscoveryScan, community: str | None) -> None:
     """Sweeps scan.cidr, writing one DiscoveredHost row per responsive
     IP and updating scan's status/counters. Never raises out to the
@@ -251,6 +293,7 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None) -> None:
 
         mac_address = arp_table.get(ip_address)
         vendor_guess = result["vendor_guess"] or (oui_lookup.lookup_oui(mac_address) if mac_address else None)
+        ipam_status, ipam_note = _classify_ipam_status(db, ip_address, matched_device_id)
 
         db.add(
             DiscoveredHost(
@@ -265,6 +308,8 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None) -> None:
                 snmp_sys_descr=result["snmp_sys_descr"],
                 vendor_guess=vendor_guess,
                 matched_device_id=matched_device_id,
+                ipam_status=ipam_status,
+                ipam_reservation_note=ipam_note,
             )
         )
 
