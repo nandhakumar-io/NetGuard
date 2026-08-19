@@ -35,6 +35,18 @@ interface BackupDestination {
   last_error: string | null;
 }
 
+interface DeviceBackupRow {
+  device_id: string;
+  hostname: string;
+  ip_address: string | null;
+  vendor: string | null;
+  backup_count: number;
+  last_backup_at: string | null;
+  last_backup_version: number | null;
+  last_backup_snapshot_id: string | null;
+  days_since_backup: number | null;
+}
+
 const DEST_TYPE_LABEL: Record<string, string> = {
   s3: "AWS S3",
   azure_blob: "Azure Blob Storage",
@@ -118,6 +130,59 @@ export default function Backups() {
   const [showAddDest, setShowAddDest] = useState(false);
   const [editingDest, setEditingDest] = useState<BackupDestination | null>(null);
 
+  const [deviceBackups, setDeviceBackups] = useState<DeviceBackupRow[]>([]);
+  const [deviceTotal, setDeviceTotal] = useState(0);
+  const [neverBackedUp, setNeverBackedUp] = useState(0);
+  const [deviceLoading, setDeviceLoading] = useState(true);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [deviceActioningId, setDeviceActioningId] = useState<string | null>(null);
+  const [runningFleetBackup, setRunningFleetBackup] = useState(false);
+
+  const loadDeviceBackups = async () => {
+    setDeviceLoading(true);
+    setDeviceError(null);
+    try {
+      const res = await api.get("/backups/devices");
+      setDeviceBackups(res.data.devices);
+      setDeviceTotal(res.data.total_devices);
+      setNeverBackedUp(res.data.never_backed_up);
+    } catch (err: any) {
+      setDeviceError(err?.response?.data?.detail || "Failed to load device config backups");
+    } finally {
+      setDeviceLoading(false);
+    }
+  };
+
+  const runDeviceBackup = async (row: DeviceBackupRow) => {
+    setDeviceActioningId(row.device_id);
+    try {
+      await api.post(`/backups/devices/${row.device_id}`);
+      await loadDeviceBackups();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || `Failed to back up ${row.hostname}`);
+    } finally {
+      setDeviceActioningId(null);
+    }
+  };
+
+  const runFleetBackup = async () => {
+    setRunningFleetBackup(true);
+    setDeviceError(null);
+    try {
+      const res = await api.post("/backups/devices/bulk");
+      const succeeded = res.data?.succeeded ?? res.data?.success_count;
+      const failed = res.data?.failed ?? res.data?.failure_count;
+      await loadDeviceBackups();
+      if (succeeded !== undefined || failed !== undefined) {
+        alert(`Fleet backup complete: ${succeeded ?? 0} succeeded, ${failed ?? 0} failed.`);
+      }
+    } catch (err: any) {
+      setDeviceError(err?.response?.data?.detail || "Failed to start fleet backup");
+    } finally {
+      setRunningFleetBackup(false);
+    }
+  };
+
   const loadDestinations = async () => {
     setDestLoading(true);
     setDestError(null);
@@ -188,6 +253,7 @@ export default function Backups() {
   useEffect(() => {
     load();
     loadDestinations();
+    loadDeviceBackups();
   }, []);
 
   const runBackup = async () => {
@@ -377,6 +443,82 @@ export default function Backups() {
               </div>
             ))}
           </div>
+        )}
+      </div>
+
+      {/* Device Config Backups */}
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mb-6">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
+          <div>
+            <h2 className="font-bold text-navy dark:text-white text-sm">Device Configuration Backups</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Per-device running-config snapshots, separate from the application database backups above.
+              {neverBackedUp > 0 && (
+                <span className="text-amber-600 font-bold"> {neverBackedUp} device{neverBackedUp === 1 ? "" : "s"} never backed up.</span>
+              )}
+            </p>
+          </div>
+          <button
+            onClick={runFleetBackup}
+            disabled={runningFleetBackup || deviceLoading}
+            className="flex items-center gap-1.5 bg-brandblue text-white font-bold px-3 py-1.5 rounded-lg text-xs hover:opacity-90 disabled:opacity-50 shrink-0"
+          >
+            {runningFleetBackup ? "Backing up…" : "Back Up All Devices Now"}
+          </button>
+        </div>
+
+        {deviceError && <div className="m-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm">{deviceError}</div>}
+
+        {deviceLoading ? (
+          <div className="text-center py-6 text-slate-400 text-sm">Loading…</div>
+        ) : deviceBackups.length === 0 ? (
+          <div className="text-center py-6 text-slate-400 text-sm">No managed devices found.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 dark:bg-slate-900/40 text-[11px] uppercase tracking-wide text-slate-400 font-bold">
+              <tr>
+                <th className="text-left py-2.5 px-4">Device</th>
+                <th className="text-left py-2.5 px-4">Vendor</th>
+                <th className="text-left py-2.5 px-4">Backups on File</th>
+                <th className="text-left py-2.5 px-4">Last Backup</th>
+                <th className="text-right py-2.5 px-4">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deviceBackups.map((row) => (
+                <tr key={row.device_id} className="border-t border-slate-100 dark:border-slate-700/50">
+                  <td className="py-2.5 px-4">
+                    <div className="font-bold text-navy dark:text-white text-sm">{row.hostname}</div>
+                    <div className="text-xs text-slate-400 font-mono">{row.ip_address || "—"}</div>
+                  </td>
+                  <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400 capitalize">{row.vendor || "—"}</td>
+                  <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400">{row.backup_count}</td>
+                  <td className="py-2.5 px-4">
+                    {row.last_backup_at ? (
+                      <>
+                        <div className="text-slate-600 dark:text-slate-300">{fmtDate(row.last_backup_at)}</div>
+                        <div className={`text-[11px] ${row.days_since_backup !== null && row.days_since_backup > 7 ? "text-amber-600 font-bold" : "text-slate-400"}`}>
+                          {row.days_since_backup === 0 ? "today" : `${row.days_since_backup}d ago`}
+                          {row.last_backup_version !== null && ` · v${row.last_backup_version}`}
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-xs text-amber-600 font-bold">Never backed up</span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4 text-right">
+                    <button
+                      disabled={deviceActioningId === row.device_id}
+                      onClick={() => runDeviceBackup(row)}
+                      className="text-xs font-bold text-brandblue hover:underline disabled:opacity-40 disabled:no-underline"
+                    >
+                      {deviceActioningId === row.device_id ? "Backing up…" : "Back Up Now"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 
