@@ -27,7 +27,7 @@ from app.schemas.user_management import (
     UserRoleCounts,
     UserStatusUpdate,
 )
-from app.services import audit_service
+from app.services import audit_service, session_revocation_service
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -129,7 +129,41 @@ def update_user_status(
         action="User Enabled" if payload.is_active else "User Disabled",
         result="Success", detail=user.email,
     )
+
+    # Disabling an account only blocks *future* logins (see app.api.auth's
+    # password-grant / SSO checks against is_active) -- a browser that's
+    # already signed in would otherwise keep refreshing its access token
+    # indefinitely. Force-revoke every active session on disable so
+    # "Disable" actually ends any session in progress, not just new ones.
+    if not payload.is_active:
+        session_revocation_service.revoke_all_sessions(
+            db, user, actor_email=current_user.email, reason="account disabled",
+        )
+
     return _serialize(user)
+
+
+@router.post("/{user_id}/revoke-sessions")
+def revoke_user_sessions(
+    user_id: str, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)
+):
+    """Force sign-out: immediately revokes every active session (refresh
+    token) for the target user, independent of their enabled/disabled
+    status. Use this for a suspected-compromised account, a lost device,
+    or an offboarding step that shouldn't wait for a full disable. Actual
+    enforcement is identical to the self-service DELETE
+    /auth/sessions/{id} a user can do to their own sessions -- see
+    app.services.session_revocation_service for why there's no separate,
+    weaker "admin revoke" mechanism.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    revoked_count = session_revocation_service.revoke_all_sessions(
+        db, user, actor_email=current_user.email, reason="manual force sign-out",
+    )
+    return {"revoked_count": revoked_count}
 
 
 @router.delete("/{user_id}", status_code=204)

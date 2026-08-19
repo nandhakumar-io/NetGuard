@@ -35,3 +35,13 @@ class BackupJob(Base):
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
     duration_seconds = Column(Integer, nullable=True)
+
+    # JSON-encoded list of per-destination off-site upload outcomes, e.g.
+    # [{"destination_id": "...", "name": "Prod S3", "type": "s3",
+    #   "status": "success", "error": null}, ...] -- populated by
+    # app.services.backup_service after a successful local dump attempts
+    # to push a copy to every enabled app.models.backup_destination.
+    # BackupDestination. NULL for a job that predates this feature, or one
+    # that failed before any upload was attempted, or a run with zero
+    # enabled destinations configured (local-only, same as before).
+    offsite_results = Column(Text, nullable=True)

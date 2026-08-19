@@ -25,6 +25,12 @@ asyncssh==2.17.0
 telnetlib3==2.0.4
 paramiko==3.4.0
 cryptography==43.0.1
+# Off-site database backup destinations (app.services.backup_destination_service).
+# Both optional at import time (see that module's try/except) so an install
+# that never configures a cloud destination doesn't need either package --
+# these are only required if an S3 or Azure Blob destination is actually added.
+boto3==1.35.24
+azure-storage-blob==12.23.1
 httpx==0.27.2
 # Browser push (Web Push API / VAPID) delivery -- app.services.push_service._send_browser
 pywebpush==2.0.1

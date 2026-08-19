@@ -8,15 +8,24 @@ full export of every user's data (credentials table included, see
 app.models.device's encrypted-at-rest columns), so it gets the same
 access bar as credential rotation and device delete.
 """
+import json
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_roles
+from app.models.backup_destination import BackupDestination
 from app.models.backup_job import BackupJob
 from app.models.user import User, UserRole
-from app.services import backup_service
+from app.schemas.backup_destination import (
+    BackupDestinationCreate,
+    BackupDestinationRead,
+    BackupDestinationUpdate,
+)
+from app.services import audit_service, backup_destination_service, backup_service
 
 router = APIRouter(prefix="/backups", tags=["backups"])
 
@@ -24,6 +33,12 @@ _admin_only = require_roles(UserRole.NETWORK_ADMIN)
 
 
 def _serialize(job: BackupJob) -> dict:
+    offsite_results = None
+    if job.offsite_results:
+        try:
+            offsite_results = json.loads(job.offsite_results)
+        except (ValueError, TypeError):
+            offsite_results = None
     return {
         "id": str(job.id),
         "status": job.status,
@@ -34,7 +49,24 @@ def _serialize(job: BackupJob) -> dict:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "duration_seconds": job.duration_seconds,
+        "offsite_results": offsite_results,
     }
+
+
+def _serialize_destination(dest: BackupDestination) -> BackupDestinationRead:
+    config = backup_destination_service.decrypt_config(dest.config_encrypted)
+    return BackupDestinationRead(
+        id=str(dest.id),
+        name=dest.name,
+        type=dest.type,
+        enabled=dest.enabled,
+        config=backup_destination_service.masked_config(dest.type, config),
+        created_by=dest.created_by,
+        created_at=dest.created_at,
+        last_run_at=dest.last_run_at,
+        last_run_status=dest.last_run_status,
+        last_error=dest.last_error,
+    )
 
 
 @router.get("")
@@ -65,6 +97,100 @@ def trigger_database_backup(db: Session = Depends(get_db), current_user: User = 
     except backup_service.BackupError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return _serialize(job)
+
+
+@router.get("/destinations", response_model=list[BackupDestinationRead])
+def list_destinations(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+    """Off-site copy targets (S3 / Azure Blob / SFTP) that every future
+    successful database backup gets pushed to -- see
+    app.services.backup_service and app.services.backup_destination_service.
+    """
+    destinations = db.query(BackupDestination).order_by(BackupDestination.created_at.desc()).all()
+    return [_serialize_destination(d) for d in destinations]
+
+
+@router.post("/destinations", response_model=BackupDestinationRead, status_code=201)
+def create_destination(
+    payload: BackupDestinationCreate, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)
+):
+    if payload.type not in backup_destination_service.DESTINATION_TYPES:
+        raise HTTPException(status_code=422, detail=f"Unknown destination type: {payload.type}")
+
+    dest = BackupDestination(
+        id=uuid.uuid4(),
+        name=payload.name,
+        type=payload.type,
+        enabled=payload.enabled,
+        config_encrypted=backup_destination_service.encrypt_config(payload.type, payload.config),
+        created_by=current_user.email,
+    )
+    db.add(dest)
+    db.commit()
+    db.refresh(dest)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="Backup Destination Added", result="Success",
+        detail=f"{dest.name} ({dest.type})",
+    )
+    return _serialize_destination(dest)
+
+
+@router.patch("/destinations/{destination_id}", response_model=BackupDestinationRead)
+def update_destination(
+    destination_id: str,
+    payload: BackupDestinationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_admin_only),
+):
+    dest = db.query(BackupDestination).filter(BackupDestination.id == destination_id).first()
+    if not dest:
+        raise HTTPException(status_code=404, detail="Backup destination not found")
+
+    if payload.name is not None:
+        dest.name = payload.name
+    if payload.enabled is not None:
+        dest.enabled = payload.enabled
+    if payload.config is not None:
+        # Merge onto the existing decrypted config so, e.g., flipping
+        # `enabled` or renaming doesn't force the caller to resend every
+        # secret field it never wanted to change.
+        existing = backup_destination_service.decrypt_config(dest.config_encrypted)
+        existing.update({k: v for k, v in payload.config.items() if v not in (None, "")})
+        dest.config_encrypted = backup_destination_service.encrypt_config(dest.type, existing)
+
+    db.commit()
+    db.refresh(dest)
+    return _serialize_destination(dest)
+
+
+@router.delete("/destinations/{destination_id}", status_code=204)
+def delete_destination(destination_id: str, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+    dest = db.query(BackupDestination).filter(BackupDestination.id == destination_id).first()
+    if not dest:
+        raise HTTPException(status_code=404, detail="Backup destination not found")
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="Backup Destination Removed", result="Success",
+        detail=f"{dest.name} ({dest.type})",
+    )
+    db.delete(dest)
+    db.commit()
+
+
+@router.post("/destinations/{destination_id}/test")
+def test_destination(destination_id: str, db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+    """Connectivity/auth check without uploading anything -- backs the
+    "Test" button on the Cloud Destinations panel."""
+    dest = db.query(BackupDestination).filter(BackupDestination.id == destination_id).first()
+    if not dest:
+        raise HTTPException(status_code=404, detail="Backup destination not found")
+
+    config = backup_destination_service.decrypt_config(dest.config_encrypted)
+    try:
+        backup_destination_service.test_connection(dest.type, config)
+    except backup_destination_service.DestinationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
 
 
 @router.get("/{backup_id}/download")

@@ -86,6 +86,20 @@ export default function Users() {
     }
   };
 
+  const revokeSessions = async (u: AdminUser) => {
+    if (!confirm(`Force sign-out ${u.email} from every device? Any active session will be ended immediately.`)) return;
+    setActioningId(u.id);
+    try {
+      const res = await api.post(`/users/${u.id}/revoke-sessions`);
+      const count = res.data.revoked_count;
+      alert(count > 0 ? `Signed out ${count} active session${count === 1 ? "" : "s"} for ${u.email}.` : `${u.email} has no active sessions.`);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to revoke sessions");
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   const removeUser = async (u: AdminUser) => {
     if (!confirm(`Permanently delete ${u.email}? This cannot be undone.`)) return;
     setActioningId(u.id);
@@ -264,6 +278,14 @@ export default function Users() {
                         className="text-xs font-bold text-brandblue hover:underline disabled:opacity-40 disabled:no-underline"
                       >
                         {u.is_active ? "Disable" : "Enable"}
+                      </button>
+                      <button
+                        disabled={actioningId === u.id || currentUser?.id === u.id}
+                        onClick={() => revokeSessions(u)}
+                        title="End every active session for this user immediately"
+                        className="text-xs font-bold text-amber-600 hover:underline disabled:opacity-40 disabled:no-underline"
+                      >
+                        Force Sign-Out
                       </button>
                       <button
                         disabled={actioningId === u.id || currentUser?.id === u.id || u.is_active}

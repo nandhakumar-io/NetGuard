@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import gzip
+import json
 import logging
 import subprocess
 import uuid
@@ -29,8 +30,9 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.backup_destination import BackupDestination
 from app.models.backup_job import BackupJob
-from app.services import audit_service, notification_service
+from app.services import audit_service, backup_destination_service, notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +145,7 @@ def run_database_backup(db: Session, *, triggered_by_email: str) -> BackupJob:
             db, actor=triggered_by_email, action="Database Backup Completed", result="Success",
             detail=f"{dest_path.name} ({job.size_bytes} bytes)",
         )
+        _upload_to_destinations(db, job, dest_path)
         _prune_old_backups(db)
 
     except FileNotFoundError:
@@ -179,6 +182,64 @@ def _fail_job(db: Session, job: BackupJob, dest_path: Path, error_message: str) 
         event="Database Backup Failed",
         message=error_message[:500],
         severity="critical",
+    )
+
+
+def _upload_to_destinations(db: Session, job: BackupJob, local_path: Path) -> None:
+    """Pushes the just-completed local backup to every enabled
+    BackupDestination (S3 / Azure Blob / SFTP -- see
+    app.services.backup_destination_service), recording a per-destination
+    outcome on job.offsite_results. Never raises and never flips the
+    job's own status/error_message: the *local* backup already succeeded
+    by the time this runs (see run_database_backup), and a broken off-site
+    copy shouldn't retroactively mark a good local backup as "failed" --
+    it's surfaced separately (offsite_results, plus each destination's own
+    last_run_status/last_error) so the Backups page can show "local: OK,
+    off-site: 1 failed" instead of one conflated status.
+    """
+    destinations = db.query(BackupDestination).filter(BackupDestination.enabled.is_(True)).all()
+    if not destinations:
+        return
+
+    results = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for dest in destinations:
+        config = backup_destination_service.decrypt_config(dest.config_encrypted)
+        entry = {
+            "destination_id": str(dest.id),
+            "name": dest.name,
+            "type": dest.type,
+            "status": "success",
+            "error": None,
+        }
+        try:
+            backup_destination_service.upload_to_destination(dest.type, config, local_path, local_path.name)
+            dest.last_run_status = "success"
+            dest.last_error = None
+        except backup_destination_service.DestinationError as exc:
+            entry["status"] = "failed"
+            entry["error"] = str(exc)[:500]
+            dest.last_run_status = "failed"
+            dest.last_error = str(exc)[:500]
+            logger.warning("Off-site backup upload to %s (%s) failed: %s", dest.name, dest.type, exc)
+            notification_service.notify(
+                event="Off-Site Backup Upload Failed",
+                message=f"{job.file_path.rsplit('/', 1)[-1] if job.file_path else 'Backup'} failed to reach "
+                        f"'{dest.name}' ({dest.type}): {str(exc)[:300]}",
+                severity="warning",
+            )
+        dest.last_run_at = now
+        results.append(entry)
+
+    job.offsite_results = json.dumps(results)
+    db.commit()
+
+    failed = [r for r in results if r["status"] == "failed"]
+    audit_service.record_event(
+        db, actor=job.triggered_by or "system", action="Off-Site Backup Upload",
+        result="Success" if not failed else "Partial Failure",
+        detail=f"{len(results) - len(failed)}/{len(results)} destination(s) succeeded"
+               + (f"; failed: {', '.join(r['name'] for r in failed)}" if failed else ""),
     )
 
 

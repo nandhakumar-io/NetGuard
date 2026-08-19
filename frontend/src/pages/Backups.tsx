@@ -11,7 +11,61 @@ interface BackupJob {
   started_at: string | null;
   completed_at: string | null;
   duration_seconds: number | null;
+  offsite_results: OffsiteResult[] | null;
 }
+
+interface OffsiteResult {
+  destination_id: string;
+  name: string;
+  type: string;
+  status: "success" | "failed";
+  error: string | null;
+}
+
+interface BackupDestination {
+  id: string;
+  name: string;
+  type: "s3" | "azure_blob" | "sftp";
+  enabled: boolean;
+  config: Record<string, any>;
+  created_by: string | null;
+  created_at: string | null;
+  last_run_at: string | null;
+  last_run_status: "success" | "failed" | null;
+  last_error: string | null;
+}
+
+const DEST_TYPE_LABEL: Record<string, string> = {
+  s3: "AWS S3",
+  azure_blob: "Azure Blob Storage",
+  sftp: "Remote Server (SFTP)",
+};
+
+const DEST_FIELDS: Record<string, { key: string; label: string; secret?: boolean; placeholder?: string }[]> = {
+  s3: [
+    { key: "bucket", label: "Bucket" },
+    { key: "region", label: "Region", placeholder: "us-east-1" },
+    { key: "access_key_id", label: "Access Key ID" },
+    { key: "secret_access_key", label: "Secret Access Key", secret: true },
+    { key: "prefix", label: "Key Prefix (optional)", placeholder: "netguard-backups" },
+    { key: "endpoint_url", label: "Custom Endpoint URL (optional)", placeholder: "for S3-compatible stores" },
+  ],
+  azure_blob: [
+    { key: "connection_string", label: "Connection String", secret: true, placeholder: "or use account name + key below" },
+    { key: "account_name", label: "Storage Account Name" },
+    { key: "account_key", label: "Storage Account Key", secret: true },
+    { key: "container", label: "Container" },
+    { key: "prefix", label: "Blob Prefix (optional)" },
+  ],
+  sftp: [
+    { key: "host", label: "Host" },
+    { key: "port", label: "Port", placeholder: "22" },
+    { key: "username", label: "Username" },
+    { key: "password", label: "Password", secret: true, placeholder: "or use a private key below" },
+    { key: "private_key", label: "Private Key (PEM, optional)", secret: true },
+    { key: "remote_dir", label: "Remote Directory", placeholder: "/backups" },
+  ],
+};
 
 const STATUS_BADGE: Record<string, string> = {
   completed: "bg-emerald-100 text-emerald-700",
@@ -57,6 +111,62 @@ export default function Backups() {
   const [running, setRunning] = useState(false);
   const [actioningId, setActioningId] = useState<string | null>(null);
 
+  const [destinations, setDestinations] = useState<BackupDestination[]>([]);
+  const [destLoading, setDestLoading] = useState(true);
+  const [destError, setDestError] = useState<string | null>(null);
+  const [destActioningId, setDestActioningId] = useState<string | null>(null);
+  const [showAddDest, setShowAddDest] = useState(false);
+
+  const loadDestinations = async () => {
+    setDestLoading(true);
+    setDestError(null);
+    try {
+      const res = await api.get("/backups/destinations");
+      setDestinations(res.data);
+    } catch (err: any) {
+      setDestError(err?.response?.data?.detail || "Failed to load backup destinations");
+    } finally {
+      setDestLoading(false);
+    }
+  };
+
+  const toggleDestEnabled = async (d: BackupDestination) => {
+    setDestActioningId(d.id);
+    try {
+      await api.patch(`/backups/destinations/${d.id}`, { enabled: !d.enabled });
+      await loadDestinations();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to update destination");
+    } finally {
+      setDestActioningId(null);
+    }
+  };
+
+  const testDestination = async (d: BackupDestination) => {
+    setDestActioningId(d.id);
+    try {
+      await api.post(`/backups/destinations/${d.id}/test`);
+      alert(`${d.name}: connection OK.`);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || `${d.name}: connection test failed.`);
+    } finally {
+      setDestActioningId(null);
+    }
+  };
+
+  const removeDestination = async (d: BackupDestination) => {
+    if (!confirm(`Remove backup destination "${d.name}"? Future backups will stop copying here.`)) return;
+    setDestActioningId(d.id);
+    try {
+      await api.delete(`/backups/destinations/${d.id}`);
+      await loadDestinations();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to remove destination");
+    } finally {
+      setDestActioningId(null);
+    }
+  };
+
   const load = async () => {
     setLoading(true);
     setError(null);
@@ -76,6 +186,7 @@ export default function Backups() {
 
   useEffect(() => {
     load();
+    loadDestinations();
   }, []);
 
   const runBackup = async () => {
@@ -177,6 +288,90 @@ export default function Backups() {
         </div>
       </div>
 
+      {/* Cloud Destinations */}
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mb-6">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
+          <div>
+            <h2 className="font-bold text-navy dark:text-white text-sm">Cloud &amp; Remote Destinations</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Every completed backup is also pushed to each enabled destination below (AWS S3, Azure Blob Storage, or a remote server over SFTP).
+            </p>
+          </div>
+          <button
+            onClick={() => setShowAddDest(true)}
+            className="flex items-center gap-1.5 bg-brandblue text-white font-bold px-3 py-1.5 rounded-lg text-xs hover:opacity-90 shrink-0"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 5v14M5 12h14" /></svg>
+            Add Destination
+          </button>
+        </div>
+
+        {destError && <div className="m-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm">{destError}</div>}
+
+        {destLoading ? (
+          <div className="text-center py-6 text-slate-400 text-sm">Loading…</div>
+        ) : destinations.length === 0 ? (
+          <div className="text-center py-6 text-slate-400 text-sm">No cloud or remote destinations configured. Backups are stored locally only.</div>
+        ) : (
+          <div className="divide-y divide-slate-100 dark:divide-slate-700/50">
+            {destinations.map((d) => (
+              <div key={d.id} className="flex items-center justify-between px-4 py-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold shrink-0 ${
+                    d.type === "s3" ? "bg-amber-100 text-amber-700"
+                      : d.type === "azure_blob" ? "bg-blue-100 text-blue-700"
+                      : "bg-purple-100 text-purple-700"
+                  }`}>
+                    {DEST_TYPE_LABEL[d.type] || d.type}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="font-bold text-navy dark:text-white text-sm truncate">{d.name}</div>
+                    <div className="text-xs text-slate-400 truncate">
+                      {d.enabled ? "Enabled" : "Disabled"}
+                      {d.last_run_at && (
+                        <>
+                          {" · Last run "}
+                          <span className={d.last_run_status === "failed" ? "text-red-500 font-bold" : "text-emerald-600 font-bold"}>
+                            {d.last_run_status === "failed" ? "failed" : "OK"}
+                          </span>
+                          {" "}{fmtDate(d.last_run_at)}
+                        </>
+                      )}
+                      {d.last_run_status === "failed" && d.last_error && (
+                        <span className="block text-red-500 truncate" title={d.last_error}>{d.last_error}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    disabled={destActioningId === d.id}
+                    onClick={() => testDestination(d)}
+                    className="text-xs font-bold text-brandblue hover:underline disabled:opacity-40"
+                  >
+                    Test
+                  </button>
+                  <button
+                    disabled={destActioningId === d.id}
+                    onClick={() => toggleDestEnabled(d)}
+                    className="text-xs font-bold text-slate-500 hover:underline disabled:opacity-40"
+                  >
+                    {d.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    disabled={destActioningId === d.id}
+                    onClick={() => removeDestination(d)}
+                    className="text-xs font-bold text-red-600 hover:underline disabled:opacity-40"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Table */}
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
@@ -188,14 +383,15 @@ export default function Backups() {
               <th className="text-left py-2.5 px-4">Triggered By</th>
               <th className="text-left py-2.5 px-4">Started</th>
               <th className="text-left py-2.5 px-4">Duration</th>
+              <th className="text-left py-2.5 px-4">Off-site</th>
               <th className="text-right py-2.5 px-4">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="text-center py-8 text-slate-400">Loading…</td></tr>
+              <tr><td colSpan={8} className="text-center py-8 text-slate-400">Loading…</td></tr>
             ) : backups.length === 0 ? (
-              <tr><td colSpan={7} className="text-center py-8 text-slate-400">No backups yet. Run one to get started.</td></tr>
+              <tr><td colSpan={8} className="text-center py-8 text-slate-400">No backups yet. Run one to get started.</td></tr>
             ) : (
               backups.map((b) => (
                 <tr key={b.id} className="border-t border-slate-100 dark:border-slate-700/50">
@@ -214,6 +410,25 @@ export default function Backups() {
                   <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400">{b.triggered_by || "—"}</td>
                   <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400">{fmtDate(b.started_at)}</td>
                   <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400">{fmtDuration(b.duration_seconds)}</td>
+                  <td className="py-2.5 px-4">
+                    {!b.offsite_results || b.offsite_results.length === 0 ? (
+                      <span className="text-xs text-slate-400">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {b.offsite_results.map((r) => (
+                          <span
+                            key={r.destination_id}
+                            title={r.status === "failed" ? (r.error || "Upload failed") : `${r.name}: uploaded`}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              r.status === "failed" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"
+                            }`}
+                          >
+                            {r.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   <td className="py-2.5 px-4 text-right">
                     <div className="flex justify-end gap-3">
                       <button
@@ -237,6 +452,91 @@ export default function Backups() {
             )}
           </tbody>
         </table>
+      </div>
+
+      {showAddDest && (
+        <AddDestinationModal
+          onClose={() => setShowAddDest(false)}
+          onCreated={loadDestinations}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddDestinationModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState<"s3" | "azure_blob" | "sftp">("s3");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const setField = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }));
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post("/backups/destinations", { name, type, enabled: true, config: fields });
+      onCreated();
+      onClose();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to add destination");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+        <h2 className="text-lg font-bold text-navy dark:text-white mb-4">Add Backup Destination</h2>
+        {error && <div className="mb-3 p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-bold text-slate-500 block mb-1">Name</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Prod S3 Off-site"
+              className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 block mb-1">Type</label>
+            <select
+              value={type}
+              onChange={(e) => { setType(e.target.value as any); setFields({}); }}
+              className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+            >
+              <option value="s3">AWS S3</option>
+              <option value="azure_blob">Azure Blob Storage</option>
+              <option value="sftp">Remote Server (SFTP)</option>
+            </select>
+          </div>
+          {DEST_FIELDS[type].map((f) => (
+            <div key={f.key}>
+              <label className="text-xs font-bold text-slate-500 block mb-1">{f.label}</label>
+              <input
+                type={f.secret ? "password" : "text"}
+                value={fields[f.key] || ""}
+                onChange={(e) => setField(f.key, e.target.value)}
+                placeholder={f.placeholder}
+                className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+              />
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={submitting || !name}
+            className="px-4 py-2 rounded-lg text-sm font-bold bg-brandblue text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {submitting ? "Adding…" : "Add Destination"}
+          </button>
+        </div>
       </div>
     </div>
   );
