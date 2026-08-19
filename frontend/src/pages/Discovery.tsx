@@ -97,8 +97,16 @@ export default function Discovery() {
   const [actioningHostId, setActioningHostId] = useState<string | null>(null);
   const [importTarget, setImportTarget] = useState<DiscoveredHost | null>(null);
   const [importHostname, setImportHostname] = useState("");
+  const [importDeviceType, setImportDeviceType] = useState("");
+  const [importSnmpVersion, setImportSnmpVersion] = useState("");
+  const [importPollInterval, setImportPollInterval] = useState("300");
   const [suggestion, setSuggestion] = useState<CredentialSuggestion | null>(null);
   const [suggestionLoading, setSuggestionLoading] = useState(false);
+
+  const [rescanTargetId, setRescanTargetId] = useState<string | null>(null);
+  const [rescanCommunity, setRescanCommunity] = useState("");
+  const [rescanningHostId, setRescanningHostId] = useState<string | null>(null);
+  const [rescanError, setRescanError] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
 
@@ -230,9 +238,43 @@ export default function Discovery() {
     }
   };
 
+  const openRescan = (host: DiscoveredHost) => {
+    setRescanTargetId(host.id);
+    setRescanCommunity("");
+    setRescanError(null);
+  };
+
+  const confirmRescan = async () => {
+    if (!rescanTargetId) return;
+    if (!rescanCommunity.trim()) {
+      setRescanError("Enter an SNMP community string");
+      return;
+    }
+    setRescanningHostId(rescanTargetId);
+    setRescanError(null);
+    try {
+      await api.post(`/discovery/hosts/${rescanTargetId}/rescan`, { snmp_community: rescanCommunity.trim() });
+      setRescanTargetId(null);
+      if (selectedScan) await loadHosts(selectedScan.id);
+    } catch (err: any) {
+      setRescanError(err?.response?.data?.detail || "Rescan failed");
+    } finally {
+      setRescanningHostId(null);
+    }
+  };
+
   const openImport = async (host: DiscoveredHost) => {
     setImportTarget(host);
     setImportHostname(host.hostname?.replace(/\.$/, "") || host.snmp_sys_name || "");
+    // Best-effort device_type guess from sysDescr keywords -- purely a
+    // starting point the operator can overwrite, same "never invent
+    // data we don't have" posture as the backend's own vendor guessing;
+    // left blank if nothing in sysDescr hints at a type.
+    const descr = (host.snmp_sys_descr || "").toLowerCase();
+    setImportDeviceType(
+      descr.includes("switch") ? "switch" : descr.includes("router") ? "router" : descr.includes("firewall") ? "firewall" : ""
+    );
+    setImportPollInterval("300");
     setSuggestion(null);
     // Best-effort credential-profile suggestion for this host's guessed
     // vendor -- a 404/null response just means "nothing to pre-fill",
@@ -241,8 +283,10 @@ export default function Discovery() {
     try {
       const res = await api.get<CredentialSuggestion | null>(`/discovery/hosts/${host.id}/suggested-credentials`);
       setSuggestion(res.data || null);
+      setImportSnmpVersion(res.data?.snmp_version || "");
     } catch {
       setSuggestion(null);
+      setImportSnmpVersion("");
     } finally {
       setSuggestionLoading(false);
     }
@@ -259,6 +303,7 @@ export default function Discovery() {
       await api.post(`/discovery/hosts/${importTarget.id}/import`, {
         hostname: importHostname.trim(),
         vendor: importTarget.vendor_guess?.toLowerCase(),
+        device_type: importDeviceType || undefined,
         // Credential *pointers* only (ref names / usernames / SNMP
         // dialect) pre-filled from the suggestion above -- no secret
         // material is ever sent here. The operator still sets the real
@@ -267,7 +312,12 @@ export default function Discovery() {
         ssh_username: suggestion?.ssh_username || undefined,
         snmp_community_ref: suggestion?.snmp_community_ref || undefined,
         snmp_username: suggestion?.snmp_username || undefined,
-        snmp_version: suggestion?.snmp_version || undefined,
+        // Editable field, defaulted from the suggestion when opening the
+        // modal -- what actually turns SNMP polling on for the new
+        // device, so it doesn't sit unmonitored until a second trip to
+        // the device page.
+        snmp_version: importSnmpVersion || undefined,
+        snmp_poll_interval_seconds: importPollInterval.trim() ? Number(importPollInterval) : undefined,
       });
       setImportTarget(null);
       setSuggestion(null);
@@ -442,7 +492,23 @@ export default function Discovery() {
                           {[host.vendor_guess, host.snmp_sys_name].filter(Boolean).join(" · ")}
                         </span>
                       ) : (
-                        <span className="text-slate-400">unidentified</span>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="text-slate-400"
+                            title="No SNMP sysName/sysDescr on file for this host -- either no SNMP community was supplied for this scan, or the host didn't respond to SNMP."
+                          >
+                            unidentified
+                          </span>
+                          {!host.imported && (
+                            <button
+                              className="text-xs text-slate-900 underline decoration-dotted hover:decoration-solid disabled:opacity-50"
+                              disabled={rescanningHostId === host.id}
+                              onClick={() => openRescan(host)}
+                            >
+                              {rescanningHostId === host.id ? "Rescanning…" : "Rescan with SNMP"}
+                            </button>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-4 py-2 font-mono text-xs">{host.open_ports || "—"}</td>
@@ -510,7 +576,7 @@ export default function Discovery() {
 
       {importTarget && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-5 w-96 space-y-3">
+          <div className="bg-white rounded-lg p-5 w-[26rem] space-y-3">
             <h3 className="font-medium">Import {importTarget.ip_address} as a device</h3>
             <div>
               <label className="block text-xs text-slate-500 mb-1">Hostname</label>
@@ -520,6 +586,44 @@ export default function Discovery() {
                 onChange={(e) => setImportHostname(e.target.value)}
                 autoFocus
               />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">Device type</label>
+                <input
+                  className="border rounded px-3 py-1.5 text-sm w-full"
+                  placeholder="switch, router, firewall…"
+                  value={importDeviceType}
+                  onChange={(e) => setImportDeviceType(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">SNMP version</label>
+                <select
+                  className="border rounded px-3 py-1.5 text-sm w-full bg-white"
+                  value={importSnmpVersion}
+                  onChange={(e) => setImportSnmpVersion(e.target.value)}
+                >
+                  <option value="">Not set</option>
+                  <option value="v1">v1</option>
+                  <option value="v2c">v2c</option>
+                  <option value="v3">v3</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">SNMP poll interval (seconds)</label>
+              <input
+                type="number"
+                min={30}
+                step={30}
+                className="border rounded px-3 py-1.5 text-sm w-32"
+                value={importPollInterval}
+                onChange={(e) => setImportPollInterval(e.target.value)}
+              />
+              <p className="text-[11px] text-slate-400 mt-1">
+                Sets up polling on import — leave blank to import unmonitored and configure it later on the device page.
+              </p>
             </div>
             {importTarget.vendor_guess && (
               <p className="text-xs text-slate-500">
@@ -567,6 +671,44 @@ export default function Discovery() {
                 onClick={confirmImport}
               >
                 {actioningHostId === importTarget.id ? "Importing…" : "Add device"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {rescanTargetId && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-5 w-96 space-y-3">
+            <h3 className="font-medium">Rescan with SNMP</h3>
+            <p className="text-xs text-slate-500">
+              Re-probes just this host with a community string to pick up its sysName/sysDescr — doesn't
+              re-run the whole range.
+            </p>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">SNMP community</label>
+              <input
+                className="border rounded px-3 py-1.5 text-sm w-full"
+                placeholder="public"
+                value={rescanCommunity}
+                onChange={(e) => setRescanCommunity(e.target.value)}
+                autoFocus
+              />
+            </div>
+            {rescanError && <p className="text-sm text-red-600">{rescanError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                className="px-3 py-1.5 rounded text-sm text-slate-600"
+                onClick={() => setRescanTargetId(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-1.5 rounded bg-slate-900 text-white text-sm disabled:opacity-50"
+                disabled={rescanningHostId === rescanTargetId}
+                onClick={confirmRescan}
+              >
+                {rescanningHostId === rescanTargetId ? "Rescanning…" : "Rescan"}
               </button>
             </div>
           </div>
