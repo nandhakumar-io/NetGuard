@@ -349,7 +349,10 @@ def push_config(
             # top-level element to be exactly <configuration> -- any XML
             # fragment authored/rendered without that wrapper (e.g. a
             # GitOps/config-template payload that's just
-            # "<interfaces>...</interfaces>") gets rejected with:
+            # "<interfaces>...</interfaces>", or one with *several*
+            # sibling top-level elements like
+            # "<interfaces>...</interfaces><vlans>...</vlans>") gets
+            # rejected with:
             #   Element [{http://xml.juniper.net/xnm/1.1/xnm}configuration]
             #   does not meet requirement
             # which is the exact same error strip_junos_readonly_attrs's
@@ -362,15 +365,38 @@ def push_config(
             # remembered the outer tag.
             try:
                 from lxml import etree as _lxml_etree
-
-                root = _lxml_etree.fromstring(config_xml.encode("utf-8"))
-                root_local = root.tag.rsplit("}", 1)[-1] if root.tag.startswith("{") else root.tag
-                if root_local != "configuration":
+            except ImportError:
+                _lxml_etree = None
+            if _lxml_etree is not None:
+                try:
+                    root = _lxml_etree.fromstring(config_xml.encode("utf-8"))
+                    root_local = root.tag.rsplit("}", 1)[-1] if root.tag.startswith("{") else root.tag
+                    if root_local != "configuration":
+                        config_xml = f"<configuration>{config_xml}</configuration>"
+                except _lxml_etree.XMLSyntaxError:
+                    # A single well-formed element parses fine above and
+                    # only needs wrapping when its tag isn't
+                    # "configuration". This branch is for input that isn't
+                    # parseable *as a standalone document at all* -- most
+                    # commonly several sibling top-level elements
+                    # ("<a/><b/>") with no single enclosing root, which is
+                    # a well-formed *fragment* but not a well-formed
+                    # *document*, so fromstring raises here instead of
+                    # returning a root to inspect. Wrapping fixes exactly
+                    # this case (the wrapped result *is* a valid document),
+                    # so do it unconditionally rather than treating the
+                    # parse failure as "leave it alone, edit_config will
+                    # explain it" -- that fallback is for genuinely
+                    # malformed XML, and silently applied here it was
+                    # actually the majority cause of this exact Junos
+                    # schema-validation failure in practice: multi-element
+                    # fragments, not missing-wrapper single elements.
                     config_xml = f"<configuration>{config_xml}</configuration>"
-            except Exception:
-                # Not parseable as XML at all -- leave as-is, edit_config
-                # will surface its own (unrelated) parser error.
-                pass
+                except Exception:
+                    # Not parseable as XML for some other reason (e.g.
+                    # binary/garbage input) -- leave as-is, edit_config
+                    # will surface its own (unrelated) parser error.
+                    pass
 
         # We do NOT add a <config> envelope here because ncclient's
         # `conn.edit_config(..., config=config_xml)` method AUTOMATICALLY
