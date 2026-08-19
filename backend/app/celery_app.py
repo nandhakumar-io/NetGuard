@@ -74,6 +74,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.snmp_poll_task": {"queue": "polling"},
         "app.tasks.reachability_task": {"queue": "polling"},
+        "app.tasks.run_network_discovery_scan_task": {"queue": "polling"},
         # Deployment Pipeline (Approved -> Snapshot -> Deploy -> Health
         # Monitor -> Success | Rollback -> Notify), SRS 6.6/6.8. This is
         # every task actually dispatched by POST /change-requests/{id}/approve

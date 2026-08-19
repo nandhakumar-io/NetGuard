@@ -12,7 +12,7 @@ Create Date: 2026-08-18 00:00:00.000000
 import sqlalchemy as sa
 
 from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import add_column_if_missing, drop_column_if_exists, table_exists
 
 revision = '0070'
 down_revision = '0069'
@@ -44,13 +44,14 @@ def upgrade() -> None:
     if 'last_gnmi_error' not in dev_cols:
         add_column_if_missing('devices', sa.Column('last_gnmi_error', sa.Text(), nullable=True))
 
-    im_cols = {col['name'] for col in inspector.get_columns('interface_metrics')}
-    if 'source' not in im_cols:
-        add_column_if_missing('interface_metrics', sa.Column('source', sa.String(), nullable=False, server_default='snmp'))
+    if table_exists('interface_metrics'):
+        im_cols = {col['name'] for col in inspector.get_columns('interface_metrics')}
+        if 'source' not in im_cols:
+            add_column_if_missing('interface_metrics', sa.Column('source', sa.String(), nullable=False, server_default='snmp'))
 
 
 def downgrade() -> None:
-    op.drop_column('interface_metrics', 'source')
+    drop_column_if_exists('interface_metrics', 'source')
     op.drop_column('devices', 'last_gnmi_error')
     op.drop_column('devices', 'last_gnmi_update_at')
     op.drop_column('devices', 'gnmi_sample_interval_ms')

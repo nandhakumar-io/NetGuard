@@ -42,6 +42,7 @@ const IntegrationsPage = lazy(() => import("./pages/Integrations"));
 const MobileNOC = lazy(() => import("./pages/MobileNOC"));
 const Users = lazy(() => import("./pages/Users"));
 const Backups = lazy(() => import("./pages/Backups"));
+const Discovery = lazy(() => import("./pages/Discovery"));
 const WallBoard = lazy(() => import("./pages/WallBoard"));
 const OnCallSchedules = lazy(() => import("./pages/OnCallSchedules"));
 const EscalationPolicies = lazy(() => import("./pages/EscalationPolicies"));
@@ -108,6 +109,7 @@ export default function App() {
           <Route path="/integrations" element={withSuspense(<IntegrationsPage />)} />
           <Route path="/users" element={withSuspense(<Users />)} />
           <Route path="/backups" element={withSuspense(<Backups />)} />
+          <Route path="/discovery" element={withSuspense(<Discovery />)} />
         </Route>
       </Route>
     </Routes>

@@ -74,6 +74,12 @@ from app.models.maintenance_window import (  # noqa: F401
     MaintenanceScope,
     MaintenanceWindow,
 )
+from app.models.network_discovery import (  # noqa: F401
+    DiscoveredHost,
+    DiscoveryScan,
+    DiscoveryScanStatus,
+    DiscoverySchedule,
+)
 from app.models.notification import (  # noqa: F401
     Notification,
     NotificationEventType,

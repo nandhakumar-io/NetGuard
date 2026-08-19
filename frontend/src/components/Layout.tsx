@@ -64,6 +64,10 @@ const groups: NavGroup[] = [
         icon: <svg {...iconProps}><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" /></svg>,
       },
       {
+        to: "/discovery", label: "Discovery",
+        icon: <svg {...iconProps}><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /><path d="M11 8v3l2 2" /></svg>,
+      },
+      {
         to: "/groups", label: "Groups",
         icon: <svg {...iconProps}><path d="M12 2l9 5-9 5-9-5 9-5z" /><path d="M3 12l9 5 9-5" /><path d="M3 17l9 5 9-5" /></svg>,
       },

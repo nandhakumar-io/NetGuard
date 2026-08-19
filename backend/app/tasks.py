@@ -17,6 +17,7 @@ pipeline_service.run_deployment_pipeline). Once every device's task has
 finished, the chord callback rolls the per-device results up into a single
 ChangeRequest.status.
 """
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -34,6 +35,8 @@ from app.services import (
     notification_service,
     pipeline_service,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _seconds_since(past: datetime | None, now: datetime) -> float | None:
@@ -798,5 +801,53 @@ def run_gitops_auto_sync_sweep_task() -> int:
         for repo in repos:
             git_sync_service.sync_repo(db, repo)
         return len(repos)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.run_network_discovery_scan_task",
+    bind=True,
+    # A crash in the task plumbing itself (DB hiccup) is worth one retry;
+    # network_discovery_service.run_scan already treats per-host probe
+    # failures as normal (logged, skipped) rather than exceptions, so a
+    # retry here re-runs the whole sweep, not just a failed host.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_network_discovery_scan_task(self, scan_id: str, community: str | None = None) -> str:
+    """Entry point for POST /discovery/scans -- runs off the request
+    thread since sweeping up to 1024 hosts (see
+    network_discovery_service.MAX_SCAN_HOSTS) can take tens of seconds,
+    longer than an HTTP client should wait synchronously.
+    """
+    from app.models.network_discovery import DiscoveryScan, DiscoveryScanStatus
+    from app.services import network_discovery_service
+
+    db = SessionLocal()
+    try:
+        scan = db.get(DiscoveryScan, uuid.UUID(scan_id))
+        if scan is None:
+            return "scan_missing"
+        if scan.status == DiscoveryScanStatus.CANCELLED:
+            return "cancelled"
+
+        scan.status = DiscoveryScanStatus.RUNNING
+        db.add(scan)
+        db.commit()
+
+        try:
+            network_discovery_service.run_scan(db, scan, community)
+            scan.status = DiscoveryScanStatus.COMPLETED
+        except Exception as exc:  # noqa: BLE001 -- bad CIDR slipped past API validation, etc.
+            scan.status = DiscoveryScanStatus.FAILED
+            scan.error = str(exc)[:500]
+            logger.warning("Network discovery scan %s failed", scan_id, exc_info=True)
+        finally:
+            scan.completed_at = datetime.now(timezone.utc)
+            db.add(scan)
+            db.commit()
+        return scan.status.value
     finally:
         db.close()

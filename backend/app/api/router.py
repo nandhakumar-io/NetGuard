@@ -35,6 +35,7 @@ from app.api import (
     jobs,
     maintenance_windows,
     metrics,
+    network_discovery,
     notification,
     notification_settings,
     path_trace,
@@ -105,3 +106,4 @@ api_router.include_router(ipam.router)
 api_router.include_router(push_subscriptions.router)
 api_router.include_router(user_management.router)
 api_router.include_router(backups.router)
+api_router.include_router(network_discovery.router)
