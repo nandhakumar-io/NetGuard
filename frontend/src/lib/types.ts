@@ -234,10 +234,10 @@ export interface LldpNeighbor {
   local_port?: string | null;
   neighbor_name: string | null;
   neighbor_port: string | null;
-  // Best-effort trunk/access mode + VLAN for the local port, resolved
-  // via Junos config (Juniper) or Q-BRIDGE-MIB SNMP (everything else) --
-  // null when the platform doesn't expose it.
-  port_mode?: "access" | "trunk" | "routed" | null;
+  // Best-effort switchport mode/VLAN for local_port, resolved via SNMP
+  // (Q-BRIDGE-MIB) -- null if unresolved (no SNMP switchport data for
+  // that port). See backend LldpNeighbor schema.
+  port_mode?: "trunk" | "access" | null;
   vlan?: string | null;
   trunk_vlans?: string[] | null;
 }
@@ -248,7 +248,7 @@ export interface CdpNeighbor {
   neighbor_id: string | null;
   neighbor_port: string | null;
   neighbor_platform: string | null;
-  port_mode?: "access" | "trunk" | "routed" | null;
+  port_mode?: "trunk" | "access" | null;
   vlan?: string | null;
   trunk_vlans?: string[] | null;
 }
@@ -1075,10 +1075,12 @@ export interface LinkMember {
   // that port. "unknown": no independent per-port poll data yet.
   status: "up" | "down" | "unknown";
   utilization_pct: number | null;
-  // Best-effort trunk/access mode + VLAN for this member's local port
-  // (see backend LinkMember.port_mode). Null when the discovery run
-  // couldn't resolve switchport info for that platform.
-  port_mode?: "access" | "trunk" | "routed" | null;
+  // Best-effort switchport mode for this member's local_port, resolved
+  // via SNMP (Q-BRIDGE-MIB) against the device that reported it -- null
+  // if unresolved (no SNMP configured, or the platform doesn't expose
+  // it). "routed" is never set here (topology members are always L2
+  // LLDP/CDP-confirmed ports); it's "trunk" | "access" | null.
+  port_mode?: "trunk" | "access" | null;
   vlan?: string | null;
   trunk_vlans?: string[] | null;
 }

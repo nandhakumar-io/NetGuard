@@ -46,6 +46,7 @@ from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
 from app.models.subnet import Subnet
 from app.services import gns3_service, risk_engine, snapshot_service
+from app.services.snmp_service import walk_switchport_vlans
 
 if TYPE_CHECKING:
     from app.models.topology_snapshot import TopologySnapshot
@@ -174,11 +175,12 @@ class LinkMember:
     # operationally down, instead of a single link-wide status.
     status: str = "unknown"
     utilization_pct: int | None = None
-    # Best-effort trunk/access mode + VLAN for the *local* (source-device)
-    # end of this member, carried straight over from DiscoveredNeighbor
-    # (see app.api.devices._persist_discovered_neighbors) -- None when the
-    # discovery run couldn't resolve switchport info for that platform.
-    port_mode: str | None = None  # "access" | "trunk" | "routed" | None
+    # Best-effort switchport mode for this member's local_port ("trunk" |
+    # "access" | "routed" | None if unresolved), plus the VLAN(s) it
+    # carries -- see _member_switchport_info. Powers the Topology page's
+    # "is this an access or trunk link" display, which previously had no
+    # way to show anything but the raw LLDP/CDP port pair.
+    port_mode: str | None = None
     vlan: str | None = None
     trunk_vlans: list[str] | None = None
 
@@ -246,6 +248,46 @@ def _member_port_state(db: Session, device_id: str, local_port: str | None) -> t
     except Exception:
         return "unknown", None
     return "unknown", None
+
+
+def _member_switchport_info(
+    devices_by_id: dict[str, Device],
+    switchport_cache: dict[str, dict],
+    device_id: str,
+    local_port: str | None,
+) -> tuple[str | None, str | None, list[str] | None]:
+    """Best-effort switchport mode/VLAN for one trunk member's local_port,
+    so the Topology page can badge a confirmed link "trunk" or "access"
+    instead of only showing the raw LLDP/CDP port pair (see
+    app.api.config_management.view_interfaces, which does the same
+    per-device SNMP walk for the device detail Interfaces tab -- this is
+    the same data source, just reused here and cached per device_id so a
+    trunk with several members doesn't re-walk the same device's VLAN
+    table once per member).
+
+    SNMP-only: unlike the device Interfaces tab, this has no NETCONF
+    session already open to a Juniper device to fall back to, so Juniper
+    switchport info only resolves here if SNMP is also configured on the
+    device. Returns (None, None, None) wherever it can't be resolved --
+    never fabricated.
+    """
+    if not local_port:
+        return None, None, None
+    device = devices_by_id.get(device_id)
+    if not device or not device.snmp_version:
+        return None, None, None
+    if device_id not in switchport_cache:
+        try:
+            from app.services import metrics_service
+
+            auth = metrics_service.build_snmp_auth(device)
+            switchport_cache[device_id] = walk_switchport_vlans(device.ip_address, auth)
+        except Exception:
+            switchport_cache[device_id] = {}
+    info = switchport_cache[device_id].get(local_port)
+    if not info:
+        return None, None, None
+    return info.get("mode"), info.get("vlan"), info.get("trunk_vlans")
 
 
 def uplink_interfaces_for_device(db: Session, device_id) -> set[str]:
@@ -480,6 +522,8 @@ def build_topology(db: Session) -> TopologyGraph:
     sizes; revisit (e.g. index by subnet first) if this becomes hot.
     """
     devices = db.query(Device).order_by(Device.hostname).all()
+    devices_by_id = {str(d.id): d for d in devices}
+    switchport_cache: dict[str, dict] = {}
     metrics_by_device = _latest_metrics_by_device(devices)
     alert_severity_by_device = _active_alert_severity_by_device(db)
 
@@ -617,6 +661,9 @@ def build_topology(db: Session) -> TopologyGraph:
             )
             member_device_id = str(row.device_id)
             status, member_util = _member_port_state(db, member_device_id, row.local_port)
+            port_mode, vlan, trunk_vlans = _member_switchport_info(
+                devices_by_id, switchport_cache, member_device_id, row.local_port
+            )
             members.append(
                 LinkMember(
                     local_port=row.local_port,
@@ -626,9 +673,9 @@ def build_topology(db: Session) -> TopologyGraph:
                     stale=is_stale,
                     status=status,
                     utilization_pct=member_util,
-                    port_mode=row.port_mode,
-                    vlan=row.vlan,
-                    trunk_vlans=row.trunk_vlans.split(",") if row.trunk_vlans else None,
+                    port_mode=port_mode,
+                    vlan=vlan,
+                    trunk_vlans=trunk_vlans,
                 )
             )
         members.sort(key=lambda m: (m.local_port or "", m.neighbor_port or ""))

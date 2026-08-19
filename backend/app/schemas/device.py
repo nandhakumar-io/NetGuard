@@ -356,13 +356,12 @@ class LldpNeighbor(BaseModel):
     # neighbor_name had to fall back to this same value because the
     # neighbor didn't send an optional System Name TLV (common on Junos).
     neighbor_chassis_id: str | None = None
-    # Best-effort switchport enrichment for the *local* port this neighbor
-    # was seen on, via the same Q-BRIDGE-MIB/Junos-config lookup that
-    # backs the device Interfaces tab (see snmp_service.walk_switchport_vlans
-    # / config_format_service.parse_junos_switchport_config, merged in by
-    # app.api.devices.discover_device). None when the platform doesn't
-    # expose it rather than a guess.
-    port_mode: str | None = None  # "access" | "trunk" | "routed" | None
+    # Best-effort switchport mode/VLAN for local_port, via the same
+    # Q-BRIDGE-MIB walk the device Interfaces tab uses (see
+    # app.services.snmp_service.walk_switchport_vlans) -- filled in by
+    # discover_device after the base LLDP walk, matched by local_port
+    # name. None if unresolved (no SNMP switchport data for that port).
+    port_mode: str | None = None
     vlan: str | None = None
     trunk_vlans: list[str] | None = None
 
@@ -376,6 +375,7 @@ class CdpNeighbor(BaseModel):
     neighbor_id: str | None = None
     neighbor_port: str | None = None
     neighbor_platform: str | None = None
+    # Same best-effort switchport enrichment as LldpNeighbor above.
     port_mode: str | None = None
     vlan: str | None = None
     trunk_vlans: list[str] | None = None

@@ -135,7 +135,36 @@ type TabName = typeof TAB_NAMES[number];
 
 // --- Subcomponents for Device Details Tabs ---
 
-function DiscoveryTable({ columns, rows, empty }: { columns: string[]; rows: string[][]; empty: string }) {
+// Small trunk/access badge + VLAN cell for the Discovery tab's LLDP/CDP
+// tables -- same visual language and same "native + trunked VLANs"
+// formatting as the Interfaces tab's Port Mode/VLAN columns (see the
+// iface.port_mode rendering further down), just reused in a
+// neighbor-table row context. null/undefined mode means unresolved (no
+// SNMP switchport data for that port), not "no VLAN configured".
+function portModeBadge(mode?: "trunk" | "access" | null) {
+  if (!mode) return <span className="text-slate-400 dark:text-slate-500">—</span>;
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+        mode === "trunk"
+          ? "bg-purple-50 text-purple-700 border border-purple-200"
+          : "bg-sky-50 text-sky-700 border border-sky-200"
+      }`}
+    >
+      {mode}
+    </span>
+  );
+}
+
+function vlanCell(mode?: "trunk" | "access" | null, vlan?: string | null, trunkVlans?: string[] | null) {
+  if (!mode) return <span className="text-slate-400 dark:text-slate-500">—</span>;
+  if (mode === "trunk" && trunkVlans?.length) {
+    return `${vlan ?? "—"} (native), ${trunkVlans.join(", ")}`;
+  }
+  return vlan ?? "—";
+}
+
+function DiscoveryTable({ columns, rows, empty }: { columns: string[]; rows: React.ReactNode[][]; empty: string }) {
   if (rows.length === 0) {
     return <p className="text-xs text-slate-400 dark:text-slate-500 italic py-4">{empty}</p>;
   }
@@ -1497,12 +1526,8 @@ function DeviceInlineDetails({
                       n.local_port || n.local_port_index,
                       n.neighbor_name || "—",
                       n.neighbor_port || "—",
-                      n.port_mode
-                        ? n.port_mode === "trunk"
-                          ? `trunk${n.trunk_vlans?.length ? ` (${n.trunk_vlans.join(", ")})` : ""}`
-                          : n.port_mode
-                        : "—",
-                      n.vlan || "—",
+                      portModeBadge(n.port_mode),
+                      vlanCell(n.port_mode, n.vlan, n.trunk_vlans),
                     ])}
                   />
                 )}
@@ -1515,12 +1540,8 @@ function DeviceInlineDetails({
                       n.neighbor_id || "—",
                       n.neighbor_port || "—",
                       n.neighbor_platform || "—",
-                      n.port_mode
-                        ? n.port_mode === "trunk"
-                          ? `trunk${n.trunk_vlans?.length ? ` (${n.trunk_vlans.join(", ")})` : ""}`
-                          : n.port_mode
-                        : "—",
-                      n.vlan || "—",
+                      portModeBadge(n.port_mode),
+                      vlanCell(n.port_mode, n.vlan, n.trunk_vlans),
                     ])}
                   />
                 )}

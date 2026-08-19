@@ -22,18 +22,6 @@ interface OffsiteResult {
   error: string | null;
 }
 
-interface DeviceBackupRow {
-  device_id: string;
-  hostname: string;
-  ip_address: string;
-  vendor: string;
-  backup_count: number;
-  last_backup_at: string | null;
-  last_backup_version: string | null;
-  last_backup_snapshot_id: string | null;
-  days_since_backup: number | null;
-}
-
 interface BackupDestination {
   id: string;
   name: string;
@@ -112,18 +100,6 @@ function fmtDuration(seconds: number | null): string {
   return `${m}m ${s}s`;
 }
 
-// Custom tweak: devices whose config hasn't been backed up in this many
-// days (or ever) are flagged in amber/red on the Device Config Backups
-// panel below, so stale coverage is visible without opening every device.
-const DEVICE_BACKUP_OVERDUE_DAYS = 7;
-
-function fmtAge(days: number | null): string {
-  if (days === null || days === undefined) return "Never";
-  if (days === 0) return "Today";
-  if (days === 1) return "1 day ago";
-  return `${days} days ago`;
-}
-
 export default function Backups() {
   const [backups, setBackups] = useState<BackupJob[]>([]);
   const [total, setTotal] = useState(0);
@@ -135,86 +111,12 @@ export default function Backups() {
   const [running, setRunning] = useState(false);
   const [actioningId, setActioningId] = useState<string | null>(null);
 
-  const [deviceBackups, setDeviceBackups] = useState<DeviceBackupRow[]>([]);
-  const [neverBackedUp, setNeverBackedUp] = useState(0);
-  const [deviceBackupsLoading, setDeviceBackupsLoading] = useState(true);
-  const [deviceBackupsError, setDeviceBackupsError] = useState<string | null>(null);
-  const [deviceActioningId, setDeviceActioningId] = useState<string | null>(null);
-  const [fleetBackupRunning, setFleetBackupRunning] = useState(false);
-
-  const loadDeviceBackups = async () => {
-    setDeviceBackupsLoading(true);
-    setDeviceBackupsError(null);
-    try {
-      const res = await api.get("/backups/devices");
-      setDeviceBackups(res.data.devices);
-      setNeverBackedUp(res.data.never_backed_up);
-    } catch (err: any) {
-      setDeviceBackupsError(err?.response?.data?.detail || "Failed to load device backup coverage");
-    } finally {
-      setDeviceBackupsLoading(false);
-    }
-  };
-
-  const backupDeviceNow = async (row: DeviceBackupRow) => {
-    setDeviceActioningId(row.device_id);
-    try {
-      await api.post(`/backups/devices/${row.device_id}`);
-      await loadDeviceBackups();
-    } catch (err: any) {
-      alert(err?.response?.data?.detail || `Failed to back up ${row.hostname}`);
-    } finally {
-      setDeviceActioningId(null);
-    }
-  };
-
-  const downloadDeviceBackup = async (row: DeviceBackupRow) => {
-    if (!row.last_backup_snapshot_id) return;
-    setDeviceActioningId(row.device_id);
-    try {
-      const res = await api.get(
-        `/devices/${row.device_id}/config/backups/${row.last_backup_snapshot_id}/download`,
-        { responseType: "blob" as any }
-      );
-      const blob = new Blob([res.data], { type: "text/plain" });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${row.hostname}-${row.last_backup_version || row.last_backup_snapshot_id}.cfg`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      alert(err?.response?.data?.detail || `Failed to download ${row.hostname}'s backup`);
-    } finally {
-      setDeviceActioningId(null);
-    }
-  };
-
-  const backupAllDevicesNow = async () => {
-    if (!confirm(`Back up the config of all ${deviceBackups.length} device(s) now?`)) return;
-    setFleetBackupRunning(true);
-    try {
-      const res = await api.post("/backups/devices/bulk");
-      const { succeeded, failed: failedMap, total: t } = res.data;
-      const failedCount = Object.keys(failedMap || {}).length;
-      await loadDeviceBackups();
-      alert(
-        failedCount === 0
-          ? `Backed up all ${t} device(s) successfully.`
-          : `Backed up ${succeeded.length}/${t} device(s). Failed: ${Object.keys(failedMap).join(", ")}`
-      );
-    } catch (err: any) {
-      alert(err?.response?.data?.detail || "Fleet backup failed to start");
-    } finally {
-      setFleetBackupRunning(false);
-    }
-  };
-
   const [destinations, setDestinations] = useState<BackupDestination[]>([]);
   const [destLoading, setDestLoading] = useState(true);
   const [destError, setDestError] = useState<string | null>(null);
   const [destActioningId, setDestActioningId] = useState<string | null>(null);
   const [showAddDest, setShowAddDest] = useState(false);
+  const [editingDest, setEditingDest] = useState<BackupDestination | null>(null);
 
   const loadDestinations = async () => {
     setDestLoading(true);
@@ -286,7 +188,6 @@ export default function Backups() {
   useEffect(() => {
     load();
     loadDestinations();
-    loadDeviceBackups();
   }, []);
 
   const runBackup = async () => {
@@ -343,8 +244,8 @@ export default function Backups() {
             </svg>
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-navy dark:text-white">Backups</h1>
-            <p className="text-sm text-slate-500 dark:text-slate-400">NetGuard application database backups and per-device configuration backups</p>
+            <h1 className="text-2xl font-bold text-navy dark:text-white">Database Backups</h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400">On-demand snapshots of the NetGuard application database</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -386,99 +287,6 @@ export default function Backups() {
           <div className="text-2xl font-bold text-navy dark:text-white">{fmtBytes(storedBytes)}</div>
           <div className="text-[11px] uppercase tracking-wide text-slate-400 font-bold mt-1">Stored Locally</div>
         </div>
-      </div>
-
-      {/* Device Config Backups (custom addition: per-device config backup
-          coverage, individual + fleet-wide backup triggers) */}
-      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mb-6">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 dark:border-slate-700/50">
-          <div>
-            <h2 className="font-bold text-navy dark:text-white text-sm">Device Config Backups</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              On-demand running-config backups for individual devices, stored in the same version history as pre-deployment
-              snapshots. {neverBackedUp > 0 && (
-                <span className="text-red-500 font-bold">{neverBackedUp} device{neverBackedUp === 1 ? "" : "s"} never backed up.</span>
-              )}
-            </p>
-          </div>
-          <button
-            onClick={backupAllDevicesNow}
-            disabled={fleetBackupRunning || deviceBackups.length === 0}
-            className="flex items-center gap-1.5 bg-navy text-white font-bold px-3 py-1.5 rounded-lg text-xs hover:opacity-90 disabled:opacity-50 shrink-0"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0018 0V5" /><path d="M3 12a9 3 0 0018 0" />
-            </svg>
-            {fleetBackupRunning ? "Backing up fleet…" : "Back Up All Devices Now"}
-          </button>
-        </div>
-
-        {deviceBackupsError && <div className="m-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm">{deviceBackupsError}</div>}
-
-        {deviceBackupsLoading ? (
-          <div className="text-center py-6 text-slate-400 text-sm">Loading…</div>
-        ) : deviceBackups.length === 0 ? (
-          <div className="text-center py-6 text-slate-400 text-sm">No managed devices yet.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 dark:bg-slate-900/40 text-[11px] uppercase tracking-wide text-slate-400 font-bold">
-              <tr>
-                <th className="text-left py-2.5 px-4">Device</th>
-                <th className="text-left py-2.5 px-4">Vendor</th>
-                <th className="text-left py-2.5 px-4">Backups On File</th>
-                <th className="text-left py-2.5 px-4">Last Backup</th>
-                <th className="text-right py-2.5 px-4">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {deviceBackups.map((row) => {
-                const overdue = row.days_since_backup === null || row.days_since_backup > DEVICE_BACKUP_OVERDUE_DAYS;
-                return (
-                  <tr key={row.device_id} className="border-t border-slate-100 dark:border-slate-700/50">
-                    <td className="py-2.5 px-4">
-                      <div className="font-bold text-navy dark:text-white text-xs">{row.hostname}</div>
-                      <div className="text-[11px] font-mono text-slate-400">{row.ip_address}</div>
-                    </td>
-                    <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400 capitalize">{row.vendor}</td>
-                    <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400 font-mono">{row.backup_count}</td>
-                    <td className="py-2.5 px-4">
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                          row.last_backup_at === null
-                            ? "bg-red-100 text-red-700"
-                            : overdue
-                            ? "bg-amber-100 text-amber-700"
-                            : "bg-emerald-100 text-emerald-700"
-                        }`}
-                        title={row.last_backup_at ? fmtDate(row.last_backup_at) : undefined}
-                      >
-                        {fmtAge(row.days_since_backup)}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-4 text-right">
-                      <div className="flex justify-end gap-3">
-                        <button
-                          disabled={deviceActioningId === row.device_id || !row.last_backup_snapshot_id}
-                          onClick={() => downloadDeviceBackup(row)}
-                          className="text-xs font-bold text-brandblue hover:underline disabled:opacity-40 disabled:no-underline"
-                        >
-                          Download
-                        </button>
-                        <button
-                          disabled={deviceActioningId === row.device_id}
-                          onClick={() => backupDeviceNow(row)}
-                          className="text-xs font-bold text-navy dark:text-white hover:underline disabled:opacity-40 disabled:no-underline"
-                        >
-                          {deviceActioningId === row.device_id ? "Backing up…" : "Back Up Now"}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
       </div>
 
       {/* Cloud Destinations */}
@@ -543,6 +351,13 @@ export default function Backups() {
                     className="text-xs font-bold text-brandblue hover:underline disabled:opacity-40"
                   >
                     Test
+                  </button>
+                  <button
+                    disabled={destActioningId === d.id}
+                    onClick={() => setEditingDest(d)}
+                    className="text-xs font-bold text-slate-500 hover:underline disabled:opacity-40"
+                  >
+                    Edit
                   </button>
                   <button
                     disabled={destActioningId === d.id}
@@ -653,6 +468,115 @@ export default function Backups() {
           onCreated={loadDestinations}
         />
       )}
+
+      {editingDest && (
+        <EditDestinationModal
+          destination={editingDest}
+          onClose={() => setEditingDest(null)}
+          onSaved={loadDestinations}
+        />
+      )}
+    </div>
+  );
+}
+
+function EditDestinationModal({
+  destination,
+  onClose,
+  onSaved,
+}: {
+  destination: BackupDestination;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(destination.name);
+  // Only pre-fill non-secret fields with their real value -- secret
+  // fields come back from GET as `true`/`false` (see backend
+  // backup_destination_service.masked_config), never the plaintext, so
+  // those inputs start blank. Blank stays blank on submit (the backend
+  // only overwrites a field if a non-empty value is sent), which is what
+  // lets "just rename it" or "just flip enabled" work without having to
+  // re-type every secret.
+  const [fields, setFields] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    const fieldDefs = DEST_FIELDS[destination.type] || [];
+    for (const f of fieldDefs) {
+      if (!f.secret && typeof destination.config[f.key] === "string") {
+        initial[f.key] = destination.config[f.key];
+      }
+    }
+    return initial;
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const setField = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }));
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const payload: Record<string, any> = { config: fields };
+      if (name !== destination.name) payload.name = name;
+      await api.patch(`/backups/destinations/${destination.id}`, payload);
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to update destination");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+        <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Edit Backup Destination</h2>
+        <p className="text-xs text-slate-400 mb-4">{DEST_TYPE_LABEL[destination.type] || destination.type}</p>
+        {error && <div className="mb-3 p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-bold text-slate-500 block mb-1">Name</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+            />
+          </div>
+          {(DEST_FIELDS[destination.type] || []).map((f) => {
+            const isSet = f.secret && destination.config[f.key] === true;
+            return (
+              <div key={f.key}>
+                <label className="text-xs font-bold text-slate-500 block mb-1">
+                  {f.label}
+                  {f.secret && (
+                    <span className={`ml-1.5 font-normal normal-case ${isSet ? "text-emerald-600" : "text-slate-400"}`}>
+                      {isSet ? "· currently set" : "· not set"}
+                    </span>
+                  )}
+                </label>
+                <input
+                  type={f.secret ? "password" : "text"}
+                  value={fields[f.key] || ""}
+                  onChange={(e) => setField(f.key, e.target.value)}
+                  placeholder={f.secret ? "Leave blank to keep current value" : f.placeholder}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                />
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={submitting || !name}
+            className="px-4 py-2 rounded-lg text-sm font-bold bg-brandblue text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {submitting ? "Saving…" : "Save Changes"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

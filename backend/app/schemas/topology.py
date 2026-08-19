@@ -30,10 +30,7 @@ class LinkMemberRead(BaseModel):
     stale: bool = False
     status: str = "unknown"  # "up" | "down" | "unknown"
     utilization_pct: int | None = None
-    # Best-effort trunk/access mode + VLAN for the local end of this
-    # member (see TopologyEdge.members / DiscoveredNeighbor). None when
-    # the discovery run couldn't resolve switchport info.
-    port_mode: str | None = None  # "access" | "trunk" | "routed" | None
+    port_mode: str | None = None  # "trunk" | "access" | "routed" | None if unresolved
     vlan: str | None = None
     trunk_vlans: list[str] | None = None
 

@@ -252,6 +252,15 @@ export default function Topology() {
   const [siteFilter, setSiteFilter] = useState<string>("all");
   const [nodeSearch, setNodeSearch] = useState<string>("");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  // Custom hover tooltip for links -- the browser's native <title> tooltip
+  // is slow to appear and easy to miss when several links are drawn close
+  // together, so a link hover also shows a small styled popup near the
+  // cursor with the same info the click-to-select detail panel shows,
+  // without requiring a click. Screen-space (clientX/clientY relative to
+  // the diagram container), not SVG-space, since it's a plain absolutely-
+  // positioned div overlay, not part of the SVG.
+  const [hoveredEdgeTip, setHoveredEdgeTip] = useState<{ edge: TopologyEdge; x: number; y: number } | null>(null);
+  const diagramContainerRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<Selection>(null);
   // Blast-radius highlighting: fetched on demand for the selected node
   // (see the "Blast Radius" panel in the node detail sidebar). Reuses the
@@ -1135,7 +1144,7 @@ export default function Topology() {
 
       {!loading && !error && graph && graph.nodes.length > 0 && (
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-          <div className="xl:col-span-3 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden relative">
+          <div ref={diagramContainerRef} className="xl:col-span-3 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden relative">
           {viewMode === "graph" || viewMode === "layered" ? (
           <>
             {/* Zoom controls -- top-right overlay, like any real network-diagram tool */}
@@ -1167,7 +1176,7 @@ export default function Topology() {
               ref={svgRef}
               viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
               className="w-full h-[680px] bg-[radial-gradient(circle_at_1px_1px,#e2e8f0_1px,transparent_0)] [background-size:22px_22px] cursor-grab active:cursor-grabbing"
-              onMouseLeave={() => setHoveredId(null)}
+              onMouseLeave={() => { setHoveredId(null); setHoveredEdgeTip(null); }}
               onWheel={onWheel}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
@@ -1246,18 +1255,32 @@ export default function Topology() {
                     const memberOffsets = members
                       ? members.map((_, i) => (i - (members.length - 1) / 2) * FAN_SPACING)
                       : [0];
+                    // If every physical member agrees on switchport mode,
+                    // fold it into the on-map label (e.g. "LLDP · trunk")
+                    // so trunk vs access is visible without hovering or
+                    // clicking -- previously the map only ever showed the
+                    // discovery protocol, never whether the link carries
+                    // tagged VLAN traffic or a single access VLAN.
+                    const memberModes = members ? new Set(members.map((m) => m.port_mode).filter(Boolean)) : null;
+                    const uniformMode = memberModes && memberModes.size === 1 ? [...memberModes][0] : null;
                     const linkLabel =
                       e.link_source === "subnet"
                         ? e.subnet || ""
                         : `${e.link_source.toUpperCase()}${members && members.length > 1 ? ` ×${members.length}` : ""}${
-                            downMemberCount > 0 ? ` (${downMemberCount} down)` : ""
-                          }${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
+                            uniformMode ? ` · ${uniformMode}` : ""
+                          }${downMemberCount > 0 ? ` (${downMemberCount} down)` : ""}${isStaleLink ? " ⚠ stale" : ""}`; // "LLDP" / "CDP" -- confirmed neighbor, no subnet to show
                     return (
                       <g
                         key={key}
                         className="cursor-pointer"
                         opacity={dimForSearch || dimForPath || dimForHover ? 0.12 : 1}
                         onClick={() => setSelection({ kind: "edge", edge: e })}
+                        onMouseMove={(evt) => {
+                          const rect = diagramContainerRef.current?.getBoundingClientRect();
+                          if (!rect) return;
+                          setHoveredEdgeTip({ edge: e, x: evt.clientX - rect.left, y: evt.clientY - rect.top });
+                        }}
+                        onMouseLeave={() => setHoveredEdgeTip((cur) => (cur?.edge === e ? null : cur))}
                       >
                         {/* fat invisible hit-area so thin lines are easy to click */}
                         <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={14} />
@@ -1307,13 +1330,7 @@ export default function Topology() {
                                     member.neighbor_port || "?"
                                   } \u2014 ${member.status}${member.stale ? " (stale)" : ""}${
                                     member.port_mode
-                                      ? ` \u2014 ${member.port_mode}${
-                                          member.port_mode === "trunk" && member.trunk_vlans?.length
-                                            ? ` (VLANs ${member.trunk_vlans.join(", ")})`
-                                            : member.vlan
-                                            ? ` (VLAN ${member.vlan})`
-                                            : ""
-                                        }`
+                                      ? ` \u2014 ${member.port_mode}${member.vlan ? ` (vlan ${member.vlan})` : ""}`
                                       : ""
                                   }`}
                                 </title>
@@ -1590,6 +1607,65 @@ export default function Topology() {
                 </g>
               </g>
             </svg>
+
+            {hoveredEdgeTip && (() => {
+              const e = hoveredEdgeTip.edge;
+              const src = graph.nodes.find((n) => n.id === e.source);
+              const tgt = graph.nodes.find((n) => n.id === e.target);
+              // Summarize member port modes: if every member agrees, show
+              // one mode chip; if they differ (mixed trunk/access on one
+              // bundle), say "mixed" rather than picking one arbitrarily.
+              const modes = new Set((e.members || []).map((m) => m.port_mode).filter(Boolean));
+              const modeSummary = modes.size === 1 ? [...modes][0] : modes.size > 1 ? "mixed" : null;
+              // Keep the tooltip on-screen near the cursor without spilling
+              // past the right/bottom edge of the diagram panel.
+              const left = Math.min(hoveredEdgeTip.x + 14, 1000);
+              const top = Math.max(hoveredEdgeTip.y - 10, 8);
+              return (
+                <div
+                  className="pointer-events-none absolute z-20 bg-navy text-white text-xs rounded-lg shadow-lg px-3 py-2 max-w-[260px]"
+                  style={{ left, top }}
+                >
+                  <div className="font-bold flex items-center gap-1.5 flex-wrap">
+                    <span>{src?.hostname || "?"}</span>
+                    <span className="text-slate-400">↔</span>
+                    <span>{tgt?.hostname || "?"}</span>
+                  </div>
+                  <div className="text-slate-300 font-mono mt-0.5">
+                    {e.local_port || "?"} ↔ {e.neighbor_port || "?"}
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                        e.link_source === "subnet" ? "bg-slate-600" : "bg-emerald-600"
+                      }`}
+                    >
+                      {e.link_source === "subnet" ? "inferred" : `${e.link_source.toUpperCase()} confirmed`}
+                    </span>
+                    {modeSummary && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          modeSummary === "trunk"
+                            ? "bg-purple-600"
+                            : modeSummary === "mixed"
+                            ? "bg-amber-600"
+                            : "bg-sky-600"
+                        }`}
+                      >
+                        {modeSummary}
+                      </span>
+                    )}
+                    {e.stale && <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-600">stale</span>}
+                  </div>
+                  {e.members && e.members.length > 1 && (
+                    <div className="text-slate-400 mt-1">{e.members.length} physical cables — click for details</div>
+                  )}
+                  {(!e.members || e.members.length <= 1) && (
+                    <div className="text-slate-400 mt-1">Click for full details</div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="flex flex-wrap gap-4 items-center px-5 py-3 border-t border-slate-100 text-xs text-slate-500">
               <span className="font-bold text-slate-400 uppercase tracking-wide text-[10px]">Status</span>
@@ -2068,40 +2144,35 @@ export default function Topology() {
                                   : "bg-slate-50 border-slate-200 text-slate-600"
                               }`}
                             >
-                              <span
-                                className={`font-mono truncate ${m.status === "down" ? "line-through decoration-slate-300" : ""}`}
-                              >
-                                {m.local_port || "?"} ↔ {m.neighbor_port || "?"}
-                              </span>
-                              <span className="flex items-center gap-1.5 shrink-0">
+                              <span className="flex flex-col min-w-0">
+                                <span
+                                  className={`font-mono truncate ${m.status === "down" ? "line-through decoration-slate-300" : ""}`}
+                                >
+                                  {m.local_port || "?"} ↔ {m.neighbor_port || "?"}
+                                </span>
                                 {m.port_mode && (
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase ${
-                                      m.port_mode === "trunk"
-                                        ? "bg-purple-100 text-purple-700"
-                                        : m.port_mode === "access"
-                                        ? "bg-blue-100 text-blue-700"
-                                        : "bg-slate-100 text-slate-600"
-                                    }`}
-                                    title={
-                                      m.port_mode === "trunk" && m.trunk_vlans?.length
-                                        ? `Trunk carrying VLANs ${m.trunk_vlans.join(", ")}`
-                                        : m.vlan
-                                        ? `VLAN ${m.vlan}`
-                                        : undefined
-                                    }
-                                  >
-                                    {m.port_mode}
-                                    {m.port_mode !== "routed" &&
-                                      (m.port_mode === "trunk"
-                                        ? m.trunk_vlans?.length
-                                          ? ` ${m.trunk_vlans.join(",")}`
-                                          : ""
-                                        : m.vlan
-                                        ? ` ${m.vlan}`
-                                        : "")}
+                                  <span className="flex items-center gap-1 mt-0.5">
+                                    <span
+                                      className={`px-1 py-0 rounded text-[9px] font-bold uppercase tracking-wide ${
+                                        m.port_mode === "trunk"
+                                          ? "bg-purple-100 text-purple-700"
+                                          : "bg-sky-100 text-sky-700"
+                                      }`}
+                                    >
+                                      {m.port_mode}
+                                    </span>
+                                    {m.vlan && (
+                                      <span className="font-mono text-slate-400 text-[10px]">
+                                        {m.port_mode === "trunk" ? "native " : ""}vlan {m.vlan}
+                                        {m.port_mode === "trunk" && m.trunk_vlans && m.trunk_vlans.length > 1
+                                          ? ` (${m.trunk_vlans.length} tagged)`
+                                          : ""}
+                                      </span>
+                                    )}
                                   </span>
                                 )}
+                              </span>
+                              <span className="flex items-center gap-1.5 shrink-0">
                                 {m.utilization_pct !== null && m.utilization_pct !== undefined && (
                                   <span className="font-mono text-slate-400">{m.utilization_pct}%</span>
                                 )}
