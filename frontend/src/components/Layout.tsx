@@ -212,10 +212,6 @@ const groups: NavGroup[] = [
         icon: <svg {...iconProps}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M6 9l4 3-4 3M12 15h6" /></svg>,
       },
       {
-        to: "/push-settings", label: "Push Notifications",
-        icon: <svg {...iconProps}><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /><circle cx="12" cy="3" r="1.5" /></svg>,
-      },
-      {
         to: "/rbac-audit", label: "RBAC Audit",
         icon: <svg {...iconProps}><circle cx="9" cy="8" r="3" /><path d="M2 20a7 7 0 0114 0" /><circle cx="18" cy="8" r="2.2" /><path d="M16.5 4.5a2.2 2.2 0 013 2 2.2 2.2 0 01-1.5 2.1" /><path d="M17 13.5a6.3 6.3 0 015 6.5h-3" /></svg>,
       },

@@ -21,12 +21,20 @@ depends_on = None
 
 
 def upgrade() -> None:
+    from sqlalchemy.dialects.postgresql import ENUM
+
+    from alembic import op
+    from migration_helpers import enum_type_exists
+
+    if not enum_type_exists("pushprovider"):
+        ENUM("ntfy", "pushover", name="pushprovider").create(op.get_bind())
+
     create_table_if_missing(
         "push_subscriptions",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("user_id", UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False),
         sa.Column("label", sa.String(), nullable=False, server_default="My Phone"),
-        sa.Column("provider", sa.Enum("ntfy", "pushover", name="pushprovider"), nullable=False, server_default="ntfy"),
+        sa.Column("provider", ENUM("ntfy", "pushover", name="pushprovider", create_type=False), nullable=False, server_default="ntfy"),
         sa.Column("target", sa.String(), nullable=False),
         sa.Column("include_non_critical", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("enabled", sa.Boolean(), nullable=False, server_default="true"),

@@ -407,9 +407,26 @@ function DeviceInlineDetails({
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [discoverySubTab, setDiscoverySubTab] = useState<"lldp" | "cdp" | "arp" | "routes" | "inventory">("lldp");
 
+  const loadCachedDiscovery = () => {
+    setDiscoveryLoading(true);
+    setDiscoveryError(null);
+    api
+      .get<DeviceDiscoveryResult & { cached?: boolean }>(`/devices/${device.id}/discovery/cached`)
+      .then((res) => {
+        if (res.data.cached) {
+          setDiscovery(res.data);
+        } else {
+          setDiscovery(null);
+        }
+      })
+      .catch(() => setDiscovery(null))
+      .finally(() => setDiscoveryLoading(false));
+  };
+
   const loadDiscovery = () => {
     setDiscoveryLoading(true);
     setDiscoveryError(null);
+    setDiscovery(null);
     api
       .get<DeviceDiscoveryResult>(`/devices/${device.id}/discovery`)
       .then((res) => setDiscovery(res.data))
@@ -599,12 +616,9 @@ function DeviceInlineDetails({
     if (activeTab === "Interfaces" && !interfaces && !interfacesLoading && !interfacesError) {
       loadInterfaces();
     }
-    // Discovery tab also auto-fetches on first visit (LLDP/CDP/ARP/routes/
-    // inventory) -- a single on-demand SNMP poll of this device, not a
-    // recurring background job, so it's safe to fire once when the tab
-    // opens rather than making the user click Run Discovery first.
+    // Discovery tab auto-fetches cached discovery data if available to prevent SNMP blocking.
     if (activeTab === "Discovery" && !discovery && !discoveryLoading && !discoveryError) {
-      loadDiscovery();
+      loadCachedDiscovery();
     }
     if (activeTab === "Alerts" && deviceAlerts.length === 0 && !alertsLoading) {
       loadAlerts();
@@ -1488,11 +1502,19 @@ function DeviceInlineDetails({
                   <span className="text-slate-500 dark:text-slate-400">
                     Reported hostname:{" "}
                     <span className="font-mono font-semibold text-navy dark:text-white">
-                      {discovery.reported_hostname || "—"}
+                      {discovery.reported_hostname || "unknown"}
                     </span>
                   </span>
-                  <span className="text-slate-400 dark:text-slate-500">
-                    Retrieved {timeAgo(discovery.retrieved_at)}
+                  <span className="text-slate-500 dark:text-slate-400">
+                    Retrieved:{" "}
+                    <span className="font-semibold text-navy dark:text-white" title={discovery.retrieved_at}>
+                      {timeAgo(discovery.retrieved_at)}
+                    </span>
+                    {(discovery as any).cached && (
+                      <span className="ml-2 font-bold text-brandblue bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-full px-2 py-0.5 text-[10px] uppercase">
+                        Cached
+                      </span>
+                    )}
                   </span>
                 </div>
 

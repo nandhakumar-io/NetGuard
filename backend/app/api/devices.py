@@ -1387,7 +1387,7 @@ def discover_device(
 
     db.commit()
 
-    return DeviceDiscoveryResult(
+    res_obj = DeviceDiscoveryResult(
         device_id=device.id,
         hostname=device.hostname,
         reported_hostname=result["hostname"],
@@ -1403,6 +1403,39 @@ def discover_device(
         retrieved_at=datetime.datetime.utcnow(),
     )
 
+    try:
+        import json
+
+        import redis
+        # Redis JSON caching for frontend auto-load
+        r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        # We store retrieving_at as string inside json to bypass pydantic DateTime serialization issues
+        cache_data = res_obj.dict()
+        cache_data["retrieved_at"] = cache_data["retrieved_at"].isoformat()
+        r.set(f"netguard:discovery:{device.id}", json.dumps(cache_data), ex=86400 * 7)
+    except Exception as e:
+        logger.warning(f"Failed to cache discovery for {device.id} to redis: {e}")
+
+    return res_obj
+
+
+@router.get("/{device_id}/discovery/cached")
+def get_cached_discovery(device_id: uuid.UUID):
+    from app.core.config import settings
+    try:
+        import json
+
+        import redis
+        r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        cached = r.get(f"netguard:discovery:{device_id}")
+        if cached:
+            data = json.loads(cached)
+            data["cached"] = True
+            return data
+    except Exception as e:
+        logger.warning(f"Failed to read cached discovery for {device_id}: {e}")
+
+    return {"cached": False}
 
 @router.post("/{device_id}/ssh-credentials", response_model=DeviceRead)
 def set_ssh_credentials(

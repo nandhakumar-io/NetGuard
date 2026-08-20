@@ -67,6 +67,8 @@ function RackCard({
   canManage,
   onMove,
   onAddDevice,
+  onRename,
+  onDelete,
   selected,
   onToggleSelect,
 }: {
@@ -78,6 +80,8 @@ function RackCard({
   onAddDevice: (dc: string, block: string, rack: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
+  onRename: (oldName: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
+  onDelete: (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
 
@@ -106,6 +110,24 @@ function RackCard({
         </p>
         <HealthBadge devices={rack.devices} />
         <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0 ml-auto">{rack.devices.length} device{rack.devices.length === 1 ? "" : "s"}</span>
+        {canManage && rack.name !== "Unassigned" && (
+          <button
+            onClick={() => onRename(rack.name, "rack", dcName, blockName)}
+            title="Rename this rack"
+            className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0"
+          >
+            ✎
+          </button>
+        )}
+        {canManage && rack.name !== "Unassigned" && (
+          <button
+            onClick={() => onDelete(rack.name, "rack", dcName, blockName)}
+            title="Delete this rack"
+            className="text-[11px] font-bold text-slate-400 hover:text-riskcrit shrink-0"
+          >
+            ✕
+          </button>
+        )}
         {canManage && (
           <button
             onClick={() => onAddDevice(dcName, blockName, rack.name)}
@@ -171,6 +193,7 @@ function BlockCard({
   onMove,
   onAddDevice,
   onRename,
+  onDelete,
   selected,
   onToggleSelect,
 }: {
@@ -179,7 +202,8 @@ function BlockCard({
   canManage: boolean;
   onMove: (deviceId: string, dataCenter: string, block: string, rack: string) => void;
   onAddDevice: (dc: string, block: string, rack: string) => void;
-  onRename: (dcName: string, blockName: string) => void;
+  onRename: (oldName: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
+  onDelete: (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
 }) {
@@ -228,11 +252,20 @@ function BlockCard({
         </span>
         {canManage && !isUnassigned && (
           <button
-            onClick={() => onRename(dcName, block.name)}
+            onClick={() => onRename(block.name, "block", dcName)}
             title="Rename this block"
             className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0"
           >
             ✎
+          </button>
+        )}
+        {canManage && !isUnassigned && (
+          <button
+            onClick={() => onDelete(block.name, "block", dcName)}
+            title="Delete this block"
+            className="text-[11px] font-bold text-slate-400 hover:text-riskcrit shrink-0"
+          >
+            ✕
           </button>
         )}
         {canManage && (
@@ -261,6 +294,8 @@ function BlockCard({
                   canManage={canManage}
                   onMove={onMove}
                   onAddDevice={onAddDevice}
+                  onRename={onRename}
+                  onDelete={onDelete}
                   selected={selected}
                   onToggleSelect={onToggleSelect}
                 />
@@ -833,12 +868,16 @@ export default function Groups() {
   const [addDeviceQuery, setAddDeviceQuery] = useState("");
   const [addDc, setAddDc] = useState("");
   const [addDcNew, setAddDcNew] = useState("");
+  const [addBlock, setAddBlock] = useState("");
+  const [addBlockNew, setAddBlockNew] = useState("");
   const [addRack, setAddRack] = useState("");
   const [addRackNew, setAddRackNew] = useState("");
   const [addPosition, setAddPosition] = useState("");
   const [addBusy, setAddBusy] = useState(false);
   const [addFormError, setAddFormError] = useState<string | null>(null);
   const [allDevices, setAllDevices] = useState<Device[] | null>(null);
+  
+  const confirm = useConfirm();
 
   const loadAllDevices = () => {
     api
@@ -847,12 +886,14 @@ export default function Groups() {
       .catch(() => setAllDevices([]));
   };
 
-  const openAddDevice = (prefillDc?: string, prefillRack?: string) => {
+  const openAddDevice = (prefillDc?: string, prefillBlock?: string, prefillRack?: string) => {
     if (allDevices === null) loadAllDevices();
     setAddDeviceId("");
     setAddDeviceQuery("");
     setAddDc(prefillDc && prefillDc !== "Unassigned" ? prefillDc : "");
     setAddDcNew("");
+    setAddBlock(prefillBlock && prefillBlock !== "Unassigned" ? prefillBlock : "");
+    setAddBlockNew("");
     setAddRack(prefillRack && prefillRack !== "Unassigned" ? prefillRack : "");
     setAddRackNew("");
     setAddPosition("");
@@ -890,13 +931,14 @@ export default function Groups() {
 
   const assignDevice = async () => {
     const dc = (addDc === "__new__" ? addDcNew : addDc).trim();
+    const block = (addBlock === "__new__" ? addBlockNew : addBlock).trim();
     const rack = (addRack === "__new__" ? addRackNew : addRack).trim();
     if (!addDeviceId) {
       setAddFormError("Pick a device.");
       return;
     }
-    if (!dc || !rack) {
-      setAddFormError("A data center and rack are both required.");
+    if (!dc || !block || !rack) {
+      setAddFormError("A data center, block, and rack are all required.");
       return;
     }
     const position = addPosition.trim() ? Number(addPosition) : null;
@@ -909,11 +951,12 @@ export default function Groups() {
     try {
       await api.patch(`/devices/${addDeviceId}`, {
         data_center: dc,
+        block: block,
         rack: rack,
         rack_position: position,
       });
       const deviceLabel = allDevices?.find((d) => d.id === addDeviceId)?.hostname || "Device";
-      setMoveNotice(`Added ${deviceLabel} to ${dc} / ${rack}.`);
+      setMoveNotice(`Added ${deviceLabel} to ${dc} / ${block} / ${rack}.`);
       setAddOpen(false);
       loadAllDevices();
       load();
@@ -985,6 +1028,7 @@ export default function Groups() {
         ids.map((id) =>
           api.patch(`/devices/${id}`, {
             data_center: target.dc === "Unassigned" ? null : target.dc,
+            block: target.label.split(" / ")[1] === "Unassigned" ? null : target.label.split(" / ")[1],
             rack: target.rack === "Unassigned" ? null : target.rack,
           })
         )
@@ -998,6 +1042,74 @@ export default function Groups() {
       setError("Bulk move failed for one or more devices.");
     } finally {
       setBulkBusy(false);
+    }
+  };
+
+  const handleRenameGroup = async (oldName: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => {
+    let devicesToUpdate: string[] = [];
+    const dc = groups.find(g => g.name === dcName);
+    if (!dc) return;
+
+    if (type === "data_center") {
+      devicesToUpdate = dc.blocks.flatMap(b => b.racks.flatMap(r => r.devices.map(d => d.id)));
+    } else if (type === "block") {
+      const b = dc.blocks.find(b => b.name === oldName);
+      if (b) devicesToUpdate = b.racks.flatMap(r => r.devices.map(d => d.id));
+    } else if (type === "rack") {
+      const b = dc.blocks.find(b => b.name === blockName);
+      const r = b?.racks.find(r => r.name === oldName);
+      if (r) devicesToUpdate = r.devices.map(d => d.id);
+    }
+
+    if (devicesToUpdate.length === 0) return;
+
+    const newName = window.prompt(`Rename ${type.replace("_", " ")} "${oldName}" to:`, oldName);
+    if (!newName || newName.trim() === oldName || newName.trim() === "") return;
+
+    setLoading(true);
+    try {
+      await Promise.all(devicesToUpdate.map(id => api.patch(`/devices/${id}`, { [type]: newName.trim() })));
+      setMoveNotice(`${type.replace("_", " ")} renamed successfully`);
+      load();
+    } catch {
+      setError("Failed to rename devices.");
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteGroup = async (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => {
+    let devicesToUpdate: string[] = [];
+    const dc = groups.find(g => g.name === dcName);
+    if (!dc) return;
+
+    if (type === "data_center") {
+      devicesToUpdate = dc.blocks.flatMap(b => b.racks.flatMap(r => r.devices.map(d => d.id)));
+    } else if (type === "block") {
+      const b = dc.blocks.find(b => b.name === name);
+      if (b) devicesToUpdate = b.racks.flatMap(r => r.devices.map(d => d.id));
+    } else if (type === "rack") {
+      const b = dc.blocks.find(b => b.name === blockName);
+      const r = b?.racks.find(r => r.name === name);
+      if (r) devicesToUpdate = r.devices.map(d => d.id);
+    }
+
+    if (devicesToUpdate.length === 0) {
+      setError("Can't delete this via devices (it has 0 devices).");
+      return;
+    }
+
+    if (!(await confirm(`Delete ${type.replace("_", " ")} "${name}"? This will move ${devicesToUpdate.length} devices to Unassigned.`))) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await Promise.all(devicesToUpdate.map(id => api.patch(`/devices/${id}`, { [type]: null })));
+      setMoveNotice(`${type.replace("_", " ")} deleted successfully`);
+      load();
+    } catch {
+      setError("Failed to delete devices.");
+      setLoading(false);
     }
   };
 
@@ -1140,15 +1252,33 @@ export default function Groups() {
           {filteredGroups.map((dc) => (
             <div key={dc.name} className="bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 rounded-2xl p-4">
               <div className="flex items-center justify-between mb-3 px-1 gap-3 flex-wrap">
-                <h2 className="text-lg font-bold text-navy dark:text-white flex items-center gap-2">
+                 <h2 className="text-lg font-bold text-navy dark:text-white flex items-center gap-2">
                   🏢 {dc.name}
                 </h2>
                 <HealthBadge devices={dc.blocks.flatMap((b) => b.racks.flatMap(r => r.devices))} />
                 <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.blocks.reduce((m, b) => m + b.racks.length, 0)} rack{dc.blocks.reduce((m, b) => m + b.racks.length, 0) === 1 ? "" : "s"}</span>
+                {canManage && dc.name !== "Unassigned" && (
+                  <button
+                    onClick={() => handleRenameGroup(dc.name, "data_center", dc.name)}
+                    title="Rename this datacenter"
+                    className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0 ml-2"
+                  >
+                    ✎
+                  </button>
+                )}
+                {canManage && dc.name !== "Unassigned" && (
+                  <button
+                    onClick={() => handleDeleteGroup(dc.name, "data_center", dc.name)}
+                    title="Delete this datacenter"
+                    className="text-[11px] font-bold text-slate-400 hover:text-riskcrit shrink-0 ml-1 mr-2"
+                  >
+                    ✕
+                  </button>
+                )}
                 {canManage && (
                   <button
                     onClick={() => openAddDevice(dc.name)}
-                    className="text-[11px] font-bold text-brandblue border border-brandblue rounded-full px-2.5 py-1 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition shrink-0"
+                    className="text-[11px] font-bold text-brandblue border border-brandblue rounded-full px-2.5 py-1 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition shrink-0 ml-2"
                   >
                     + Add device
                   </button>
@@ -1163,7 +1293,8 @@ export default function Groups() {
                     canManage={canManage}
                     onMove={handleMove}
                     onAddDevice={openAddDevice}
-                    onRename={() => {}} 
+                    onRename={handleRenameGroup}
+                    onDelete={handleDeleteGroup}
                     selected={selected}
                     onToggleSelect={toggleSelect}
                   />

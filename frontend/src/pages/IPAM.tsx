@@ -60,10 +60,16 @@ export default function IPAMPage() {
   const canManage = user?.role === "network_admin" || user?.role === "network_engineer";
 
   const [subnets, setSubnets] = useState<Subnet[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [subnetsLoading, setSubnetsLoading] = useState(true);
+  const [subnetsError, setSubnetsError] = useState<string | null>(null);
+
   const [conflicts, setConflicts] = useState<ConflictReport>({ conflicts: [] });
+  const [conflictsLoading, setConflictsLoading] = useState(true);
+  const [conflictsError, setConflictsError] = useState<string | null>(null);
+
   const [staleReservations, setStaleReservations] = useState<StaleReservation[]>([]);
+  const [staleLoading, setStaleLoading] = useState(true);
+  const [staleError, setStaleError] = useState<string | null>(null);
   const [showStale, setShowStale] = useState(false);
 
   const [siteFilter, setSiteFilter] = useState("");
@@ -76,45 +82,47 @@ export default function IPAMPage() {
 
   const [detailSubnet, setDetailSubnet] = useState<Subnet | null>(null);
 
-  const load = () => {
-    setLoading(true);
-    // allSettled, not all -- these three calls are independent (subnet
-    // inventory, fleet-wide conflicts, stale reservations) and one of the
-    // newer ones failing (e.g. stale-reservations depending on Network
-    // Discovery data) shouldn't blank the whole page and hide subnets
-    // that loaded fine. Each result is applied independently and only
-    // the calls that actually failed are reported.
-    Promise.allSettled([
-      api.get<Subnet[]>("/ipam", { params: siteFilter ? { site: siteFilter } : {} }),
-      api.get<ConflictReport>("/ipam/conflicts"),
-      api.get<StaleReservation[]>("/ipam/reservations/stale"),
-    ]).then(([subnetsRes, conflictsRes, staleRes]) => {
-      const failed: string[] = [];
-
-      if (subnetsRes.status === "fulfilled") {
-        setSubnets(subnetsRes.value.data);
-      } else {
-        failed.push("subnet inventory");
-      }
-
-      if (conflictsRes.status === "fulfilled") {
-        setConflicts(conflictsRes.value.data);
-      } else {
-        failed.push("conflict report");
-      }
-
-      if (staleRes.status === "fulfilled") {
-        setStaleReservations(staleRes.value.data);
-      } else {
-        failed.push("stale reservations");
-      }
-
-      setError(failed.length ? `Failed to load: ${failed.join(", ")}.` : null);
-      setLoading(false);
-    });
+  const loadSubnets = () => {
+    setSubnetsLoading(true);
+    setSubnetsError(null);
+    api.get<Subnet[]>("/ipam", { params: siteFilter ? { site: siteFilter } : {} })
+      .then((res) => setSubnets(res.data))
+      .catch((err) => setSubnetsError(err?.response?.data?.detail || "Failed to load subnet inventory."))
+      .finally(() => setSubnetsLoading(false));
   };
 
-  useEffect(load, [siteFilter]);
+  const loadConflicts = () => {
+    setConflictsLoading(true);
+    setConflictsError(null);
+    api.get<ConflictReport>("/ipam/conflicts")
+      .then((res) => setConflicts(res.data))
+      .catch((err) => setConflictsError(err?.response?.data?.detail || "Failed to load conflict report."))
+      .finally(() => setConflictsLoading(false));
+  };
+
+  const loadStaleReservations = () => {
+    setStaleLoading(true);
+    setStaleError(null);
+    api.get<StaleReservation[]>("/ipam/reservations/stale")
+      .then((res) => setStaleReservations(res.data))
+      .catch((err) => setStaleError(err?.response?.data?.detail || "Failed to load stale reservations."))
+      .finally(() => setStaleLoading(false));
+  };
+
+  const load = () => {
+    loadSubnets();
+    loadConflicts();
+    loadStaleReservations();
+  };
+
+  useEffect(() => {
+    loadSubnets();
+  }, [siteFilter]);
+
+  useEffect(() => {
+    loadConflicts();
+    loadStaleReservations();
+  }, []);
 
   const sites = useMemo(() => Array.from(new Set(subnets.map((s) => s.site).filter(Boolean))) as string[], [subnets]);
 
@@ -198,7 +206,16 @@ export default function IPAMPage() {
         )}
       </div>
 
-      {conflicts.conflicts.length > 0 && (
+      {conflictsError && (
+        <div className="rounded-xl border border-riskcrit/30 bg-riskcrit/5 p-4 flex items-center justify-between">
+          <p className="text-sm font-semibold text-riskcrit">{conflictsError}</p>
+          <button onClick={loadConflicts} className="px-3 py-1 bg-white dark:bg-slate-800 border border-riskcrit/30 text-riskcrit rounded-md text-xs font-semibold hover:bg-riskcrit hover:text-white transition-colors">
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!conflictsError && conflicts.conflicts.length > 0 && (
         <div className="rounded-xl border border-riskcrit/30 bg-riskcrit/5 dark:bg-riskcrit/10 p-4">
           <p className="text-sm font-semibold text-riskcrit">
             {conflicts.conflicts.length} IP {conflicts.conflicts.length === 1 ? "conflict" : "conflicts"} in inventory
@@ -224,8 +241,17 @@ export default function IPAMPage() {
           </div>
         </div>
       )}
+      
+      {staleError && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 p-4 flex items-center justify-between">
+          <p className="text-sm font-semibold text-amber-700">{staleError}</p>
+          <button onClick={loadStaleReservations} className="px-3 py-1 bg-white dark:bg-slate-800 border border-amber-400/30 text-amber-700 rounded-md text-xs font-semibold hover:bg-amber-400 hover:text-white transition-colors">
+            Retry
+          </button>
+        </div>
+      )}
 
-      {staleReservations.length > 0 && (
+      {!staleError && staleReservations.length > 0 && (
         <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 dark:bg-amber-400/10 p-4">
           <button
             className="flex items-center justify-between w-full text-left"
@@ -287,10 +313,17 @@ export default function IPAMPage() {
         </select>
       </div>
 
-      {error && <p className="text-riskcrit text-sm">{error}</p>}
+      {subnetsError && (
+        <div className="flex items-center gap-3 p-4 bg-riskcrit/5 border border-riskcrit/30 rounded-xl mb-4">
+          <p className="text-riskcrit text-sm font-semibold">{subnetsError}</p>
+          <button onClick={loadSubnets} className="px-3 py-1 bg-white dark:bg-slate-800 border border-riskcrit/30 text-riskcrit rounded-md text-xs font-semibold hover:bg-riskcrit hover:text-white transition-colors">
+            Retry loading subnets
+          </button>
+        </div>
+      )}
 
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
-        {loading ? (
+        {subnetsLoading ? (
           <LoadingRows rows={5} className="p-4" />
         ) : filteredSubnets.length === 0 ? (
           <EmptyState
@@ -797,4 +830,4 @@ function SubnetDetailModal({
       </div>
     </div>
   );
-}/
+}

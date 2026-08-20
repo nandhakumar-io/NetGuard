@@ -17,7 +17,6 @@ const Devices = lazy(() => import("./pages/Devices"));
 const DeviceDetail = lazy(() => import("./pages/DeviceDetail"));
 const Groups = lazy(() => import("./pages/Groups"));
 const IPAMPage = lazy(() => import("./pages/IPAM"));
-const PushSettings = lazy(() => import("./pages/PushSettings"));
 const AuditLog = lazy(() => import("./pages/AuditLog"));
 const TerminalRecordings = lazy(() => import("./pages/TerminalRecordings"));
 const AlertRunbooks = lazy(() => import("./pages/AlertRunbooks"));
@@ -105,7 +104,6 @@ export default function App() {
           <Route path="/auditor-export" element={withSuspense(<AuditorExport />)} />
           <Route path="/terminal-recordings" element={withSuspense(<TerminalRecordings />)} />
           <Route path="/security" element={withSuspense(<Security />)} />
-          <Route path="/push-settings" element={withSuspense(<PushSettings />)} />
           <Route path="/integrations" element={withSuspense(<IntegrationsPage />)} />
           <Route path="/users" element={withSuspense(<Users />)} />
           <Route path="/backups" element={withSuspense(<Backups />)} />
