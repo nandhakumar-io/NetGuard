@@ -182,7 +182,13 @@ export default function JitAccess() {
         <div className="rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400 text-sm px-3 py-2">{error}</div>
       )}
 
-      {/* --- Request form --- */}
+      {/* --- Request form ---
+          Admins already hold every role's permissions outright and never
+          need a temporary elevation for themselves -- for them this
+          section is dead weight (and mildly confusing: "why would I
+          request access I already have"), so only non-admins see it.
+          Admins go straight to the approval queue below. */}
+      {!isAdmin && (
       <form
         onSubmit={submitRequest}
         className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3"
@@ -251,6 +257,7 @@ export default function JitAccess() {
           {submitting ? "Submitting…" : "Request access"}
         </button>
       </form>
+      )}
 
       {/* --- Approval time-to-approve + stale-access metrics --- */}
       {isAdmin && metrics && (

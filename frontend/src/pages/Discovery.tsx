@@ -191,6 +191,22 @@ export default function Discovery() {
     }
   };
 
+  const [cancellingScanId, setCancellingScanId] = useState<string | null>(null);
+
+  const cancelScan = async (scan: DiscoveryScan) => {
+    if (!confirm(`Stop the scan of ${scan.cidr}? Hosts already found will be kept.`)) return;
+    setCancellingScanId(scan.id);
+    try {
+      const res = await api.post<DiscoveryScan>(`/discovery/scans/${scan.id}/cancel`);
+      setScans((prev) => prev.map((s) => (s.id === res.data.id ? res.data : s)));
+      if (selectedScan?.id === scan.id) setSelectedScan(res.data);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to cancel scan");
+    } finally {
+      setCancellingScanId(null);
+    }
+  };
+
   const deleteScan = async (scan: DiscoveryScan) => {
     if (!confirm(`Delete scan of ${scan.cidr} and its results?`)) return;
     try {
@@ -432,9 +448,23 @@ export default function Discovery() {
                   </td>
                   <td className="px-4 py-2 text-slate-500">{fmtDate(scan.started_at)}</td>
                   <td className="px-4 py-2 text-slate-500">{scan.started_by || "—"}</td>
-                  <td className="px-4 py-2 text-right">
+                  <td className="px-4 py-2 text-right space-x-3 whitespace-nowrap">
+                    {(scan.status === "pending" || scan.status === "running") && (
+                      <button
+                        className="text-xs text-amber-600 hover:underline disabled:opacity-50"
+                        disabled={cancellingScanId === scan.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          cancelScan(scan);
+                        }}
+                      >
+                        {cancellingScanId === scan.id ? "Stopping…" : "Stop"}
+                      </button>
+                    )}
                     <button
-                      className="text-xs text-red-500 hover:underline"
+                      className="text-xs text-red-500 hover:underline disabled:opacity-50"
+                      disabled={scan.status === "running"}
+                      title={scan.status === "running" ? "Stop the scan before deleting it" : undefined}
                       onClick={(e) => {
                         e.stopPropagation();
                         deleteScan(scan);
@@ -456,9 +486,20 @@ export default function Discovery() {
             <h2 className="font-medium">
               Results — <span className="font-mono text-sm">{selectedScan.cidr}</span>
             </h2>
-            <span className={`px-2 py-0.5 rounded text-xs ${STATUS_BADGE[selectedScan.status]}`}>
-              {selectedScan.status}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className={`px-2 py-0.5 rounded text-xs ${STATUS_BADGE[selectedScan.status]}`}>
+                {selectedScan.status}
+              </span>
+              {(selectedScan.status === "pending" || selectedScan.status === "running") && (
+                <button
+                  className="text-xs text-amber-600 hover:underline disabled:opacity-50"
+                  disabled={cancellingScanId === selectedScan.id}
+                  onClick={() => cancelScan(selectedScan)}
+                >
+                  {cancellingScanId === selectedScan.id ? "Stopping…" : "Stop scan"}
+                </button>
+              )}
+            </div>
           </div>
           {hostsLoading && hosts.length === 0 ? (
             <div className="p-4 text-sm text-slate-500">Loading…</div>

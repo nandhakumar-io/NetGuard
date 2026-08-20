@@ -834,6 +834,7 @@ def run_network_discovery_scan_task(self, scan_id: str, community: str | None = 
             return "cancelled"
 
         scan.status = DiscoveryScanStatus.RUNNING
+        scan.celery_task_id = self.request.id
         db.add(scan)
         db.commit()
 

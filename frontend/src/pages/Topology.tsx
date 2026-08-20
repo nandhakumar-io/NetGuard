@@ -300,7 +300,15 @@ export default function Topology() {
   // alert, and rings the device itself -- so "what's currently on fire"
   // reads directly off the map without cross-referencing the Alerts page.
   // Defaults on since it's the highest-signal overlay for troubleshooting.
-  const [alertOverlay, setAlertOverlay] = useState(true);
+  // Off by default -- this overlay paints a link red the moment *either*
+  // endpoint device has *any* active warning/critical alert, regardless
+  // of that link's own state (a device's unrelated CPU/disk alert used
+  // to turn every link touching it red, even idle/healthy ones). That's
+  // useful as an opt-in "what's near an incident" view, but shouldn't be
+  // the default lens a healthy link is seen through -- links should read
+  // their own status/utilization color by default; alertOverlay is now
+  // an explicit toggle for layering incidents on top of that.
+  const [alertOverlay, setAlertOverlay] = useState(false);
 
   // --- Path highlight: click two devices, trace the path between them ---
   // Reuses the existing /path-trace endpoint (same one that powers the

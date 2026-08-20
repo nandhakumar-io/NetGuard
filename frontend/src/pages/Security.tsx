@@ -11,6 +11,8 @@ interface SessionInfo {
   device: string | null;
   ip_address: string | null;
   location: string | null;
+  user_id: string | null;
+  user_email: string | null;
 }
 
 interface RotationTableResult {
@@ -47,6 +49,17 @@ export default function Security() {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
+
+  // Admins can additionally see and revoke *every* user's active
+  // sessions, not just their own -- separate state/endpoint
+  // (GET/DELETE /auth/sessions/all) so the default "my sessions" view
+  // (and its "sign out of all other sessions" action, which only ever
+  // means "my other sessions") stays unaffected by the toggle.
+  const isAdmin = user?.role === "network_admin";
+  const [showAllSessions, setShowAllSessions] = useState(false);
+  const [allSessions, setAllSessions] = useState<SessionInfo[] | null>(null);
+  const [allSessionsError, setAllSessionsError] = useState<string | null>(null);
+  const [revokingAllSessionId, setRevokingAllSessionId] = useState<string | null>(null);
 
   const canRotateSecrets = user?.role === "network_admin" || user?.role === "security";
   const [activeKeyCount, setActiveKeyCount] = useState<number | null>(null);
@@ -108,6 +121,45 @@ export default function Security() {
   useEffect(() => {
     loadSessions();
   }, []);
+
+  const loadAllSessions = async () => {
+    setAllSessionsError(null);
+    try {
+      const res = await api.get<SessionInfo[]>("/auth/sessions/all");
+      const sorted = [...res.data].sort((a, b) => Number(b.current) - Number(a.current));
+      setAllSessions(sorted);
+    } catch (err: any) {
+      setAllSessionsError(err?.response?.data?.detail || "Could not load sessions.");
+    }
+  };
+
+  useEffect(() => {
+    if (isAdmin && showAllSessions && allSessions === null) loadAllSessions();
+  }, [isAdmin, showAllSessions]);
+
+  const revokeAnySession = async (id: string, isCurrent: boolean) => {
+    if (isCurrent) {
+      const ok = await confirm(
+        "This is your current session. Revoking it will sign you out immediately. Continue?",
+        { confirmLabel: "Sign out" }
+      );
+      if (!ok) return;
+    }
+    setRevokingAllSessionId(id);
+    setAllSessionsError(null);
+    try {
+      await api.delete(`/auth/sessions/all/${id}`);
+      if (isCurrent) {
+        window.location.href = "/login";
+        return;
+      }
+      setAllSessions((prev) => (prev ? prev.filter((s) => s.id !== id) : prev));
+    } catch (err: any) {
+      setAllSessionsError(err?.response?.data?.detail || "Could not revoke that session.");
+    } finally {
+      setRevokingAllSessionId(null);
+    }
+  };
 
   const revokeSession = async (id: string, isCurrent: boolean) => {
     if (isCurrent) {
@@ -412,6 +464,74 @@ export default function Security() {
           </ul>
         )}
       </div>
+
+      {isAdmin && (
+        <>
+          <div className="flex items-center justify-between mt-8 mb-1">
+            <h2 className="text-lg font-bold text-navy">All User Sessions</h2>
+            <button
+              onClick={() => setShowAllSessions((v) => !v)}
+              className="text-xs font-semibold text-brandblue hover:underline"
+            >
+              {showAllSessions ? "Hide" : "Show"}
+            </button>
+          </div>
+          <p className="text-sm text-slate-500 mb-4">
+            Every active session across every user -- for signing someone out remotely (lost device,
+            offboarding, suspected compromise).
+          </p>
+
+          {showAllSessions && (
+            <div className="bg-white border border-slate-200 rounded-xl p-6">
+              {allSessionsError && <p className="text-riskcrit text-sm mb-3">{allSessionsError}</p>}
+
+              {allSessions === null && !allSessionsError && (
+                <p className="text-sm text-slate-500">Loading sessions...</p>
+              )}
+
+              {allSessions !== null && allSessions.length === 0 && (
+                <p className="text-sm text-slate-500">No active sessions found.</p>
+              )}
+
+              {allSessions !== null && allSessions.length > 0 && (
+                <ul className="divide-y divide-slate-100">
+                  {allSessions.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between gap-3 py-3.5 first:pt-0 last:pb-0">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-navy flex items-center gap-2 flex-wrap">
+                          {s.user_email || "Unknown user"}
+                          {s.current && (
+                            <span className="text-[10px] uppercase tracking-wide font-semibold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                              This device
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5 truncate">
+                          {s.device || `Session ${s.id.slice(0, 8)}`}
+                          {" · "}
+                          {[s.ip_address, s.location].filter(Boolean).join(" · ") || "IP unknown"}
+                          {" · last active "}
+                          {timeAgo(s.created_at)}
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          Signed in {formatDate(s.created_at)} &middot; expires {formatDate(s.expires_at)}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => revokeAnySession(s.id, s.current)}
+                        disabled={revokingAllSessionId === s.id}
+                        className="text-xs font-semibold text-riskcrit border border-riskcrit rounded-lg px-3 py-1.5 hover:bg-red-50 transition-colors disabled:opacity-50 shrink-0"
+                      >
+                        {revokingAllSessionId === s.id ? "Revoking..." : s.current ? "Sign out" : "Revoke"}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
       {canRotateSecrets && (
         <>

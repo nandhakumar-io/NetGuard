@@ -19,7 +19,9 @@ NETWORK_ADMIN-only, same restriction as app.api.webhooks and for the
 same reason (an authenticated-but-untrusted caller shouldn't be able to
 make the backend probe arbitrary internal ranges on demand).
 """
+import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -52,6 +54,7 @@ from app.schemas.network_discovery import (
     DiscoveryScheduleUpdate,
 )
 from app.services import (
+    audit_service,
     credential_service,
     event_bus,
     ipam_service,
@@ -60,6 +63,7 @@ from app.services import (
 )
 
 router = APIRouter(prefix="/discovery", tags=["network-discovery"])
+logger = logging.getLogger(__name__)
 
 _discovery_admin = require_roles(UserRole.NETWORK_ADMIN)
 
@@ -91,13 +95,27 @@ def start_scan(
 
     from app.tasks import run_network_discovery_scan_task
 
-    run_network_discovery_scan_task.apply_async(args=[str(scan.id), body.snmp_community])
+    async_result = run_network_discovery_scan_task.apply_async(args=[str(scan.id), body.snmp_community])
+    # Stored immediately (not just by the task itself once it starts
+    # running) so a cancel request that arrives while the scan is still
+    # PENDING -- e.g. the "polling" queue has a backlog -- can still
+    # revoke it before a worker ever picks it up.
+    scan.celery_task_id = async_result.id
+    db.commit()
 
     return scan
 
 
 @router.get("/scans", response_model=list[DiscoveryScanRead])
 def list_scans(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    # Sweeps any PENDING/RUNNING scan that's been stuck way past a
+    # reasonable finish time (worker crash, nothing consuming the
+    # "polling" queue, ...) to FAILED -- see network_discovery_service.
+    # reconcile_stuck_scans's docstring. Without this a dead scan just
+    # sat on RUNNING forever: the frontend's poll (Discovery.tsx) keeps
+    # refetching it as "in flight" indefinitely with no results and,
+    # previously, no way to cancel it either.
+    network_discovery_service.reconcile_stuck_scans(db)
     return db.query(DiscoveryScan).order_by(DiscoveryScan.started_at.desc()).limit(100).all()
 
 
@@ -106,6 +124,50 @@ def get_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depend
     scan = db.get(DiscoveryScan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    return scan
+
+
+@router.post("/scans/{scan_id}/cancel", response_model=DiscoveryScanRead)
+def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(_discovery_admin)):
+    """Stops a PENDING or RUNNING scan. Two layers, best-effort:
+
+    1. Revokes the Celery task by id (terminate=True) so a scan that
+       hasn't started yet never runs, and one already mid-sweep gets
+       SIGTERM'd rather than continuing in the background even though
+       the UI now shows it as cancelled.
+    2. Flips the DB row to CANCELLED regardless of whether the revoke
+       call itself succeeds (e.g. the broker is unreachable) -- a scan
+       already inside network_discovery_service.run_scan's probe loop
+       also re-checks this on the DB every CANCEL_CHECK_INTERVAL probes
+       and bails out cooperatively, so the row being CANCELLED is what
+       actually stops it either way, not the revoke call.
+
+    Whatever hosts were already written before cancellation stay on the
+    scan's results -- cancelling doesn't discard partial progress.
+    """
+    scan = db.get(DiscoveryScan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.status not in (DiscoveryScanStatus.PENDING, DiscoveryScanStatus.RUNNING):
+        raise HTTPException(status_code=409, detail=f"Scan is '{scan.status.value}', not pending/running -- nothing to cancel")
+
+    if scan.celery_task_id:
+        try:
+            from app.celery_app import celery_app
+
+            celery_app.control.revoke(scan.celery_task_id, terminate=True)
+        except Exception:  # noqa: BLE001 -- best-effort; the DB flip below is what actually stops it
+            logger.warning("Failed to revoke Celery task %s for scan %s", scan.celery_task_id, scan_id, exc_info=True)
+
+    scan.status = DiscoveryScanStatus.CANCELLED
+    scan.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(scan)
+
+    audit_service.record_event(
+        db, actor=user.email, action="Network Discovery Scan Cancelled", result="Success",
+        detail=f"{scan.cidr} (scan={scan.id}); {scan.responsive_hosts} host(s) found before cancelling",
+    )
     return scan
 
 

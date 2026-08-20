@@ -25,7 +25,7 @@ import ipaddress
 import logging
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -35,6 +35,7 @@ from app.models.network_discovery import (
     DiscoveredHostIpamStatus,
     DiscoveryIgnoreRule,
     DiscoveryScan,
+    DiscoveryScanStatus,
 )
 from app.models.subnet import IPAddressState, IPReservation, Subnet
 from app.services import oui_lookup, snmp_service
@@ -53,6 +54,21 @@ DEFAULT_PORTS = [22, 23, 80, 443, 161, 3389]
 TCP_PROBE_TIMEOUT_SECONDS = 0.75
 SNMP_TIMEOUT_SECONDS = 1.5
 MAX_WORKERS = 64
+
+# How often (in completed probes) run_scan re-checks the DB for a
+# CANCELLED status -- see run_scan's docstring. Small enough that a
+# cancel takes effect within a couple seconds even on a full 1024-host
+# sweep, large enough not to hammer the DB with a refresh per probe.
+CANCEL_CHECK_INTERVAL = 16
+
+# A scan stuck on PENDING/RUNNING this long (worker crashed, the "poller"
+# queue has no consumer, redis lost the task, ...) is treated as failed --
+# same reconciliation pattern as app.services.backup_service.
+# _reconcile_stuck_jobs. Generous relative to MAX_SCAN_HOSTS's "reasonable
+# window" above: a full 1024-host sweep at MAX_WORKERS=64 concurrency
+# with a 0.75s probe timeout should finish in well under a minute, so 10
+# minutes stuck is unambiguously "never going to finish", not just slow.
+STUCK_SCAN_TIMEOUT_MINUTES = 10
 
 
 def parse_and_validate_cidr(cidr: str) -> ipaddress.IPv4Network:
@@ -250,6 +266,13 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
     the caller from scan.snmp_community_ref, if one was supplied) --
     never re-read from the DB here so this function has no crypto
     dependency of its own beyond what's already resolved for it.
+
+    Re-checks scan.status against the DB every CANCEL_CHECK_INTERVAL
+    completed probes so POST /discovery/scans/{id}/cancel (which flips
+    the row to CANCELLED) actually stops an in-progress sweep instead of
+    only being noticed after every one of up to MAX_SCAN_HOSTS probes has
+    already finished -- previously a cancel request during a running scan
+    had no effect at all until the whole sweep completed on its own.
     """
     network = parse_and_validate_cidr(scan.cidr)
     ports = [int(p) for p in scan.ports.split(",")] if scan.ports else DEFAULT_PORTS
@@ -261,10 +284,19 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
 
     responsive_count = 0
     new_count = 0
+    completed_probes = 0
 
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(hosts)))) as pool:
         futures = {pool.submit(_probe_host, ip, ports, community): ip for ip in hosts}
         for future in as_completed(futures):
+            completed_probes += 1
+            if completed_probes % CANCEL_CHECK_INTERVAL == 0:
+                db.refresh(scan, attribute_names=["status"])
+                if scan.status == DiscoveryScanStatus.CANCELLED:
+                    for f in futures:
+                        f.cancel()  # only affects probes not yet started
+                    break
+
             ip_address = futures[future]
             try:
                 result = future.result()
@@ -311,3 +343,41 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
     scan.responsive_hosts = responsive_count
     scan.new_hosts = new_count
     db.commit()
+
+
+def reconcile_stuck_scans(db: Session) -> None:
+    """Marks any DiscoveryScan still PENDING/RUNNING long after it should
+    have finished (STUCK_SCAN_TIMEOUT_MINUTES) as FAILED -- covers the
+    case that made a scan look like it "runs forever": the Celery task
+    was never actually picked up (no worker consuming the "polling"
+    queue -- see celery_app.py's task_routes and the `poller` service in
+    docker-compose.yaml) or the worker process died mid-sweep, either of
+    which leaves the row on PENDING/RUNNING indefinitely with nothing
+    left to ever flip it. Same fail-safe pattern as
+    app.services.backup_service._reconcile_stuck_jobs. Cheap (indexed
+    status filter) so it's safe to call on every GET /discovery/scans
+    rather than needing a separate sweep task.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STUCK_SCAN_TIMEOUT_MINUTES)
+    stuck = (
+        db.query(DiscoveryScan)
+        .filter(DiscoveryScan.status.in_([DiscoveryScanStatus.PENDING, DiscoveryScanStatus.RUNNING]))
+        .all()
+    )
+    changed = False
+    for scan in stuck:
+        started_at = scan.started_at
+        if started_at is None:
+            continue
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if started_at < cutoff:
+            scan.status = DiscoveryScanStatus.FAILED
+            scan.error = (
+                "Scan did not complete in time (worker likely never picked it up, or crashed mid-run). "
+                "Check that a Celery worker is consuming the 'polling' queue."
+            )
+            scan.completed_at = datetime.now(timezone.utc)
+            changed = True
+    if changed:
+        db.commit()

@@ -398,6 +398,74 @@ def revoke_session(
     db.commit()
 
 
+@router.get("/sessions/all", response_model=list[SessionRead])
+def list_all_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.NETWORK_ADMIN)),
+    refresh_token_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+):
+    """Fleet-wide session visibility for admins -- every active
+    (non-revoked, non-expired) refresh-token session across every user,
+    not just the caller's own. NETWORK_ADMIN-only, same bar as user role
+    management: seeing who's logged in where across the whole org is a
+    security-relevant capability, not something every user gets on their
+    own Security page (that one stays self-scoped, see list_sessions
+    above).
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    current_hash = hash_refresh_token(refresh_token_cookie) if refresh_token_cookie else None
+
+    records = (
+        db.query(RefreshToken, User)
+        .join(User, User.id == RefreshToken.user_id)
+        .filter(RefreshToken.revoked.is_(False))
+        .order_by(RefreshToken.created_at.desc())
+        .all()
+    )
+
+    sessions = []
+    for r, u in records:
+        expires_at = r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now:
+            continue
+        sessions.append(
+            SessionRead(
+                id=str(r.id),
+                created_at=r.created_at,
+                expires_at=expires_at,
+                current=bool(current_hash and r.token_hash == current_hash),
+                device=session_device.device_label(r.user_agent),
+                ip_address=r.ip_address,
+                location=session_device.location_label(r.ip_address),
+                user_id=str(u.id),
+                user_email=u.email,
+            )
+        )
+    return sessions
+
+
+@router.delete("/sessions/all/{session_id}", status_code=204)
+def revoke_any_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.NETWORK_ADMIN)),
+):
+    """Admin revoke of any user's session by id -- the fleet-wide
+    complement to DELETE /auth/sessions/{id}, which only ever lets a
+    user revoke their own. Not scoped to current_user.id on purpose:
+    that's the whole point of an admin being able to sign someone else
+    out remotely (lost device, offboarding, suspected compromise).
+    """
+    record = db.query(RefreshToken).filter(RefreshToken.id == session_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    record.revoked = True
+    db.commit()
+
+
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     # extra_roles/extra_permissions were previously omitted here entirely

@@ -78,7 +78,11 @@ class SessionRead(BaseModel):
     """A single active (non-revoked, non-expired) refresh token issued to
     the current user -- i.e. a logged-in "session" on some device/browser.
     The raw token itself is never exposed, only enough metadata to let a
-    user recognize and revoke it (see GET/DELETE /auth/sessions)."""
+    user recognize and revoke it (see GET/DELETE /auth/sessions).
+
+    user_email/user_id are only populated on the admin-wide listing
+    (GET /auth/sessions/all) -- the self-scoped GET /auth/sessions leaves
+    them None since every row already belongs to the caller."""
 
     id: str
     created_at: datetime
@@ -87,3 +91,5 @@ class SessionRead(BaseModel):
     device: str | None = None
     ip_address: str | None = None
     location: str | None = None
+    user_id: str | None = None
+    user_email: str | None = None

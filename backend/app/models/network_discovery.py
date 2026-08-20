@@ -101,6 +101,16 @@ class DiscoveryScan(Base):
     status = Column(Enum(DiscoveryScanStatus), nullable=False, default=DiscoveryScanStatus.PENDING)
     error = Column(Text, nullable=True)
 
+    # The Celery AsyncResult id for the enqueued run_network_discovery_scan_task
+    # -- set right after apply_async (see app.api.network_discovery.start_scan)
+    # so POST /discovery/scans/{id}/cancel can issue a real
+    # celery_app.control.revoke(task_id, terminate=True) instead of only
+    # flipping the DB row, which a task already mid-sweep would never
+    # notice. Nullable: scans fired by run_discovery_schedule_sweep_task
+    # run inline on the beat worker rather than via apply_async, so there's
+    # no separate task id to revoke for those.
+    celery_task_id = Column(String, nullable=True)
+
     total_hosts = Column(Integer, nullable=False, default=0)  # size of the range scanned
     responsive_hosts = Column(Integer, nullable=False, default=0)  # hosts that answered on any probed port
     new_hosts = Column(Integer, nullable=False, default=0)  # responsive hosts with no matching Device row

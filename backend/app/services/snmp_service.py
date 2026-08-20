@@ -208,6 +208,10 @@ LLDP_PORT_SUBTYPE_IFNAME = "5"
 # Kept as an alias -- this constant used to be local-port-only before
 # remote-port subtype-aware resolution was added below.
 LLDP_LOC_PORT_SUBTYPE_IFNAME = LLDP_PORT_SUBTYPE_IFNAME
+# local(7): the port ID value is the device's own ifIndex, not a name --
+# see _resolve_lldp_local_port_names' docstring for why Junos needs this
+# handled for the *local* side too, not just the remote side.
+LLDP_PORT_SUBTYPE_LOCAL = "7"
 CDP_OIDS = {
     # Index: ifIndex.cdpCacheDeviceIndex
     "cdpCacheDeviceId": "1.3.6.1.4.1.9.9.23.1.2.1.1.6",
@@ -963,12 +967,23 @@ def _resolve_lldp_local_port_names(ip_address: str, auth: "SnmpAuthConfig", time
     """Maps lldpLocPortNum -> a real, human-readable local interface name
     (e.g. "ge-0/0/0", "GigabitEthernet1/0/1") via lldpLocPortTable.
 
-    Only lldpLocPortIdSubtype == interfaceName(3) rows are usable as a
-    name directly -- other subtypes (macAddress, local, ...) aren't
-    interface names and are left unresolved rather than shown as
-    something misleading. Any failure (table not implemented, agent
-    doesn't populate lldpLocPortTable) just yields {}, and callers fall
-    back to the raw port number.
+    lldpLocPortIdSubtype == interfaceName(5) rows are usable as a name
+    directly. Junos, however, commonly tags its *local* port ID as
+    local(7) rather than interfaceName(5) even though IOS/IOS-XE uses
+    interfaceName(5) for the same table -- the same per-vendor split
+    _discover_lldp_neighbors already accounts for on the *remote* side
+    (see neighbor_port_is_ifindex there). Previously only subtype 5 was
+    handled here, so every Junos device's own local ports fell straight
+    through to the raw lldpLocPortNum bookkeeping index (an internal LLDP
+    table index, not even a real ifIndex) -- e.g. "513", "516" instead of
+    "ge-0/0/0". For local(7), lldpLocPortId's value is the device's own
+    ifIndex as a numeric string, so it's resolved the same way
+    resolve_ifindex_port_name resolves a *neighbor's* local(7) port: an
+    ifDescr walk, just against this same device instead of another one.
+
+    Any failure (table not implemented, agent doesn't populate
+    lldpLocPortTable) just yields {}, and callers fall back to the raw
+    port number.
     """
     try:
         port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpLocPortId"], timeout)
@@ -976,10 +991,20 @@ def _resolve_lldp_local_port_names(ip_address: str, auth: "SnmpAuthConfig", time
             return {}
         subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpLocPortIdSubtype"], timeout)
         result: dict[str, str] = {}
+        if_descr_cache: dict[str, str] | None = None
         for local_port, port_id in port_ids.items():
             subtype = str(_parse_snmp_enum_int(subtypes.get(local_port)) or subtypes.get(local_port) or "")
             if subtype == LLDP_PORT_SUBTYPE_IFNAME and port_id:
                 result[str(local_port)] = str(port_id).strip()
+            elif subtype == LLDP_PORT_SUBTYPE_LOCAL and port_id and str(port_id).strip().isdigit():
+                if if_descr_cache is None:
+                    try:
+                        if_descr_cache = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+                    except Exception:
+                        if_descr_cache = {}
+                resolved = if_descr_cache.get(str(port_id).strip())
+                if resolved:
+                    result[str(local_port)] = resolved
         return result
     except Exception:
         return {}
