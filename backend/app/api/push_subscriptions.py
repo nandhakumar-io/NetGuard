@@ -27,6 +27,32 @@ from app.services import push_service
 router = APIRouter(prefix="/push-subscriptions", tags=["push-subscriptions"])
 
 
+def _sub_to_read(sub: PushSubscription) -> PushSubscriptionRead:
+    """Converts the ORM row to PushSubscriptionRead, parsing the
+    include_actions JSON column -- same pattern as
+    app.api.webhooks._webhook_to_read for its events/include_actions
+    columns, needed because the DB stores this as a JSON-encoded Text
+    column but the schema exposes it as a real list.
+    """
+    include_actions = None
+    if sub.include_actions:
+        try:
+            include_actions = json.loads(sub.include_actions)
+        except (ValueError, TypeError):
+            include_actions = None
+    return PushSubscriptionRead(
+        id=sub.id,
+        label=sub.label,
+        provider=sub.provider.value if hasattr(sub.provider, "value") else sub.provider,
+        target=sub.target,
+        include_non_critical=sub.include_non_critical,
+        include_actions=include_actions,
+        enabled=sub.enabled,
+        created_at=sub.created_at,
+        last_pushed_at=sub.last_pushed_at,
+    )
+
+
 @router.get("/vapid-public-key", response_model=VapidPublicKeyResponse)
 def get_vapid_public_key():
     """The public half of the server's VAPID keypair, handed to the
@@ -97,12 +123,13 @@ def test_target(
 
 @router.get("", response_model=list[PushSubscriptionRead])
 def list_subscriptions(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return (
+    rows = (
         db.query(PushSubscription)
         .filter(PushSubscription.user_id == current_user.id)
         .order_by(PushSubscription.created_at.desc())
         .all()
     )
+    return [_sub_to_read(r) for r in rows]
 
 
 @router.post("", response_model=PushSubscriptionRead, status_code=201)
@@ -137,11 +164,12 @@ def create_subscription(
         provider=provider,
         target=target,
         include_non_critical=payload.include_non_critical,
+        include_actions=json.dumps(payload.include_actions) if payload.include_actions else None,
     )
     db.add(subscription)
     db.commit()
     db.refresh(subscription)
-    return subscription
+    return _sub_to_read(subscription)
 
 
 @router.patch("/{subscription_id}", response_model=PushSubscriptionRead)
@@ -162,13 +190,15 @@ def update_subscription(
     new_target = updates.get("target", subscription.target)
     if "provider" in updates or "target" in updates:
         _validate_target_if_url(new_provider, new_target)
+    if "include_actions" in updates:
+        updates["include_actions"] = json.dumps(updates["include_actions"]) if updates["include_actions"] else None
 
     for field, value in updates.items():
         setattr(subscription, field, value)
 
     db.commit()
     db.refresh(subscription)
-    return subscription
+    return _sub_to_read(subscription)
 
 
 @router.delete("/{subscription_id}", status_code=204)

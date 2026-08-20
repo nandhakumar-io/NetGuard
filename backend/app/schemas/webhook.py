@@ -12,6 +12,15 @@ class WebhookCreate(BaseModel):
     secret: str | None = None
     events: list[str] | None = None
     telegram_chat_id: str | None = None
+    # Subset of ["acknowledge", "escalate", "run_runbook"] -- response
+    # actions to attach to each delivery (interactive buttons on Slack/
+    # Teams, inline keyboard on Telegram, an "actions" array of deep
+    # links for generic endpoints).
+    include_actions: list[str] | None = None
+    # Runbook the "run_runbook" action links to when the triggering
+    # alert has no runbook of its own suggested. None = fall back to
+    # linking the general runbooks page.
+    default_runbook_id: uuid.UUID | None = None
     enabled: bool = True
 
 
@@ -22,6 +31,8 @@ class WebhookUpdate(BaseModel):
     secret: str | None = None
     events: list[str] | None = None
     telegram_chat_id: str | None = None
+    include_actions: list[str] | None = None
+    default_runbook_id: uuid.UUID | None = None
     enabled: bool | None = None
 
 
@@ -33,6 +44,9 @@ class WebhookRead(BaseModel):
     secret: str | None = None
     events: list[str] | None = None
     telegram_chat_id: str | None = None
+    include_actions: list[str] | None = None
+    default_runbook_id: uuid.UUID | None = None
+    default_runbook_name: str | None = None
     enabled: bool
     created_by: str | None = None
     created_at: datetime

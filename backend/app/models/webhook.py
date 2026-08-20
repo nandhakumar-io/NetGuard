@@ -52,6 +52,19 @@ class WebhookEndpoint(Base):
     # (url should be the bot token URL in that case).
     telegram_chat_id = Column(String, nullable=True)
 
+    # JSON-encoded list of response actions to attach alongside the alert
+    # payload/message, e.g. ["acknowledge","escalate","run_runbook"].
+    # Slack/Teams get real interactive buttons; Telegram gets an inline
+    # keyboard; generic endpoints get an "actions" array in the JSON body
+    # with deep links back into NetGuard. NULL/empty = plain notification,
+    # no action affordances.
+    include_actions = Column(Text, nullable=True)
+
+    # Runbook to link/trigger when the "run_runbook" action is included
+    # and the recipient clicks it. NULL = the button links to the alert's
+    # own suggested runbook (if any) instead of a fixed one.
+    default_runbook_id = Column(UUID(as_uuid=True), ForeignKey("alert_runbooks.id"), nullable=True)
+
     enabled = Column(Boolean, nullable=False, default=True, server_default="true")
     created_by = Column(String, nullable=True)
 

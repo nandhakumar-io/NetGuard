@@ -862,7 +862,7 @@ function RemoteSyslogSection({ canManage }: { canManage: boolean }) {
   };
 
   const remove = async (d: SyslogDestination) => {
-    if (!(await confirm({ title: "Remove syslog destination?", body: `Alert events will stop forwarding to ${d.name} (${d.host}:${d.port}).`, confirmLabel: "Remove" }))) return;
+    if (!(await confirm(`Remove syslog destination? Alert events will stop forwarding to ${d.name} (${d.host}:${d.port}).`, { confirmLabel: "Remove" }))) return;
     try {
       await api.delete(`/syslog/destinations/${d.id}`);
       toast.success("Syslog destination removed.");

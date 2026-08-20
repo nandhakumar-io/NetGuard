@@ -207,6 +207,24 @@ export default function Discovery() {
     }
   };
 
+  const [retryingScanId, setRetryingScanId] = useState<string | null>(null);
+
+  const retryScan = async (scan: DiscoveryScan) => {
+    setRetryingScanId(scan.id);
+    try {
+      const res = await api.post<DiscoveryScan>("/discovery/scans", {
+        cidr: scan.cidr,
+        snmp_community: community.trim() || undefined,
+      });
+      await loadScans();
+      openScan(res.data);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to retry scan");
+    } finally {
+      setRetryingScanId(null);
+    }
+  };
+
   const deleteScan = async (scan: DiscoveryScan) => {
     if (!confirm(`Delete scan of ${scan.cidr} and its results?`)) return;
     try {
@@ -428,8 +446,13 @@ export default function Discovery() {
                 >
                   <td className="px-4 py-2 font-mono">{scan.cidr}</td>
                   <td className="px-4 py-2">
-                    <span className={`px-2 py-0.5 rounded text-xs ${STATUS_BADGE[scan.status]}`}>
-                      {scan.status}
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${STATUS_BADGE[scan.status]}`}>
+                      {scan.status === "failed" && (
+                        <svg viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
+                          <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495ZM10 6a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                      {scan.status === "failed" ? "error" : scan.status}
                     </span>
                     {scan.status === "failed" && scan.error && (
                       <span className="ml-2 text-xs text-red-500" title={scan.error}>
@@ -461,6 +484,18 @@ export default function Discovery() {
                         {cancellingScanId === scan.id ? "Stopping…" : "Stop"}
                       </button>
                     )}
+                    {scan.status === "failed" && (
+                      <button
+                        className="text-xs text-navy dark:text-white font-medium hover:underline disabled:opacity-50"
+                        disabled={retryingScanId === scan.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          retryScan(scan);
+                        }}
+                      >
+                        {retryingScanId === scan.id ? "Retrying…" : "Retry"}
+                      </button>
+                    )}
                     <button
                       className="text-xs text-red-500 hover:underline disabled:opacity-50"
                       disabled={scan.status === "running"}
@@ -487,8 +522,8 @@ export default function Discovery() {
               Results — <span className="font-mono text-sm">{selectedScan.cidr}</span>
             </h2>
             <div className="flex items-center gap-2">
-              <span className={`px-2 py-0.5 rounded text-xs ${STATUS_BADGE[selectedScan.status]}`}>
-                {selectedScan.status}
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_BADGE[selectedScan.status]}`}>
+                {selectedScan.status === "failed" ? "error" : selectedScan.status}
               </span>
               {(selectedScan.status === "pending" || selectedScan.status === "running") && (
                 <button
@@ -499,14 +534,41 @@ export default function Discovery() {
                   {cancellingScanId === selectedScan.id ? "Stopping…" : "Stop scan"}
                 </button>
               )}
+              {selectedScan.status === "failed" && (
+                <button
+                  className="text-xs px-2 py-1 rounded bg-navy text-white dark:bg-white dark:text-navy font-medium hover:opacity-90 disabled:opacity-50"
+                  disabled={retryingScanId === selectedScan.id}
+                  onClick={() => retryScan(selectedScan)}
+                >
+                  {retryingScanId === selectedScan.id ? "Retrying…" : "Retry scan"}
+                </button>
+              )}
             </div>
           </div>
+          {selectedScan.status === "failed" && (
+            <div className="mx-4 mt-4 rounded-lg border border-red-300 bg-red-50 dark:border-red-500/40 dark:bg-red-950/30 px-4 py-3 flex items-start gap-3">
+              <svg viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 text-red-500 shrink-0 mt-0.5">
+                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495ZM10 6a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clipRule="evenodd" />
+              </svg>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-red-700 dark:text-red-300">Scan failed to complete</div>
+                <div className="text-xs text-red-600 dark:text-red-400 mt-0.5 break-words">
+                  {selectedScan.error || "The scan worker did not report a result before the timeout. This usually means the worker queue is backed up or the worker process is not running."}
+                </div>
+                <div className="text-xs text-red-500/80 dark:text-red-400/70 mt-1">
+                  Started {fmtDate(selectedScan.started_at)}{selectedScan.completed_at ? ` · failed ${fmtDate(selectedScan.completed_at)}` : ""}
+                </div>
+              </div>
+            </div>
+          )}
           {hostsLoading && hosts.length === 0 ? (
             <div className="p-4 text-sm text-slate-500">Loading…</div>
           ) : hosts.length === 0 ? (
             <div className="p-4 text-sm text-slate-500">
               {selectedScan.status === "running" || selectedScan.status === "pending"
                 ? "Scan in progress — results will appear as hosts respond."
+                : selectedScan.status === "failed"
+                ? "No results — the scan did not complete. Retry above."
                 : "No responsive hosts found in this range."}
             </div>
           ) : (

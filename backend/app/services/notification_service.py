@@ -276,7 +276,61 @@ def _post_telegram(event: str, message: str, severity: str) -> None:
         logger.warning("Telegram notification send failed", exc_info=True)
 
 
-def _build_webhook_payload(wh_type: str, event: str, message: str, severity: str, event_type: str) -> dict:
+_ACTION_LABELS = {
+    "acknowledge": "Acknowledge",
+    "escalate": "Escalate",
+    "run_runbook": "Run Runbook",
+}
+
+
+def _action_url(action: str, event_type: str | None, alert_id: str | None, runbook_id: str | None) -> str:
+    """Deep link back into NetGuard for a given response action -- these
+    are always plain "open this page, logged-in-user does the real
+    thing" links rather than unauthenticated action endpoints, so a
+    stolen/forwarded Slack message or push notification can't be used to
+    acknowledge or escalate anything without a valid NetGuard session.
+    """
+    base = settings.FRONTEND_URL.rstrip("/")
+    if action == "run_runbook":
+        if runbook_id:
+            return f"{base}/alert-runbooks?runbook={runbook_id}"
+        return f"{base}/alert-runbooks"
+    if action == "escalate":
+        if alert_id:
+            return f"{base}/alerts?alert={alert_id}&action=escalate"
+        return f"{base}/escalation-policies"
+    # acknowledge
+    if alert_id:
+        return f"{base}/alerts?alert={alert_id}&action=acknowledge"
+    return f"{base}/alerts"
+
+
+def _build_action_buttons(
+    actions: list[str] | None, event_type: str | None, alert_id: str | None, runbook_id: str | None
+) -> list[dict]:
+    """Common (label, url) pairs for the requested actions, shared by
+    every webhook_type's button formatting below."""
+    if not actions:
+        return []
+    out = []
+    for action in actions:
+        label = _ACTION_LABELS.get(action)
+        if not label:
+            continue
+        out.append({"action": action, "label": label, "url": _action_url(action, event_type, alert_id, runbook_id)})
+    return out
+
+
+def _build_webhook_payload(
+    wh_type: str,
+    event: str,
+    message: str,
+    severity: str,
+    event_type: str,
+    actions: list[str] | None = None,
+    alert_id: str | None = None,
+    runbook_id: str | None = None,
+) -> dict:
     """Formats the outbound JSON body for a given webhook type. Split out
     from _fan_out_user_webhooks so the exact same formatting logic backs
     a manual retry (app.api.webhooks.retry_delivery) -- a retry should
@@ -284,22 +338,46 @@ def _build_webhook_payload(wh_type: str, event: str, message: str, severity: str
     replay a stored payload that might be built from a since-removed
     field shape."""
     emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+    buttons = _build_action_buttons(actions, event_type, alert_id, runbook_id)
     if wh_type == "telegram":
-        return {
+        payload = {
             "chat_id": "",  # filled in by the caller, which has the WebhookEndpoint row
             "text": f"{emoji} <b>NetGuard — {event}</b>\n{message}",
             "parse_mode": "HTML",
         }
+        if buttons:
+            # Telegram inline keyboard: one URL button per row, so it's
+            # never ambiguous which tap fires which action.
+            payload["reply_markup"] = {"inline_keyboard": [[{"text": b["label"], "url": b["url"]}] for b in buttons]}
+        return payload
     if wh_type == "slack":
-        return {"text": f"{emoji} *NetGuard — {event}*\n{message}"}
+        payload = {"text": f"{emoji} *NetGuard — {event}*\n{message}"}
+        if buttons:
+            payload["attachments"] = [
+                {
+                    "color": {"critical": "#dc2626", "warning": "#d97706"}.get(severity, "#0284c7"),
+                    "actions": [
+                        {"type": "button", "text": b["label"], "url": b["url"], "style": "danger" if b["action"] == "escalate" else "default"}
+                        for b in buttons
+                    ],
+                }
+            ]
+        return payload
     if wh_type == "teams":
-        return {"text": f"{emoji} **NetGuard — {event}**\n{message}"}
+        payload = {"text": f"{emoji} **NetGuard — {event}**\n{message}"}
+        if buttons:
+            payload["potentialAction"] = [
+                {"@type": "OpenUri", "name": b["label"], "targets": [{"os": "default", "uri": b["url"]}]}
+                for b in buttons
+            ]
+        return payload
     return {
         "event": event,
         "event_type": event_type,
         "message": message,
         "severity": severity,
         "source": "netguard",
+        "actions": buttons or None,
     }
 
 
@@ -313,6 +391,7 @@ def deliver_webhook(
     is_retry: bool = False,
     retry_of_id=None,
     retried_by: str | None = None,
+    alert_id: str | None = None,
 ):
     """Sends one webhook delivery attempt and records it as a
     WebhookDeliveryAttempt row, whatever the outcome. Used both by the
@@ -328,7 +407,16 @@ def deliver_webhook(
     from app.models.webhook import WebhookDeliveryAttempt
 
     wh_type = wh.webhook_type.value if hasattr(wh.webhook_type, "value") else wh.webhook_type
-    payload = _build_webhook_payload(wh_type, event, message, severity, event_type or event)
+    actions = None
+    if getattr(wh, "include_actions", None):
+        try:
+            actions = json.loads(wh.include_actions)
+        except (ValueError, TypeError):
+            actions = None
+    payload = _build_webhook_payload(
+        wh_type, event, message, severity, event_type or event,
+        actions=actions, alert_id=alert_id, runbook_id=str(wh.default_runbook_id) if getattr(wh, "default_runbook_id", None) else None,
+    )
     if wh_type == "telegram":
         payload["chat_id"] = wh.telegram_chat_id or ""
 
@@ -364,7 +452,7 @@ def deliver_webhook(
     return attempt
 
 
-def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: str) -> None:
+def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: str, alert_id: str | None = None) -> None:
     """Send the notification to all enabled user-configured WebhookEndpoint rows."""
     import json as _json
 
@@ -383,14 +471,14 @@ def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: 
                 except (ValueError, TypeError):
                     pass
 
-            deliver_webhook(db, wh, event=event, message=message, severity=severity, event_type=event_type)
+            deliver_webhook(db, wh, event=event, message=message, severity=severity, event_type=event_type, alert_id=alert_id)
     except Exception:
         logger.warning("Failed to fan out to user webhooks", exc_info=True)
     finally:
         db.close()
 
 
-def _fan_out_push(event: str, message: str, severity: str) -> None:
+def _fan_out_push(event: str, message: str, severity: str, alert_id: str | None = None) -> None:
     """Push to every enabled mobile/browser subscription via
     app.services.push_service (ntfy / Pushover / browser Web Push) --
     this was fully built (registration UI, delivery for all three
@@ -403,7 +491,7 @@ def _fan_out_push(event: str, message: str, severity: str) -> None:
 
     db = SessionLocal()
     try:
-        push_service.send_push(db, title=f"NetGuard — {event}", message=message, severity=severity)
+        push_service.send_push(db, title=f"NetGuard — {event}", message=message, severity=severity, alert_id=alert_id)
     except Exception:
         logger.warning("Failed to fan out push notifications", exc_info=True)
     finally:
@@ -434,6 +522,7 @@ def notify(
     device_hostname: str | None = None,
     change_request_id: uuid.UUID | None = None,
     deployment_id: uuid.UUID | None = None,
+    alert_id: uuid.UUID | str | None = None,
 ) -> None:
     """Fan out a notification to Slack, Teams, Telegram, Email, user-configured
     webhooks, and the in-app Notification Center.
@@ -444,6 +533,10 @@ def notify(
     device_hostname / change_request_id / deployment_id: optional context
         surfaced in the in-app Notification Center so a notification can
         deep-link back to the device/change/deployment it's about.
+    alert_id: when this notification is about a specific Alert, its id --
+        lets webhook/push deliveries that opted into response action
+        buttons (acknowledge/escalate/run runbook) deep-link straight to
+        that alert instead of the general alerts list.
     """
     emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
     text = f"{emoji} *NetGuard — {event}*\n{message}"
@@ -458,11 +551,13 @@ def notify(
     # Telegram (global env-var-based)
     _post_telegram(event, message, severity)
 
+    alert_id_str = str(alert_id) if alert_id else None
+
     # User-configured webhooks (DB-based)
-    _fan_out_user_webhooks(event, message, severity, event_type)
+    _fan_out_user_webhooks(event, message, severity, event_type, alert_id=alert_id_str)
 
     # Mobile/browser push (ntfy, Pushover, Web Push)
-    _fan_out_push(event, message, severity)
+    _fan_out_push(event, message, severity, alert_id=alert_id_str)
 
     # Remote syslog collectors (Splunk, Graylog, rsyslog, SIEM, ...)
     _fan_out_syslog(event, message, severity)

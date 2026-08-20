@@ -24,6 +24,7 @@ interface FormState {
   provider: Provider;
   target: string;
   include_non_critical: boolean;
+  include_actions: string[];
 }
 
 const EMPTY_FORM: FormState = {
@@ -31,6 +32,7 @@ const EMPTY_FORM: FormState = {
   provider: "ntfy",
   target: "",
   include_non_critical: false,
+  include_actions: [],
 };
 
 function targetPlaceholder(provider: Provider): string {
@@ -112,6 +114,7 @@ export default function PushSettings() {
       provider: sub.provider,
       target: sub.target,
       include_non_critical: sub.include_non_critical,
+      include_actions: sub.include_actions || [],
     });
     setFormError(null);
     setShowForm(true);
@@ -121,6 +124,15 @@ export default function PushSettings() {
     setShowForm(false);
     setEditingId(null);
     setFormError(null);
+  };
+
+  const toggleFormAction = (action: string) => {
+    setForm((f) => ({
+      ...f,
+      include_actions: f.include_actions.includes(action)
+        ? f.include_actions.filter((a) => a !== action)
+        : [...f.include_actions, action],
+    }));
   };
 
   const submitForm = async (e: FormEvent) => {
@@ -278,6 +290,15 @@ export default function PushSettings() {
                   <div className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
                     {sub.include_non_critical ? "All alerts" : "Critical only"} · Last push: {formatRelative(sub.last_pushed_at)}
                   </div>
+                  {sub.include_actions && sub.include_actions.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {sub.include_actions.map((a) => (
+                        <span key={a} className="text-[10px] font-bold uppercase tracking-wider text-brandblue bg-brandblue/10 px-2 py-0.5 rounded-full">
+                          {a === "run_runbook" ? "Run Runbook" : a === "acknowledge" ? "Acknowledge" : "Escalate"}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1.5 shrink-0">
@@ -385,6 +406,41 @@ export default function PushSettings() {
                 />
                 Also push non-critical (warning/info) alerts
               </label>
+
+              {form.provider === "ntfy" && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">
+                    Action buttons on the push itself
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { id: "acknowledge", label: "Acknowledge" },
+                      { id: "escalate", label: "Escalate" },
+                      { id: "run_runbook", label: "Run Runbook" },
+                    ].map((a) => (
+                      <label
+                        key={a.id}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border cursor-pointer transition-colors ${
+                          form.include_actions.includes(a.id)
+                            ? "border-brandblue bg-brandblue/10 text-brandblue"
+                            : "border-slate-200 dark:border-noc-borderlit text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={form.include_actions.includes(a.id)}
+                          onChange={() => toggleFormAction(a.id)}
+                          className="sr-only"
+                        />
+                        {a.label}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+                    Adds up to 3 tap targets under the notification (ntfy's native action buttons) that open NetGuard straight to that action — not yet supported on Pushover or browser push.
+                  </p>
+                </div>
+              )}
 
               {formError && <p className="text-sm text-red-600 dark:text-red-400">{formError}</p>}
 

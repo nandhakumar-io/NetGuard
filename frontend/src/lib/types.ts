@@ -1222,12 +1222,15 @@ export interface StaleReservation {
   last_scan_at: string | null;
 }
 
+export type PushActionId = "acknowledge" | "escalate" | "run_runbook";
+
 export interface PushSubscription {
   id: string;
   label: string;
   provider: "ntfy" | "pushover" | "browser";
   target: string;
   include_non_critical: boolean;
+  include_actions: PushActionId[] | null;
   enabled: boolean;
   created_at: string | null;
   last_pushed_at: string | null;
@@ -1608,6 +1611,9 @@ export interface WebhookEndpoint {
   secret: string | null;
   events: string[] | null;
   telegram_chat_id: string | null;
+  include_actions: PushActionId[] | null;
+  default_runbook_id: string | null;
+  default_runbook_name: string | null;
   enabled: boolean;
   created_by: string | null;
   created_at: string;

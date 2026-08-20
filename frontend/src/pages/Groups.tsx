@@ -18,10 +18,16 @@ interface GroupRack {
   devices: GroupDevice[];
 }
 
-interface GroupDataCenter {
+interface GroupBlock {
   name: string;
   device_count: number;
   racks: GroupRack[];
+}
+
+interface GroupDataCenter {
+  name: string;
+  device_count: number;
+  blocks: GroupBlock[];
 }
 
 const statusColor: Record<string, string> = {
@@ -57,6 +63,7 @@ function HealthBadge({ devices }: { devices: GroupDevice[] }) {
 function RackCard({
   rack,
   dcName,
+  blockName,
   canManage,
   onMove,
   onAddDevice,
@@ -65,9 +72,10 @@ function RackCard({
 }: {
   rack: GroupRack;
   dcName: string;
+  blockName: string;
   canManage: boolean;
-  onMove: (deviceId: string, dataCenter: string, rack: string) => void;
-  onAddDevice: (dc: string, rack: string) => void;
+  onMove: (deviceId: string, dataCenter: string, block: string, rack: string) => void;
+  onAddDevice: (dc: string, block: string, rack: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
 }) {
@@ -89,7 +97,7 @@ function RackCard({
         e.preventDefault();
         setDragOver(false);
         const deviceId = e.dataTransfer.getData("text/device-id");
-        if (deviceId) onMove(deviceId, dcName, rack.name);
+        if (deviceId) onMove(deviceId, dcName, blockName, rack.name);
       }}
     >
       <div className="bg-slate-100 dark:bg-slate-900 px-4 py-2 flex items-center justify-between border-b border-slate-200 dark:border-slate-700 gap-3">
@@ -100,7 +108,7 @@ function RackCard({
         <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0 ml-auto">{rack.devices.length} device{rack.devices.length === 1 ? "" : "s"}</span>
         {canManage && (
           <button
-            onClick={() => onAddDevice(dcName, rack.name)}
+            onClick={() => onAddDevice(dcName, blockName, rack.name)}
             title="Add a device to this rack"
             className="text-[11px] font-bold text-brandblue hover:text-navy dark:hover:text-white shrink-0"
           >
@@ -152,7 +160,121 @@ function RackCard({
   );
 }
 
-/** Named/logical device groups (app.models.device_group.DeviceGroup) --
+/** One "block" (building/pod) within a data center -- a named grouping
+ * of racks, the middle tier of the DC -> Block -> Rack -> Device
+ * hierarchy. Collapsible since a real campus can have dozens of racks
+ * spread across a handful of blocks. */
+function BlockCard({
+  block,
+  dcName,
+  canManage,
+  onMove,
+  onAddDevice,
+  onRename,
+  selected,
+  onToggleSelect,
+}: {
+  block: GroupBlock;
+  dcName: string;
+  canManage: boolean;
+  onMove: (deviceId: string, dataCenter: string, block: string, rack: string) => void;
+  onAddDevice: (dc: string, block: string, rack: string) => void;
+  onRename: (dcName: string, blockName: string) => void;
+  selected: Set<string>;
+  onToggleSelect: (deviceId: string) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const isUnassigned = block.name === "Unassigned";
+
+  return (
+    <div
+      className={`border rounded-xl overflow-hidden transition-colors ${
+        dragOver ? "border-brandblue ring-2 ring-brandblue/20" : "border-slate-200 dark:border-slate-700"
+      } ${isUnassigned ? "bg-white/60 dark:bg-slate-800/40" : "bg-white dark:bg-slate-800"}`}
+      onDragOver={(e) => {
+        // Dropping directly on the block header (not a specific rack)
+        // moves the device into this block's first rack, or a synthetic
+        // "Unassigned" rack if the block has none yet.
+        if (!canManage) return;
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        if (!canManage) return;
+        e.preventDefault();
+        setDragOver(false);
+        const deviceId = e.dataTransfer.getData("text/device-id");
+        if (deviceId) onMove(deviceId, dcName, block.name, block.racks[0]?.name || "Unassigned");
+      }}
+    >
+      <div className="px-3.5 py-2 flex items-center gap-2.5 bg-gradient-to-r from-brandblue/[0.06] to-transparent dark:from-brandblue/10 border-b border-slate-100 dark:border-slate-700">
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 shrink-0"
+          title={collapsed ? "Expand block" : "Collapse block"}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={`transition-transform ${collapsed ? "-rotate-90" : ""}`}>
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+        <span className="text-sm font-bold text-navy dark:text-white flex items-center gap-1.5 shrink-0">
+          🧱 {block.name}
+        </span>
+        <HealthBadge devices={block.racks.flatMap((r) => r.devices)} />
+        <span className="text-[11px] text-slate-400 dark:text-slate-500 ml-auto shrink-0">
+          {block.device_count} device{block.device_count === 1 ? "" : "s"} · {block.racks.length} rack{block.racks.length === 1 ? "" : "s"}
+        </span>
+        {canManage && !isUnassigned && (
+          <button
+            onClick={() => onRename(dcName, block.name)}
+            title="Rename this block"
+            className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0"
+          >
+            ✎
+          </button>
+        )}
+        {canManage && (
+          <button
+            onClick={() => onAddDevice(dcName, block.name, "")}
+            className="text-[11px] font-bold text-brandblue hover:text-navy dark:hover:text-white shrink-0"
+          >
+            + Add
+          </button>
+        )}
+      </div>
+      {!collapsed && (
+        <div className="p-3">
+          {block.racks.length === 0 ? (
+            <p className="text-xs text-slate-400 dark:text-slate-500 italic px-1">
+              {canManage ? "No racks in this block yet — use \"+ Add\" above." : "No racks in this block."}
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {block.racks.map((rack) => (
+                <RackCard
+                  key={rack.name}
+                  rack={rack}
+                  dcName={dcName}
+                  blockName={block.name}
+                  canManage={canManage}
+                  onMove={onMove}
+                  onAddDevice={onAddDevice}
+                  selected={selected}
+                  onToggleSelect={onToggleSelect}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/**
  * distinct from the Data Center/Rack physical-placement view below.
  * Supports create/edit/delete and nesting (a group can have a parent),
  * plus per-group device membership management. Only Network Admins get
@@ -819,8 +941,10 @@ export default function Groups() {
   const rackOptions = useMemo(() => {
     const opts: { label: string; dc: string; rack: string }[] = [];
     for (const dc of groups) {
-      for (const r of dc.racks) {
-        opts.push({ label: `${dc.name} / ${r.name}`, dc: dc.name, rack: r.name });
+      for (const b of dc.blocks) {
+        for (const r of b.racks) {
+          opts.push({ label: `${dc.name} / ${r.name}`, dc: dc.name, rack: r.name });
+        }
       }
     }
     return opts;
@@ -834,7 +958,7 @@ export default function Groups() {
     const dcName = addDc === "__new__" ? null : addDc;
     if (!dcName) return [];
     const dc = groups.find((g) => g.name === dcName);
-    return dc ? dc.racks.map((r) => r.name).filter((n) => n !== "Unassigned") : [];
+    return dc ? dc.blocks.flatMap(b => b.racks).map((r) => r.name).filter((n) => n !== "Unassigned") : [];
   }, [groups, addDc]);
 
   const addDeviceOptions = useMemo(() => {
@@ -883,19 +1007,22 @@ export default function Groups() {
     return groups
       .map((dc) => ({
         ...dc,
-        racks: dc.racks
-          .map((r) => ({
-            ...r,
-            devices: r.devices.filter((d) => d.hostname.toLowerCase().includes(q)),
-          }))
-          .filter((r) => r.devices.length > 0 || r.name.toLowerCase().includes(q)),
+        blocks: dc.blocks.map(b => ({
+          ...b,
+          racks: b.racks
+            .map((r) => ({
+              ...r,
+              devices: r.devices.filter((d) => d.hostname.toLowerCase().includes(q)),
+            }))
+            .filter((r) => r.devices.length > 0 || r.name.toLowerCase().includes(q)),
+        })).filter(b => b.racks.length > 0)
       }))
-      .filter((dc) => dc.racks.length > 0 || dc.name.toLowerCase().includes(q));
+      .filter((dc) => dc.blocks.length > 0 || dc.name.toLowerCase().includes(q));
   }, [groups, query]);
 
   const totals = useMemo(() => {
     const dcCount = groups.length;
-    const rackCount = groups.reduce((n, dc) => n + dc.racks.length, 0);
+    const rackCount = groups.reduce((n, dc) => n + dc.blocks.reduce((m, b) => m + b.racks.length, 0), 0);
     const deviceCount = groups.reduce((n, dc) => n + dc.device_count, 0);
     return { dcCount, rackCount, deviceCount };
   }, [groups]);
@@ -1016,8 +1143,8 @@ export default function Groups() {
                 <h2 className="text-lg font-bold text-navy dark:text-white flex items-center gap-2">
                   🏢 {dc.name}
                 </h2>
-                <HealthBadge devices={dc.racks.flatMap((r) => r.devices)} />
-                <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.racks.length} rack{dc.racks.length === 1 ? "" : "s"}</span>
+                <HealthBadge devices={dc.blocks.flatMap((b) => b.racks.flatMap(r => r.devices))} />
+                <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.blocks.reduce((m, b) => m + b.racks.length, 0)} rack{dc.blocks.reduce((m, b) => m + b.racks.length, 0) === 1 ? "" : "s"}</span>
                 {canManage && (
                   <button
                     onClick={() => openAddDevice(dc.name)}
@@ -1027,15 +1154,16 @@ export default function Groups() {
                   </button>
                 )}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {dc.racks.map((rack) => (
-                  <RackCard
-                    key={rack.name}
-                    rack={rack}
+              <div className="flex flex-col gap-4">
+                {dc.blocks.map((block) => (
+                  <BlockCard
+                    key={block.name}
+                    block={block}
                     dcName={dc.name}
                     canManage={canManage}
                     onMove={handleMove}
                     onAddDevice={openAddDevice}
+                    onRename={() => {}} 
                     selected={selected}
                     onToggleSelect={toggleSelect}
                   />

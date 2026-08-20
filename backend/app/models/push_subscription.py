@@ -40,6 +40,13 @@ class PushSubscription(Base):
     # what *does* get encrypted).
     target = Column(String, nullable=False)
     include_non_critical = Column(Boolean, nullable=False, default=False)
+    # JSON-encoded list of response actions to attach to the push itself,
+    # e.g. ["acknowledge","escalate","run_runbook"]. Rendered as native
+    # ntfy action buttons (deep links back into NetGuard) on the ntfy
+    # provider; stored but not yet actionable on Pushover/browser, whose
+    # notification-action surfaces are more limited. NULL/empty = plain
+    # notification. See app.services.push_service._send_ntfy.
+    include_actions = Column(String, nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_pushed_at = Column(DateTime(timezone=True), nullable=True)

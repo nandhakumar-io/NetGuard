@@ -778,13 +778,13 @@ def update_device(
     if device.supports_snmp and not was_snmp_enabled:
         _poll_snmp_best_effort(db, device)
 
-    if "data_center" in updates or "rack" in updates:
+    if "data_center" in updates or "block" in updates or "rack" in updates:
         # This is the write path the Groups page uses (drag-drop onto a
         # rack, or the bulk "Move to rack" action) -- log it as a
         # placement change specifically, since "what moved where" is what
         # a NOC admin actually wants out of the audit trail here.
-        old_place = f"{before.get('data_center') or 'Unassigned'} / {before.get('rack') or 'Unassigned'}"
-        new_place = f"{device.data_center or 'Unassigned'} / {device.rack or 'Unassigned'}"
+        old_place = f"{before.get('data_center') or 'Unassigned'} / {before.get('block') or 'Unassigned'} / {before.get('rack') or 'Unassigned'}"
+        new_place = f"{device.data_center or 'Unassigned'} / {device.block or 'Unassigned'} / {device.rack or 'Unassigned'}"
         audit_service.record_event(
             db,
             actor=current_user.email,
@@ -1536,20 +1536,25 @@ def list_device_protocol_operations(
 
 @router.get("/groups/summary")
 def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Devices rolled up into a data-center -> rack -> device hierarchy,
-    for the Topology page's grouping view and any other "group by
-    location" UI. Devices with no data_center/rack set are bucketed
-    under "Unassigned" rather than dropped, so the fleet always fully
-    accounts for every device even before anyone's filled in placement.
+    """Devices rolled up into a data-center -> block -> rack -> device
+    hierarchy, for the Topology page's grouping view and any other
+    "group by location" UI. Devices with no data_center/block/rack set
+    are bucketed under "Unassigned" rather than dropped, so the fleet
+    always fully accounts for every device even before anyone's filled
+    in placement. `block` is an optional middle tier (building/pod)
+    between data center and rack -- most orgs with a single small DC
+    will never touch it and everything just falls under "Unassigned".
     """
     devices = db.query(Device).order_by(Device.hostname).all()
 
     data_centers: dict[str, dict] = {}
     for d in devices:
         dc_name = d.data_center or "Unassigned"
+        block_name = d.block or "Unassigned"
         rack_name = d.rack or "Unassigned"
-        dc = data_centers.setdefault(dc_name, {"name": dc_name, "racks": {}, "device_count": 0})
-        rack = dc["racks"].setdefault(rack_name, {"name": rack_name, "devices": []})
+        dc = data_centers.setdefault(dc_name, {"name": dc_name, "blocks": {}, "device_count": 0})
+        block = dc["blocks"].setdefault(block_name, {"name": block_name, "racks": {}, "device_count": 0})
+        rack = block["racks"].setdefault(rack_name, {"name": rack_name, "devices": []})
         rack["devices"].append(
             {
                 "id": str(d.id),
@@ -1560,18 +1565,23 @@ def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)
             }
         )
         dc["device_count"] += 1
+        block["device_count"] += 1
 
     result = []
     for dc in data_centers.values():
-        # Sort devices within a rack by rack_position when set (unset
-        # sorts last), then hostname -- gives a stable, sensible
-        # top-to-bottom rack-elevation order.
-        racks = []
-        for rack in dc["racks"].values():
-            rack["devices"].sort(key=lambda dv: (dv["rack_position"] is None, dv["rack_position"] or 0, dv["hostname"]))
-            racks.append(rack)
-        racks.sort(key=lambda r: r["name"])
-        result.append({"name": dc["name"], "device_count": dc["device_count"], "racks": racks})
+        blocks = []
+        for block in dc["blocks"].values():
+            # Sort devices within a rack by rack_position when set (unset
+            # sorts last), then hostname -- gives a stable, sensible
+            # top-to-bottom rack-elevation order.
+            racks = []
+            for rack in block["racks"].values():
+                rack["devices"].sort(key=lambda dv: (dv["rack_position"] is None, dv["rack_position"] or 0, dv["hostname"]))
+                racks.append(rack)
+            racks.sort(key=lambda r: r["name"])
+            blocks.append({"name": block["name"], "device_count": block["device_count"], "racks": racks})
+        blocks.sort(key=lambda b: b["name"])
+        result.append({"name": dc["name"], "device_count": dc["device_count"], "blocks": blocks})
 
     result.sort(key=lambda dc: dc["name"])
     return result

@@ -46,9 +46,9 @@ const SEVERITY_DOT: Record<AlertSeverity, string> = {
 };
 
 const SEVERITY_ROW: Record<AlertSeverity, string> = {
-  critical: "border-red-500/40 bg-red-950/30",
-  warning: "border-amber-400/30 bg-amber-950/20",
-  info: "border-sky-400/20 bg-sky-950/10",
+  critical: "border-red-300 bg-red-50 dark:border-red-500/40 dark:bg-red-950/30",
+  warning: "border-amber-300 bg-amber-50 dark:border-amber-400/30 dark:bg-amber-950/20",
+  info: "border-sky-300 bg-sky-50 dark:border-sky-400/20 dark:bg-sky-950/10",
 };
 
 const HEALTH_DOT: Record<string, string> = {
@@ -66,9 +66,9 @@ const STATUS_DOT: Record<string, string> = {
 };
 
 const INCIDENT_SEVERITY_BADGE: Record<string, string> = {
-  critical: "bg-red-500/20 text-red-300 border-red-500/40",
-  major: "bg-amber-500/20 text-amber-300 border-amber-500/40",
-  minor: "bg-slate-500/20 text-slate-300 border-slate-500/40",
+  critical: "bg-red-50 text-red-700 border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40",
+  major: "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40",
+  minor: "bg-slate-100 text-slate-600 border-slate-300 dark:bg-slate-500/20 dark:text-slate-300 dark:border-slate-500/40",
 };
 
 const OPEN_INCIDENT_STATUSES = new Set(["open", "mitigated", "postmortem_due"]);
@@ -92,11 +92,22 @@ function formatBps(bps: number | null | undefined): string {
   return `${bps}bps`;
 }
 
-function StatTile({ label, value, tone }: { label: string; value: string | number; tone?: string }) {
+function StatTile({ label, value, tone, accent }: { label: string; value: string | number; tone?: string; accent?: "critical" | "warning" | "ok" }) {
+  const accentBar =
+    accent === "critical"
+      ? "bg-red-500"
+      : accent === "warning"
+      ? "bg-amber-400"
+      : accent === "ok"
+      ? "bg-emerald-500"
+      : "bg-slate-200 dark:bg-slate-800";
   return (
-    <div className="flex-1 min-w-[110px] px-3.5 py-2.5 border-r border-slate-800 last:border-r-0">
-      <div className={`text-2xl font-black tabular-nums leading-none ${tone || "text-white"}`}>{value}</div>
-      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mt-1.5">{label}</div>
+    <div className="relative flex-1 min-w-[128px] rounded-lg bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+      <span className={`absolute inset-x-0 top-0 h-0.5 ${accentBar}`} />
+      <div className="px-3.5 py-2.5">
+        <div className={`text-2xl font-black tabular-nums leading-none ${tone || "text-navy dark:text-white"}`}>{value}</div>
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold mt-1.5">{label}</div>
+      </div>
     </div>
   );
 }
@@ -190,36 +201,52 @@ export default function WallBoard() {
     : 0;
 
   return (
-    <div ref={containerRef} className="fixed inset-0 bg-slate-950 text-white flex flex-col overflow-hidden font-sans">
+    <div
+      ref={containerRef}
+      className="fixed inset-0 bg-slate-100 dark:bg-slate-950 text-navy dark:text-white flex flex-col overflow-hidden font-sans bg-[radial-gradient(ellipse_at_top,_rgba(37,99,235,0.06),_transparent_60%)] dark:bg-[radial-gradient(ellipse_at_top,_rgba(37,99,235,0.10),_transparent_60%)]"
+    >
       {/* --- Top bar: identity, clock, controls --- */}
-      <div className="flex items-center justify-between px-5 py-2.5 border-b border-slate-800 shrink-0">
+      <div className="flex items-center justify-between px-5 py-2.5 border-b border-slate-200 dark:border-slate-800 shrink-0 bg-white/70 dark:bg-slate-900/40 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-brandblue flex items-center justify-center">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <div className="w-8 h-8 rounded-lg bg-brandblue flex items-center justify-center shrink-0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-white">
               <path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6l8-4z" />
             </svg>
           </div>
           <span className="font-bold text-lg tracking-tight">NetGuard6</span>
-          <span className="text-slate-500 text-sm">NOC Wall Board</span>
+          <span className="text-slate-500 dark:text-slate-500 text-sm">NOC Wall Board</span>
+          <span className="hidden md:flex items-center gap-1.5 text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-300 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/30">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
+            </span>
+            LIVE
+          </span>
           {connError && (
-            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40">
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40">
               Connection issue — showing last known state
             </span>
           )}
         </div>
         <div className="flex items-center gap-4">
+          <div className="hidden lg:block text-right pr-4 border-r border-slate-200 dark:border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold">Fleet Health</div>
+            <div className={`text-sm font-black tabular-nums leading-none mt-0.5 ${healthTone(summary?.global_health_score)}`}>
+              {summary ? `${summary.global_health_score} / 100` : "—"}
+            </div>
+          </div>
           <div className="text-right">
             <div className="text-2xl font-black tabular-nums leading-none">
               {now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
             </div>
-            <div className="text-[11px] text-slate-500">
+            <div className="text-[11px] text-slate-500 dark:text-slate-500">
               {now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
             </div>
           </div>
           <button
             onClick={() => setPaused((p) => !p)}
             title={paused ? "Resume auto-rotation" : "Pause auto-rotation"}
-            className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-800 hover:text-white"
+            className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-navy dark:hover:text-white"
           >
             {paused ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
@@ -230,7 +257,7 @@ export default function WallBoard() {
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-            className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-800 hover:text-white"
+            className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-navy dark:hover:text-white"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3M16 21h3a2 2 0 002-2v-3" />
@@ -244,7 +271,7 @@ export default function WallBoard() {
           error volume, and change/deployment activity are the numbers an
           on-call engineer actually glances up for. Wraps to a second row
           on smaller wall displays rather than clipping. --- */}
-      <div className="flex flex-wrap border-b border-slate-800 shrink-0">
+      <div className="flex flex-wrap gap-2 px-3 py-2.5 border-b border-slate-200 dark:border-slate-800 shrink-0">
         <StatTile label="Devices Online" value={summary ? `${summary.devices_online}/${summary.devices_total}` : "—"} />
         <StatTile label="Fleet Health" value={summary ? `${summary.global_health_score}` : "—"} tone={healthTone(summary?.global_health_score)} />
         <StatTile
@@ -252,24 +279,25 @@ export default function WallBoard() {
           value={summary?.fleet_health_weighted_pct !== undefined ? `${summary.fleet_health_weighted_pct.toFixed(1)}%` : "—"}
           tone={healthTone(summary?.fleet_health_weighted_pct)}
         />
-        <StatTile label="Critical Alerts" value={criticalCount} tone={criticalCount > 0 ? "text-red-400" : "text-white"} />
-        <StatTile label="Warning Alerts" value={warningCount} tone={warningCount > 0 ? "text-amber-400" : "text-white"} />
-        <StatTile label="Open Incidents" value={openIncidents.length} tone={openIncidents.length > 0 ? "text-red-400" : "text-white"} />
+        <StatTile label="Critical Alerts" value={criticalCount} tone={criticalCount > 0 ? "text-red-600 dark:text-red-400" : "text-navy dark:text-white"} accent={criticalCount > 0 ? "critical" : "ok"} />
+        <StatTile label="Warning Alerts" value={warningCount} tone={warningCount > 0 ? "text-amber-600 dark:text-amber-400" : "text-navy dark:text-white"} accent={warningCount > 0 ? "warning" : "ok"} />
+        <StatTile label="Open Incidents" value={openIncidents.length} tone={openIncidents.length > 0 ? "text-red-600 dark:text-red-400" : "text-navy dark:text-white"} accent={openIncidents.length > 0 ? "critical" : "ok"} />
         <StatTile
           label="Uplinks Up"
           value={summary?.uplink_availability ? `${summary.uplink_availability.uplinks_up}/${summary.uplink_availability.uplinks_total}` : "—"}
           tone={
             summary?.uplink_availability && summary.uplink_availability.uplinks_up < summary.uplink_availability.uplinks_total
-              ? "text-amber-400"
-              : "text-white"
+              ? "text-amber-600 dark:text-amber-400"
+              : "text-navy dark:text-white"
           }
+          accent={summary?.uplink_availability && summary.uplink_availability.uplinks_up < summary.uplink_availability.uplinks_total ? "warning" : "ok"}
         />
-        <StatTile label="Ports Down" value={summary?.down_ports?.length ?? "—"} tone={(summary?.down_ports?.length ?? 0) > 0 ? "text-amber-400" : "text-white"} />
+        <StatTile label="Ports Down" value={summary?.down_ports?.length ?? "—"} tone={(summary?.down_ports?.length ?? 0) > 0 ? "text-amber-600 dark:text-amber-400" : "text-navy dark:text-white"} accent={(summary?.down_ports?.length ?? 0) > 0 ? "warning" : "ok"} />
         <StatTile label="Active Deployments" value={summary?.active_deployments ?? "—"} />
-        <StatTile label="Failed Deployments" value={summary?.failed_deployments ?? "—"} tone={(summary?.failed_deployments ?? 0) > 0 ? "text-red-400" : "text-white"} />
+        <StatTile label="Failed Deployments" value={summary?.failed_deployments ?? "—"} tone={(summary?.failed_deployments ?? 0) > 0 ? "text-red-600 dark:text-red-400" : "text-navy dark:text-white"} accent={(summary?.failed_deployments ?? 0) > 0 ? "critical" : "ok"} />
         <StatTile label="Open Drifts" value={summary?.open_drifts ?? "—"} />
         <StatTile label="Pending Changes" value={summary?.pending_change_requests ?? "—"} />
-        <StatTile label="Syslog Errors (1h)" value={syslogSummary ? syslogErrorCount : "—"} tone={syslogErrorCount > 0 ? "text-amber-400" : "text-white"} />
+        <StatTile label="Syslog Errors (1h)" value={syslogSummary ? syslogErrorCount : "—"} tone={syslogErrorCount > 0 ? "text-amber-600 dark:text-amber-400" : "text-navy dark:text-white"} accent={syslogErrorCount > 0 ? "warning" : "ok"} />
       </div>
 
       {/* --- Rotating main panel --- */}
@@ -280,39 +308,55 @@ export default function WallBoard() {
         {activePanel === "ops" && <OpsPanel incidents={openIncidents} devicesById={devicesById} summary={summary} />}
       </div>
 
-      {/* --- Panel indicator / manual switch --- */}
-      <div className="flex items-center justify-center gap-2 py-3 border-t border-slate-800 shrink-0">
-        {PANELS.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => setActivePanel(p.id)}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors ${
-              activePanel === p.id ? "bg-brandblue text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
+      {/* --- Panel indicator / manual switch, with a rotation-progress bar
+          under the active tab so the room can see at a glance how long
+          until it auto-advances (paused hides the bar entirely rather
+          than showing a stalled one). --- */}
+      <div className="flex flex-col items-center justify-center gap-1.5 py-3 border-t border-slate-200 dark:border-slate-800 shrink-0 bg-white/70 dark:bg-slate-900/40 backdrop-blur-sm">
+        <div className="flex items-center gap-2">
+          {PANELS.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setActivePanel(p.id)}
+              className={`relative overflow-hidden flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                activePanel === p.id ? "bg-brandblue text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700"
+              }`}
+            >
+              {activePanel === p.id && !paused && (
+                <span
+                  key={`${p.id}-${now.getSeconds()}`}
+                  className="absolute inset-0 bg-white/25 origin-left animate-[wallboard-progress_var(--rotate-ms)_linear_1]"
+                  style={{ ["--rotate-ms" as string]: `${ROTATE_MS}ms` }}
+                />
+              )}
+              <span className="relative">{p.label}</span>
+            </button>
+          ))}
+        </div>
+        <div className="text-[10px] text-slate-400 dark:text-slate-600 tabular-nums">
+          {paused ? "Auto-rotation paused" : `Auto-rotating every ${ROTATE_MS / 1000}s`}
+        </div>
       </div>
+      <style>{`@keyframes wallboard-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }`}</style>
     </div>
   );
 }
 
 function healthTone(score: number | undefined): string {
-  if (score === undefined) return "text-white";
-  if (score >= 90) return "text-emerald-400";
-  if (score >= 70) return "text-amber-400";
-  return "text-red-400";
+  if (score === undefined) return "text-navy dark:text-white";
+  if (score >= 90) return "text-emerald-600 dark:text-emerald-400";
+  if (score >= 70) return "text-amber-600 dark:text-amber-400";
+  return "text-red-600 dark:text-red-400";
 }
 
 function AlertsPanel({ alerts, total }: { alerts: Alert[]; total: number }) {
   return (
     <div className="h-full flex flex-col">
-      <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">
-        Top Active Alerts {total > alerts.length && <span className="text-slate-600">(showing {alerts.length} of {total})</span>}
+      <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
+        Top Active Alerts {total > alerts.length && <span className="text-slate-400 dark:text-slate-600">(showing {alerts.length} of {total})</span>}
       </h2>
       {alerts.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-slate-600 text-xl font-bold">No active alerts — fleet is quiet.</div>
+        <div className="flex-1 flex items-center justify-center text-slate-400 dark:text-slate-600 text-xl font-bold">No active alerts — fleet is quiet.</div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto grid grid-cols-2 gap-2.5 content-start">
           {alerts.map((a) => (
@@ -321,11 +365,11 @@ function AlertsPanel({ alerts, total }: { alerts: Alert[]; total: number }) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
                   <div className="font-bold text-sm truncate">{a.category}</div>
-                  <div className="text-[11px] text-slate-500 shrink-0">{timeAgo(a.last_seen_at || null)}</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-500 shrink-0">{timeAgo(a.last_seen_at || null)}</div>
                 </div>
-                <div className="text-sm text-slate-300 truncate">{a.message}</div>
+                <div className="text-sm text-slate-700 dark:text-slate-300 truncate">{a.message}</div>
                 {a.occurrence_count && a.occurrence_count > 1 && (
-                  <div className="text-[11px] text-slate-500 mt-0.5">×{a.occurrence_count} occurrences</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-500 mt-0.5">×{a.occurrence_count} occurrences</div>
                 )}
               </div>
             </div>
@@ -338,7 +382,7 @@ function AlertsPanel({ alerts, total }: { alerts: Alert[]; total: number }) {
 
 function TopologyPanel({ topology, summary }: { topology: TopologyResponse | null; summary: DashboardSummary | null }) {
   if (!topology) {
-    return <div className="h-full flex items-center justify-center text-slate-600 text-xl font-bold">Loading topology…</div>;
+    return <div className="h-full flex items-center justify-center text-slate-400 dark:text-slate-600 text-xl font-bold">Loading topology…</div>;
   }
   // Deliberately not the full interactive canvas from pages/Topology.tsx --
   // a wall board wants "which devices are unhealthy right now, at a
@@ -361,14 +405,14 @@ function TopologyPanel({ topology, summary }: { topology: TopologyResponse | nul
   return (
     <div className="h-full flex gap-5 min-h-0">
       <div className="flex-1 flex flex-col min-w-0">
-        <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">
+        <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
           Topology Health — {topology.nodes.length} devices, {topology.edges.length} links
           {unhealthy > 0 && <span className="text-red-400"> · {unhealthy} unhealthy</span>}
         </h2>
         <div className="flex-1 min-h-0 overflow-y-auto space-y-4">
           {sites.map(([site, nodes]) => (
           <div key={site}>
-            <div className="text-xs font-bold text-slate-500 mb-1.5">{site} <span className="text-slate-600">({nodes.length})</span></div>
+            <div className="text-xs font-bold text-slate-500 dark:text-slate-500 mb-1.5">{site} <span className="text-slate-400 dark:text-slate-600">({nodes.length})</span></div>
             <div className="flex flex-wrap gap-1.5">
               {nodes.map((n) => (
                 <div
@@ -383,7 +427,7 @@ function TopologyPanel({ topology, summary }: { topology: TopologyResponse | nul
           </div>
         ))}
       </div>
-      <div className="flex items-center gap-4 pt-3 mt-2 border-t border-slate-800 text-[11px] text-slate-500">
+      <div className="flex items-center gap-4 pt-3 mt-2 border-t border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-500">
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" /> Healthy</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-amber-400" /> Degraded</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-red-500" /> Offline / Unhealthy</span>
@@ -391,17 +435,17 @@ function TopologyPanel({ topology, summary }: { topology: TopologyResponse | nul
       </div>
       </div>
       {(summary?.offline_devices && summary.offline_devices.length > 0) && (
-        <div className="w-80 flex flex-col shrink-0 border-l border-slate-800 pl-5 min-h-0">
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Offline & Degraded</h2>
+        <div className="w-80 flex flex-col shrink-0 border-l border-slate-200 dark:border-slate-800 pl-5 min-h-0">
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Offline & Degraded</h2>
           <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
             {summary.offline_devices.map(d => (
-              <div key={d.id} className="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+              <div key={d.id} className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-bold text-sm truncate">{d.hostname}</span>
-                  <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded border shrink-0 ${d.status === 'offline' ? 'bg-red-500/20 text-red-300 border-red-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40'}`}>{d.status}</span>
+                  <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded border shrink-0 ${d.status === 'offline' ? 'bg-red-50 text-red-700 border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40' : 'bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40'}`}>{d.status}</span>
                 </div>
-                {d.last_seen && <div className="text-xs text-slate-500 mt-1">Last seen: {timeAgo(d.last_seen)} ago</div>}
-                {d.last_error && <div className="text-[10px] text-red-400 truncate mt-0.5" title={d.last_error}>{d.last_error}</div>}
+                {d.last_seen && <div className="text-xs text-slate-500 dark:text-slate-500 mt-1">Last seen: {timeAgo(d.last_seen)} ago</div>}
+                {d.last_error && <div className="text-[10px] text-red-600 dark:text-red-400 truncate mt-0.5" title={d.last_error}>{d.last_error}</div>}
               </div>
             ))}
           </div>
@@ -417,20 +461,20 @@ function TopologyPanel({ topology, summary }: { topology: TopologyResponse | nul
 // Dashboard page already computes, just laid out for glance-reading.
 function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
   if (!summary) {
-    return <div className="h-full flex items-center justify-center text-slate-600 text-xl font-bold">Loading fleet metrics…</div>;
+    return <div className="h-full flex items-center justify-center text-slate-400 dark:text-slate-600 text-xl font-bold">Loading fleet metrics…</div>;
   }
   return (
     <div className="h-full grid grid-cols-4 gap-5 min-h-0">
       <div className="min-h-0 flex flex-col">
-        <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Top CPU</h2>
+        <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Top CPU</h2>
         <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
           {summary.top_cpu_devices.length === 0 ? (
-            <div className="text-slate-600 text-sm">No data.</div>
+            <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
           ) : (
             summary.top_cpu_devices.slice(0, 8).map((d) => (
-              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <span className="text-sm font-bold truncate">{d.hostname}</span>
-                <span className={`text-sm font-black tabular-nums ${d.cpu >= 90 ? "text-red-400" : d.cpu >= 75 ? "text-amber-400" : "text-slate-300"}`}>
+                <span className={`text-sm font-black tabular-nums ${d.cpu >= 90 ? "text-red-600 dark:text-red-400" : d.cpu >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
                   {d.cpu.toFixed(0)}%
                 </span>
               </div>
@@ -439,15 +483,15 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
         </div>
       </div>
       <div className="min-h-0 flex flex-col">
-        <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Top Memory</h2>
+        <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Top Memory</h2>
         <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
           {summary.top_memory_devices.length === 0 ? (
-            <div className="text-slate-600 text-sm">No data.</div>
+            <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
           ) : (
             summary.top_memory_devices.slice(0, 8).map((d) => (
-              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <span className="text-sm font-bold truncate">{d.hostname}</span>
-                <span className={`text-sm font-black tabular-nums ${d.memory >= 90 ? "text-red-400" : d.memory >= 75 ? "text-amber-400" : "text-slate-300"}`}>
+                <span className={`text-sm font-black tabular-nums ${d.memory >= 90 ? "text-red-600 dark:text-red-400" : d.memory >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
                   {d.memory.toFixed(0)}%
                 </span>
               </div>
@@ -456,15 +500,15 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
         </div>
       </div>
       <div className="min-h-0 flex flex-col">
-        <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Top Bandwidth</h2>
+        <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Top Bandwidth</h2>
         <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
           {summary.top_bandwidth_devices.length === 0 ? (
-            <div className="text-slate-600 text-sm">No data.</div>
+            <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
           ) : (
             summary.top_bandwidth_devices.slice(0, 8).map((d) => (
-              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <span className="text-sm font-bold truncate">{d.hostname}</span>
-                <span className={`text-sm font-black tabular-nums ${d.bandwidth >= 90 ? "text-red-400" : d.bandwidth >= 75 ? "text-amber-400" : "text-slate-300"}`}>
+                <span className={`text-sm font-black tabular-nums ${d.bandwidth >= 90 ? "text-red-600 dark:text-red-400" : d.bandwidth >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
                   {d.bandwidth.toFixed(0)}%
                 </span>
               </div>
@@ -474,9 +518,9 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
       </div>
       <div className="min-h-0 flex flex-col gap-4">
         <div className="min-h-0 flex-1 flex flex-col">
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
             Uplinks {summary.uplink_availability && (
-              <span className="text-slate-600 normal-case font-medium">
+              <span className="text-slate-400 dark:text-slate-600 normal-case font-medium">
                 ({summary.uplink_availability.uplinks_up}/{summary.uplink_availability.uplinks_total} up
                 {summary.uplink_availability.uptime_pct !== null ? `, ${summary.uplink_availability.uptime_pct.toFixed(1)}% ${summary.uplink_availability.window_days}d` : ""})
               </span>
@@ -484,15 +528,15 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           </h2>
           <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
             {summary.uplinks.length === 0 ? (
-              <div className="text-slate-600 text-sm">No uplinks configured.</div>
+              <div className="text-slate-400 dark:text-slate-600 text-sm">No uplinks configured.</div>
             ) : (
               summary.uplinks.slice(0, 4).map((u) => (
-                <div key={u.hostname + (u.role || "")} className="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+                <div key={u.hostname + (u.role || "")} className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-bold truncate">{u.hostname}</span>
                     <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[u.status] || STATUS_DOT.unknown}`} />
                   </div>
-                  <div className="flex items-center justify-between text-[11px] text-slate-500 mt-0.5">
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-500 mt-0.5">
                     <span>{u.role || "uplink"}</span>
                     <span className="tabular-nums">{u.utilization_pct.toFixed(0)}% · {formatBps(u.throughput_bps)}</span>
                   </div>
@@ -502,15 +546,15 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           </div>
         </div>
         <div className="min-h-0 flex-1 flex flex-col">
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Top Errors</h2>
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Top Errors</h2>
           <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
             {summary.top_error_devices.length === 0 ? (
-              <div className="text-slate-600 text-sm">No data.</div>
+              <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
             ) : (
               summary.top_error_devices.slice(0, 4).map((d) => (
-                <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+                <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                   <span className="text-sm font-bold truncate">{d.hostname}</span>
-                  <span className="text-sm font-black text-amber-400 tabular-nums">
+                  <span className="text-sm font-black text-amber-600 dark:text-amber-400 tabular-nums">
                     {d.interface_errors}
                   </span>
                 </div>
@@ -520,13 +564,13 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
         </div>
       </div>
       {(summary.down_ports.length > 0 || summary.flapping_interfaces.length > 0) && (
-        <div className="col-span-4 flex gap-5 pt-1 border-t border-slate-800">
+        <div className="col-span-4 flex gap-5 pt-1 border-t border-slate-200 dark:border-slate-800">
           {summary.down_ports.length > 0 && (
             <div className="flex-1 min-w-0">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400 mt-2 mb-1.5">Ports Down ({summary.down_ports.length})</div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400 mt-2 mb-1.5">Ports Down ({summary.down_ports.length})</div>
               <div className="flex flex-wrap gap-1.5">
                 {summary.down_ports.slice(0, 12).map((p, idx) => (
-                  <span key={idx} className="text-[11px] px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300">
+                  <span key={idx} className="text-[11px] px-2 py-1 rounded-md bg-amber-50 border border-amber-300 text-amber-700 dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-300">
                     {p.hostname} · {p.interface}
                   </span>
                 ))}
@@ -535,10 +579,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           )}
           {summary.flapping_interfaces.length > 0 && (
             <div className="flex-1 min-w-0">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-red-400 mt-2 mb-1.5">Flapping ({summary.flapping_interfaces.length})</div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400 mt-2 mb-1.5">Flapping ({summary.flapping_interfaces.length})</div>
               <div className="flex flex-wrap gap-1.5">
                 {summary.flapping_interfaces.slice(0, 12).map((p, idx) => (
-                  <span key={idx} className="text-[11px] px-2 py-1 rounded-md bg-red-500/10 border border-red-500/30 text-red-300">
+                  <span key={idx} className="text-[11px] px-2 py-1 rounded-md bg-red-50 border border-red-300 text-red-700 dark:bg-red-500/10 dark:border-red-500/30 dark:text-red-300">
                     {p.hostname} · {p.interface} ×{p.flap_count}
                   </span>
                 ))}
@@ -567,23 +611,23 @@ function OpsPanel({
   return (
     <div className="h-full grid grid-cols-3 gap-5 min-h-0">
       <div className="min-h-0 flex flex-col">
-        <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Open Incidents ({incidents.length})</h2>
+        <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Open Incidents ({incidents.length})</h2>
         {incidents.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center text-slate-600 text-lg font-bold">No open incidents.</div>
+          <div className="flex-1 flex items-center justify-center text-slate-400 dark:text-slate-600 text-lg font-bold">No open incidents.</div>
         ) : (
           <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
             {incidents.map((inc) => (
-              <div key={inc.id} className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 flex items-center gap-4">
+              <div key={inc.id} className="rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/60 px-4 py-3 flex items-center gap-4">
                 <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border shrink-0 ${INCIDENT_SEVERITY_BADGE[inc.severity] || INCIDENT_SEVERITY_BADGE.minor}`}>
                   {inc.severity.toUpperCase()}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="font-bold truncate">{inc.title}</div>
-                  <div className="text-xs text-slate-500">
+                  <div className="text-xs text-slate-500 dark:text-slate-500">
                     {inc.alert_ids.length} alert{inc.alert_ids.length === 1 ? "" : "s"} · status: {inc.status.replace(/_/g, " ")}
                   </div>
                 </div>
-                <div className="text-xs text-slate-500 shrink-0">open {timeAgo(inc.detected_at || inc.created_at)}</div>
+                <div className="text-xs text-slate-500 dark:text-slate-500 shrink-0">open {timeAgo(inc.detected_at || inc.created_at)}</div>
               </div>
             ))}
           </div>
@@ -592,33 +636,33 @@ function OpsPanel({
 
       <div className="min-h-0 flex flex-col gap-4">
         <div>
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">Deployment Activity</h2>
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Deployment Activity</h2>
           <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+            <div className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
               <div className="text-lg font-black tabular-nums">{summary?.active_deployments ?? "—"}</div>
-              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">In flight</div>
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold">In flight</div>
             </div>
-            <div className="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
-              <div className={`text-lg font-black tabular-nums ${(summary?.failed_deployments ?? 0) > 0 ? "text-red-400" : ""}`}>{summary?.failed_deployments ?? "—"}</div>
-              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Failed</div>
+            <div className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
+              <div className={`text-lg font-black tabular-nums ${(summary?.failed_deployments ?? 0) > 0 ? "text-red-600 dark:text-red-400" : ""}`}>{summary?.failed_deployments ?? "—"}</div>
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold">Failed</div>
             </div>
-            <div className="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-2">
+            <div className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
               <div className="text-lg font-black tabular-nums">{summary?.deployment_success_rate !== undefined ? `${summary.deployment_success_rate.toFixed(0)}%` : "—"}</div>
-              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Success rate</div>
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold">Success rate</div>
             </div>
           </div>
         </div>
 
         <div className="min-h-0 flex-1 flex flex-col">
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">Recent Config Backups</h2>
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Recent Config Backups</h2>
           <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5">
             {!summary || summary.recent_backups.length === 0 ? (
-              <div className="text-slate-600 text-sm">No recent backups.</div>
+              <div className="text-slate-400 dark:text-slate-600 text-sm">No recent backups.</div>
             ) : (
               summary.recent_backups.slice(0, 6).map((b) => (
-                <div key={b.id} className="flex items-center justify-between text-xs bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-1.5">
+                <div key={b.id} className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 rounded-lg px-3 py-1.5">
                   <span className="font-bold truncate">{b.hostname}</span>
-                  <span className="text-slate-500 tabular-nums shrink-0">{timeAgo(b.created_at)} ago</span>
+                  <span className="text-slate-500 dark:text-slate-500 tabular-nums shrink-0">{timeAgo(b.created_at)} ago</span>
                 </div>
               ))
             )}
@@ -628,32 +672,32 @@ function OpsPanel({
       </div>
       <div className="min-h-0 flex flex-col gap-4">
         <div className="min-h-0 flex-1 flex flex-col">
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">Recent Automation</h2>
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Recent Automation</h2>
           <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5">
             {!summary || summary.recent_protocol_operations.length === 0 ? (
-              <div className="text-slate-600 text-sm">No recent automation runs.</div>
+              <div className="text-slate-400 dark:text-slate-600 text-sm">No recent automation runs.</div>
             ) : (
               summary.recent_protocol_operations.slice(0, 6).map((op) => (
-                <div key={op.id} className="flex items-center justify-between text-xs bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-1.5 gap-2">
+                <div key={op.id} className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 rounded-lg px-3 py-1.5 gap-2">
                   <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${op.success ? "bg-emerald-500" : "bg-red-500"}`} />
                   <span className="font-bold truncate flex-1">{op.device_hostname} · {op.protocol} {op.operation}</span>
-                  <span className="text-slate-500 tabular-nums shrink-0">{timeAgo(op.created_at)} ago</span>
+                  <span className="text-slate-500 dark:text-slate-500 tabular-nums shrink-0">{timeAgo(op.created_at)} ago</span>
                 </div>
               ))
             )}
           </div>
         </div>
         <div className="min-h-0 flex-1 flex flex-col">
-          <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">Recent Reboots</h2>
+          <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Recent Reboots</h2>
           <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5">
             {!summary || summary.recent_reboots.length === 0 ? (
-              <div className="text-slate-600 text-sm">No recent reboots.</div>
+              <div className="text-slate-400 dark:text-slate-600 text-sm">No recent reboots.</div>
             ) : (
               summary.recent_reboots.slice(0, 6).map((r) => (
-                <div key={r.hostname} className="flex items-center justify-between text-xs bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-1.5 gap-2">
+                <div key={r.hostname} className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 rounded-lg px-3 py-1.5 gap-2">
                   <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-amber-400" />
                   <span className="font-bold truncate flex-1">{r.hostname}</span>
-                  <span className="text-slate-500 tabular-nums shrink-0">Up {Math.floor(r.uptime_seconds / 60)}m</span>
+                  <span className="text-slate-500 dark:text-slate-500 tabular-nums shrink-0">Up {Math.floor(r.uptime_seconds / 60)}m</span>
                 </div>
               ))
             )}

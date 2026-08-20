@@ -21,7 +21,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from migration_helpers import add_column_if_missing
+from migration_helpers import (
+    add_column_if_missing,
+    create_index_if_missing,
+    create_table_if_missing,
+)
 
 revision = "0076"
 down_revision = "0075"
@@ -35,7 +39,15 @@ def upgrade() -> None:
     add_column_if_missing("discovered_hosts", sa.Column("ignored_by", sa.String(), nullable=True))
     add_column_if_missing("discovered_hosts", sa.Column("ignored_at", sa.DateTime(timezone=True), nullable=True))
 
-    op.create_table(
+    # *_if_missing throughout, like every other post-0001 migration --
+    # 0001_baseline.py's Base.metadata.create_all(checkfirst=True) already
+    # creates every table/column that exists in *current* models (including
+    # this one) on a brand-new database, so a raw op.create_table here
+    # raised DuplicateTable on every fresh install and broke `alembic
+    # upgrade head` for the whole chain (see migration_helpers.py's module
+    # docstring). This was the one migration after 0001 that never got
+    # converted to the idempotent helpers.
+    create_table_if_missing(
         "discovery_ignore_rules",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column(
@@ -50,14 +62,14 @@ def upgrade() -> None:
         sa.Column("ignored_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("note", sa.String(), nullable=True),
     )
-    op.create_index(
+    create_index_if_missing(
         "ix_discovery_ignore_rules_schedule_id", "discovery_ignore_rules", ["schedule_id"]
     )
     # Partial-ish dedup guard: NULL vendor_guess rows aren't caught by a
     # plain unique constraint (NULLs never compare equal), so the app
     # layer (ignore_host) does a query-then-upsert instead of relying on
     # a DB constraint to prevent duplicate rules for the same fingerprint.
-    op.create_index(
+    create_index_if_missing(
         "ix_discovery_ignore_rules_fingerprint",
         "discovery_ignore_rules",
         ["schedule_id", "ip_address", "vendor_guess"],

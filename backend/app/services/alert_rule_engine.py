@@ -158,7 +158,7 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                     from app.services import notification_service
 
                     notification_service.notify(
-                        event=category, message=alert.message, severity=severity
+                        event=category, message=alert.message, severity=severity, alert_id=alert.id
                     )
             else:
                 alert_service.auto_resolve(

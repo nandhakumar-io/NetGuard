@@ -913,8 +913,17 @@ def _discover_routing_table(ip_address: str, auth: "SnmpAuthConfig", timeout: fl
         # empty. Fall back to IP-FORWARD-MIB's ipCidrRouteTable, which is
         # what those devices actually populate.
         return _discover_routing_table_fallback(ip_address, auth, timeout)
-    mask = _walk(ip_address, auth, ROUTE_OIDS["ipRouteMask"], timeout)
-    if_index = _walk(ip_address, auth, ROUTE_OIDS["ipRouteIfIndex"], timeout)
+    # mask/if_index are independent walks (both just keyed off the same
+    # destination index next_hop already gave us) -- they were previously
+    # run one after the other, tripling this job's wall-clock time inside
+    # the outer discover_inventory() thread pool (see its docstring: that
+    # pool only overlaps the 7 *jobs* with each other, it can't parallelize
+    # walks happening serially *within* one job). Run them side by side.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="discover-route") as pool:
+        f_mask = pool.submit(_walk, ip_address, auth, ROUTE_OIDS["ipRouteMask"], timeout)
+        f_if_index = pool.submit(_walk, ip_address, auth, ROUTE_OIDS["ipRouteIfIndex"], timeout)
+        mask = f_mask.result()
+        if_index = f_if_index.result()
 
     rows = []
     for destination, hop in list(next_hop.items())[:MAX_DISCOVERY_ROWS]:
@@ -990,6 +999,9 @@ def _resolve_lldp_local_port_names(ip_address: str, auth: "SnmpAuthConfig", time
         port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpLocPortId"], timeout)
         if not port_ids:
             return {}
+        # Now the long pole within the (already-parallel) LLDP job above --
+        # subtypes is independent of port_ids, so it doesn't need to wait
+        # behind it.
         subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpLocPortIdSubtype"], timeout)
         result: dict[str, str] = {}
         if_descr_cache: dict[str, str] | None = None
@@ -1054,11 +1066,24 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
     chassis_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemChassisId"], timeout)
     if not chassis_ids:
         return []
-    sys_names = _walk(ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
-    port_ids = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
-    port_id_subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpRemPortIdSubtype"], timeout)
-    chassis_id_subtypes = _walk(ip_address, auth, LLDP_OIDS["lldpRemChassisIdSubtype"], timeout)
-    local_port_names = _resolve_lldp_local_port_names(ip_address, auth, timeout)
+    # Four more independent lldpRemTable column walks plus the local-port
+    # name resolution (itself 2-3 more walks, see
+    # _resolve_lldp_local_port_names) -- this was the single biggest
+    # contributor to Discovery's overall latency: even with the outer
+    # discover_inventory() pool overlapping all 7 jobs, this one job alone
+    # could take 5-6x a single walk's time run serially, making it the
+    # long pole the whole request waited on. Overlap them here too.
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="discover-lldp") as pool:
+        f_sys_names = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
+        f_port_ids = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
+        f_port_id_subtypes = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemPortIdSubtype"], timeout)
+        f_chassis_id_subtypes = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemChassisIdSubtype"], timeout)
+        f_local_port_names = pool.submit(_resolve_lldp_local_port_names, ip_address, auth, timeout)
+        sys_names = f_sys_names.result()
+        port_ids = f_port_ids.result()
+        port_id_subtypes = f_port_id_subtypes.result()
+        chassis_id_subtypes = f_chassis_id_subtypes.result()
+        local_port_names = f_local_port_names.result()
 
     rows = []
     for index, chassis_id in list(chassis_ids.items())[:MAX_DISCOVERY_ROWS]:
@@ -1102,9 +1127,17 @@ def _discover_cdp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: fl
     device_ids = _walk(ip_address, auth, CDP_OIDS["cdpCacheDeviceId"], timeout)
     if not device_ids:
         return []
-    ports = _walk(ip_address, auth, CDP_OIDS["cdpCacheDevicePort"], timeout)
-    platforms = _walk(ip_address, auth, CDP_OIDS["cdpCachePlatform"], timeout)
-    if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout) or {}
+    # ports/platforms/if_descr are three more independent walks keyed off
+    # device_ids' index -- same "job is internally serial" issue as
+    # _discover_routing_table above; overlap them instead of paying three
+    # full round trips back to back.
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="discover-cdp") as pool:
+        f_ports = pool.submit(_walk, ip_address, auth, CDP_OIDS["cdpCacheDevicePort"], timeout)
+        f_platforms = pool.submit(_walk, ip_address, auth, CDP_OIDS["cdpCachePlatform"], timeout)
+        f_if_descr = pool.submit(_walk, ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+        ports = f_ports.result()
+        platforms = f_platforms.result()
+        if_descr = f_if_descr.result() or {}
 
     rows = []
     for index, neighbor_id in list(device_ids.items())[:MAX_DISCOVERY_ROWS]:

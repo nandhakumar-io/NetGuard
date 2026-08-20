@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../lib/api";
-import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry, PushSubscription } from "../lib/types";
+import { Alert, AlertSummary, AlertRule, AlertRunbook, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry, PushSubscription } from "../lib/types";
 import { useToast, errorMessage } from "../lib/toast";
 import { useConfirm } from "../lib/confirm";
 import SavedViews from "../components/SavedViews";
@@ -114,7 +114,8 @@ export default function AlertCenter() {
   const [pushTestingId, setPushTestingId] = useState<string | null>(null);
   const [showWebhookForm, setShowWebhookForm] = useState(false);
   const [editingWebhook, setEditingWebhook] = useState<WebhookEndpoint | null>(null);
-  const [webhookForm, setWebhookForm] = useState({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "" });
+  const [webhookForm, setWebhookForm] = useState({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "", include_actions: [] as string[], default_runbook_id: "" });
+  const [runbooks, setRunbooks] = useState<AlertRunbook[]>([]);
   const [testingWebhook, setTestingWebhook] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<WebhookTestResult | null>(null);
   // Delivery log: expanded per-webhook (deliveriesOpenFor holds the
@@ -167,6 +168,10 @@ export default function AlertCenter() {
   const fetchWebhooks = useCallback(() => {
     setWebhooksLoading(true);
     api.get<WebhookEndpoint[]>("/webhooks").then((res) => setWebhooks(res.data)).catch(() => {}).finally(() => setWebhooksLoading(false));
+  }, []);
+
+  useEffect(() => {
+    api.get<AlertRunbook[]>("/alert-runbooks").then((res) => setRunbooks(res.data)).catch(() => {});
   }, []);
 
   const fetchPushSubs = useCallback(() => {
@@ -483,9 +488,18 @@ export default function AlertCenter() {
 
   // Webhook CRUD
   const resetWebhookForm = () => {
-    setWebhookForm({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "" });
+    setWebhookForm({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "", include_actions: [], default_runbook_id: "" });
     setEditingWebhook(null);
     setShowWebhookForm(false);
+  };
+
+  const toggleWebhookAction = (action: string) => {
+    setWebhookForm((f) => ({
+      ...f,
+      include_actions: f.include_actions.includes(action)
+        ? f.include_actions.filter((a) => a !== action)
+        : [...f.include_actions, action],
+    }));
   };
 
   const handleSaveWebhook = async () => {
@@ -497,6 +511,8 @@ export default function AlertCenter() {
       secret: webhookForm.secret || null,
       telegram_chat_id: webhookForm.telegram_chat_id || null,
       events: evts,
+      include_actions: webhookForm.include_actions.length ? webhookForm.include_actions : null,
+      default_runbook_id: webhookForm.include_actions.includes("run_runbook") && webhookForm.default_runbook_id ? webhookForm.default_runbook_id : null,
     };
     try {
       if (editingWebhook) {
@@ -1328,6 +1344,8 @@ export default function AlertCenter() {
                   <option value="info">Info</option>
                 </select>
                 <input placeholder="Scope: Vendor (optional)" value={ruleForm.scope_vendor} onChange={(e) => setRuleForm({ ...ruleForm, scope_vendor: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                <input placeholder="Scope: Site (optional)" value={ruleForm.scope_site || ""} onChange={(e) => setRuleForm({ ...ruleForm, scope_site: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
+                <input placeholder="Scope: Device Role (optional)" value={ruleForm.scope_device_role || ""} onChange={(e) => setRuleForm({ ...ruleForm, scope_device_role: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
                 <input placeholder="Cooldown (seconds)" type="number" value={ruleForm.cooldown_seconds} onChange={(e) => setRuleForm({ ...ruleForm, cooldown_seconds: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
                 <textarea placeholder="Description (optional)" value={ruleForm.description} onChange={(e) => setRuleForm({ ...ruleForm, description: e.target.value })} className="col-span-full text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900 resize-none h-16" />
               </div>
@@ -1584,6 +1602,43 @@ export default function AlertCenter() {
                 <input placeholder="Secret (optional, for HMAC signing)" value={webhookForm.secret} onChange={(e) => setWebhookForm({ ...webhookForm, secret: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
                 <input placeholder="Event filter (comma-separated, empty = all)" value={webhookForm.events} onChange={(e) => setWebhookForm({ ...webhookForm, events: e.target.value })} className="col-span-full text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900" />
               </div>
+
+              <div className="mt-4 border-t border-slate-100 dark:border-slate-700 pt-4">
+                <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Response actions</div>
+                <p className="text-xs text-slate-500 dark:text-slate-500 mb-3">
+                  Attach one-tap action buttons to each delivery, alongside the plain alert notification. Slack/Teams render real interactive buttons; Telegram gets an inline keyboard; generic endpoints get an <code>actions</code> array of deep links.
+                </p>
+                <div className="flex flex-wrap gap-3">
+                  {[
+                    { id: "acknowledge", label: "Acknowledge" },
+                    { id: "escalate", label: "Escalate" },
+                    { id: "run_runbook", label: "Run Runbook" },
+                  ].map((a) => (
+                    <label key={a.id} className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={webhookForm.include_actions.includes(a.id)}
+                        onChange={() => toggleWebhookAction(a.id)}
+                        className="rounded"
+                      />
+                      {a.label}
+                    </label>
+                  ))}
+                </div>
+                {webhookForm.include_actions.includes("run_runbook") && (
+                  <select
+                    value={webhookForm.default_runbook_id}
+                    onChange={(e) => setWebhookForm({ ...webhookForm, default_runbook_id: e.target.value })}
+                    className="mt-3 text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900 w-full md:w-1/2"
+                  >
+                    <option value="">Default: link to Runbooks page</option>
+                    {runbooks.map((rb) => (
+                      <option key={rb.id} value={rb.id}>{rb.title}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
               <div className="flex items-center gap-2 mt-4">
                 <button onClick={handleSaveWebhook} disabled={!webhookForm.name || !webhookForm.url} className="text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-4 py-2 rounded-lg shadow-sm disabled:opacity-40">{editingWebhook ? "Update" : "Create"}</button>
                 <button onClick={resetWebhookForm} className="text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-700 dark:text-slate-400 px-4 py-2">Cancel</button>
@@ -1626,6 +1681,15 @@ export default function AlertCenter() {
                       {wh.events && wh.events.length > 0 && (
                         <p className="text-[11px] text-slate-400 mt-1">Events: {wh.events.join(", ")}</p>
                       )}
+                      {wh.include_actions && wh.include_actions.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {wh.include_actions.map((a) => (
+                            <span key={a} className="text-[10px] font-bold uppercase tracking-wider text-brandblue bg-brandblue/10 px-2 py-0.5 rounded-full">
+                              {a === "run_runbook" ? "Run Runbook" : a === "acknowledge" ? "Acknowledge" : "Escalate"}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
@@ -1652,6 +1716,8 @@ export default function AlertCenter() {
                             name: wh.name, url: wh.url, webhook_type: wh.webhook_type,
                             secret: wh.secret || "", telegram_chat_id: wh.telegram_chat_id || "",
                             events: wh.events?.join(", ") || "",
+                            include_actions: wh.include_actions || [],
+                            default_runbook_id: wh.default_runbook_id || "",
                           });
                           setShowWebhookForm(true);
                         }}

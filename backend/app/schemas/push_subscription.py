@@ -12,6 +12,9 @@ class PushSubscriptionCreate(BaseModel):
     # via endpoint/p256dh/auth below, not something a user types in.
     target: str | None = None
     include_non_critical: bool = False
+    # Subset of ["acknowledge", "escalate", "run_runbook"] -- which
+    # one-tap action buttons to attach to the push itself.
+    include_actions: list[str] | None = None
     # Only used when provider="browser": the three fields off the
     # browser's PushSubscription.toJSON() (endpoint, and keys.p256dh /
     # keys.auth) captured right after pushManager.subscribe() succeeds.
@@ -24,6 +27,7 @@ class PushSubscriptionUpdate(BaseModel):
     label: str | None = None
     target: str | None = None
     include_non_critical: bool | None = None
+    include_actions: list[str] | None = None
     enabled: bool | None = None
 
 
@@ -35,6 +39,7 @@ class PushSubscriptionRead(BaseModel):
     provider: str
     target: str
     include_non_critical: bool
+    include_actions: list[str] | None = None
     enabled: bool
     created_at: datetime.datetime | None = None
     last_pushed_at: datetime.datetime | None = None

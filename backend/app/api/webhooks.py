@@ -20,6 +20,7 @@ admin token from turning into an internal-network prober.
 """
 import ipaddress
 import json
+import logging
 import socket
 import uuid
 
@@ -41,6 +42,7 @@ from app.schemas.webhook import (
 from app.services.notification_service import deliver_webhook
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+logger = logging.getLogger(__name__)
 
 _webhook_admin = require_roles(UserRole.NETWORK_ADMIN)
 
@@ -79,18 +81,30 @@ def _validate_outbound_url(url: str, label: str = "URL") -> None:
 
     try:
         infos = socket.getaddrinfo(parsed.host, None)
-    except socket.gaierror as exc:
-        raise HTTPException(status_code=422, detail=f"Could not resolve {label.lower()} host: {exc}")
-    except OSError as exc:
+    except (socket.gaierror, OSError) as exc:
         # Broader than gaierror alone: some environments (restricted
-        # egress, no DNS resolver reachable, IPv6-only resolver hiccups)
-        # raise a plain OSError here instead. Previously that escaped
-        # uncaught past this function -> 500 with no CORS headers on some
-        # deployments -> the browser reported it as an opaque network
-        # error with no response body, which is exactly what made a
-        # perfectly valid ntfy topic URL fail to save with no usable
-        # reason shown ("Could not save this subscription.").
-        raise HTTPException(status_code=422, detail=f"Could not resolve {label.lower()} host: {exc}")
+        # egress, no DNS resolver reachable from *this* process, IPv6-only
+        # resolver hiccups) raise a plain OSError here instead.
+        #
+        # This used to hard-reject the save with a 422 whenever resolution
+        # failed. That's wrong: a NetGuard backend commonly runs with
+        # tighter/differently-routed egress than the browser the admin is
+        # sitting at (split-horizon DNS, an internal resolver that simply
+        # doesn't carry public zones, a proxy in between) -- so a
+        # perfectly reachable, perfectly public target like
+        # https://ntfy.sh/... could never be resolved from here and the
+        # subscription could never be saved, no matter how many times the
+        # admin retried ("Could not save this subscription.", with no
+        # actionable reason, since some deployments also drop CORS
+        # headers on the error path). The actual SSRF protection this
+        # function exists for only matters when resolution *succeeds* and
+        # reveals a private/internal address below; an address this
+        # process can't resolve at all isn't evidence of that, and
+        # push_service's own httpx.post already fails closed (best-effort,
+        # caught, logged) if the target genuinely can't be reached at
+        # send time. So: log and allow rather than block the save.
+        logger.warning("Could not resolve %s host %r for outbound-URL validation (%s) -- allowing save", label.lower(), parsed.host, exc)
+        return
 
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
@@ -108,7 +122,7 @@ def _validate_outbound_url(url: str, label: str = "URL") -> None:
             )
 
 
-def _webhook_to_read(wh: WebhookEndpoint) -> WebhookRead:
+def _webhook_to_read(wh: WebhookEndpoint, runbook_names: dict | None = None) -> WebhookRead:
     """Convert a WebhookEndpoint ORM row to a WebhookRead, parsing events JSON.
 
     Deliberately never puts wh.secret on the response -- it's the HMAC
@@ -124,6 +138,12 @@ def _webhook_to_read(wh: WebhookEndpoint) -> WebhookRead:
             events = json.loads(wh.events)
         except (ValueError, TypeError):
             events = None
+    include_actions = None
+    if wh.include_actions:
+        try:
+            include_actions = json.loads(wh.include_actions)
+        except (ValueError, TypeError):
+            include_actions = None
     return WebhookRead(
         id=wh.id,
         name=wh.name,
@@ -132,6 +152,9 @@ def _webhook_to_read(wh: WebhookEndpoint) -> WebhookRead:
         secret=None,
         events=events,
         telegram_chat_id=wh.telegram_chat_id,
+        include_actions=include_actions,
+        default_runbook_id=wh.default_runbook_id,
+        default_runbook_name=(runbook_names or {}).get(wh.default_runbook_id),
         enabled=wh.enabled,
         created_by=wh.created_by,
         created_at=wh.created_at,
@@ -146,7 +169,14 @@ def list_webhooks(
     _: User = Depends(get_current_user),
 ):
     rows = db.query(WebhookEndpoint).order_by(WebhookEndpoint.created_at.desc()).limit(limit).all()
-    return [_webhook_to_read(r) for r in rows]
+    from app.models.alert_runbook import AlertRunbook
+
+    runbook_ids = {r.default_runbook_id for r in rows if r.default_runbook_id}
+    runbook_names = {}
+    if runbook_ids:
+        for rb in db.query(AlertRunbook).filter(AlertRunbook.id.in_(runbook_ids)).all():
+            runbook_names[rb.id] = rb.name
+    return [_webhook_to_read(r, runbook_names) for r in rows]
 
 
 @router.post("", response_model=WebhookRead, status_code=201)

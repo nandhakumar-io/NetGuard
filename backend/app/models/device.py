@@ -152,6 +152,12 @@ class Device(Base):
     # no data_center still groups fine (falls under an "Unassigned" DC
     # bucket in the UI), same as devices with no site today.
     data_center = Column(String, nullable=True, index=True)
+    # Optional intermediate grouping between data_center and rack --
+    # models a real campus/DC's physical hierarchy (building/block/pod),
+    # e.g. "DC1" -> "Block 3" -> "Rack A12". Free-text, same convention
+    # as data_center/rack; NULL groups fine under "Unassigned" like the
+    # other two, and a device can have a rack with no block set.
+    block = Column(String, nullable=True, index=True)
     rack = Column(String, nullable=True, index=True)
     # Optional 1-based slot/U position within the rack, purely cosmetic
     # (sorts devices top-to-bottom in the rack-elevation view) -- not

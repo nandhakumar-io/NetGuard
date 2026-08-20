@@ -32,8 +32,47 @@ TIMEOUT_SECONDS = 5.0
 _NTFY_PRIORITY = {"critical": "urgent", "warning": "high", "info": "default"}
 _PUSHOVER_PRIORITY = {"critical": 2, "warning": 1, "info": 0}  # 2 = emergency (repeats until acked)
 
+_ACTION_LABELS = {"acknowledge": "Acknowledge", "escalate": "Escalate", "run_runbook": "Run Runbook"}
 
-def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
+
+def _action_deep_link(action: str, alert_id: str | None) -> str:
+    """Same deep-link scheme as notification_service._action_url -- these
+    always open the NetGuard UI (which requires a real session) rather
+    than firing a bare unauthenticated action, so a lost/shared phone
+    notification can't be used to ack or escalate anything on its own.
+    """
+    base = settings.FRONTEND_URL.rstrip("/")
+    if action == "run_runbook":
+        return f"{base}/alert-runbooks"
+    if action == "escalate":
+        return f"{base}/alerts?alert={alert_id}&action=escalate" if alert_id else f"{base}/escalation-policies"
+    return f"{base}/alerts?alert={alert_id}&action=acknowledge" if alert_id else f"{base}/alerts"
+
+
+def _ntfy_actions_header(include_actions: str | None, alert_id: str | None) -> str | None:
+    """Builds the value of ntfy's `Actions` header: a comma-separated list
+    of `view, Label, url` triples, which ntfy renders as up to three tap
+    targets under the notification. See https://ntfy.sh/docs/publish/#action-buttons
+    """
+    if not include_actions:
+        return None
+    try:
+        actions = json.loads(include_actions)
+    except (ValueError, TypeError):
+        return None
+    if not actions:
+        return None
+    parts = []
+    for action in actions[:3]:  # ntfy supports at most 3 action buttons
+        label = _ACTION_LABELS.get(action)
+        if not label:
+            continue
+        url = _action_deep_link(action, alert_id)
+        parts.append(f"view, {label}, {url}")
+    return "; ".join(parts) if parts else None
+
+
+def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, url: str | None, alert_id: str | None = None) -> bool:
     headers = {
         "Title": title,
         "Priority": _NTFY_PRIORITY.get(severity, "default"),
@@ -41,6 +80,9 @@ def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, u
     }
     if url:
         headers["Click"] = url
+    actions_header = _ntfy_actions_header(getattr(sub, "include_actions", None), alert_id)
+    if actions_header:
+        headers["Actions"] = actions_header
     if severity == "critical":
         # Emergency-priority ntfy pushes retry/repeat client-side until
         # acknowledged in the app, same intent as Pushover priority 2
@@ -150,13 +192,13 @@ def _send_browser(sub: PushSubscription, title: str, message: str, severity: str
         return False
 
 
-def _send_one(sub: PushSubscription, title: str, message: str, severity: str, url: str | None) -> bool:
+def _send_one(sub: PushSubscription, title: str, message: str, severity: str, url: str | None, alert_id: str | None = None) -> bool:
     provider = sub.provider.value if hasattr(sub.provider, "value") else str(sub.provider)
     if provider == "pushover":
         return _send_pushover(sub, title, message, severity, url)
     if provider == "browser":
         return _send_browser(sub, title, message, severity, url)
-    return _send_ntfy(sub, title, message, severity, url)
+    return _send_ntfy(sub, title, message, severity, url, alert_id=alert_id)
 
 
 def send_push(
@@ -167,6 +209,7 @@ def send_push(
     severity: str = "critical",
     url: str | None = None,
     user_ids: list | None = None,
+    alert_id: str | None = None,
 ) -> int:
     """Pushes to every enabled subscription that opted into this
     severity -- subscriptions default to critical-only (see
@@ -177,6 +220,10 @@ def send_push(
     `user_ids`: restrict delivery to specific users' subscriptions (e.g.
     an escalation policy's designated on-call engineer) instead of every
     subscription in the system. None = fan out to everyone subscribed.
+
+    `alert_id`: when this push is about a specific Alert, its id -- used
+    to build the acknowledge/escalate/run-runbook action buttons (ntfy
+    only, see _ntfy_actions_header) so they deep-link to that alert.
 
     Returns the number of subscriptions successfully pushed to.
     """
@@ -190,7 +237,7 @@ def send_push(
     for sub in subs:
         if severity != "critical" and not sub.include_non_critical:
             continue
-        if _send_one(sub, title, message, severity, url):
+        if _send_one(sub, title, message, severity, url, alert_id=alert_id):
             sub.last_pushed_at = now
             db.add(sub)
             sent += 1
