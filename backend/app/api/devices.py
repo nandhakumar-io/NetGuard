@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -1326,22 +1327,28 @@ def discover_device(
 
     from app.core.config import settings
 
-    result = snmp_service.discover_inventory(
-        device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS, vendor=device.vendor.value
-    )
+    # discover_inventory() and the switchport/VLAN walk don't depend on
+    # each other (switchport_info only needs ip/auth, and nothing in
+    # discover_inventory reads it) -- they were previously run one after
+    # the other, adding the switchport walk's full round-trip time on top
+    # of discover_inventory's own. Run them side by side instead.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="discovery-endpoint") as pool:
+        result_future = pool.submit(
+            snmp_service.discover_inventory,
+            device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS, vendor=device.vendor.value,
+        )
+        switchport_future = pool.submit(snmp_service.walk_switchport_vlans, device.ip_address, auth)
 
-    # Best-effort switchport (trunk/access + VLAN) enrichment for the
-    # Discovery tab's LLDP/CDP tables -- same Q-BRIDGE-MIB walk the
-    # device Interfaces tab already uses (see
-    # app.api.config_management.view_interfaces), matched by local_port
-    # name. Previously the LLDP/CDP neighbor tables had no mode/VLAN
-    # columns at all, so a link's carried-VLAN(s) were only visible by
-    # separately opening the Interfaces tab and matching port names up
-    # by hand. One extra walk per discovery run, not per neighbor row.
-    try:
-        switchport_info = snmp_service.walk_switchport_vlans(device.ip_address, auth)
-    except Exception:
-        switchport_info = {}
+        result = result_future.result()
+        # Best-effort switchport (trunk/access + VLAN) enrichment for the
+        # Discovery tab's LLDP/CDP tables -- same Q-BRIDGE-MIB walk the
+        # device Interfaces tab already uses (see
+        # app.api.config_management.view_interfaces), matched by local_port
+        # name.
+        try:
+            switchport_info = switchport_future.result()
+        except Exception:
+            switchport_info = {}
     for neighbor in result.get("lldp_neighbors") or []:
         info = switchport_info.get(neighbor.get("local_port") or "")
         if info:

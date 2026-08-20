@@ -11,6 +11,7 @@ from a poll that noticed the interface was down.
 import asyncio
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("netguard.snmp")
@@ -1283,16 +1284,54 @@ def discover_inventory(
     # floor it rather than trust a short SNMP_TIMEOUT_SECONDS tuned for
     # the routine poll's tighter budget. See DISCOVERY_TIMEOUT_FLOOR.
     timeout = max(timeout, DISCOVERY_TIMEOUT_FLOOR)
-    hostname = _get_via_pysnmp(ip_address, auth, OIDS["sysName"], timeout)
-    sys_descr = _get_via_pysnmp(ip_address, auth, OIDS["sysDescr"], timeout)
-    inventory = _discover_physical_inventory(ip_address, auth, timeout)
+
+    # The 7 walks/GETs below are all independent SNMP round trips against
+    # the same device -- none of them reads another's result -- so running
+    # them sequentially was pure wasted wall-clock: each one pays its own
+    # full request/timeout budget back-to-back, which is exactly why this
+    # call took 15-30s end to end (9+ blocking walks in series, then the
+    # API layer's switchport walk on top of that). A thread pool overlaps
+    # them: total time becomes roughly the slowest single walk instead of
+    # the sum of all of them. pysnmp's sync (hlapi) calls release the GIL
+    # while blocked on socket I/O, so real threads -- not just asyncio --
+    # actually parallelize the network waiting here.
+    jobs = {
+        "hostname": (_get_via_pysnmp, (ip_address, auth, OIDS["sysName"], timeout)),
+        "sys_descr": (_get_via_pysnmp, (ip_address, auth, OIDS["sysDescr"], timeout)),
+        "inventory": (_discover_physical_inventory, (ip_address, auth, timeout)),
+        "arp_table": (_discover_arp_table, (ip_address, auth, timeout)),
+        "routing_table": (_discover_routing_table, (ip_address, auth, timeout)),
+        "lldp_neighbors": (_discover_lldp_neighbors, (ip_address, auth, timeout)),
+        "cdp_neighbors": (_discover_cdp_neighbors, (ip_address, auth, timeout)),
+    }
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="discover") as pool:
+        future_to_key = {pool.submit(fn, *args): key for key, (fn, args) in jobs.items()}
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                results[key] = future.result()
+            except Exception:
+                logger.exception("discover_inventory: %s sub-walk failed for %s", key, ip_address)
+                # Same best-effort contract as the old sequential version --
+                # one failed table shouldn't fail the whole discovery call.
+                results[key] = [] if key not in ("hostname", "sys_descr") else None
+
+    hostname = results["hostname"]
+    sys_descr = results["sys_descr"]
+    inventory = results["inventory"]
     detected_model, detected_serial_number = _detect_chassis_summary(inventory)
     detected_platform = _detect_platform_from_sysdescr(sys_descr)
     detected_os_version = _detect_os_version_from_sysdescr(sys_descr)
 
     if (vendor or "").lower() == "juniper" and (not detected_model or not detected_serial_number):
-        box_descr = _get_via_pysnmp(ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxDescr"], timeout)
-        box_serial = _get_via_pysnmp(ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxSerialNo"], timeout)
+        # These two are still independent of each other -- parallelize too
+        # instead of adding them back as a serial tail.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="discover-jnx") as pool:
+            f_descr = pool.submit(_get_via_pysnmp, ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxDescr"], timeout)
+            f_serial = pool.submit(_get_via_pysnmp, ip_address, auth, JUNIPER_BOX_OIDS["jnxBoxSerialNo"], timeout)
+            box_descr = f_descr.result()
+            box_serial = f_serial.result()
         detected_model = detected_model or box_descr
         detected_serial_number = detected_serial_number or box_serial
         if not detected_platform and box_descr:
@@ -1300,10 +1339,10 @@ def discover_inventory(
 
     return {
         "hostname": hostname,
-        "arp_table": _discover_arp_table(ip_address, auth, timeout),
-        "routing_table": _discover_routing_table(ip_address, auth, timeout),
-        "lldp_neighbors": _discover_lldp_neighbors(ip_address, auth, timeout),
-        "cdp_neighbors": _discover_cdp_neighbors(ip_address, auth, timeout),
+        "arp_table": results["arp_table"],
+        "routing_table": results["routing_table"],
+        "lldp_neighbors": results["lldp_neighbors"],
+        "cdp_neighbors": results["cdp_neighbors"],
         "inventory": inventory,
         "detected_platform": detected_platform,
         "detected_model": detected_model,
@@ -1707,6 +1746,39 @@ KNOWN_TRAP_CATEGORIES = {
     "ciscoEnvMonTemperatureNotification": "Temperature Critical",
     "psFailure": "Power Failure",
 }
+
+# Numeric snmpTrapOID.0 value -> the same symbolic names
+# KNOWN_TRAP_CATEGORIES/classify_trap already key on. Every inbound trap
+# PDU identifies itself only by numeric OID (see trap_service.py's
+# receiver callback) -- there's no MIB compiler in the hot path turning
+# that into "linkDown" for us, so this reverse map is what actually
+# connects a wire-format trap to classify_trap()'s existing severity/
+# category logic. IF-MIB/SNMPv2-MIB standard traps are universal across
+# every vendor (Cisco/Juniper/Arista/generic Linux net-snmp alike) so
+# those are covered unconditionally; linkDown specifically is the one
+# this feature is mainly for. The Cisco-specific ones
+# (cpmCPURisingThreshold, ciscoEnvMonTemperatureNotification) are
+# included since KNOWN_TRAP_CATEGORIES already names them, but psFailure
+# is deliberately left unmapped here -- it isn't one universal OID
+# across vendors (Cisco splits it per-platform under
+# CISCO-ENTITY-*-MIB), so guessing one specific OID for it would be
+# more likely wrong than helpful; it still works fine as an unknown trap
+# (falls through to Info severity with its raw OID shown) until a real
+# fleet's actual OID is added here.
+TRAP_OID_NAMES = {
+    "1.3.6.1.6.3.1.1.5.1": "coldStart",
+    "1.3.6.1.6.3.1.1.5.2": "warmStart",
+    "1.3.6.1.6.3.1.1.5.3": "linkDown",
+    "1.3.6.1.6.3.1.1.5.4": "linkUp",
+    "1.3.6.1.6.3.1.1.5.5": "authenticationFailure",
+    "1.3.6.1.4.1.9.9.109.2.0.1": "cpmCPURisingThreshold",  # CISCO-PROCESS-MIB
+    "1.3.6.1.4.1.9.9.13.3.0.1": "ciscoEnvMonTemperatureNotification",  # CISCO-ENVMON-MIB
+}
+
+# IF-MIB ifIndex -- linkDown/linkUp notifications carry this as one of
+# their varbinds (the "affected interface"). Same OID trap_service.py
+# uses to pull which port a linkDown/linkUp trap is actually about.
+IF_INDEX_VARBIND_OID = "1.3.6.1.2.1.2.2.1.1"
 
 
 def classify_trap(trap_oid_name: str) -> tuple[str, str]:

@@ -100,6 +100,14 @@ class Settings(BaseSettings):
     VICTORIAMETRICS_URL: str = "http://localhost:8428"
 
     SLACK_WEBHOOK_URL: str | None = None
+
+    # Master switch for outbound remote-syslog forwarding (see
+    # app.services.syslog_forward_service / app.models.syslog_destination).
+    # Per-destination enabled/disabled + severity filtering happens on top
+    # of this; this flag exists so forwarding can be killed fleet-wide
+    # without touching every configured destination row (e.g. during an
+    # incident where a collector is the thing that's down).
+    SYSLOG_FORWARDING_ENABLED: bool = True
     TEAMS_WEBHOOK_URL: str | None = None
 
     # Two-way ChatOps (FR: approve/reject a change request, trigger a
@@ -431,6 +439,32 @@ class Settings(BaseSettings):
     SFLOW_LISTENER_ENABLED: bool = True
     SFLOW_UDP_HOST: str = "0.0.0.0"
     SFLOW_UDP_PORT: int = 6343
+
+    # SNMP trap receiving -- linkDown/linkUp/coldStart/etc. traps arrive
+    # unsolicited, in real time, instead of waiting for the next
+    # SNMP_POLL_INTERVAL_SECONDS poll to notice the same thing. This is
+    # what gets "port went down" from a worst-case 60s poll-driven delay
+    # down to sub-second. Default port 1620, not the standard 162, for
+    # the same reason SYSLOG_UDP_PORT isn't 514 -- binds without root/
+    # CAP_NET_BIND_SERVICE in a normal container. Point real devices'
+    # `snmp-server host <this ip> version 2c <community>` (or the
+    # equivalent Junos/EOS trap-target config) at 1620, or front it with
+    # a relay/port-forward to 162 if the deployment needs the standard
+    # port. See app.services.trap_service.start_trap_listener.
+    SNMP_TRAP_LISTENER_ENABLED: bool = True
+    SNMP_TRAP_UDP_HOST: str = "0.0.0.0"
+    SNMP_TRAP_UDP_PORT: int = 1620
+    # Comma-separated list of SNMPv1/v2c community strings this receiver
+    # accepts traps under. Deliberately separate from any single
+    # device's configured polling community (Device.snmp_version /
+    # credential_service) -- fleets very commonly use a shared trap
+    # community across every device regardless of each device's own
+    # polling credentials, and pysnmp's trap receiver validates the
+    # community in the packet itself rather than per-source-device, so
+    # there's no clean way to reuse per-device polling creds here
+    # anyway. "public" is the near-universal vendor default for trap
+    # destinations; add the real one(s) in production.
+    SNMP_TRAP_COMMUNITIES: str = "public"
 
     # --- gNMI streaming telemetry (dial-in, alongside SNMP polling) ---
     # Unlike NetFlow/sFlow above (devices dial *out* to us on a fixed

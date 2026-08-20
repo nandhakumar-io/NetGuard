@@ -182,13 +182,88 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
     alert_rule_engine.evaluate_rules(db, device, metrics)
 
 
+def record_interface_transition(
+    db: Session, device: Device, *, if_index: str, if_descr: str, is_up: bool, source: str = AlertSource.HEALTH_POLL
+) -> bool:
+    """Writes an InterfaceStatus transition row (if the status actually
+    changed since the last known reading) and raises/auto-resolves the
+    per-port "Interface Down" alert -- the shared core of interface
+    up/down handling, extracted so a trap-driven transition
+    (app.services.trap_service, source=AlertSource.SNMP_TRAP) goes
+    through the exact same alert-dedup/notify path as a poll-driven one
+    (_sync_interface_status below) instead of a parallel, easy-to-drift
+    implementation. Returns True if this call recorded a real
+    transition (status differed from the latest row on file), False if
+    it was a no-op repeat of the already-known state.
+    """
+    new_status = InterfaceOperStatus.DOWN if not is_up else InterfaceOperStatus.UP
+
+    latest = (
+        db.query(InterfaceStatus)
+        .filter(InterfaceStatus.device_id == device.id, InterfaceStatus.if_index == if_index)
+        .order_by(InterfaceStatus.changed_at.desc())
+        .first()
+    )
+
+    if latest is not None and latest.status == new_status:
+        return False
+
+    db.add(
+        InterfaceStatus(
+            device_id=device.id,
+            if_index=if_index,
+            if_descr=if_descr,
+            status=new_status,
+            previous_status=latest.status if latest is not None else None,
+        )
+    )
+
+    category = f"Interface Down: {if_descr}"
+
+    alert_config = (
+        db.query(InterfaceAlertConfig)
+        .filter(InterfaceAlertConfig.device_id == device.id, InterfaceAlertConfig.if_descr == if_descr)
+        .first()
+    )
+    alerts_enabled = alert_config.enabled if alert_config is not None else True
+
+    if new_status == InterfaceOperStatus.DOWN:
+        if alerts_enabled:
+            uplink_tag = " [WAN/UPLINK]" if device.is_uplink else ""
+            alert, is_new = alert_service.raise_alert(
+                db,
+                device_id=device.id,
+                severity="critical",
+                source=source,
+                category=category,
+                message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
+            )
+            if is_new:
+                notification_service.notify(
+                    event="Interface Down",
+                    message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
+                    severity="critical",
+                )
+    elif latest is not None:
+        alert_service.auto_resolve(
+            db,
+            device_id=device.id,
+            category=category,
+            note=f"{device.hostname}: interface {if_descr} is back up",
+        )
+    return True
+
+
 def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) -> None:
     """Diffs this poll's per-interface oper status against the latest
     known InterfaceStatus row for each (device, ifIndex) and, on a real
     change, writes a new history row plus raises/auto-resolves the
     per-port "Interface Down" alert -- the NOC-dashboard-facing half of
     port monitoring (the other half, walking the SNMP table itself, is
-    snmp_service.walk_interface_stats).
+    snmp_service.walk_interface_stats). See record_interface_transition
+    above for the actual write/alert logic, shared with the trap-driven
+    path (app.services.trap_service) so a linkDown trap and a poll that
+    independently notices the same down port behave identically.
 
     Category is scoped to the specific interface (f"Interface Down:
     {descr}") rather than a single shared "Interface Down" category per
@@ -202,81 +277,8 @@ def _sync_interface_status(db: Session, device: Device, metrics: SnmpMetrics) ->
     for entry in metrics.per_interface:
         if_index = str(entry.get("if_index"))
         if_descr = entry.get("if_descr") or f"if{if_index}"
-        new_status = InterfaceOperStatus.DOWN if entry.get("status") == "down" else InterfaceOperStatus.UP
-
-        latest = (
-            db.query(InterfaceStatus)
-            .filter(InterfaceStatus.device_id == device.id, InterfaceStatus.if_index == if_index)
-            .order_by(InterfaceStatus.changed_at.desc())
-            .first()
-        )
-
-        if latest is not None and latest.status == new_status:
-            # No change -- don't spam a new history row every poll, just
-            # keep whatever description we last saw (ifDescr essentially
-            # never changes poll-to-poll, but stay defensive).
-            continue
-
-        db.add(
-            InterfaceStatus(
-                device_id=device.id,
-                if_index=if_index,
-                if_descr=if_descr,
-                status=new_status,
-                previous_status=latest.status if latest is not None else None,
-            )
-        )
-
-        category = f"Interface Down: {if_descr}"
-
-        # Per-interface opt-out (see InterfaceAlertConfig) -- history is
-        # still recorded above regardless, so flap timelines/topology
-        # stay complete even for muted ports; only the critical alert +
-        # notification are suppressed. No row for this (device, if_descr)
-        # means the implicit default (enabled) applies.
-        alert_config = (
-            db.query(InterfaceAlertConfig)
-            .filter(InterfaceAlertConfig.device_id == device.id, InterfaceAlertConfig.if_descr == if_descr)
-            .first()
-        )
-        alerts_enabled = alert_config.enabled if alert_config is not None else True
-
-        if new_status == InterfaceOperStatus.DOWN:
-            # A device's very first-ever poll finding a port already down
-            # still alerts (there's nothing "newly down" to compare
-            # against, but an operationally-down port is worth surfacing
-            # regardless of whether we caught the actual transition).
-            if alerts_enabled:
-                # A down port on a device flagged as a WAN/uplink (see
-                # Device.is_uplink) is flagged distinctly in the message
-                # -- same critical severity as any other down port (this
-                # already pages), but the label makes it obvious at a
-                # glance in Alert Center / notifications that this is a
-                # site-affecting uplink, not an access port.
-                uplink_tag = " [WAN/UPLINK]" if device.is_uplink else ""
-                alert, is_new = alert_service.raise_alert(
-                    db,
-                    device_id=device.id,
-                    severity="critical",
-                    source=AlertSource.HEALTH_POLL,
-                    category=category,
-                    message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
-                )
-                if is_new:
-                    notification_service.notify(
-                        event="Interface Down",
-                        message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
-                        severity="critical",
-                    )
-        elif latest is not None:
-            # Only auto-resolve on a genuine down->up recovery, not on the
-            # very first poll ever seeing this port (nothing to clear).
-            alert_service.auto_resolve(
-                db,
-                device_id=device.id,
-                category=category,
-                note=f"{device.hostname}: interface {if_descr} is back up",
-            )
+        is_up = entry.get("status") != "down"
+        record_interface_transition(db, device, if_index=if_index, if_descr=if_descr, is_up=is_up)
 
 
 def _sync_interface_metrics(db: Session, device: Device, metrics: SnmpMetrics, poll_interval_seconds: float) -> None:

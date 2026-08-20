@@ -9,17 +9,26 @@ listener both funnel through the same ingest_message().
 import datetime
 import uuid
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles
 from app.models.device import Device
+from app.models.syslog_destination import SyslogDestination
 from app.models.syslog_message import SyslogMessage, SyslogSeverity
+from app.models.user import UserRole
 from app.schemas.syslog import SyslogIngestRequest, SyslogMessageRead, SyslogSummary
-from app.services import syslog_service
+from app.schemas.syslog_destination import (
+    SyslogDestinationCreate,
+    SyslogDestinationRead,
+    SyslogDestinationUpdate,
+)
+from app.services import syslog_forward_service, syslog_service
 
 router = APIRouter(prefix="/syslog", tags=["syslog"])
+
+_admin_only = require_roles(UserRole.NETWORK_ADMIN)
 
 
 def _to_read(row: SyslogMessage, hostname: str | None) -> SyslogMessageRead:
@@ -120,3 +129,76 @@ def ingest_syslog_message(
     msg = syslog_service.ingest_message(db, source_ip=source_ip, raw=body.raw)
     device = db.get(Device, msg.device_id) if msg.device_id else None
     return _to_read(msg, device.hostname if device else None)
+
+
+# --- Remote syslog forwarding destinations --------------------------------
+#
+# NOC teams typically forward everything NetGuard alerts on into a central
+# SIEM/log collector (Splunk, Graylog, rsyslog relay) on top of Slack/
+# email/webhooks. Restricted to NETWORK_ADMIN for writes since a
+# destination can be pointed at an arbitrary host:port on the network --
+# same access bar as webhook endpoint management.
+
+
+@router.get("/destinations", response_model=list[SyslogDestinationRead])
+def list_syslog_destinations(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    return db.query(SyslogDestination).order_by(SyslogDestination.created_at.desc()).all()
+
+
+@router.post("/destinations", response_model=SyslogDestinationRead)
+def create_syslog_destination(
+    body: SyslogDestinationCreate,
+    db: Session = Depends(get_db),
+    user=Depends(_admin_only),
+):
+    dest = SyslogDestination(**body.model_dump(), created_by=getattr(user, "email", None))
+    db.add(dest)
+    db.commit()
+    db.refresh(dest)
+    return dest
+
+
+@router.patch("/destinations/{destination_id}", response_model=SyslogDestinationRead)
+def update_syslog_destination(
+    destination_id: uuid.UUID,
+    body: SyslogDestinationUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(_admin_only),
+):
+    dest = db.get(SyslogDestination, destination_id)
+    if not dest:
+        raise HTTPException(status_code=404, detail="Syslog destination not found")
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(dest, field, value)
+    db.commit()
+    db.refresh(dest)
+    return dest
+
+
+@router.delete("/destinations/{destination_id}")
+def delete_syslog_destination(
+    destination_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _=Depends(_admin_only),
+):
+    dest = db.get(SyslogDestination, destination_id)
+    if not dest:
+        raise HTTPException(status_code=404, detail="Syslog destination not found")
+    db.delete(dest)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/destinations/{destination_id}/test")
+def test_syslog_destination(
+    destination_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _=Depends(_admin_only),
+):
+    dest = db.get(SyslogDestination, destination_id)
+    if not dest:
+        raise HTTPException(status_code=404, detail="Syslog destination not found")
+    ok, err = syslog_forward_service.send_test_message(db, dest)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"Test message failed: {err}")
+    return {"ok": True}

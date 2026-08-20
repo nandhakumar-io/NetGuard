@@ -390,6 +390,42 @@ def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: 
         db.close()
 
 
+def _fan_out_push(event: str, message: str, severity: str) -> None:
+    """Push to every enabled mobile/browser subscription via
+    app.services.push_service (ntfy / Pushover / browser Web Push) --
+    this was fully built (registration UI, delivery for all three
+    providers, per-subscription severity filtering) but notify() never
+    actually called it, so nothing ever reached a registered phone no
+    matter how a subscription was configured. Same best-effort contract
+    as every other channel here: never raises, never blocks the caller.
+    """
+    from app.services import push_service
+
+    db = SessionLocal()
+    try:
+        push_service.send_push(db, title=f"NetGuard — {event}", message=message, severity=severity)
+    except Exception:
+        logger.warning("Failed to fan out push notifications", exc_info=True)
+    finally:
+        db.close()
+
+
+def _fan_out_syslog(event: str, message: str, severity: str) -> None:
+    """Forwards to every enabled RemoteSyslogDestination via
+    app.services.syslog_forward_service. Same best-effort contract as
+    every other channel here: never raises, never blocks the caller.
+    """
+    from app.services import syslog_forward_service
+
+    db = SessionLocal()
+    try:
+        syslog_forward_service.fan_out(db, event, message, severity)
+    except Exception:
+        logger.warning("Failed to fan out remote syslog forwarding", exc_info=True)
+    finally:
+        db.close()
+
+
 def notify(
     event: str,
     message: str,
@@ -424,6 +460,12 @@ def notify(
 
     # User-configured webhooks (DB-based)
     _fan_out_user_webhooks(event, message, severity, event_type)
+
+    # Mobile/browser push (ntfy, Pushover, Web Push)
+    _fan_out_push(event, message, severity)
+
+    # Remote syslog collectors (Splunk, Graylog, rsyslog, SIEM, ...)
+    _fan_out_syslog(event, message, severity)
 
     _persist_and_broadcast(
         event_type=event_type,

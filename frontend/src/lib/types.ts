@@ -1583,6 +1583,23 @@ export interface NotificationTestResult {
 
 export type WebhookType = "generic" | "slack" | "teams" | "telegram";
 
+export interface SyslogDestination {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  protocol: "udp" | "tcp";
+  facility: number;
+  min_severity: "info" | "warning" | "critical";
+  use_rfc5424: boolean;
+  enabled: boolean;
+  created_by: string | null;
+  created_at: string | null;
+  last_sent_at: string | null;
+  last_error: string | null;
+  last_error_at: string | null;
+}
+
 export interface WebhookEndpoint {
   id: string;
   name: string;

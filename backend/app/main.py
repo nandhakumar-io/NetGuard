@@ -16,6 +16,7 @@ logger = logging.getLogger("netguard.snmp_inprocess")
 
 _snmp_poll_loop_task: asyncio.Task | None = None
 _syslog_transport = None  # asyncio.DatagramTransport | None -- see app.services.syslog_service
+_trap_transport = None  # asyncio.DatagramTransport | None -- see app.services.trap_service
 _flow_transport = None  # asyncio.DatagramTransport | None -- see app.services.flow_service (NetFlow/IPFIX)
 _sflow_transport = None  # asyncio.DatagramTransport | None -- see app.services.flow_service (sFlow)
 _topology_snapshot_loop_task: asyncio.Task | None = None
@@ -165,6 +166,14 @@ async def lifespan(app: FastAPI):
             host=settings.SYSLOG_UDP_HOST, port=settings.SYSLOG_UDP_PORT
         )
 
+    global _trap_transport
+    if settings.SNMP_TRAP_LISTENER_ENABLED and _trap_transport is None:
+        from app.services import trap_service
+
+        _trap_transport = await trap_service.start_trap_listener(
+            host=settings.SNMP_TRAP_UDP_HOST, port=settings.SNMP_TRAP_UDP_PORT
+        )
+
     global _flow_transport
     if settings.NETFLOW_LISTENER_ENABLED and _flow_transport is None:
         from app.services import flow_service
@@ -203,6 +212,10 @@ async def lifespan(app: FastAPI):
     if _syslog_transport is not None:
         _syslog_transport.close()
         _syslog_transport = None
+
+    if _trap_transport is not None:
+        _trap_transport.close()
+        _trap_transport = None
 
     if _flow_transport is not None:
         _flow_transport.close()

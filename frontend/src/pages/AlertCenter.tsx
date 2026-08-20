@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../lib/api";
-import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry } from "../lib/types";
+import { Alert, AlertSummary, AlertRule, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry, PushSubscription } from "../lib/types";
 import { useToast, errorMessage } from "../lib/toast";
 import { useConfirm } from "../lib/confirm";
 import SavedViews from "../components/SavedViews";
@@ -56,7 +56,7 @@ const METRIC_LABELS: Record<string, string> = {
   interface_errors: "Interface Errors", interface_down_count: "Interfaces Down", fan_failure: "Fan Failure", power_supply_failure: "PSU Failure",
 };
 
-type Tab = "alerts" | "rules" | "escalations" | "webhooks";
+type Tab = "alerts" | "rules" | "escalations" | "webhooks" | "push";
 
 export default function AlertCenter() {
   const navigate = useNavigate();
@@ -105,6 +105,13 @@ export default function AlertCenter() {
   // Webhooks state
   const [webhooks, setWebhooks] = useState<WebhookEndpoint[]>([]);
   const [webhooksLoading, setWebhooksLoading] = useState(false);
+
+  // Push subscriptions state (read-only summary here -- full CRUD stays
+  // on /push-settings, this tab is just "can alerts actually reach a
+  // phone" visibility from the same place alerts/webhooks live).
+  const [pushSubs, setPushSubs] = useState<PushSubscription[]>([]);
+  const [pushLoading, setPushLoading] = useState(false);
+  const [pushTestingId, setPushTestingId] = useState<string | null>(null);
   const [showWebhookForm, setShowWebhookForm] = useState(false);
   const [editingWebhook, setEditingWebhook] = useState<WebhookEndpoint | null>(null);
   const [webhookForm, setWebhookForm] = useState({ name: "", url: "", webhook_type: "generic", secret: "", telegram_chat_id: "", events: "" });
@@ -162,6 +169,11 @@ export default function AlertCenter() {
     api.get<WebhookEndpoint[]>("/webhooks").then((res) => setWebhooks(res.data)).catch(() => {}).finally(() => setWebhooksLoading(false));
   }, []);
 
+  const fetchPushSubs = useCallback(() => {
+    setPushLoading(true);
+    api.get<PushSubscription[]>("/push-subscriptions").then((res) => setPushSubs(res.data)).catch(() => {}).finally(() => setPushLoading(false));
+  }, []);
+
   const fetchPolicies = useCallback(() => {
     setPoliciesLoading(true);
     Promise.all([
@@ -186,7 +198,8 @@ export default function AlertCenter() {
     if (tab === "rules") fetchRules();
     if (tab === "webhooks") fetchWebhooks();
     if (tab === "escalations") fetchPolicies();
-  }, [tab, fetchRules, fetchWebhooks, fetchPolicies]);
+    if (tab === "push") fetchPushSubs();
+  }, [tab, fetchRules, fetchWebhooks, fetchPolicies, fetchPushSubs]);
 
   // WebSocket for realtime
   useEffect(() => {
@@ -506,6 +519,19 @@ export default function AlertCenter() {
     } catch (err) {
       toast.error(errorMessage(err, "Failed to delete webhook endpoint."));
       // Best-effort; the surrounding list/table stays on its last good state.
+    }
+  };
+
+  const handleTestPush = async (id: string) => {
+    setPushTestingId(id);
+    try {
+      const res = await api.post<{ sent: boolean; message: string }>(`/push-subscriptions/${id}/test`);
+      if (res.data.sent) toast.success(res.data.message || "Test push sent.");
+      else toast.error(res.data.message || "Test push failed to send.");
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to send test push."));
+    } finally {
+      setPushTestingId(null);
     }
   };
 
@@ -1680,6 +1706,77 @@ export default function AlertCenter() {
                       )}
                     </div>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== PUSH TAB ===== */}
+      {tab === "push" && (
+        <div className="mt-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-5">
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-navy dark:text-white">Push Notifications</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                Alerts are pushed to every enabled device below via ntfy, Pushover, or browser Web Push --
+                critical alerts always go out; devices opt in individually to warning/info as well.
+              </p>
+            </div>
+            <button
+              onClick={() => navigate("/push-settings")}
+              className="shrink-0 text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-3 py-2 rounded-lg"
+            >
+              + Add / Manage Devices
+            </button>
+          </div>
+
+          {pushLoading ? (
+            <p className="text-xs text-slate-500 dark:text-slate-400">Loading…</p>
+          ) : pushSubs.length === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                No devices registered yet -- critical alerts won't reach a phone until one is added.
+              </p>
+              <button
+                onClick={() => navigate("/push-settings")}
+                className="mt-3 text-xs font-bold uppercase tracking-wider text-white bg-brandblue hover:bg-navy px-3 py-2 rounded-lg"
+              >
+                Register a Device
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {pushSubs.map((sub) => (
+                <div
+                  key={sub.id}
+                  className="flex items-center justify-between gap-3 p-3 rounded-lg border border-slate-200 dark:border-slate-700"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-navy dark:text-white truncate">{sub.label}</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">
+                        {sub.provider}
+                      </span>
+                      {!sub.enabled && (
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-riskcrit bg-red-50 px-1.5 py-0.5 rounded">
+                          Disabled
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      {sub.include_non_critical ? "Critical, warning & info" : "Critical alerts only"} · Last push:{" "}
+                      {sub.last_pushed_at ? new Date(sub.last_pushed_at).toLocaleString() : "Never"}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleTestPush(sub.id)}
+                    disabled={pushTestingId === sub.id || !sub.enabled}
+                    className="shrink-0 text-xs font-bold uppercase tracking-wider text-brandblue border border-brandblue px-2.5 py-1 rounded-lg disabled:opacity-40"
+                  >
+                    {pushTestingId === sub.id ? "Sending…" : "Test"}
+                  </button>
                 </div>
               ))}
             </div>

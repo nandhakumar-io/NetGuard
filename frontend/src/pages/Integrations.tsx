@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useConfirm } from "../lib/confirm";
 import { useToast } from "../lib/toast";
-import { NotificationSettings, NotificationTestResult, WebhookEndpoint, WebhookTestResult } from "../lib/types";
+import { NotificationSettings, NotificationTestResult, SyslogDestination, WebhookEndpoint, WebhookTestResult } from "../lib/types";
 
 // --- Types (kept local -- these features are small enough not to warrant
 // new entries in lib/types.ts's shared type set) -----------------------
@@ -111,7 +111,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-type IntegrationTabId = "chatops" | "notifications" | "gitops";
+type IntegrationTabId = "chatops" | "notifications" | "syslog" | "gitops";
 
 const INTEGRATION_TABS: { id: IntegrationTabId; label: string; blurb: string; icon: React.ReactNode }[] = [
   {
@@ -131,6 +131,16 @@ const INTEGRATION_TABS: { id: IntegrationTabId; label: string; blurb: string; ic
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" />
+      </svg>
+    ),
+  },
+  {
+    id: "syslog",
+    label: "Remote Syslog",
+    blurb: "Forward to SIEM/collector",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="2" y="4" width="20" height="16" rx="2" /><path d="M2 8h20M6 12h.01M6 16h.01" />
       </svg>
     ),
   },
@@ -193,6 +203,9 @@ export default function IntegrationsPage() {
       </div>
       <div className={tab === "notifications" ? "flex flex-col gap-8" : "hidden"}>
         <AlertNotificationsSection canManage={canManage} />
+      </div>
+      <div className={tab === "syslog" ? "flex flex-col gap-8" : "hidden"}>
+        <RemoteSyslogSection canManage={canManage} />
       </div>
       <div className={tab === "gitops" ? "flex flex-col gap-8" : "hidden"}>
         <GitOpsSection canManage={canManage} />
@@ -754,6 +767,249 @@ function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
             </form>
           )}
         </div>
+      </div>
+    </Panel>
+  );
+}
+
+const emptySyslogDestForm = {
+  name: "",
+  host: "",
+  port: "514",
+  protocol: "udp" as "udp" | "tcp",
+  facility: "16",
+  min_severity: "info" as "info" | "warning" | "critical",
+  use_rfc5424: false,
+  enabled: true,
+};
+
+function RemoteSyslogSection({ canManage }: { canManage: boolean }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+
+  const [dests, setDests] = useState<SyslogDestination[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptySyslogDestForm);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    api
+      .get<SyslogDestination[]>("/syslog/destinations")
+      .then((res) => setDests(res.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  const openAdd = () => {
+    setEditingId(null);
+    setForm(emptySyslogDestForm);
+    setFormError(null);
+    setShowForm(true);
+  };
+
+  const openEdit = (d: SyslogDestination) => {
+    setEditingId(d.id);
+    setForm({
+      name: d.name,
+      host: d.host,
+      port: String(d.port),
+      protocol: d.protocol,
+      facility: String(d.facility),
+      min_severity: d.min_severity,
+      use_rfc5424: d.use_rfc5424,
+      enabled: d.enabled,
+    });
+    setFormError(null);
+    setShowForm(true);
+  };
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setFormError(null);
+    const payload = {
+      name: form.name,
+      host: form.host,
+      port: Number(form.port) || 514,
+      protocol: form.protocol,
+      facility: Number(form.facility) || 16,
+      min_severity: form.min_severity,
+      use_rfc5424: form.use_rfc5424,
+      enabled: form.enabled,
+    };
+    try {
+      if (editingId) {
+        await api.patch(`/syslog/destinations/${editingId}`, payload);
+        toast.success("Syslog destination updated.");
+      } else {
+        await api.post("/syslog/destinations", payload);
+        toast.success("Remote syslog destination added — alert events will now forward there.");
+      }
+      setShowForm(false);
+      load();
+    } catch (err: any) {
+      setFormError(err?.response?.data?.detail || "Failed to save syslog destination.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (d: SyslogDestination) => {
+    if (!(await confirm({ title: "Remove syslog destination?", body: `Alert events will stop forwarding to ${d.name} (${d.host}:${d.port}).`, confirmLabel: "Remove" }))) return;
+    try {
+      await api.delete(`/syslog/destinations/${d.id}`);
+      toast.success("Syslog destination removed.");
+      load();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to remove syslog destination.");
+    }
+  };
+
+  const test = async (d: SyslogDestination) => {
+    setTestingId(d.id);
+    try {
+      await api.post(`/syslog/destinations/${d.id}/test`);
+      toast.success(`Test message sent to ${d.name}.`);
+      load();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Test message failed to send.");
+      load();
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  return (
+    <Panel>
+      <div className="p-5 flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-700">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-lg bg-blue-600/10 dark:bg-blue-400/10 border border-blue-600/25 dark:border-blue-400/25 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="4" width="20" height="16" rx="2" /><path d="M2 8h20M6 12h.01M6 16h.01" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-lg font-bold text-navy dark:text-slate-100">Remote Syslog Forwarding</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
+              Forward every NetGuard alert/event (same fan-out as email, Slack, Teams, and webhooks) to an
+              external syslog collector — Splunk, Graylog, an rsyslog relay, or a SIEM ingest point — over
+              UDP or TCP, in RFC 3164 or RFC 5424 framing.
+            </p>
+          </div>
+        </div>
+        {canManage && (
+          <button onClick={openAdd} className="shrink-0 text-xs font-bold text-blue-600 dark:text-blue-400 hover:brightness-110">
+            + Add destination
+          </button>
+        )}
+      </div>
+
+      <div className="p-5">
+        {loading ? (
+          <p className="text-xs text-slate-400 dark:text-slate-500">Loading…</p>
+        ) : dests.length === 0 ? (
+          <p className="text-xs text-slate-400 dark:text-slate-500">No remote syslog destinations configured yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-slate-400 dark:text-slate-500 uppercase tracking-wider text-[10px]">
+                  <th className="pb-2 pr-3">Name</th>
+                  <th className="pb-2 pr-3">Target</th>
+                  <th className="pb-2 pr-3">Min severity</th>
+                  <th className="pb-2 pr-3">Format</th>
+                  <th className="pb-2 pr-3">Status</th>
+                  <th className="pb-2 pr-3">Last sent</th>
+                  <th className="pb-2"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {dests.map((d) => (
+                  <tr key={d.id}>
+                    <td className="py-2 pr-3 font-bold text-navy dark:text-slate-100">{d.name}</td>
+                    <td className="py-2 pr-3 font-mono text-slate-600 dark:text-slate-400">
+                      {d.host}:{d.port} <span className="uppercase text-slate-400 dark:text-slate-500">({d.protocol})</span>
+                    </td>
+                    <td className="py-2 pr-3 capitalize text-slate-600 dark:text-slate-400">{d.min_severity}</td>
+                    <td className="py-2 pr-3 text-slate-600 dark:text-slate-400">{d.use_rfc5424 ? "RFC 5424" : "RFC 3164"}</td>
+                    <td className="py-2 pr-3">
+                      {!d.enabled ? (
+                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">Disabled</span>
+                      ) : d.last_error ? (
+                        <span title={d.last_error} className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-600/10 dark:bg-red-400/10 text-red-600 dark:text-red-400">Error</span>
+                      ) : (
+                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-600/10 dark:bg-emerald-400/10 text-emerald-600 dark:text-emerald-400">Enabled</span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-500 dark:text-slate-400">{d.last_sent_at ? new Date(d.last_sent_at).toLocaleString() : "—"}</td>
+                    <td className="py-2 text-right whitespace-nowrap">
+                      <button onClick={() => test(d)} disabled={testingId === d.id} className="text-blue-600 dark:text-blue-400 hover:brightness-110 font-bold mr-3 disabled:opacity-50">
+                        {testingId === d.id ? "Testing…" : "Test"}
+                      </button>
+                      {canManage && (
+                        <>
+                          <button onClick={() => openEdit(d)} className="text-slate-500 dark:text-slate-400 hover:text-navy dark:hover:text-slate-100 font-bold mr-3">Edit</button>
+                          <button onClick={() => remove(d)} className="text-red-600 dark:text-red-400 hover:brightness-110 font-bold">Remove</button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {showForm && canManage && (
+          <form onSubmit={save} className="mt-4 border border-slate-200 dark:border-slate-700 rounded-lg p-4 flex flex-col gap-3 max-w-lg">
+            <h3 className="text-sm font-bold text-navy dark:text-slate-100">{editingId ? "Edit destination" : "Add remote syslog destination"}</h3>
+            <input placeholder="Name (e.g. Splunk Prod)" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400" />
+            <div className="grid grid-cols-3 gap-2">
+              <input placeholder="Host / IP" value={form.host} onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))} className="col-span-2 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400" />
+              <input placeholder="Port" value={form.port} onChange={(e) => setForm((f) => ({ ...f, port: e.target.value }))} className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400" />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <select value={form.protocol} onChange={(e) => setForm((f) => ({ ...f, protocol: e.target.value as "udp" | "tcp" }))} className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400">
+                <option value="udp">UDP</option>
+                <option value="tcp">TCP</option>
+              </select>
+              <select value={form.min_severity} onChange={(e) => setForm((f) => ({ ...f, min_severity: e.target.value as any }))} className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400">
+                <option value="info">Min severity: Info</option>
+                <option value="warning">Min severity: Warning</option>
+                <option value="critical">Min severity: Critical</option>
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-2 items-center">
+              <input placeholder="Facility (0-23, default 16)" value={form.facility} onChange={(e) => setForm((f) => ({ ...f, facility: e.target.value }))} className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400" />
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
+                <input type="checkbox" checked={form.use_rfc5424} onChange={(e) => setForm((f) => ({ ...f, use_rfc5424: e.target.checked }))} className="accent-blue-600 dark:accent-blue-400" />
+                Use RFC 5424 framing
+              </label>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
+              <input type="checkbox" checked={form.enabled} onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))} className="accent-blue-600 dark:accent-blue-400" />
+              Enabled
+            </label>
+
+            {formError && <p className="text-red-600 dark:text-red-400 text-xs">{formError}</p>}
+
+            <div className="flex gap-2">
+              <button type="submit" disabled={saving || !form.name || !form.host} className="bg-blue-600 dark:bg-blue-400 text-slate-50 dark:text-slate-950 rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50">
+                {saving ? "Saving…" : editingId ? "Save changes" : "Add destination"}
+              </button>
+              <button type="button" onClick={() => setShowForm(false)} className="border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 rounded-md px-4 py-2 text-xs font-bold hover:border-blue-600 dark:hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 transition">
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </Panel>
   );
