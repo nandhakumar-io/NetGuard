@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import decode_access_token
+from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
 
 # was:  tokenUrl="auth/login"
@@ -33,6 +34,19 @@ def get_current_user(
             raise credentials_exception
     except JWTError:
         raise credentials_exception
+
+    # Tokens issued alongside a session (see _issue_token_pair) carry that
+    # session's RefreshToken row id as `sid`. If the session has since been
+    # revoked -- Security > Active Sessions > Revoke, or "sign out of all
+    # other sessions" -- this still-unexpired access token must stop
+    # working immediately rather than staying valid until it naturally
+    # expires. Tokens with no `sid` (e.g. the one-off token /auth/register
+    # returns before any refresh token exists) skip this check.
+    sid = payload.get("sid")
+    if sid:
+        session = db.get(RefreshToken, sid)
+        if session is None or session.revoked:
+            raise credentials_exception
 
     user = db.query(User).filter(User.email == email).first()
     if user is None:

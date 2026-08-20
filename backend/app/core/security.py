@@ -51,12 +51,24 @@ def _create_token(subject: str, token_type: str, expires_delta: timedelta, extra
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_access_token(subject: str, role: str, expires_minutes: int | None = None) -> str:
+def create_access_token(
+    subject: str, role: str, expires_minutes: int | None = None, session_id: str | None = None
+) -> str:
+    """`session_id`, when given, is the id of the RefreshToken row this
+    access token was issued alongside (see _issue_token_pair). Carried as
+    the `sid` claim so get_current_user can check on every request whether
+    that session has since been revoked (Security > Active Sessions ->
+    Revoke) -- without it, revoking a session had no effect until the
+    already-issued access token happened to expire on its own.
+    """
+    extra_claims = {"role": role}
+    if session_id:
+        extra_claims["sid"] = session_id
     return _create_token(
         subject,
         token_type="access",
         expires_delta=timedelta(minutes=expires_minutes or settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-        extra_claims={"role": role},
+        extra_claims=extra_claims,
     )
 
 

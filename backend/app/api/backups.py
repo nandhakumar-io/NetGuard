@@ -84,6 +84,7 @@ def list_backups(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
     """Archive history plus the summary stat-card figures the Backups page
     header shows (total/completed/failed counts, total bytes stored
     locally across completed rows)."""
+    backup_service._reconcile_stuck_jobs(db)
     jobs = db.query(BackupJob).order_by(BackupJob.started_at.desc()).all()
     completed = [j for j in jobs if j.status == "completed"]
     failed = [j for j in jobs if j.status == "failed"]

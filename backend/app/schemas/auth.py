@@ -84,3 +84,6 @@ class SessionRead(BaseModel):
     created_at: datetime
     expires_at: datetime
     current: bool = False
+    device: str | None = None
+    ip_address: str | None = None
+    location: str | None = None

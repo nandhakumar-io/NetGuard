@@ -80,6 +80,7 @@ export default function PushSettings() {
   const [saving, setSaving] = useState(false);
 
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [testingForm, setTestingForm] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
 
@@ -141,6 +142,26 @@ export default function PushSettings() {
       setFormError(extractErrorMessage(err, "Could not save this subscription."));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTestForm = async () => {
+    setFormError(null);
+    setTestingForm(true);
+    try {
+      const res = await api.post<{ sent: boolean; message: string }>("/push-subscriptions/test-target", {
+        provider: form.provider,
+        target: form.target,
+      });
+      if (res.data.sent) {
+        toast.success(res.data.message);
+      } else {
+        toast.error(res.data.message);
+      }
+    } catch (err) {
+      setFormError(extractErrorMessage(err, "Failed to send test push."));
+    } finally {
+      setTestingForm(false);
     }
   };
 
@@ -367,21 +388,35 @@ export default function PushSettings() {
 
               {formError && <p className="text-sm text-red-600 dark:text-red-400">{formError}</p>}
 
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={closeForm}
-                  className="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-3 py-2 rounded-lg text-sm font-medium bg-brandblue text-white hover:bg-brandblue/90 disabled:opacity-50 transition-colors"
-                >
-                  {saving ? "Saving…" : editingId ? "Save changes" : "Add device"}
-                </button>
+              <div className="flex justify-between items-center gap-2 pt-2">
+                {form.provider !== "browser" ? (
+                  <button
+                    type="button"
+                    onClick={handleTestForm}
+                    disabled={testingForm || !form.target}
+                    className="px-3 py-2 rounded-lg text-sm font-medium text-brandblue border border-brandblue/30 hover:bg-brandblue/5 disabled:opacity-50 transition-colors"
+                  >
+                    {testingForm ? "Sending…" : "Send test"}
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={closeForm}
+                    className="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="px-3 py-2 rounded-lg text-sm font-medium bg-brandblue text-white hover:bg-brandblue/90 disabled:opacity-50 transition-colors"
+                  >
+                    {saving ? "Saving…" : editingId ? "Save changes" : "Add device"}
+                  </button>
+                </div>
               </div>
             </form>
           </div>

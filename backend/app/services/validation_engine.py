@@ -85,6 +85,13 @@ JUNOS_ALLOWED_COMMANDS = {
     "set", "delete", "deactivate", "activate", "annotate", "edit", "top",
     "commit", "exit", "rollback", "show", "insert", "rename", "copy",
     "protect", "unprotect", "wildcard",
+    # "configure" (enter configuration mode) is a no-op from a syntax
+    # standpoint -- it carries no hierarchy path to validate -- but it's
+    # how every real Junos change payload actually starts (it's also
+    # exactly what the New Change Request form's own placeholder text
+    # shows), so rejecting it as "unrecognized" failed validation on
+    # every change submitted in the conventional form.
+    "configure",
 }
 
 _IOS_LIKE_VENDORS = {"cisco", "arista"}

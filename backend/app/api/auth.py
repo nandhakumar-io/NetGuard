@@ -61,17 +61,54 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=REFRESH_COOKIE_NAME, path=_REFRESH_COOKIE_PATH)
 
 
-def _issue_token_pair(db: Session, user: User, response: Response, request: Request | None = None) -> Token:
-    access_token = create_access_token(subject=user.email, role=user.role.value)
+def _issue_token_pair(
+    db: Session,
+    user: User,
+    response: Response,
+    request: Request | None = None,
+    rotate_record: RefreshToken | None = None,
+) -> Token:
+    """Issues a fresh access/refresh pair.
 
+    `rotate_record`, when given, is the RefreshToken row being rotated by
+    POST /auth/refresh: it's updated in place (new hash, new expiry) rather
+    than being revoked with a brand-new row inserted alongside it. This
+    keeps a session's identity (its row id, and therefore its position in
+    Security > Active Sessions) stable across the silent refreshes every
+    page load triggers -- previously each one minted a new "session" for
+    the same browser/IP, so a handful of reloads made it look like several
+    different devices had logged in. login()/mfa_verify() never pass this
+    (a fresh login is legitimately a new session).
+
+    The access token carries the session row's id as `sid` so a revoked
+    session (DELETE /auth/sessions/{id}) stops authenticating immediately
+    instead of only once the access token would have expired anyway -- see
+    get_current_user's sid check.
+    """
     raw_refresh = generate_refresh_token()
-    db.add(RefreshToken(
-        user_id=user.id,
-        token_hash=hash_refresh_token(raw_refresh),
-        expires_at=refresh_token_expiry(),
-        user_agent=request.headers.get("user-agent") if request else None,
-        ip_address=session_device.client_ip(request) if request else None,
-    ))
+    user_agent = request.headers.get("user-agent") if request else None
+    ip_address = session_device.client_ip(request) if request else None
+
+    if rotate_record is not None:
+        rotate_record.token_hash = hash_refresh_token(raw_refresh)
+        rotate_record.expires_at = refresh_token_expiry()
+        rotate_record.revoked = False
+        # Refresh the device/IP fingerprint too -- a laptop that changed
+        # networks between refreshes should show its current IP, not the
+        # one it logged in from.
+        rotate_record.user_agent = user_agent
+        rotate_record.ip_address = ip_address
+        session_record = rotate_record
+    else:
+        session_record = RefreshToken(
+            user_id=user.id,
+            token_hash=hash_refresh_token(raw_refresh),
+            expires_at=refresh_token_expiry(),
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+        db.add(session_record)
+
     # Shared choke point for both the plain-password and post-MFA login
     # paths (login() and mfa_verify() both end here), so this is the one
     # place that needs to stamp "last login" rather than duplicating it in
@@ -79,6 +116,9 @@ def _issue_token_pair(db: Session, user: User, response: Response, request: Requ
     # app.api.user_management).
     user.last_login_at = datetime.utcnow()
     db.commit()
+    db.refresh(session_record)
+
+    access_token = create_access_token(subject=user.email, role=user.role.value, session_id=str(session_record.id))
 
     _set_refresh_cookie(response, raw_refresh)
     return Token(access_token=access_token)
@@ -237,14 +277,11 @@ def refresh(
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Refresh token invalid or expired, please log in again")
 
-    record.revoked = True
-    db.commit()
-
     user = db.get(User, record.user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
 
-    return _issue_token_pair(db, user, response, request)
+    return _issue_token_pair(db, user, response, request, rotate_record=record)
 
 
 @router.post("/logout", status_code=204)

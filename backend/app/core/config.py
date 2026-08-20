@@ -537,6 +537,21 @@ class Settings(BaseSettings):
     BACKUP_STORAGE_DIR: str = "./data/backups"
     BACKUP_RETENTION_DAYS: int = 30
     BACKUP_RETENTION_MIN_COUNT: int = 5
+    # How many completed backups _prune_old_backups keeps before deleting
+    # the oldest. Was referenced by backup_service._prune_old_backups
+    # without ever being declared here -- same "undeclared attribute ->
+    # AttributeError" trap as BACKUP_STORAGE_DIR above, just not yet
+    # caught since pruning only runs after a successful backup.
+    BACKUP_RETENTION_COUNT: int = 14
+    # Hard ceiling on how long a single pg_dump run is allowed to take
+    # before it's killed and the backup marked failed. Also referenced
+    # without being declared -- every backup attempt raised AttributeError
+    # the moment it reached the subprocess.run() call, before pg_dump even
+    # started, which (being neither FileNotFoundError, TimeoutExpired, nor
+    # CalledProcessError) escaped run_database_backup's except clauses
+    # entirely and left the BackupJob row stuck on status="running"
+    # forever with a raw 500 ("Failed to start backup") on the response.
+    BACKUP_PGDUMP_TIMEOUT_SECONDS: int = 300
 
     # Privileged terminal session recording (app.services.
     # session_recording_service, app.api.terminal): every interactive

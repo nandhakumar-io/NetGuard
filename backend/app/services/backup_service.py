@@ -87,6 +87,36 @@ def _prune_old_backups(db: Session) -> None:
     db.commit()
 
 
+def _reconcile_stuck_jobs(db: Session) -> None:
+    """Marks any BackupJob still "running" long after it should have
+    finished (2x the configured pg_dump timeout, as a safety margin) as
+    failed. Needed for jobs created before a crash that never reached
+    _fail_job/completion -- e.g. the AttributeError this module used to
+    raise on every run (see BACKUP_PGDUMP_TIMEOUT_SECONDS/
+    BACKUP_RETENTION_COUNT in app.core.config) left rows stuck on
+    "running" indefinitely, with no local process left to ever finish
+    them. Cheap (indexed status filter) so it's safe to call on every
+    GET /backups rather than needing a separate sweep job.
+    """
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        seconds=settings.BACKUP_PGDUMP_TIMEOUT_SECONDS * 2
+    )
+    stuck = db.query(BackupJob).filter(BackupJob.status == "running").all()
+    for job in stuck:
+        started_at = job.started_at
+        if started_at is None:
+            continue
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=datetime.timezone.utc)
+        if started_at < cutoff:
+            job.status = "failed"
+            job.error_message = "Backup did not complete (server likely restarted or crashed mid-run)."
+            job.completed_at = datetime.datetime.now(datetime.timezone.utc)
+            job.duration_seconds = int((job.completed_at - started_at).total_seconds())
+    if stuck:
+        db.commit()
+
+
 def run_database_backup(db: Session, *, triggered_by_email: str) -> BackupJob:
     """Runs pg_dump against the NetGuard application database, gzips the
     output, and records the result as a BackupJob row. Never raises for a
@@ -156,6 +186,18 @@ def run_database_backup(db: Session, *, triggered_by_email: str) -> BackupJob:
     except subprocess.CalledProcessError as exc:
         stderr_tail = (exc.stderr or b"").decode(errors="replace")[-1000:]
         _fail_job(db, job, dest_path, stderr_tail or "pg_dump exited with a non-zero status.")
+    except Exception as exc:  # noqa: BLE001 - deliberately broad: anything else
+        # (storage_dir not writable, disk full mid-gzip-write, a DB hiccup
+        # committing the "completed" row, etc.) must still resolve this job
+        # to "failed" rather than leave it stuck on "running" forever with
+        # nothing in the UI to explain why -- that's exactly what a narrower
+        # except list (pg_dump-specific errors only) was doing: an
+        # unanticipated exception here used to escape past this function
+        # entirely, bubble up as a raw 500 ("Failed to start backup" with no
+        # detail), and abandon the job row mid-flight since nothing ever
+        # flipped its status off "running".
+        logger.exception("Unexpected error during database backup")
+        _fail_job(db, job, dest_path, f"Unexpected error: {exc}")
 
     db.refresh(job)
     return job

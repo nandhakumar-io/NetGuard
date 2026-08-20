@@ -81,6 +81,16 @@ def _validate_outbound_url(url: str, label: str = "URL") -> None:
         infos = socket.getaddrinfo(parsed.host, None)
     except socket.gaierror as exc:
         raise HTTPException(status_code=422, detail=f"Could not resolve {label.lower()} host: {exc}")
+    except OSError as exc:
+        # Broader than gaierror alone: some environments (restricted
+        # egress, no DNS resolver reachable, IPv6-only resolver hiccups)
+        # raise a plain OSError here instead. Previously that escaped
+        # uncaught past this function -> 500 with no CORS headers on some
+        # deployments -> the browser reported it as an opaque network
+        # error with no response body, which is exactly what made a
+        # perfectly valid ntfy topic URL fail to save with no usable
+        # reason shown ("Could not save this subscription.").
+        raise HTTPException(status_code=422, detail=f"Could not resolve {label.lower()} host: {exc}")
 
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
