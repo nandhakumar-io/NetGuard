@@ -19,6 +19,7 @@ const CHANNEL_BADGE: Record<string, string> = {
   webhook: "bg-purple-100 text-purple-700",
   slack: "bg-emerald-100 text-emerald-700",
   teams: "bg-indigo-100 text-indigo-700",
+  push: "bg-amber-100 text-amber-700",
 };
 
 const SEVERITY_BADGE: Record<string, string> = {
@@ -338,10 +339,17 @@ export default function EscalationPolicies() {
                 <option value="webhook">Webhook</option>
                 <option value="slack">Slack</option>
                 <option value="teams">Teams</option>
+                <option value="push">Push notification</option>
               </select>
             </label>
 
-            {form.channel !== "email" && (
+            {form.channel === "push" && (
+              <p className="text-xs text-slate-400">
+                Sends to every device subscribed to push notifications for this alert's severity (configure devices under Push Settings). No URL needed.
+              </p>
+            )}
+
+            {form.channel !== "email" && form.channel !== "push" && (
               <label className="text-xs text-slate-500 flex flex-col gap-1">
                 Webhook URL
                 <input

@@ -749,7 +749,7 @@ export interface CorrelatedAlertGroup {
 // --- Escalation Policies ---
 
 export type EscalationSeverityScope = "critical" | "warning" | "all";
-export type EscalationChannel = "email" | "webhook" | "slack" | "teams";
+export type EscalationChannel = "email" | "webhook" | "slack" | "teams" | "push";
 
 export interface OnCallSchedule {
   id: string;

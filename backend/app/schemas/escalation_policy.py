@@ -12,7 +12,7 @@ class EscalationPolicyCreate(BaseModel):
     unack_minutes: int = 15
     repeat_minutes: int | None = None
     secondary_contacts: str | None = None  # comma-separated emails
-    channel: str = "email"  # email / webhook / slack / teams
+    channel: str = "email"  # email / webhook / slack / teams / push
     webhook_url: str | None = None
     enabled: bool = True
 

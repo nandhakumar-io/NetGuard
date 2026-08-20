@@ -32,6 +32,7 @@ import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
@@ -605,12 +606,21 @@ def stale_reservations(db: Session, subnet: Subnet | None = None) -> list[dict]:
     )
 
     subnets_by_id = {subnet.id: subnet} if subnet is not None else {s.id: s for s in db.query(Subnet).all()}
-    completed_scans = (
-        db.query(DiscoveryScan)
-        .filter(DiscoveryScan.status == DiscoveryScanStatus.COMPLETED)
-        .order_by(DiscoveryScan.completed_at.desc())
-        .all()
-    )
+    try:
+        completed_scans = (
+            db.query(DiscoveryScan)
+            .filter(DiscoveryScan.status == DiscoveryScanStatus.COMPLETED)
+            .order_by(DiscoveryScan.completed_at.desc())
+            .all()
+        )
+    except OperationalError:
+        # Network Discovery's tables (migration 0074+) aren't present in
+        # this database yet -- rather than 500ing the whole IPAM page
+        # over a feature this deployment hasn't migrated to, report every
+        # reservation as never_scanned (the honest answer: we have no
+        # scan data to compare against) instead of failing outright.
+        db.rollback()
+        completed_scans = []
     # Pre-parse each scan's CIDR once rather than per-reservation.
     scan_networks = []
     for scan in completed_scans:

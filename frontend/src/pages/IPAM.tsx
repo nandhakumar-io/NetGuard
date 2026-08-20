@@ -78,19 +78,40 @@ export default function IPAMPage() {
 
   const load = () => {
     setLoading(true);
-    Promise.all([
+    // allSettled, not all -- these three calls are independent (subnet
+    // inventory, fleet-wide conflicts, stale reservations) and one of the
+    // newer ones failing (e.g. stale-reservations depending on Network
+    // Discovery data) shouldn't blank the whole page and hide subnets
+    // that loaded fine. Each result is applied independently and only
+    // the calls that actually failed are reported.
+    Promise.allSettled([
       api.get<Subnet[]>("/ipam", { params: siteFilter ? { site: siteFilter } : {} }),
       api.get<ConflictReport>("/ipam/conflicts"),
       api.get<StaleReservation[]>("/ipam/reservations/stale"),
-    ])
-      .then(([subnetsRes, conflictsRes, staleRes]) => {
-        setSubnets(subnetsRes.data);
-        setConflicts(conflictsRes.data);
-        setStaleReservations(staleRes.data);
-        setError(null);
-      })
-      .catch(() => setError("Failed to load IPAM data."))
-      .finally(() => setLoading(false));
+    ]).then(([subnetsRes, conflictsRes, staleRes]) => {
+      const failed: string[] = [];
+
+      if (subnetsRes.status === "fulfilled") {
+        setSubnets(subnetsRes.value.data);
+      } else {
+        failed.push("subnet inventory");
+      }
+
+      if (conflictsRes.status === "fulfilled") {
+        setConflicts(conflictsRes.value.data);
+      } else {
+        failed.push("conflict report");
+      }
+
+      if (staleRes.status === "fulfilled") {
+        setStaleReservations(staleRes.value.data);
+      } else {
+        failed.push("stale reservations");
+      }
+
+      setError(failed.length ? `Failed to load: ${failed.join(", ")}.` : null);
+      setLoading(false);
+    });
   };
 
   useEffect(load, [siteFilter]);
@@ -776,4 +797,4 @@ function SubnetDetailModal({
       </div>
     </div>
   );
-}
+}/

@@ -382,11 +382,18 @@ export default function Topology() {
   };
 
   useEffect(() => {
-    if (viewMode === "groups" && groups === null && !groupsLoading) {
+    // Refetch every time the groups view is switched into, not just the
+    // first time -- previously this only loaded once per page visit
+    // (guarded on `groups === null`), so the datacenter/rack view kept
+    // showing whatever was true at first click even after devices moved
+    // racks, were added/removed, or changed status. Also re-fires on a
+    // live topology push while the groups view is the active tab, so it
+    // doesn't need a manual switch-away-and-back to catch up.
+    if (viewMode === "groups") {
       loadGroups();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode]);
+  }, [viewMode, lastLiveUpdate]);
 
   // --- selected device's per-interface (port) status + short metrics
   // history -- fetched lazily whenever a node is selected, powers the

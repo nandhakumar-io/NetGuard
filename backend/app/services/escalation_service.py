@@ -69,6 +69,21 @@ def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
             severity=alert.severity.value,
             device_hostname=None,
         )
+    elif policy.channel.value == "push":
+        # PUSH: the policy's own dedicated channel, for teams that want
+        # "escalate straight to someone's phone" without also wiring up a
+        # webhook/Slack/Teams URL. This is the same delivery path as the
+        # unconditional push below, so it isn't repeated a second time
+        # for this policy (see the guard on that call).
+        push_service.send_push(
+            db,
+            title=f"🚨 Alert Escalated ({policy.name})",
+            message=message,
+            severity=alert.severity.value,
+        )
+        # Still write an in-app Notification Center row so the escalation
+        # is visible even if nobody's phone is subscribed to push.
+        notification_service.notify(event="Alert Escalated", message=message, severity=alert.severity.value)
     else:
         # WEBHOOK / SLACK / TEAMS: post directly to the policy's own
         # webhook, independent of the fleet-wide SLACK_WEBHOOK_URL /
@@ -89,18 +104,21 @@ def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
     # Mobile push, on top of whichever channel above -- an escalation is
     # by definition something that already sat unacknowledged past its
     # window, so it's exactly the "nobody's staring at the dashboard"
-    # case a phone push is for. Runs regardless of policy.channel so a
-    # team using SLACK/TEAMS/EMAIL for the primary escalation channel
-    # still gets a push as the secondary, wake-someone-up path.
+    # case a phone push is for. Runs regardless of policy.channel (except
+    # PUSH itself, already sent above -- this would otherwise double-fire
+    # the exact same push) so a team using SLACK/TEAMS/EMAIL for the
+    # primary escalation channel still gets a push as the secondary,
+    # wake-someone-up path.
     # send_push itself only reaches devices subscribed to this severity
     # (critical-only by default), so warning-scope policies won't buzz a
     # phone unless that device opted into non-critical pushes.
-    push_service.send_push(
-        db,
-        title=f"🚨 Alert Escalated ({policy.name})",
-        message=message,
-        severity=alert.severity.value,
-    )
+    if policy.channel.value != "push":
+        push_service.send_push(
+            db,
+            title=f"🚨 Alert Escalated ({policy.name})",
+            message=message,
+            severity=alert.severity.value,
+        )
 
 
 def run_escalation_sweep(db: Session) -> int:

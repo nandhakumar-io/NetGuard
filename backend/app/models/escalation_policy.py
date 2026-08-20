@@ -30,6 +30,7 @@ class EscalationChannel(str, enum.Enum):
     WEBHOOK = "webhook"
     SLACK = "slack"
     TEAMS = "teams"
+    PUSH = "push"
 
 
 class EscalationPolicy(Base):
