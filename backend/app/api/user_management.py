@@ -16,6 +16,7 @@ except the list is a write.
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core import permissions as permission_registry
 from app.core.database import get_db
 from app.core.deps import require_roles
 from app.core.security import hash_password
@@ -54,6 +55,15 @@ def _parse_extra_roles(user: User) -> list[UserRole]:
     return out
 
 
+def _parse_extra_permissions(user: User) -> list[str]:
+    if not user.extra_permissions:
+        return []
+    # Tolerate a stale/renamed permission key the same way
+    # _parse_extra_roles tolerates a stale role value, rather than 500ing
+    # the whole list if app.core.permissions.ALL_PERMISSIONS ever drops one.
+    return [p for p in (raw.strip() for raw in user.extra_permissions.split(",")) if p and p in permission_registry.PERMISSION_KEYS]
+
+
 def _serialize(user: User) -> AdminUserRead:
     return AdminUserRead(
         id=str(user.id),
@@ -61,6 +71,7 @@ def _serialize(user: User) -> AdminUserRead:
         full_name=user.full_name,
         role=user.role,
         extra_roles=_parse_extra_roles(user),
+        extra_permissions=_parse_extra_permissions(user),
         is_active=_is_active(user),
         mfa_enabled=str(user.mfa_enabled).lower() == "true",
         sso_provider=user.sso_provider,
@@ -69,8 +80,34 @@ def _serialize(user: User) -> AdminUserRead:
     )
 
 
+def _valid_permission_keys(keys: list[str]) -> list[str]:
+    """Drops anything not in the registry rather than 422ing the whole
+    request -- e.g. a frontend build with a stale catalog snapshot
+    sending a permission key that's since been renamed/removed."""
+    return [k for k in keys if k in permission_registry.PERMISSION_KEYS]
+
+
 def _active_admin_count(db: Session) -> int:
     return sum(1 for u in db.query(User).filter(User.role == UserRole.NETWORK_ADMIN).all() if _is_active(u))
+
+
+@router.get("/permissions/catalog")
+def list_permission_catalog(_: User = Depends(_admin_only)):
+    """The full set of individually-grantable capability/page permissions
+    (app.core.permissions.ALL_PERMISSIONS) for the Users page's Custom
+    Permissions modal to render as checkboxes, grouped by category --
+    single source of truth so the frontend never has to hardcode/duplicate
+    this list and drift from what the backend actually enforces."""
+    return {
+        "capabilities": [
+            {"key": p.key, "label": p.label, "description": p.description}
+            for p in permission_registry.CAPABILITY_PERMISSIONS
+        ],
+        "pages": [
+            {"key": p.key, "label": p.label, "description": p.description}
+            for p in permission_registry.PAGE_PERMISSIONS
+        ],
+    }
 
 
 @router.get("", response_model=AdminUserListResponse)
@@ -99,6 +136,7 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db), current
         hashed_password=hash_password(payload.password),
         role=payload.role,
         extra_roles=",".join(r.value for r in payload.extra_roles) or None,
+        extra_permissions=",".join(_valid_permission_keys(payload.extra_permissions)) or None,
         is_active=True,
     )
     db.add(user)
@@ -130,12 +168,22 @@ def update_user_permissions(
 
     extra = [r for r in payload.extra_roles if r != user.role]  # granting a user's own base role is a no-op
     user.extra_roles = ",".join(r.value for r in extra) or None
+
+    detail = f"{user.email}: extra_roles={[r.value for r in extra] or 'none'}"
+    # extra_permissions is optional on the payload (see
+    # UserPermissionsUpdate) so a save that only touches extra_roles
+    # doesn't silently wipe an existing extra_permissions grant.
+    if payload.extra_permissions is not None:
+        valid = _valid_permission_keys(payload.extra_permissions)
+        user.extra_permissions = ",".join(valid) or None
+        detail += f"; extra_permissions={valid or 'none'}"
+
     db.commit()
     db.refresh(user)
 
     audit_service.record_event(
         db, actor=current_user.email, action="User Permissions Updated", result="Success",
-        detail=f"{user.email}: extra_roles={[r.value for r in extra] or 'none'}",
+        detail=detail,
     )
     return _serialize(user)
 

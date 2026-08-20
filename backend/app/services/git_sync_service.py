@@ -105,6 +105,21 @@ def _run_git(args: list[str], cwd: Path | None = None) -> str:
         raise GitSyncError(f"git {' '.join(args[:1])} failed: {safe_err.strip()[:500]}")
     except subprocess.TimeoutExpired:
         raise GitSyncError(f"git {' '.join(args[:1])} timed out after {GIT_TIMEOUT_SECONDS}s")
+    except FileNotFoundError:
+        # subprocess couldn't find the `git` binary at all -- distinct from
+        # any of the above (which all require git to have actually run).
+        # Surfacing this as the generic "Unexpected error: [Errno 2]..."
+        # from sync_repo's broad except left the repo card showing a raw
+        # OSError with no indication of what's actually wrong or how to
+        # fix it. This is an environment/deployment problem (the `git`
+        # package isn't installed in the backend/worker image -- see
+        # backend/Dockerfile), not anything about the repo URL, branch,
+        # or access token, so say that plainly instead of making it look
+        # like a repo-config mistake.
+        raise GitSyncError(
+            "git is not installed on the backend server. Install the `git` package in the "
+            "backend/worker container image (see backend/Dockerfile) and retry."
+        )
 
 
 def _working_dir(repo: GitRepoConfig) -> Path:

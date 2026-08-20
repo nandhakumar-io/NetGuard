@@ -400,10 +400,21 @@ def revoke_session(
 
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
+    # extra_roles/extra_permissions were previously omitted here entirely
+    # -- the frontend's isAdmin()/hasPermission() (lib/auth.tsx) both read
+    # off CurrentUser.extra_roles/extra_permissions, so any admin-granted
+    # extra_roles or extra_permissions grant was silently invisible client
+    # side even though app.core.deps.require_roles honored it on every
+    # actual API call: the user could reach a page's endpoints directly
+    # but the nav/UI gating (which only has this response to go on) kept
+    # hiding the page and 403-styled buttons as if nothing had been
+    # granted.
     return {
         "id": str(current_user.id),
         "email": current_user.email,
         "full_name": current_user.full_name,
         "role": current_user.role.value,
         "mfa_enabled": current_user.mfa_enabled == "true",
+        "extra_roles": [r.strip() for r in (current_user.extra_roles or "").split(",") if r.strip()],
+        "extra_permissions": [p.strip() for p in (current_user.extra_permissions or "").split(",") if p.strip()],
     }

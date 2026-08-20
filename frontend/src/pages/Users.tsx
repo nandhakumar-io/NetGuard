@@ -8,11 +8,23 @@ interface AdminUser {
   full_name: string;
   role: string;
   extra_roles: string[];
+  extra_permissions: string[];
   is_active: boolean;
   mfa_enabled: boolean;
   sso_provider: string | null;
   created_at: string | null;
   last_login_at: string | null;
+}
+
+interface PermissionCatalogEntry {
+  key: string;
+  label: string;
+  description: string;
+}
+
+interface PermissionCatalog {
+  capabilities: PermissionCatalogEntry[];
+  pages: PermissionCatalogEntry[];
 }
 
 interface RoleCounts {
@@ -273,6 +285,19 @@ export default function Users() {
                         ))}
                       </div>
                     )}
+                    {u.extra_permissions.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {u.extra_permissions.map((p) => (
+                          <span
+                            key={p}
+                            title="Custom permission: individually-granted capability or page access"
+                            className="px-1.5 py-0.5 rounded text-[10px] font-bold border border-dashed bg-sky-50 text-sky-700 border-sky-200"
+                          >
+                            +{p.replace(/^page:/, "").replace(/_/g, " ")}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2.5 px-4">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${u.is_active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
@@ -337,8 +362,18 @@ export default function Users() {
 
 function PermissionsModal({ user, onClose, onSaved }: { user: AdminUser; onClose: () => void; onSaved: () => void }) {
   const [selected, setSelected] = useState<Set<string>>(new Set(user.extra_roles));
+  const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set(user.extra_permissions));
+  const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<PermissionCatalog>("/users/permissions/catalog")
+      .then((res) => setCatalog(res.data))
+      .catch(() => setCatalogError("Failed to load the permissions catalog."));
+  }, []);
 
   const toggle = (role: string) => {
     setSelected((prev) => {
@@ -349,11 +384,23 @@ function PermissionsModal({ user, onClose, onSaved }: { user: AdminUser; onClose
     });
   };
 
+  const togglePerm = (key: string) => {
+    setSelectedPerms((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const submit = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      await api.patch(`/users/${user.id}/permissions`, { extra_roles: Array.from(selected) });
+      await api.patch(`/users/${user.id}/permissions`, {
+        extra_roles: Array.from(selected),
+        extra_permissions: Array.from(selectedPerms),
+      });
       onSaved();
       onClose();
     } catch (err: any) {
@@ -365,14 +412,19 @@ function PermissionsModal({ user, onClose, onSaved }: { user: AdminUser; onClose
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6 max-h-[85vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Custom Permissions</h2>
         <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
           {user.full_name} is a <span className="font-bold">{roleLabel(user.role)}</span>. Grant access to
-          specific other roles' features below, without changing their base role.
+          specific other roles' features, or individual capabilities/pages, without changing their base role.
         </p>
         {error && <div className="mb-3 p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
-        <div className="space-y-2">
+
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Whole Role Access</div>
+        <div className="space-y-2 mb-5">
           {ROLE_OPTIONS.filter((r) => r !== user.role).map((r) => (
             <label
               key={r}
@@ -391,6 +443,55 @@ function PermissionsModal({ user, onClose, onSaved }: { user: AdminUser; onClose
             </label>
           ))}
         </div>
+
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Capabilities</div>
+        {catalogError && <div className="mb-3 p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{catalogError}</div>}
+        {!catalog && !catalogError && <div className="text-xs text-slate-400 mb-4">Loading…</div>}
+        {catalog && (
+          <div className="space-y-2 mb-5">
+            {catalog.capabilities.map((p) => (
+              <label
+                key={p.key}
+                className="flex items-start gap-2.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedPerms.has(p.key)}
+                  onChange={() => togglePerm(p.key)}
+                  className="mt-0.5 rounded border-slate-300 dark:border-slate-600"
+                />
+                <span>
+                  <span className="block font-bold text-navy dark:text-white text-xs">{p.label}</span>
+                  <span className="block text-[11px] text-slate-400">{p.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Page Access</div>
+        {catalog && (
+          <div className="space-y-2">
+            {catalog.pages.map((p) => (
+              <label
+                key={p.key}
+                className="flex items-start gap-2.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedPerms.has(p.key)}
+                  onChange={() => togglePerm(p.key)}
+                  className="mt-0.5 rounded border-slate-300 dark:border-slate-600"
+                />
+                <span>
+                  <span className="block font-bold text-navy dark:text-white text-xs">{p.label}</span>
+                  <span className="block text-[11px] text-slate-400">{p.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 mt-5">
           <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">
             Cancel

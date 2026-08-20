@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { TerminalRecordingRecord, TerminalSessionRecording } from "../lib/types";
 import { Terminal } from "xterm";
+import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
 
 // Reviewer-only page (SECURITY / NETWORK_ADMIN) mirroring the backend gate on
@@ -63,9 +64,22 @@ function PlaybackModal({ recording, onClose }: { recording: TerminalSessionRecor
       fontSize: 13,
       theme: { background: "#1e1e2e", foreground: "#cdd6f4", cursor: "#f38ba8" },
     });
+    // Without a fit addon this stayed at xterm's default 80x24 cell grid
+    // sized off whatever font metrics were available at construction time
+    // (often before webfonts/layout settled), which could leave the
+    // canvas laid out at ~0 visible rows inside the 380px container --
+    // the terminal was technically receiving and buffering every write,
+    // just not rendering any of it. Matches the sizing WebTerminal.tsx
+    // (the live session view) already does for the same reason.
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
     term.open(containerRef.current);
+    fitAddon.fit();
+    const handleResize = () => fitAddon.fit();
+    window.addEventListener("resize", handleResize);
     termRef.current = term;
     return () => {
+      window.removeEventListener("resize", handleResize);
       term.dispose();
       termRef.current = null;
     };
@@ -78,6 +92,21 @@ function PlaybackModal({ recording, onClose }: { recording: TerminalSessionRecor
       if (records[i].dir === "out") term.write(records[i].data);
     }
   };
+
+  // Render the full session the moment its transcript loads, rather than
+  // leaving the terminal blank until the reviewer clicks Play. A reviewer
+  // opening a recording wants to see what happened -- requiring an extra
+  // click before anything appears (with no visual difference between
+  // "nothing captured" and "captured but not played yet") is exactly what
+  // reads as "playback shows an empty terminal" even though the transcript
+  // (confirmed by the raw .jsonl download) has real content. Play/Reset
+  // below still work for scrubbing through the timeline from here.
+  useEffect(() => {
+    if (!records || !records.length || !termRef.current) return;
+    writeUpTo(records.length);
+    setCursor(records.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [records]);
 
   const reset = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -108,6 +137,16 @@ function PlaybackModal({ recording, onClose }: { recording: TerminalSessionRecor
     if (playing) {
       if (timerRef.current) clearTimeout(timerRef.current);
       setPlaying(false);
+      return;
+    }
+    // Transcript is auto-rendered up to the end on load, so cursor already
+    // sits at records.length the first time someone presses the button --
+    // without this, "Replay" would immediately no-op (from >= length) and
+    // look exactly like the "empty terminal" bug this is fixing.
+    if (cursor >= records.length) {
+      termRef.current?.reset();
+      setPlaying(true);
+      step(0);
       return;
     }
     setPlaying(true);

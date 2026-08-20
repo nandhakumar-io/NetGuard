@@ -38,6 +38,15 @@ class User(Base):
     # below) and to avoid a Postgres ARRAY-specific migration.
     extra_roles = Column(String, nullable=True)
 
+    # Fine-grained, individually-grantable capability/page permissions --
+    # complements extra_roles (which grants a *whole other role's*
+    # surface). Comma-separated list of app.core.permissions.Permission
+    # `key` values (e.g. "config_management", "network_discovery",
+    # "page:backups"). See app.core.permissions and
+    # app.core.deps.require_roles (which consults
+    # permissions.implied_roles_for(...) against this column).
+    extra_permissions = Column(String, nullable=True)
+
     # SSO identity link (Google OIDC today; provider is a plain string so
     # Okta/Entra OIDC can reuse the same columns later without a migration).
     # sso_subject is the IdP's stable `sub` claim, not email -- email can be

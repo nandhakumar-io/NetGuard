@@ -1,12 +1,58 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { useAuth } from "../lib/auth";
+import { useAuth, isAdmin, hasPermission } from "../lib/auth";
+import type { CurrentUser } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import NotificationBell from "./NotificationBell";
 import CommandPalette from "./CommandPalette";
 
 type NavItem = { to: string; label: string; end?: boolean; icon: JSX.Element };
 type NavGroup = { label: string; icon: JSX.Element; items: NavItem[] };
+
+// Sidebar pages hidden by default unless the viewer is a Network Admin
+// (or, for terminal-recordings, Security) -- an admin can grant any of
+// these to a specific user via Users > Custom Permissions without
+// promoting them to a whole other role. Mirrors backend app.core.
+// permissions.PAGE_PERMISSIONS; the backend remains the real enforcement
+// point (some of these routes are also role-gated server-side, e.g.
+// /users, /backups), this just keeps the nav from listing pages a given
+// user can't actually do anything on.
+const RESTRICTED_PAGE_PERMISSIONS: Record<string, string> = {
+  "/users": "page:users",
+  "/integrations": "page:integrations",
+  "/backups": "page:backups",
+  "/terminal-recordings": "page:terminal-recordings",
+  "/audit-log": "page:audit-log",
+  "/auditor-export": "page:auditor-export",
+  "/rbac-audit": "page:rbac-audit",
+};
+
+// Auditors and Security already have a legitimate standing reason to see
+// the audit/compliance pages without needing an individual grant.
+const ROLE_DEFAULT_ACCESS: Record<string, string[]> = {
+  "/audit-log": ["auditor", "security"],
+  "/auditor-export": ["auditor", "security"],
+  "/rbac-audit": ["auditor"],
+};
+
+function canSeePage(user: CurrentUser | null, to: string): boolean {
+  const permKey = RESTRICTED_PAGE_PERMISSIONS[to];
+  if (!permKey) return true; // not a restricted page -- unchanged, open to every authenticated role
+  if (isAdmin(user)) return true;
+  if (user && ROLE_DEFAULT_ACCESS[to]?.includes(user.role)) return true;
+  if (hasPermission(user, permKey)) return true;
+  // "Logs & Audit Export" is a convenience bundle covering both
+  // export-adjacent pages, so an admin doesn't have to grant two
+  // near-identical permissions for what's really one capability.
+  if ((to === "/audit-log" || to === "/auditor-export") && hasPermission(user, "logs_export")) return true;
+  return false;
+}
+
+function filterGroupsForUser(allGroups: NavGroup[], user: CurrentUser | null): NavGroup[] {
+  return allGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => canSeePage(user, item.to)) }))
+    .filter((group) => group.items.length > 0);
+}
 
 // Slightly larger than the old fixed 16px so each glyph reads clearly in
 // the collapsed 72px rail -- every item below also gets its own distinct
@@ -384,6 +430,8 @@ export default function Layout() {
     }
   }, [mobileOpen]);
 
+  const visibleGroups = filterGroupsForUser(groups, user);
+
   const sidebarContent = (onNavigate?: () => void, iconOnly?: boolean) => (
     <>
       <div className="px-4 py-6 border-b border-white/10 dark:border-noc-border flex items-center gap-3 overflow-hidden">
@@ -405,7 +453,7 @@ export default function Layout() {
         </button>
       </div>
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto overflow-x-hidden">
-        {groups.map((group) => (
+        {visibleGroups.map((group) => (
           <NavGroupSection
             key={group.label}
             group={group}

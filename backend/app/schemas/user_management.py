@@ -23,10 +23,21 @@ class AdminUserCreate(BaseModel):
     # Security's terminal-recording review: role=network_engineer,
     # extra_roles=["security"].
     extra_roles: list[UserRole] = []
+    # Individually-grantable capability/page permission keys -- see
+    # app.core.permissions.PERMISSION_KEYS -- for a specific narrow
+    # capability (e.g. "config_management") instead of a whole extra
+    # role's entire surface.
+    extra_permissions: list[str] = []
 
 
 class UserPermissionsUpdate(BaseModel):
     extra_roles: list[UserRole]
+    # Individually-grantable capability/page permission keys -- see
+    # app.core.permissions.PERMISSION_KEYS. Optional/omittable so an
+    # older frontend build that only knows about extra_roles doesn't
+    # accidentally wipe a user's extra_permissions on every save; the
+    # endpoint replaces the set only when this field is actually sent.
+    extra_permissions: list[str] | None = None
 
 
 class UserStatusUpdate(BaseModel):
@@ -39,6 +50,7 @@ class AdminUserRead(BaseModel):
     full_name: str
     role: UserRole
     extra_roles: list[UserRole] = []
+    extra_permissions: list[str] = []
     is_active: bool
     mfa_enabled: bool
     sso_provider: str | None = None

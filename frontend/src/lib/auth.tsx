@@ -9,6 +9,30 @@ export interface CurrentUser {
   full_name: string;
   role: UserRole;
   mfa_enabled: boolean;
+  // Fine-grained grants beyond base role -- see backend app.core.permissions.
+  // extra_roles: whole other roles' worth of access. extra_permissions:
+  // individual capability/page keys (e.g. "config_management", "page:backups").
+  extra_roles: string[];
+  extra_permissions: string[];
+}
+
+/** True if `user` has network_admin either as their base role or via a
+ *  whole-role extra_roles grant -- the "can do everything" check used
+ *  throughout the app before this permissions system existed. */
+export function isAdmin(user: CurrentUser | null): boolean {
+  return !!user && (user.role === "network_admin" || user.extra_roles.includes("network_admin"));
+}
+
+/** True if `user` can see/use `permissionKey` (e.g. "page:backups",
+ *  "config_management") -- via base role admin, an extra_roles grant that
+ *  implies it, or a direct extra_permissions grant. Mirrors the backend's
+ *  require_roles/require_permission logic in app.core.deps, but frontend
+ *  side this only ever gates *visibility* -- the backend is still the
+ *  real enforcement point. */
+export function hasPermission(user: CurrentUser | null, permissionKey: string): boolean {
+  if (!user) return false;
+  if (isAdmin(user)) return true;
+  return user.extra_permissions.includes(permissionKey);
 }
 
 /** Result of a login attempt: either the session is established immediately,
