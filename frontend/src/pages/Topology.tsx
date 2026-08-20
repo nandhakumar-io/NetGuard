@@ -1753,46 +1753,63 @@ export default function Topology() {
                           <h3 className="text-sm font-bold text-navy">{dc.name}</h3>
                         </div>
                         <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">
-                          {dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.racks.length} rack
-                          {dc.racks.length === 1 ? "" : "s"}
+                          {dc.device_count} device{dc.device_count === 1 ? "" : "s"} ·{" "}
+                          {dc.blocks.reduce((n, b) => n + b.racks.length, 0)} rack
+                          {dc.blocks.reduce((n, b) => n + b.racks.length, 0) === 1 ? "" : "s"}
                         </span>
                       </div>
-                      <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                        {dc.racks.map((rack) => (
-                          <div key={rack.name} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50/40">
-                            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white border-b border-slate-200">
-                              <span className="text-xs">🗄️</span>
-                              <span className="text-xs font-bold text-slate-600">{rack.name}</span>
-                              <span className="text-[10px] text-slate-400 ml-auto">{rack.devices.length}</span>
+                      <div className="p-4 flex flex-col gap-4">
+                        {dc.blocks.map((block) => (
+                          <div key={block.name}>
+                            {/* Block is an optional middle tier (building/pod) between
+                                data center and rack -- most orgs never set it, so every
+                                device lands in a single "Unassigned" block and this
+                                header is skipped to avoid noise. */}
+                            {(block.name !== "Unassigned" || dc.blocks.length > 1) && (
+                              <div className="flex items-center gap-1.5 mb-2">
+                                <span className="text-xs">🏗️</span>
+                                <span className="text-xs font-bold text-slate-500">{block.name}</span>
+                              </div>
+                            )}
+                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                              {block.racks.map((rack) => (
+                                <div key={rack.name} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50/40">
+                                  <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white border-b border-slate-200">
+                                    <span className="text-xs">🗄️</span>
+                                    <span className="text-xs font-bold text-slate-600">{rack.name}</span>
+                                    <span className="text-[10px] text-slate-400 ml-auto">{rack.devices.length}</span>
+                                  </div>
+                                  <ul className="p-2 flex flex-col gap-1">
+                                    {rack.devices.map((dv) => {
+                                      const fullNode = graph.nodes.find((n) => n.id === dv.id);
+                                      return (
+                                        <li
+                                          key={dv.id}
+                                          onClick={() =>
+                                            fullNode &&
+                                            setSelection({ kind: "node", node: { ...fullNode, x: 0, y: 0 } as LaidOutNode })
+                                          }
+                                          className={`flex items-center gap-2 text-xs rounded-md px-2 py-1.5 cursor-pointer border transition-colors ${
+                                            selectedNodeId === dv.id
+                                              ? "border-brandblue bg-blue-50"
+                                              : "border-transparent hover:bg-white hover:border-slate-200"
+                                          }`}
+                                        >
+                                          <span
+                                            className="w-2 h-2 rounded-full shrink-0"
+                                            style={{ backgroundColor: STATUS_COLOR[dv.status] || STATUS_COLOR.unknown }}
+                                          />
+                                          <span className="font-semibold text-slate-700 truncate">{dv.hostname}</span>
+                                          {dv.device_type && (
+                                            <span className="text-[10px] text-slate-400 ml-auto shrink-0">{dv.device_type}</span>
+                                          )}
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                </div>
+                              ))}
                             </div>
-                            <ul className="p-2 flex flex-col gap-1">
-                              {rack.devices.map((dv) => {
-                                const fullNode = graph.nodes.find((n) => n.id === dv.id);
-                                return (
-                                  <li
-                                    key={dv.id}
-                                    onClick={() =>
-                                      fullNode &&
-                                      setSelection({ kind: "node", node: { ...fullNode, x: 0, y: 0 } as LaidOutNode })
-                                    }
-                                    className={`flex items-center gap-2 text-xs rounded-md px-2 py-1.5 cursor-pointer border transition-colors ${
-                                      selectedNodeId === dv.id
-                                        ? "border-brandblue bg-blue-50"
-                                        : "border-transparent hover:bg-white hover:border-slate-200"
-                                    }`}
-                                  >
-                                    <span
-                                      className="w-2 h-2 rounded-full shrink-0"
-                                      style={{ backgroundColor: STATUS_COLOR[dv.status] || STATUS_COLOR.unknown }}
-                                    />
-                                    <span className="font-semibold text-slate-700 truncate">{dv.hostname}</span>
-                                    {dv.device_type && (
-                                      <span className="text-[10px] text-slate-400 ml-auto shrink-0">{dv.device_type}</span>
-                                    )}
-                                  </li>
-                                );
-                              })}
-                            </ul>
                           </div>
                         ))}
                       </div>

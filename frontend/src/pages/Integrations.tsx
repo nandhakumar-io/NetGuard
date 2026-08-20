@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useConfirm } from "../lib/confirm";
 import { useToast } from "../lib/toast";
 import { NotificationSettings, NotificationTestResult, SyslogDestination, WebhookEndpoint, WebhookTestResult, PushSubscription } from "../lib/types";
+import { EmptyState } from "../components/EmptyState";
 
 // --- Types (kept local -- these features are small enough not to warrant
 // new entries in lib/types.ts's shared type set) -----------------------

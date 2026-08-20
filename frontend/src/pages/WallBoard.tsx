@@ -20,6 +20,18 @@ import { Alert, AlertSeverity, DashboardSummary, SyslogSummary, TopologyResponse
 const ROTATE_MS = 12_000;
 const POLL_MS = 20_000;
 const CLOCK_MS = 1_000;
+// If a poll succeeds but data is older than this, something's off (tab
+// throttled in the background, a proxy/cache serving stale responses,
+// etc.) even though connError wouldn't catch it -- that flag only fires
+// on an outright failed request, not "requests keep succeeding but
+// nothing's actually changing." Distinct staleness check for a display
+// nobody's actively watching moment-to-moment.
+const STALE_AFTER_MS = POLL_MS * 3;
+// Kiosk browsers left open for weeks accrue memory/DOM cruft and can drift
+// from whatever's currently deployed. A quiet, once-a-day reload at a
+// fixed off-hours time keeps a 24/7 wall display healthy without anyone
+// having to walk over and refresh it by hand.
+const DAILY_RELOAD_HOUR = 4;
 
 type Panel = "alerts" | "topology" | "fleet" | "ops";
 const PANELS: { id: Panel; label: string }[] = [
@@ -123,6 +135,7 @@ export default function WallBoard() {
   const [activePanel, setActivePanel] = useState<Panel>("alerts");
   const [paused, setPaused] = useState(false);
   const [connError, setConnError] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -144,6 +157,7 @@ export default function WallBoard() {
         for (const n of t.data.nodes) map[n.id] = n.hostname;
         setDevicesById(map);
         setConnError(false);
+        setLastUpdated(new Date());
       })
       .catch(() => setConnError(true));
   }, []);
@@ -158,6 +172,43 @@ export default function WallBoard() {
     const t = setInterval(() => setNow(new Date()), CLOCK_MS);
     return () => clearInterval(t);
   }, []);
+
+  // Keep the display awake -- the entire point of a wall board is that
+  // nobody's touching the mouse/keyboard, which is exactly what a screen
+  // saver / display sleep timer looks for. Re-acquire on tab visibility
+  // change since the OS releases the lock whenever the tab is hidden.
+  useEffect(() => {
+    let wakeLock: WakeLockSentinel | null = null;
+    const acquire = async () => {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLock = await (navigator as Navigator & { wakeLock: { request: (t: "screen") => Promise<WakeLockSentinel> } }).wakeLock.request("screen");
+        }
+      } catch {
+        // Wake lock isn't available/granted in every browser or context --
+        // fail silently, the board still works, it just may need whatever
+        // OS-level "never sleep" setting the kiosk machine already has.
+      }
+    };
+    acquire();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") acquire();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      wakeLock?.release().catch(() => {});
+    };
+  }, []);
+
+  // Quiet once-a-day reload at a fixed off-hours time -- see DAILY_RELOAD_HOUR.
+  useEffect(() => {
+    if (now.getHours() === DAILY_RELOAD_HOUR && now.getMinutes() === 0 && now.getSeconds() === 0) {
+      window.location.reload();
+    }
+  }, [now]);
+
+  const dataStale = lastUpdated !== null && now.getTime() - lastUpdated.getTime() > STALE_AFTER_MS;
 
   useEffect(() => {
     if (paused) return;
@@ -225,6 +276,11 @@ export default function WallBoard() {
           {connError && (
             <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40">
               Connection issue — showing last known state
+            </span>
+          )}
+          {!connError && dataStale && (
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40">
+              Data stale — last updated {timeAgo(lastUpdated ? lastUpdated.toISOString() : null)} ago
             </span>
           )}
         </div>

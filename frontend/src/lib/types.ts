@@ -1331,10 +1331,16 @@ export interface RackGroup {
   }>;
 }
 
-export interface DataCenterGroup {
+export interface DataCenterBlock {
   name: string;
   device_count: number;
   racks: RackGroup[];
+}
+
+export interface DataCenterGroup {
+  name: string;
+  device_count: number;
+  blocks: DataCenterBlock[];
 }
 
 // --- Interface (port) status: current + history (NOC dashboard, device panel) ---
