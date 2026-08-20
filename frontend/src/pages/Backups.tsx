@@ -153,10 +153,24 @@ export default function Backups() {
     }
   };
 
+  // Which off-site destination(s) a manual device config backup should
+  // also be pushed to, in addition to always being saved locally (every
+  // snapshot is stored in NetGuard's own DB regardless of this choice).
+  // "all" (default) = every enabled destination, matching the historical
+  // behavior; "local" = skip off-site entirely; otherwise a specific
+  // destination id.
+  const [backupScope, setBackupScope] = useState<string>("all");
+
+  const scopeToDestinationIds = (): string[] | undefined => {
+    if (backupScope === "all") return undefined;
+    if (backupScope === "local") return [];
+    return [backupScope];
+  };
+
   const runDeviceBackup = async (row: DeviceBackupRow) => {
     setDeviceActioningId(row.device_id);
     try {
-      await api.post(`/backups/devices/${row.device_id}`);
+      await api.post(`/backups/devices/${row.device_id}`, { destination_ids: scopeToDestinationIds() });
       await loadDeviceBackups();
     } catch (err: any) {
       alert(err?.response?.data?.detail || `Failed to back up ${row.hostname}`);
@@ -169,7 +183,7 @@ export default function Backups() {
     setRunningFleetBackup(true);
     setDeviceError(null);
     try {
-      const res = await api.post("/backups/devices/bulk");
+      const res = await api.post("/backups/devices/bulk", { destination_ids: scopeToDestinationIds() });
       const succeeded = res.data?.succeeded ?? res.data?.success_count;
       const failed = res.data?.failed ?? res.data?.failure_count;
       await loadDeviceBackups();
@@ -458,13 +472,33 @@ export default function Backups() {
               )}
             </p>
           </div>
-          <button
-            onClick={runFleetBackup}
-            disabled={runningFleetBackup || deviceLoading}
-            className="flex items-center gap-1.5 bg-brandblue text-white font-bold px-3 py-1.5 rounded-lg text-xs hover:opacity-90 disabled:opacity-50 shrink-0"
-          >
-            {runningFleetBackup ? "Backing up…" : "Back Up All Devices Now"}
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <label className="text-xs text-slate-500 dark:text-slate-400 font-medium" htmlFor="backup-scope">
+              Save to
+            </label>
+            <select
+              id="backup-scope"
+              value={backupScope}
+              onChange={(e) => setBackupScope(e.target.value)}
+              className="text-xs border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200"
+              title="Where 'Back Up Now' / 'Back Up All Devices Now' should also copy the config, in addition to always being saved locally"
+            >
+              <option value="local">Locally only</option>
+              <option value="all">Locally + all destinations</option>
+              {destinations.map((d) => (
+                <option key={d.id} value={d.id}>
+                  Locally + {d.name}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={runFleetBackup}
+              disabled={runningFleetBackup || deviceLoading}
+              className="flex items-center gap-1.5 bg-brandblue text-white font-bold px-3 py-1.5 rounded-lg text-xs hover:opacity-90 disabled:opacity-50 shrink-0"
+            >
+              {runningFleetBackup ? "Backing up…" : "Back Up All Devices Now"}
+            </button>
+          </div>
         </div>
 
         {deviceError && <div className="m-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm">{deviceError}</div>}

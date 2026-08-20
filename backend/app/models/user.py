@@ -28,6 +28,16 @@ class User(Base):
     role = Column(Enum(UserRole), nullable=False, default=UserRole.NETWORK_ENGINEER)
     is_active = Column(String, default=True)
 
+    # Fine-grained access beyond the base `role`: a comma-separated list of
+    # additional UserRole values (e.g. a NETWORK_ENGINEER who also needs
+    # Security's terminal-recording review, without promoting them to a
+    # full extra role's *entire* surface -- see require_roles in
+    # app.core.deps, which checks `role in roles OR extra_roles ∩ roles`.
+    # String/comma-separated rather than a real array column to match this
+    # model's existing is_active/mfa_enabled portability convention (see
+    # below) and to avoid a Postgres ARRAY-specific migration.
+    extra_roles = Column(String, nullable=True)
+
     # SSO identity link (Google OIDC today; provider is a plain string so
     # Okta/Entra OIDC can reuse the same columns later without a migration).
     # sso_subject is the IdP's stable `sub` claim, not email -- email can be

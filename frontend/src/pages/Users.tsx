@@ -7,6 +7,7 @@ interface AdminUser {
   email: string;
   full_name: string;
   role: string;
+  extra_roles: string[];
   is_active: boolean;
   mfa_enabled: boolean;
   sso_provider: string | null;
@@ -54,6 +55,7 @@ export default function Users() {
   const [filter, setFilter] = useState<"all" | string>("all");
   const [search, setSearch] = useState("");
   const [showNewUser, setShowNewUser] = useState(false);
+  const [permissionsUser, setPermissionsUser] = useState<AdminUser | null>(null);
   const [actioningId, setActioningId] = useState<string | null>(null);
 
   const load = async () => {
@@ -258,6 +260,19 @@ export default function Users() {
                     <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${ROLE_BADGE[u.role] || "bg-slate-100 text-slate-600"}`}>
                       {roleLabel(u.role)}
                     </span>
+                    {u.extra_roles.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {u.extra_roles.map((r) => (
+                          <span
+                            key={r}
+                            title="Custom permission: granted this role's access in addition to their base role"
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border border-dashed ${ROLE_BADGE[r] || "bg-slate-100 text-slate-600"}`}
+                          >
+                            +{roleLabel(r)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2.5 px-4">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${u.is_active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
@@ -272,6 +287,14 @@ export default function Users() {
                   </td>
                   <td className="py-2.5 px-4 text-right">
                     <div className="flex justify-end gap-3">
+                      <button
+                        disabled={actioningId === u.id}
+                        onClick={() => setPermissionsUser(u)}
+                        title="Grant this user access to specific other roles' features, on top of their base role"
+                        className="text-xs font-bold text-slate-500 hover:underline disabled:opacity-40 disabled:no-underline"
+                      >
+                        Permissions
+                      </button>
                       <button
                         disabled={actioningId === u.id || currentUser?.id === u.id}
                         onClick={() => toggleActive(u)}
@@ -305,6 +328,82 @@ export default function Users() {
       </div>
 
       {showNewUser && <NewUserModal onClose={() => setShowNewUser(false)} onCreated={load} />}
+      {permissionsUser && (
+        <PermissionsModal user={permissionsUser} onClose={() => setPermissionsUser(null)} onSaved={load} />
+      )}
+    </div>
+  );
+}
+
+function PermissionsModal({ user, onClose, onSaved }: { user: AdminUser; onClose: () => void; onSaved: () => void }) {
+  const [selected, setSelected] = useState<Set<string>>(new Set(user.extra_roles));
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = (role: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(role)) next.delete(role);
+      else next.add(role);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.patch(`/users/${user.id}/permissions`, { extra_roles: Array.from(selected) });
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to update permissions");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Custom Permissions</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+          {user.full_name} is a <span className="font-bold">{roleLabel(user.role)}</span>. Grant access to
+          specific other roles' features below, without changing their base role.
+        </p>
+        {error && <div className="mb-3 p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
+        <div className="space-y-2">
+          {ROLE_OPTIONS.filter((r) => r !== user.role).map((r) => (
+            <label
+              key={r}
+              className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(r)}
+                onChange={() => toggle(r)}
+                className="rounded border-slate-300 dark:border-slate-600"
+              />
+              <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${ROLE_BADGE[r] || "bg-slate-100 text-slate-600"}`}>
+                {roleLabel(r)}
+              </span>
+              <span className="text-xs text-slate-400">access</span>
+            </label>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitting}
+            className="px-4 py-2 rounded-lg text-sm font-bold bg-brandblue text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {submitting ? "Saving…" : "Save Permissions"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -314,14 +413,30 @@ function NewUserModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("network_engineer");
+  const [extraRoles, setExtraRoles] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const toggleExtra = (r: string) => {
+    setExtraRoles((prev) => {
+      const next = new Set(prev);
+      if (next.has(r)) next.delete(r);
+      else next.add(r);
+      return next;
+    });
+  };
 
   const submit = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      await api.post("/users", { email, full_name: fullName, password, role });
+      await api.post("/users", {
+        email,
+        full_name: fullName,
+        password,
+        role,
+        extra_roles: Array.from(extraRoles),
+      });
       onCreated();
       onClose();
     } catch (err: any) {
@@ -354,6 +469,24 @@ function NewUserModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
             <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm capitalize">
               {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
             </select>
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 block mb-1">
+              Custom Permissions <span className="font-normal text-slate-400">(optional, beyond their role)</span>
+            </label>
+            <div className="space-y-1.5">
+              {ROLE_OPTIONS.filter((r) => r !== role).map((r) => (
+                <label key={r} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={extraRoles.has(r)}
+                    onChange={() => toggleExtra(r)}
+                    className="rounded border-slate-300 dark:border-slate-600"
+                  />
+                  {roleLabel(r)} access
+                </label>
+              ))}
+            </div>
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">

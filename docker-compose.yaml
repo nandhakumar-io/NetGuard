@@ -1,5 +1,3 @@
-# docker/docker-compose.yml
-
 services:
 
   # ============================================================
@@ -253,6 +251,22 @@ services:
       NETFLOW_LISTENER_ENABLED: "false"
       SFLOW_LISTENER_ENABLED: "false"
       TOPOLOGY_SNAPSHOT_ENABLED: "false"
+
+    volumes:
+      # BACKUP_STORAGE_DIR and TERMINAL_RECORDING_DIR both default to
+      # ./data/... under the image's /app workdir, which -- unlike the dev
+      # compose file -- has nothing backing it here at all: no bind mount,
+      # no named volume. Every container recreation (redeploy, restart
+      # policy kicking in after a crash, `docker compose up -d` picking up
+      # a new BACKEND_TAG) wipes it, while the BackupJob/
+      # TerminalSessionRecording rows survive in Postgres. That's exactly
+      # what produced the two "server likely restarted mid-run" failed
+      # backups and the empty-terminal/failed-download symptoms: the DB
+      # says completed, the file is gone. All 3 `api` replicas share the
+      # same local-driver named volume on this host, so a download served
+      # by replica B works fine for a file replica A wrote.
+      - netguard_backups:/app/data/backups
+      - netguard_recordings:/app/data/terminal-recordings
 
     depends_on:
       migrate:
@@ -789,6 +803,8 @@ volumes:
   netguard_natsdata:
   netguard_vmdata:
   netguard_grafanadata:
+  netguard_backups:
+  netguard_recordings:
 
 
 # ================================================================

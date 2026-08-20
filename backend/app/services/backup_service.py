@@ -316,7 +316,9 @@ class DeviceBackupError(Exception):
     doesn't abort the rest of a bulk run."""
 
 
-def _push_device_config_to_destinations(db: Session, device, snapshot, operator_email: str) -> None:
+def _push_device_config_to_destinations(
+    db: Session, device, snapshot, operator_email: str, destination_ids: list | None = None
+) -> None:
     """Pushes one just-taken device config snapshot to every enabled
     BackupDestination, same off-site copy every database backup already
     gets (see _upload_to_destinations) -- device config backups were
@@ -335,7 +337,16 @@ def _push_device_config_to_destinations(db: Session, device, snapshot, operator_
     """
     from app.services import snapshot_service
 
-    destinations = db.query(BackupDestination).filter(BackupDestination.enabled.is_(True)).all()
+    query = db.query(BackupDestination).filter(BackupDestination.enabled.is_(True))
+    if destination_ids is not None:
+        # Caller asked for a specific subset (or none at all -- "local
+        # only") rather than the default "push to every enabled
+        # destination" behavior. An empty list here means "skip
+        # off-site entirely", not "unfiltered".
+        if not destination_ids:
+            return
+        query = query.filter(BackupDestination.id.in_(destination_ids))
+    destinations = query.all()
     if not destinations:
         return
 
@@ -386,7 +397,9 @@ def _push_device_config_to_destinations(db: Session, device, snapshot, operator_
         )
 
 
-def run_device_config_backup(db: Session, device, operator_email: str, label: str | None = None):
+def run_device_config_backup(
+    db: Session, device, operator_email: str, label: str | None = None, destination_ids: list | None = None
+):
     """Reads `device`'s live running config over its configured protocol and
     persists it as a new ConfigSnapshot. Raises DeviceBackupError on any
     read failure -- callers decide whether that's a hard stop (single-device
@@ -416,7 +429,7 @@ def run_device_config_backup(db: Session, device, operator_email: str, label: st
         device_hostname=device.hostname,
         detail=f"snapshot={snapshot.id} version={snapshot.version} label={label or 'manual backup'}",
     )
-    _push_device_config_to_destinations(db, device, snapshot, operator_email)
+    _push_device_config_to_destinations(db, device, snapshot, operator_email, destination_ids=destination_ids)
     return snapshot
 
 
@@ -482,7 +495,9 @@ def device_backup_summary(db: Session) -> list[dict]:
     return rows
 
 
-def run_fleet_config_backup(db: Session, operator_email: str, device_ids: list | None = None) -> dict:
+def run_fleet_config_backup(
+    db: Session, operator_email: str, device_ids: list | None = None, destination_ids: list | None = None
+) -> dict:
     """Bulk "back up every device's config right now" sweep for the Backups
     page's fleet-wide button -- device_ids=None means every managed device.
     Each device is independently best-effort (an unreachable device just
@@ -501,7 +516,7 @@ def run_fleet_config_backup(db: Session, operator_email: str, device_ids: list |
     failed: dict[str, str] = {}
     for device in devices:
         try:
-            run_device_config_backup(db, device, operator_email, label="fleet backup")
+            run_device_config_backup(db, device, operator_email, label="fleet backup", destination_ids=destination_ids)
             succeeded.append(device.hostname)
         except DeviceBackupError as exc:
             failed[device.hostname] = str(exc)

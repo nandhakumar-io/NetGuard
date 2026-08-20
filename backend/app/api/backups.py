@@ -40,6 +40,14 @@ class FleetConfigBackupRequest(BaseModel):
     # A specific list lets the same endpoint back a "back up these
     # selected devices" flow later without a second route.
     device_ids: list[uuid.UUID] | None = None
+    # None (default) = push to every enabled BackupDestination, same as
+    # before this field existed. [] = local only (skip off-site
+    # entirely). A specific list = push to just those destinations.
+    destination_ids: list[uuid.UUID] | None = None
+
+
+class DeviceConfigBackupRequest(BaseModel):
+    destination_ids: list[uuid.UUID] | None = None
 
 
 def _serialize(job: BackupJob) -> dict:
@@ -148,15 +156,25 @@ def list_device_backups(db: Session = Depends(get_db), _: User = Depends(_admin_
 
 
 @router.post("/devices/{device_id}", status_code=201)
-def trigger_device_backup(device_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+def trigger_device_backup(
+    device_id: uuid.UUID,
+    payload: DeviceConfigBackupRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_admin_only),
+):
     """Backs up a single device's config right now -- same underlying call
     as the device Config tab's Backup button, just reachable from the
-    fleet-wide Backups page too."""
+    fleet-wide Backups page too. `destination_ids` lets the caller choose
+    "local only" ([]), a specific subset, or the default (omitted/None =
+    every enabled destination, matching the historical behavior)."""
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+    destination_ids = payload.destination_ids if payload else None
     try:
-        snapshot = backup_service.run_device_config_backup(db, device, current_user.email, label="backups page")
+        snapshot = backup_service.run_device_config_backup(
+            db, device, current_user.email, label="backups page", destination_ids=destination_ids
+        )
     except backup_service.DeviceBackupError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {
@@ -179,7 +197,10 @@ def trigger_fleet_backup(
     Returns which hostnames succeeded/failed so the UI can show a real
     summary instead of a single pass/fail toast."""
     device_ids = payload.device_ids if payload else None
-    return backup_service.run_fleet_config_backup(db, current_user.email, device_ids=device_ids)
+    destination_ids = payload.destination_ids if payload else None
+    return backup_service.run_fleet_config_backup(
+        db, current_user.email, device_ids=device_ids, destination_ids=destination_ids
+    )
 
 
 @router.get("/destinations", response_model=list[BackupDestinationRead])

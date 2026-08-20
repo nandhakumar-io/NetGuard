@@ -17,6 +17,16 @@ class AdminUserCreate(BaseModel):
     full_name: str
     password: str
     role: UserRole = UserRole.NETWORK_ENGINEER
+    # Additional roles' capabilities to grant this user on top of `role`,
+    # without a blanket promotion to each one's entire surface -- see
+    # app.core.deps.require_roles. E.g. a Network Engineer who also needs
+    # Security's terminal-recording review: role=network_engineer,
+    # extra_roles=["security"].
+    extra_roles: list[UserRole] = []
+
+
+class UserPermissionsUpdate(BaseModel):
+    extra_roles: list[UserRole]
 
 
 class UserStatusUpdate(BaseModel):
@@ -28,6 +38,7 @@ class AdminUserRead(BaseModel):
     email: str
     full_name: str
     role: UserRole
+    extra_roles: list[UserRole] = []
     is_active: bool
     mfa_enabled: bool
     sso_provider: str | None = None

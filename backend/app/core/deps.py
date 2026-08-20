@@ -92,27 +92,45 @@ def get_current_user_ws(token: str, db: Session, roles: tuple[UserRole, ...] = (
     return user
 
 
+def _extra_roles(user: User) -> set[str]:
+    if not user.extra_roles:
+        return set()
+    return {r.strip() for r in user.extra_roles.split(",") if r.strip()}
+
+
 def require_roles(*roles: UserRole):
     """Dependency factory for Role-Based Access Control (RBAC).
 
     Usage: `Depends(require_roles(UserRole.NETWORK_ADMIN))`
 
-    A user passes if their base User.role is in `roles`, OR they currently
-    hold an active Just-In-Time elevation (app.services.jit_service) to
-    one of `roles` -- see app.models.jit_elevation.JitElevation. This is
-    the one place JIT access actually takes effect: everywhere else in the
-    app checks a plain User.role, unaware that it might be temporary.
+    A user passes if any of the following is true:
+      - their base User.role is in `roles`
+      - one of their admin-granted `extra_roles` (fine-grained custom
+        permissions -- see app.api.user_management, "Manage permissions")
+        is in `roles`
+      - they currently hold an active Just-In-Time elevation
+        (app.services.jit_service) to one of `roles` -- see
+        app.models.jit_elevation.JitElevation.
+
+    extra_roles exists for the case a user needs one specific other
+    role's surface (e.g. a Network Engineer who also reviews terminal
+    recordings) without a blanket promotion to that entire role, or a
+    time-boxed JIT grant when the need is standing rather than occasional.
     """
 
     def _check(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+        role_values = {r.value for r in roles}
+
         if user.role in roles:
+            return user
+
+        if _extra_roles(user) & role_values:
             return user
 
         from app.services import (
             jit_service,  # local import: avoids a deps<->services import cycle
         )
 
-        role_values = {r.value for r in roles}
         if jit_service.active_roles_for_user(db, user.id) & role_values:
             return user
 

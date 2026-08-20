@@ -24,6 +24,7 @@ from app.schemas.user_management import (
     AdminUserCreate,
     AdminUserListResponse,
     AdminUserRead,
+    UserPermissionsUpdate,
     UserRoleCounts,
     UserStatusUpdate,
 )
@@ -38,12 +39,28 @@ def _is_active(user: User) -> bool:
     return str(user.is_active).lower() in ("true", "1")
 
 
+def _parse_extra_roles(user: User) -> list[UserRole]:
+    if not user.extra_roles:
+        return []
+    out = []
+    for raw in user.extra_roles.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            out.append(UserRole(raw))
+        except ValueError:
+            continue  # tolerate a stale/unknown value rather than 500ing the whole list
+    return out
+
+
 def _serialize(user: User) -> AdminUserRead:
     return AdminUserRead(
         id=str(user.id),
         email=user.email,
         full_name=user.full_name,
         role=user.role,
+        extra_roles=_parse_extra_roles(user),
         is_active=_is_active(user),
         mfa_enabled=str(user.mfa_enabled).lower() == "true",
         sso_provider=user.sso_provider,
@@ -81,6 +98,7 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db), current
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
         role=payload.role,
+        extra_roles=",".join(r.value for r in payload.extra_roles) or None,
         is_active=True,
     )
     db.add(user)
@@ -89,7 +107,35 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db), current
 
     audit_service.record_event(
         db, actor=current_user.email, action="User Created", result="Success",
-        detail=f"{user.email} created with role {user.role.value}",
+        detail=f"{user.email} created with role {user.role.value}"
+        + (f" (+{', '.join(r.value for r in payload.extra_roles)})" if payload.extra_roles else ""),
+    )
+    return _serialize(user)
+
+
+@router.patch("/{user_id}/permissions", response_model=AdminUserRead)
+def update_user_permissions(
+    user_id: str, payload: UserPermissionsUpdate, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)
+):
+    """Sets a user's fine-grained custom permissions: which *other* roles'
+    endpoints they can reach in addition to their base `role`, without a
+    full role change. Replaces the whole extra_roles set each call (not a
+    per-item add/remove) -- the User Management UI always sends the
+    complete desired set from a checkbox list, same pattern as
+    update_user_status for is_active.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    extra = [r for r in payload.extra_roles if r != user.role]  # granting a user's own base role is a no-op
+    user.extra_roles = ",".join(r.value for r in extra) or None
+    db.commit()
+    db.refresh(user)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="User Permissions Updated", result="Success",
+        detail=f"{user.email}: extra_roles={[r.value for r in extra] or 'none'}",
     )
     return _serialize(user)
 

@@ -197,14 +197,27 @@ function PlaybackModal({ recording, onClose }: { recording: TerminalSessionRecor
         )}
 
         <div className="px-4 pb-3">
-          <a
-            href={`/api/v1/terminal-recordings/${recording.id}/download`}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            onClick={async () => {
+              try {
+                const res = await api.get(`/terminal-recordings/${recording.id}/download`, {
+                  responseType: "blob" as any,
+                });
+                const blob = new Blob([res.data], { type: "application/x-ndjson" });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `terminal-session-${recording.id}.jsonl`;
+                a.click();
+                window.URL.revokeObjectURL(url);
+              } catch {
+                setError("Failed to download transcript.");
+              }
+            }}
             className="text-xs text-brandblue hover:text-white font-medium"
           >
             Download raw transcript (.jsonl)
-          </a>
+          </button>
         </div>
       </div>
     </div>
