@@ -102,8 +102,17 @@ class PathHop(Base):
     # (with its live health color) instead of a bare IP.
     device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True, index=True)
 
-    rtt_ms = Column(Float, nullable=True)  # single-sample average RTT for this hop, ms
+    rtt_ms = Column(Float, nullable=True)  # average RTT for this hop, ms (mtr's "Avg" column when available)
     packet_loss_pct = Column(Float, nullable=True)  # 0-100
     status = Column(Enum(HopStatus), nullable=False, default=HopStatus.UNKNOWN)
+
+    # Extra per-hop statistics from a real mtr run (NULL for topology-
+    # fallback hops, which only ever have a single ICMP sample and so
+    # can't populate best/worst/stddev/sent).
+    sent = Column(Integer, nullable=True)  # probe cycles sent for this hop
+    last_rtt_ms = Column(Float, nullable=True)
+    best_rtt_ms = Column(Float, nullable=True)
+    worst_rtt_ms = Column(Float, nullable=True)
+    stddev_rtt_ms = Column(Float, nullable=True)
 
     trace = relationship("PathTrace", back_populates="hops")

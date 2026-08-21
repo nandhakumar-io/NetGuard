@@ -10,7 +10,7 @@
  * current user's) so no admin role is needed.
  */
 import { useEffect, useRef, useState } from "react";
-import api from "../api/axios";
+import { api } from "../lib/api";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

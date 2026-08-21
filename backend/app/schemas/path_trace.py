@@ -17,6 +17,11 @@ class PathHopRead(BaseModel):
     rtt_ms: float | None = None
     packet_loss_pct: float | None = None
     status: HopStatus
+    sent: int | None = None
+    last_rtt_ms: float | None = None
+    best_rtt_ms: float | None = None
+    worst_rtt_ms: float | None = None
+    stddev_rtt_ms: float | None = None
 
 
 class PathTraceRead(BaseModel):

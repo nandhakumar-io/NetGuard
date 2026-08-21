@@ -123,6 +123,7 @@ _MTR_LINE_RE = re.compile(
     r"^\s*(?P<hop>\d+)\.\|--\s+(?P<host>\S+)\s+"
     r"(?P<loss>[\d.]+)%\s+(?P<snt>\d+)\s+"
     r"(?P<last>[\d.]+)\s+(?P<avg>[\d.]+)\s+(?P<best>[\d.]+)\s+(?P<wrst>[\d.]+)"
+    r"(?:\s+(?P<stdev>[\d.]+))?"
 )
 
 
@@ -156,16 +157,25 @@ def _run_mtr(target_ip: str) -> list[dict] | None:
             continue
         host = m.group("host")
         loss_pct = float(m.group("loss"))
+        is_dead = loss_pct >= 100.0 or host in ("???", "*")
         # mtr still reports an "Avg" RTT column even at 100% loss (it's
         # just 0.0/stale from a prior cycle), so treat full loss as no
         # usable RTT sample rather than trusting that number.
-        avg_rtt = None if loss_pct >= 100.0 or host in ("???", "*") else float(m.group("avg"))
+        avg_rtt = None if is_dead else float(m.group("avg"))
         hops.append(
             {
                 "hop_index": int(m.group("hop")),
                 "ip_address": None if host in ("???", "*") else host,
                 "rtt_ms": avg_rtt,
                 "loss_pct": loss_pct,
+                # Extra per-hop mtr statistics -- sent-probe count plus
+                # last/best/worst/stddev RTT, all discarded until now even
+                # though mtr's report-mode output already includes them.
+                "sent": int(m.group("snt")),
+                "last_rtt_ms": None if is_dead else float(m.group("last")),
+                "best_rtt_ms": None if is_dead else float(m.group("best")),
+                "worst_rtt_ms": None if is_dead else float(m.group("wrst")),
+                "stddev_rtt_ms": None if is_dead or not m.group("stdev") else float(m.group("stdev")),
             }
         )
     return hops or None
@@ -395,6 +405,11 @@ def run_trace(
                 rtt_ms=rtt_ms,
                 packet_loss_pct=loss_pct,
                 status=status,
+                sent=h.get("sent"),
+                last_rtt_ms=h.get("last_rtt_ms"),
+                best_rtt_ms=h.get("best_rtt_ms"),
+                worst_rtt_ms=h.get("worst_rtt_ms"),
+                stddev_rtt_ms=h.get("stddev_rtt_ms"),
             )
         )
         if ip == target_ip:

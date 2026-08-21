@@ -98,6 +98,7 @@ function RackCard({
   onDelete,
   selected,
   onToggleSelect,
+  onDeviceAction,
 }: {
   rack: GroupRack;
   dcName: string;
@@ -109,6 +110,7 @@ function RackCard({
   onToggleSelect: (deviceId: string) => void;
   onRename: (oldName: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
   onDelete: (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
+  onDeviceAction: (action: "edit" | "remove" | "replace", device: GroupDevice, dcName: string, blockName: string, rackName: string) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -203,6 +205,16 @@ function RackCard({
                     {d.device_type}
                   </span>
                 )}
+                {canManage && (
+                  <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
+                    <button onClick={() => onDeviceAction("edit", d, dcName, blockName, rack.name)} title="Edit placement"
+                      className="text-[11px] text-slate-400 hover:text-blue-500 leading-none">✎</button>
+                    <button onClick={() => onDeviceAction("replace", d, dcName, blockName, rack.name)} title="Replace device"
+                      className="text-[11px] text-slate-400 hover:text-indigo-500 leading-none">⇄</button>
+                    <button onClick={() => onDeviceAction("remove", d, dcName, blockName, rack.name)} title="Remove from rack"
+                      className="text-[11px] text-slate-400 hover:text-red-500 leading-none">✕</button>
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -224,6 +236,7 @@ function DataCenterCard({
   onDelete,
   selected,
   onToggleSelect,
+  onDeviceAction,
 }: {
   dataCenter: GroupDataCenter;
   blockName: string;
@@ -234,6 +247,7 @@ function DataCenterCard({
   onDelete: (name: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
+  onDeviceAction: (action: "edit" | "remove" | "replace", device: GroupDevice, dcName: string, blockName: string, rackName: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -318,6 +332,7 @@ function DataCenterCard({
                   onDelete={(name, type, dcName, blockNameArg) =>
                     onDelete(name, type === "data_center" ? "data_center" : type, blockNameArg || blockName, dcName)}
                   selected={selected} onToggleSelect={onToggleSelect}
+                  onDeviceAction={onDeviceAction}
                 />
               ))}
             </div>
@@ -342,6 +357,7 @@ function BlockCard({
   onDelete,
   selected,
   onToggleSelect,
+  onDeviceAction,
 }: {
   block: GroupBlock;
   canManage: boolean;
@@ -351,6 +367,7 @@ function BlockCard({
   onDelete: (name: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
+  onDeviceAction: (action: "edit" | "remove" | "replace", device: GroupDevice, dcName: string, blockName: string, rackName: string) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -451,6 +468,7 @@ function BlockCard({
                 onDelete={onDelete}
                 selected={selected}
                 onToggleSelect={onToggleSelect}
+                onDeviceAction={onDeviceAction}
               />
             ))
           )}
@@ -1029,7 +1047,14 @@ export default function Groups() {
   const [addBusy, setAddBusy] = useState(false);
   const [addFormError, setAddFormError] = useState<string | null>(null);
   const [allDevices, setAllDevices] = useState<Device[] | null>(null);
-  
+
+  // Modal mode: "add" (default) places a device into a rack; "edit"
+  // reuses the same form to change an already-placed device's slot;
+  // "replace" swaps a new device into a device's current slot and
+  // unassigns the old one.
+  const [modalMode, setModalMode] = useState<"add" | "edit" | "replace">("add");
+  const [modalOldDeviceId, setModalOldDeviceId] = useState<string | null>(null);
+
   const confirm = useConfirm();
 
   const loadAllDevices = () => {
@@ -1039,9 +1064,14 @@ export default function Groups() {
       .catch(() => setAllDevices([]));
   };
 
-  const openAddDevice = (prefillBlock?: string, prefillDc?: string, prefillRack?: string) => {
+  const openAddDevice = (
+    prefillBlock?: string,
+    prefillDc?: string,
+    prefillRack?: string,
+    opts?: { mode?: "add" | "edit" | "replace"; deviceId?: string; position?: number | null }
+  ) => {
     if (allDevices === null) loadAllDevices();
-    setAddDeviceId("");
+    setAddDeviceId(opts?.mode === "edit" && opts.deviceId ? opts.deviceId : "");
     setAddDeviceQuery("");
     setAddBlock(prefillBlock && prefillBlock !== "Unassigned" ? prefillBlock : "");
     setAddBlockNew("");
@@ -1049,9 +1079,49 @@ export default function Groups() {
     setAddDcNew("");
     setAddRack(prefillRack && prefillRack !== "Unassigned" ? prefillRack : "");
     setAddRackNew("");
-    setAddPosition("");
+    setAddPosition(opts?.position != null ? String(opts.position) : "");
     setAddFormError(null);
+    setModalMode(opts?.mode || "add");
+    setModalOldDeviceId(opts?.mode === "replace" ? opts?.deviceId || null : null);
     setAddOpen(true);
+  };
+
+  // Edit / replace / remove entry point for the per-device row actions.
+  const handleDeviceAction = async (
+    action: "edit" | "remove" | "replace",
+    device: GroupDevice,
+    dcName: string,
+    blockName: string,
+    rackName: string
+  ) => {
+    if (action === "edit") {
+      openAddDevice(blockName, dcName, rackName, {
+        mode: "edit",
+        deviceId: device.id,
+        position: device.rack_position,
+      });
+      return;
+    }
+    if (action === "replace") {
+      openAddDevice(blockName, dcName, rackName, {
+        mode: "replace",
+        deviceId: device.id,
+        position: device.rack_position,
+      });
+      return;
+    }
+    // remove: unassign device from the hierarchy entirely
+    if (!(await confirm(`Remove ${device.hostname} from ${blockName} / ${dcName} / ${rackName}? It will become unassigned.`))) {
+      return;
+    }
+    try {
+      await api.patch(`/devices/${device.id}`, { block: null, data_center: null, rack: null, rack_position: null });
+      setMoveNotice(`Removed ${device.hostname} from the rack.`);
+      load();
+      setTimeout(() => setMoveNotice(null), 3000);
+    } catch {
+      setError("Failed to remove device from rack.");
+    }
   };
 
   const load = () => {
@@ -1105,6 +1175,10 @@ export default function Groups() {
       setAddFormError("Rack position must be a positive whole number (U slot), or left blank.");
       return;
     }
+    if (modalMode === "replace" && addDeviceId === modalOldDeviceId) {
+      setAddFormError("Pick a different device to replace this one with.");
+      return;
+    }
     setAddBusy(true);
     setAddFormError(null);
     try {
@@ -1114,14 +1188,30 @@ export default function Groups() {
         rack: rack,
         rack_position: position,
       });
+      if (modalMode === "replace" && modalOldDeviceId) {
+        await api.patch(`/devices/${modalOldDeviceId}`, {
+          block: null,
+          data_center: null,
+          rack: null,
+          rack_position: null,
+        });
+      }
       const deviceLabel = allDevices?.find((d) => d.id === addDeviceId)?.hostname || "Device";
-      setMoveNotice(`Added ${deviceLabel} to ${block} / ${dc} / ${rack}.`);
+      setMoveNotice(
+        modalMode === "replace"
+          ? `Replaced device with ${deviceLabel} in ${block} / ${dc} / ${rack}.`
+          : modalMode === "edit"
+          ? `Updated placement for ${deviceLabel}.`
+          : `Added ${deviceLabel} to ${block} / ${dc} / ${rack}.`
+      );
       setAddOpen(false);
+      setModalMode("add");
+      setModalOldDeviceId(null);
       loadAllDevices();
       load();
       setTimeout(() => setMoveNotice(null), 3000);
     } catch (e: any) {
-      setAddFormError(e?.response?.data?.detail || "Failed to add device to rack.");
+      setAddFormError(e?.response?.data?.detail || "Failed to save device placement.");
     } finally {
       setAddBusy(false);
     }
@@ -1174,10 +1264,11 @@ export default function Groups() {
 
   const addDeviceOptions = useMemo(() => {
     const q = addDeviceQuery.trim().toLowerCase();
-    const list = allDevices || [];
+    let list = allDevices || [];
+    if (modalMode === "replace" && modalOldDeviceId) list = list.filter((d) => d.id !== modalOldDeviceId);
     const filtered = q ? list.filter((d) => d.hostname.toLowerCase().includes(q)) : list;
     return filtered.slice(0, 50);
-  }, [allDevices, addDeviceQuery]);
+  }, [allDevices, addDeviceQuery, modalMode, modalOldDeviceId]);
 
   useEffect(() => {
     if (addBlock !== "__new__" && addDc !== "__new__" && addDc && !dcsForAddBlock.includes(addDc)) {
@@ -1486,6 +1577,7 @@ export default function Groups() {
                   onDelete={handleDeleteGroup}
                   selected={selected}
                   onToggleSelect={toggleSelect}
+                  onDeviceAction={handleDeviceAction}
                 />
               ))}
             </div>
@@ -1496,18 +1588,25 @@ export default function Groups() {
       {addOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
-          onClick={() => setAddOpen(false)}
+          onClick={() => { setAddOpen(false); setModalMode("add"); setModalOldDeviceId(null); }}
         >
           <div
             className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-md p-5 flex flex-col gap-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold text-navy dark:text-white">Add Device to Rack</h3>
-              <button onClick={() => setAddOpen(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl leading-none">
+              <h3 className="text-lg font-bold text-navy dark:text-white">
+                {modalMode === "edit" ? "Edit Device Placement" : modalMode === "replace" ? "Replace Device" : "Add Device to Rack"}
+              </h3>
+              <button onClick={() => { setAddOpen(false); setModalMode("add"); setModalOldDeviceId(null); }} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl leading-none">
                 ×
               </button>
             </div>
+            {modalMode === "replace" && (
+              <p className="text-xs text-slate-500 dark:text-slate-400 -mt-2">
+                Pick the device that should take over this slot. The current device will be moved to Unassigned.
+              </p>
+            )}
 
             {addFormError && (
               <p className="text-riskcrit text-xs font-semibold bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg">
@@ -1647,7 +1746,13 @@ export default function Groups() {
                 disabled={addBusy}
                 className="bg-brandblue hover:bg-blue-600 disabled:opacity-40 text-white font-bold px-4 py-1.5 rounded-full text-sm transition"
               >
-                {addBusy ? "Adding…" : "Add to Rack"}
+                {addBusy
+                  ? "Saving…"
+                  : modalMode === "edit"
+                  ? "Save Placement"
+                  : modalMode === "replace"
+                  ? "Replace Device"
+                  : "Add to Rack"}
               </button>
             </div>
           </div>

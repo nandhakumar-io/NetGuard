@@ -1491,6 +1491,11 @@ export interface PathHop {
   rtt_ms: number | null;
   packet_loss_pct: number | null;
   status: HopStatus;
+  sent: number | null;
+  last_rtt_ms: number | null;
+  best_rtt_ms: number | null;
+  worst_rtt_ms: number | null;
+  stddev_rtt_ms: number | null;
 }
 
 export interface PathTrace {

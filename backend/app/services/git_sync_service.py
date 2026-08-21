@@ -229,7 +229,14 @@ def sync_repo(db: Session, repo: GitRepoConfig) -> dict:
             raise GitSyncError(f"template_path '{repo.template_path}' does not exist in the repo")
 
         for path in sorted(template_dir.rglob("*")):
-            if not path.is_file() or path.suffix not in (".j2", ".yaml", ".yml", ".txt", ".cfg"):
+            # Matches the documented behavior (see Integrations UI copy and
+            # GitRepoConfig's docstring: "reads *.j2/*.yaml files under
+            # template_path"). .txt/.cfg were previously accepted too,
+            # which meant any stray non-template file dropped into the
+            # template dir (a README, a scratch test.txt, ...) got treated
+            # as a template and failed the whole sync on its missing
+            # front-matter instead of being silently ignored.
+            if not path.is_file() or path.suffix not in (".j2", ".yaml", ".yml"):
                 continue
             try:
                 outcome = _sync_one_file(db, path)

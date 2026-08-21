@@ -279,6 +279,18 @@ export default function PathTracePage() {
                               )}
                             </div>
                           </div>
+                          {/* Extra mtr stats (best/worst/stddev/sent) -- only
+                              present for real mtr-sourced hops, not the
+                              single-sample topology fallback. */}
+                          {(hop.best_rtt_ms != null || hop.worst_rtt_ms != null || hop.stddev_rtt_ms != null || hop.sent != null) && (
+                            <div className="flex items-center gap-3 flex-wrap mt-1.5 pt-1.5 border-t border-black/5 dark:border-white/5 text-[10px] text-slate-400 dark:text-slate-500">
+                              {hop.last_rtt_ms != null && <span>Last <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.last_rtt_ms.toFixed(1)}</b> ms</span>}
+                              {hop.best_rtt_ms != null && <span>Best <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.best_rtt_ms.toFixed(1)}</b> ms</span>}
+                              {hop.worst_rtt_ms != null && <span>Worst <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.worst_rtt_ms.toFixed(1)}</b> ms</span>}
+                              {hop.stddev_rtt_ms != null && <span>StDev <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.stddev_rtt_ms.toFixed(1)}</b> ms</span>}
+                              {hop.sent != null && <span>Sent <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.sent}</b></span>}
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
