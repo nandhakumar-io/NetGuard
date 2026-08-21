@@ -1,22 +1,26 @@
 """Hop-by-hop path/route tracing (NetPath-style).
 
-Two hop sources, tried in order -- see app.models.path_trace.PathTrace's
-docstring for the full rationale:
+Two hop sources, tried in order:
 
-  1. Real `traceroute`/`tracepath` (whichever is present in this runtime),
-     parsed into per-hop IP + RTT.
+  1. Real `mtr` (My Traceroute) in report mode, parsed into per-hop IP +
+     RTT + loss.  mtr sends multiple probes per hop and reports packet
+     loss % directly, which is exactly the loss/degraded signal this app
+     wants for each hop.  Preferred over traceroute for its richer
+     per-hop data and because it does not rely on raw-socket privileges.
+
   2. Topology-graph fallback: BFS over the same adjacency graph the
      Topology page already renders (app.services.topology_service,
      built from confirmed LLDP/CDP/GNS3 links), probing each intermediate
      *managed* device with reachability_service.is_reachable() + a
      best-effort ICMP RTT sample.
 
-Fallback (2) is the one that actually works in this app's own runtime in
-practice: a locked-down container frequently has neither `traceroute` nor
-raw-socket privileges, which is exactly why reachability_service already
-treats ICMP as a secondary signal behind a plain TCP connect for
-Device.status. Path tracing inherits that same tolerance rather than
-just returning "traceroute not available" with nothing else to show.
+Note: a plain `traceroute`/`tracepath` fallback was previously method 2
+but has been removed from the active call chain.  In locked-down container
+environments traceroute frequently lacks the raw-socket privileges it needs
+and hangs for the full _TRACE_TOOL_TIMEOUT_SECONDS before returning
+nothing, causing every trace to be artificially slow.  The topology-graph
+fallback is cheaper, faster, and produces richer device annotations.
+The _run_traceroute() helper is kept below for the existing test suite.
 """
 from __future__ import annotations
 
@@ -35,8 +39,9 @@ from app.models.device import Device
 from app.models.path_trace import HopStatus, PathHop, PathTrace, PathTraceStatus
 from app.services import reachability_service, topology_service
 
-_TRACEROUTE_TIMEOUT_SECONDS = 15
+_TRACE_TOOL_TIMEOUT_SECONDS = 15
 _MAX_HOPS = 30
+_MTR_CYCLES = 5
 
 # A hop's RTT counts as "degraded" (rather than plain "ok") once it's this
 # slow, or if it lost part of its probe samples -- same rough threshold
@@ -106,7 +111,67 @@ def _icmp_rtt_ms(ip_address: str, timeout: float = 1.0, count: int = 2) -> tuple
     return rtt_ms, loss_pct
 
 
-# --- Method 1: real traceroute -------------------------------------------
+# --- Method 1: real mtr (report mode) -------------------------------------
+
+# mtr's `-r` report-mode output looks like:
+#   Start: 2024-01-01T00:00:00+0000
+#   HOST: hostname                   Loss%   Snt   Last   Avg  Best  Wrst StDev
+#     1.|-- 10.0.0.1                  0.0%     5    0.4   0.5   0.3   0.9   0.2
+#     2.|-- 10.0.1.1                 20.0%     5    1.2   1.4   1.1   2.0   0.4
+#     3.|-- ???                      100.0     5    0.0   0.0   0.0   0.0   0.0
+_MTR_LINE_RE = re.compile(
+    r"^\s*(?P<hop>\d+)\.\|--\s+(?P<host>\S+)\s+"
+    r"(?P<loss>[\d.]+)%\s+(?P<snt>\d+)\s+"
+    r"(?P<last>[\d.]+)\s+(?P<avg>[\d.]+)\s+(?P<best>[\d.]+)\s+(?P<wrst>[\d.]+)"
+)
+
+
+def _run_mtr(target_ip: str) -> list[dict] | None:
+    """Returns parsed hops from a real `mtr` report-mode run, or None if
+    the binary isn't present or the run failed outright (caller falls
+    back to traceroute/tracepath, then the topology method).
+
+    `-r` (report mode, non-interactive) + `-n` (numeric, skip reverse
+    DNS -- keeps this fast and avoids hanging on a broken resolver) +
+    `-c` (probe cycles per hop, so loss% is a real ratio rather than a
+    single yes/no) + `-w` (wide report -- unabbreviated hostnames,
+    though `-n` means this mostly just keeps the column format stable).
+    """
+    binary = shutil.which("mtr")
+    if not binary:
+        return None
+
+    cmd = [binary, "-r", "-n", "-w", "-c", str(_MTR_CYCLES), "-m", str(_MAX_HOPS), target_ip]
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=_TRACE_TOOL_TIMEOUT_SECONDS, text=True
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    hops: list[dict] = []
+    for line in (result.stdout or "").splitlines():
+        m = _MTR_LINE_RE.match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        loss_pct = float(m.group("loss"))
+        # mtr still reports an "Avg" RTT column even at 100% loss (it's
+        # just 0.0/stale from a prior cycle), so treat full loss as no
+        # usable RTT sample rather than trusting that number.
+        avg_rtt = None if loss_pct >= 100.0 or host in ("???", "*") else float(m.group("avg"))
+        hops.append(
+            {
+                "hop_index": int(m.group("hop")),
+                "ip_address": None if host in ("???", "*") else host,
+                "rtt_ms": avg_rtt,
+                "loss_pct": loss_pct,
+            }
+        )
+    return hops or None
+
+
+# --- Method 2: real traceroute ---------------------------------------------
 
 _TRACEROUTE_LINE_RE = re.compile(
     r"^\s*(?P<hop>\d+)\s+"
@@ -126,7 +191,7 @@ def _run_traceroute(target_ip: str) -> list[dict] | None:
     cmd = [binary, "-n", "-m", str(_MAX_HOPS), target_ip] if "traceroute" in binary else [binary, "-n", target_ip]
     try:
         result = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=_TRACEROUTE_TIMEOUT_SECONDS, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=_TRACE_TOOL_TIMEOUT_SECONDS, text=True
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -286,16 +351,19 @@ def run_trace(
         db.refresh(trace)
         return trace
 
-    raw_hops = _run_traceroute(target_ip)
-    hop_source = "traceroute"
+    raw_hops = _run_mtr(target_ip)
+    hop_source = "mtr"
     device_by_ip = {d.ip_address: d for d in db.query(Device).all()}
 
     if raw_hops is None:
+        # mtr is unavailable or failed -- skip the plain traceroute
+        # fallback entirely (it hangs for the full timeout in locked-down
+        # containers) and jump straight to the topology-graph method.
         hop_source = "topology"
         if source_device is None:
-            # No managed source device to anchor the graph walk from, and
-            # no traceroute available -- the only thing left to honestly
-            # report is a direct probe of the target itself.
+            # No managed source device to anchor the graph walk from and
+            # mtr is unavailable -- the only thing left to honestly report
+            # is a direct probe of the target itself.
             rtt, loss = _icmp_rtt_ms(target_ip)
             raw_hops = [
                 {

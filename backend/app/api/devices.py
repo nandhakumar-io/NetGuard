@@ -1569,25 +1569,35 @@ def list_device_protocol_operations(
 
 @router.get("/groups/summary")
 def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Devices rolled up into a data-center -> block -> rack -> device
-    hierarchy, for the Topology page's grouping view and any other
-    "group by location" UI. Devices with no data_center/block/rack set
-    are bucketed under "Unassigned" rather than dropped, so the fleet
-    always fully accounts for every device even before anyone's filled
-    in placement. `block` is an optional middle tier (building/pod)
-    between data center and rack -- most orgs with a single small DC
-    will never touch it and everything just falls under "Unassigned".
+    """Devices rolled up into an enterprise-level block -> data-center ->
+    rack -> device hierarchy (everything sits under a single top-level
+    "company" node in the UI, since this app is single-tenant), for the
+    Topology page's grouping view and any other "group by location" UI.
+
+    `block` is the top physical/organizational grouping level -- a
+    campus, region, or business unit that owns one or more data centers
+    -- with `data_center` nested under it, and `rack` nested under that.
+    Devices with no block/data_center/rack set are bucketed under
+    "Unassigned" at whichever level(s) are missing, rather than dropped,
+    so the fleet always fully accounts for every device even before
+    anyone's filled in placement. Most orgs with a single small DC will
+    never touch `block` and everything just falls under "Unassigned".
+
+    (Note: `block` and `data_center` are both plain nullable strings on
+    Device with no structural difference between them -- swapping which
+    one is the outer grouping level here is purely an aggregation-order
+    change, not a schema change.)
     """
     devices = db.query(Device).order_by(Device.hostname).all()
 
-    data_centers: dict[str, dict] = {}
+    blocks_top: dict[str, dict] = {}
     for d in devices:
-        dc_name = d.data_center or "Unassigned"
         block_name = d.block or "Unassigned"
+        dc_name = d.data_center or "Unassigned"
         rack_name = d.rack or "Unassigned"
-        dc = data_centers.setdefault(dc_name, {"name": dc_name, "blocks": {}, "device_count": 0})
-        block = dc["blocks"].setdefault(block_name, {"name": block_name, "racks": {}, "device_count": 0})
-        rack = block["racks"].setdefault(rack_name, {"name": rack_name, "devices": []})
+        block = blocks_top.setdefault(block_name, {"name": block_name, "data_centers": {}, "device_count": 0})
+        dc = block["data_centers"].setdefault(dc_name, {"name": dc_name, "racks": {}, "device_count": 0})
+        rack = dc["racks"].setdefault(rack_name, {"name": rack_name, "devices": []})
         rack["devices"].append(
             {
                 "id": str(d.id),
@@ -1597,26 +1607,26 @@ def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)
                 "rack_position": d.rack_position,
             }
         )
-        dc["device_count"] += 1
         block["device_count"] += 1
+        dc["device_count"] += 1
 
     result = []
-    for dc in data_centers.values():
-        blocks = []
-        for block in dc["blocks"].values():
+    for block in blocks_top.values():
+        data_centers = []
+        for dc in block["data_centers"].values():
             # Sort devices within a rack by rack_position when set (unset
             # sorts last), then hostname -- gives a stable, sensible
             # top-to-bottom rack-elevation order.
             racks = []
-            for rack in block["racks"].values():
+            for rack in dc["racks"].values():
                 rack["devices"].sort(key=lambda dv: (dv["rack_position"] is None, dv["rack_position"] or 0, dv["hostname"]))
                 racks.append(rack)
             racks.sort(key=lambda r: r["name"])
-            blocks.append({"name": block["name"], "device_count": block["device_count"], "racks": racks})
-        blocks.sort(key=lambda b: b["name"])
-        result.append({"name": dc["name"], "device_count": dc["device_count"], "blocks": blocks})
+            data_centers.append({"name": dc["name"], "device_count": dc["device_count"], "racks": racks})
+        data_centers.sort(key=lambda dc: dc["name"])
+        result.append({"name": block["name"], "device_count": block["device_count"], "data_centers": data_centers})
 
-    result.sort(key=lambda dc: dc["name"])
+    result.sort(key=lambda b: b["name"])
     return result
 
 

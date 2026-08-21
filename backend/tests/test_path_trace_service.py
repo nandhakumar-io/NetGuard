@@ -70,3 +70,44 @@ def test_run_traceroute_parses_real_output_including_a_silent_hop(monkeypatch):
 def test_run_traceroute_returns_none_when_binary_missing(monkeypatch):
     monkeypatch.setattr(pts.shutil, "which", lambda name: None)
     assert pts._run_traceroute("8.8.8.8") is None
+
+
+_MTR_REPORT_OUTPUT = """Start: 2024-01-01T00:00:00+0000
+HOST: netguard-container              Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 10.0.0.1                       0.0%     5    0.4   0.5   0.3   0.9   0.2
+  2.|-- 10.0.1.1                      20.0%     5    1.2   1.4   1.1   2.0   0.4
+  3.|-- ???                          100.0%     5    0.0   0.0   0.0   0.0   0.0
+  4.|-- 8.8.8.8                        0.0%     5   14.1  14.2  14.0  14.5   0.2
+"""
+
+
+def test_run_mtr_parses_report_output_including_a_silent_hop(monkeypatch):
+    monkeypatch.setattr(pts.shutil, "which", lambda name: "/usr/bin/mtr" if name == "mtr" else None)
+
+    fake_result = type("R", (), {"stdout": _MTR_REPORT_OUTPUT, "returncode": 0})()
+    with patch.object(pts.subprocess, "run", return_value=fake_result):
+        hops = pts._run_mtr("8.8.8.8")
+
+    assert hops is not None
+    assert [h["hop_index"] for h in hops] == [1, 2, 3, 4]
+
+    assert hops[0]["ip_address"] == "10.0.0.1"
+    assert hops[0]["rtt_ms"] == 0.5
+    assert hops[0]["loss_pct"] == 0.0
+
+    # Partial loss hop should carry through mtr's real ratio, not an
+    # inferred one.
+    assert hops[1]["loss_pct"] == 20.0
+
+    # hop 3 is a fully silent hop ("???") -- must be captured, not
+    # dropped, with total loss and no RTT.
+    assert hops[2]["ip_address"] is None
+    assert hops[2]["rtt_ms"] is None
+    assert hops[2]["loss_pct"] == 100.0
+
+    assert hops[3]["ip_address"] == "8.8.8.8"
+
+
+def test_run_mtr_returns_none_when_binary_missing(monkeypatch):
+    monkeypatch.setattr(pts.shutil, "which", lambda name: None)
+    assert pts._run_mtr("8.8.8.8") is None

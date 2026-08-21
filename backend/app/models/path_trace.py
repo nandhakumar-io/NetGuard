@@ -71,7 +71,7 @@ class PathTrace(Base):
     target_input = Column(String, nullable=False)  # exactly what the operator typed/selected
     target_resolved_ip = Column(String, nullable=True)
 
-    hop_source = Column(String, nullable=False, default="topology")  # "traceroute" | "topology"
+    hop_source = Column(String, nullable=False, default="topology")  # "mtr" | "traceroute" | "topology"
     status = Column(Enum(PathTraceStatus), nullable=False, default=PathTraceStatus.PARTIAL)
     total_hops = Column(Integer, nullable=False, default=0)
     reached_target = Column(Boolean, nullable=False, default=False, server_default="false")

@@ -7,7 +7,7 @@ import {
   TopologyEdge,
   TopologySnapshotSummary,
   TopologyDiff,
-  DataCenterGroup,
+  BlockGroup,
   InterfaceCurrentStatus,
   InterfaceStatusHistoryEntry,
   DeviceMetric,
@@ -395,7 +395,7 @@ export default function Topology() {
     }
     return s;
   }, [pathDeviceIds]);
-  const [groups, setGroups] = useState<DataCenterGroup[] | null>(null);
+  const [groups, setGroups] = useState<BlockGroup[] | null>(null);
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [groupsError, setGroupsError] = useState<string | null>(null);
 
@@ -403,7 +403,7 @@ export default function Topology() {
     setGroupsLoading(true);
     setGroupsError(null);
     api
-      .get<DataCenterGroup[]>("/devices/groups/summary")
+      .get<BlockGroup[]>("/devices/groups/summary")
       .then((res) => setGroups(res.data))
       .catch(() => setGroupsError("Failed to load device groups."))
       .finally(() => setGroupsLoading(false));
@@ -1792,34 +1792,37 @@ export default function Topology() {
               )}
               {!groupsLoading && !groupsError && groups && groups.length > 0 && (
                 <div className="flex flex-col gap-6">
-                  {groups.map((dc) => (
-                    <div key={dc.name} className="border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wide">
+                    <span>🏛️</span> Company
+                  </div>
+                  {groups.map((block) => (
+                    <div key={block.name} className="border border-slate-200 rounded-xl overflow-hidden">
                       <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-200">
                         <div className="flex items-center gap-2">
                           <span className="text-sm">🏢</span>
-                          <h3 className="text-sm font-bold text-navy">{dc.name}</h3>
+                          <h3 className="text-sm font-bold text-navy">{block.name}</h3>
                         </div>
                         <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">
-                          {dc.device_count} device{dc.device_count === 1 ? "" : "s"} ·{" "}
-                          {dc.blocks.reduce((n, b) => n + b.racks.length, 0)} rack
-                          {dc.blocks.reduce((n, b) => n + b.racks.length, 0) === 1 ? "" : "s"}
+                          {block.device_count} device{block.device_count === 1 ? "" : "s"} ·{" "}
+                          {block.data_centers.reduce((n, dc) => n + dc.racks.length, 0)} rack
+                          {block.data_centers.reduce((n, dc) => n + dc.racks.length, 0) === 1 ? "" : "s"}
                         </span>
                       </div>
                       <div className="p-4 flex flex-col gap-4">
-                        {dc.blocks.map((block) => (
-                          <div key={block.name}>
-                            {/* Block is an optional middle tier (building/pod) between
-                                data center and rack -- most orgs never set it, so every
-                                device lands in a single "Unassigned" block and this
+                        {block.data_centers.map((dc) => (
+                          <div key={dc.name}>
+                            {/* Data center is an optional middle tier between block
+                                and rack -- most orgs never set it, so every device
+                                lands in a single "Unassigned" data center and this
                                 header is skipped to avoid noise. */}
-                            {(block.name !== "Unassigned" || dc.blocks.length > 1) && (
+                            {(dc.name !== "Unassigned" || block.data_centers.length > 1) && (
                               <div className="flex items-center gap-1.5 mb-2">
                                 <span className="text-xs">🏗️</span>
-                                <span className="text-xs font-bold text-slate-500">{block.name}</span>
+                                <span className="text-xs font-bold text-slate-500">{dc.name}</span>
                               </div>
                             )}
                             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                              {block.racks.map((rack) => (
+                              {dc.racks.map((rack) => (
                                 <div key={rack.name} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50/40">
                                   <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white border-b border-slate-200">
                                     <span className="text-xs">🗄️</span>

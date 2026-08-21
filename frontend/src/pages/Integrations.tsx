@@ -521,7 +521,9 @@ function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
   // --- Email (SMTP) ---
   const [smtp, setSmtp] = useState<NotificationSettings | null>(null);
   const [smtpForm, setSmtpForm] = useState(emptySmtpForm);
-  const [smtpLoading, setSmtpLoading] = useState(true);
+  // Non-admins cannot call GET /notification-settings (403), so start
+  // with loading=false and skip the fetch entirely for them.
+  const [smtpLoading, setSmtpLoading] = useState(canManage);
   const [smtpSaving, setSmtpSaving] = useState(false);
   const [smtpTesting, setSmtpTesting] = useState(false);
   const [smtpError, setSmtpError] = useState<string | null>(null);
@@ -548,7 +550,9 @@ function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
       .finally(() => setSmtpLoading(false));
   };
 
-  useEffect(loadSmtp, []);
+  // Only admins are allowed to call this endpoint; non-admins see the
+  // read-only status string rendered below instead.
+  useEffect(() => { if (canManage) loadSmtp(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveSmtp = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -226,7 +226,7 @@ export default function PathTracePage() {
                     {selected.source_hostname || selected.source_ip} → {selected.target_hostname || selected.target_input}
                   </h3>
                   <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
-                    {selected.hop_source === "traceroute" ? "Live traceroute" : "Derived from topology graph"} ·{" "}
+                    {selected.hop_source === "mtr" ? "Live mtr trace" : selected.hop_source === "traceroute" ? "Live traceroute" : "Derived from topology graph"} ·{" "}
                     {selected.total_hops} hop{selected.total_hops === 1 ? "" : "s"} · {timeAgo(selected.created_at)}
                     {selected.requested_by ? ` · by ${selected.requested_by}` : ""}
                   </p>

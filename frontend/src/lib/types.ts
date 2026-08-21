@@ -45,6 +45,7 @@ export interface Device {
   tags?: string[];
   custom_fields?: Record<string, string>;
   data_center?: string | null;
+  block?: string | null;
   rack?: string | null;
   rack_position?: number | null;
   enabled_health_checks?: string[] | null;
@@ -1331,16 +1332,22 @@ export interface RackGroup {
   }>;
 }
 
-export interface DataCenterBlock {
+// Enterprise physical-placement hierarchy: Block -> Data Center -> Rack ->
+// Device (rendered under a single top-level "Company" heading in the UI,
+// since this app is single-tenant). `block` is the top grouping level --
+// a campus/region/business-unit that can own one or more data centers --
+// with `data_center` nested under it and `rack` nested under that. See
+// backend app.api.devices.get_device_groups for the aggregation.
+export interface DataCenterGroup {
   name: string;
   device_count: number;
   racks: RackGroup[];
 }
 
-export interface DataCenterGroup {
+export interface BlockGroup {
   name: string;
   device_count: number;
-  blocks: DataCenterBlock[];
+  data_centers: DataCenterGroup[];
 }
 
 // --- Interface (port) status: current + history (NOC dashboard, device panel) ---
@@ -1495,7 +1502,7 @@ export interface PathTrace {
   target_hostname: string | null;
   target_input: string;
   target_resolved_ip: string | null;
-  hop_source: "traceroute" | "topology";
+  hop_source: "mtr" | "traceroute" | "topology";
   status: PathTraceStatus;
   total_hops: number;
   reached_target: boolean;

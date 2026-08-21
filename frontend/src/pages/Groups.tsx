@@ -18,27 +18,37 @@ interface GroupRack {
   devices: GroupDevice[];
 }
 
-interface GroupBlock {
+// Enterprise physical-placement hierarchy: Company (implicit, single-
+// tenant) -> Block -> Data Center -> Rack -> Device. `block` is the top
+// grouping level -- a campus/region/business-unit that can own one or
+// more data centers -- with `data_center` nested under it and `rack`
+// nested under that. See backend app.api.devices.get_device_groups.
+interface GroupDataCenter {
   name: string;
   device_count: number;
   racks: GroupRack[];
 }
 
-interface GroupDataCenter {
+interface GroupBlock {
   name: string;
   device_count: number;
-  blocks: GroupBlock[];
+  data_centers: GroupDataCenter[];
 }
 
 const statusColor: Record<string, string> = {
-  online: "bg-risklow",
+  online: "bg-emerald-500",
   offline: "bg-slate-400",
-  degraded: "bg-riskmed",
+  degraded: "bg-amber-500",
   unknown: "bg-slate-300 dark:bg-slate-600",
 };
 
-/** Rolls a list of devices up into up/degraded/down/unknown counts, so a
- * NOC admin can see rack/DC health without opening every card. */
+const statusRing: Record<string, string> = {
+  online: "ring-emerald-500/30",
+  offline: "ring-slate-400/30",
+  degraded: "ring-amber-500/30",
+  unknown: "ring-slate-400/20",
+};
+
 function healthRollup(devices: GroupDevice[]) {
   const counts = { online: 0, degraded: 0, offline: 0, unknown: 0 };
   for (const d of devices) {
@@ -47,13 +57,30 @@ function healthRollup(devices: GroupDevice[]) {
   return counts;
 }
 
+function HealthBar({ devices }: { devices: GroupDevice[] }) {
+  const c = healthRollup(devices);
+  const total = devices.length;
+  if (total === 0) return null;
+  const pct = (n: number) => `${((n / total) * 100).toFixed(1)}%`;
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex h-1.5 w-20 rounded-full overflow-hidden bg-slate-200 dark:bg-slate-700">
+        <div className="bg-emerald-500" style={{ width: pct(c.online) }} />
+        <div className="bg-amber-500" style={{ width: pct(c.degraded) }} />
+        <div className="bg-slate-400" style={{ width: pct(c.offline) }} />
+      </div>
+      <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">{c.online}/{total}</span>
+    </div>
+  );
+}
+
 function HealthBadge({ devices }: { devices: GroupDevice[] }) {
   const c = healthRollup(devices);
   if (devices.length === 0) return null;
   return (
     <div className="flex items-center gap-2 text-[11px] font-semibold">
-      {c.online > 0 && <span className="text-risklow flex items-center gap-1">● {c.online} up</span>}
-      {c.degraded > 0 && <span className="text-riskmed flex items-center gap-1">● {c.degraded} degraded</span>}
+      {c.online > 0 && <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">● {c.online} up</span>}
+      {c.degraded > 0 && <span className="text-amber-500 flex items-center gap-1">● {c.degraded} degraded</span>}
       {c.offline > 0 && <span className="text-slate-400 dark:text-slate-500 flex items-center gap-1">● {c.offline} down</span>}
       {c.unknown > 0 && <span className="text-slate-300 dark:text-slate-600 flex items-center gap-1">● {c.unknown} unknown</span>}
     </div>
@@ -84,111 +111,112 @@ function RackCard({
   onDelete: (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const c = healthRollup(rack.devices);
+  const total = rack.devices.length;
 
   return (
     <div
-      className={`bg-white dark:bg-slate-800 border rounded-xl shadow-sm overflow-hidden transition-colors ${
-        dragOver ? "border-brandblue ring-2 ring-brandblue/30" : "border-slate-200 dark:border-slate-700"
-      }`}
-      onDragOver={(e) => {
-        if (!canManage) return;
-        e.preventDefault();
-        setDragOver(true);
-      }}
+      className={`rounded-xl overflow-hidden border transition-all duration-200 ${
+        dragOver
+          ? "border-blue-500 ring-2 ring-blue-500/25 shadow-lg shadow-blue-500/10"
+          : "border-slate-200 dark:border-slate-700 shadow-sm hover:shadow-md"
+      } bg-white dark:bg-slate-800`}
+      onDragOver={(e) => { if (!canManage) return; e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
         if (!canManage) return;
-        e.preventDefault();
-        setDragOver(false);
+        e.preventDefault(); setDragOver(false);
         const deviceId = e.dataTransfer.getData("text/device-id");
         if (deviceId) onMove(deviceId, dcName, blockName, rack.name);
       }}
     >
-      <div className="bg-slate-100 dark:bg-slate-900 px-4 py-2 flex items-center justify-between border-b border-slate-200 dark:border-slate-700 gap-3">
-        <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5 shrink-0">
-          🗄️ Rack: {rack.name}
-        </p>
-        <HealthBadge devices={rack.devices} />
-        <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0 ml-auto">{rack.devices.length} device{rack.devices.length === 1 ? "" : "s"}</span>
+      {/* Rack header */}
+      <div className="px-3 py-2 flex items-center gap-2 bg-gradient-to-r from-slate-100 to-slate-50 dark:from-slate-900 dark:to-slate-800/60 border-b border-slate-200 dark:border-slate-700">
+        <button onClick={() => setCollapsed(c => !c)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 shrink-0">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            className={`transition-transform duration-200 ${collapsed ? "-rotate-90" : ""}`}>
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+        <span className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400 shrink-0">🗄</span>
+        <span className="text-xs font-bold text-slate-700 dark:text-slate-200 truncate flex-1">{rack.name}</span>
+        <HealthBar devices={rack.devices} />
+        <span className="text-[10px] text-slate-400 shrink-0">{total}U</span>
         {canManage && rack.name !== "Unassigned" && (
-          <button
-            onClick={() => onRename(rack.name, "rack", dcName, blockName)}
-            title="Rename this rack"
-            className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0"
-          >
-            ✎
-          </button>
-        )}
-        {canManage && rack.name !== "Unassigned" && (
-          <button
-            onClick={() => onDelete(rack.name, "rack", dcName, blockName)}
-            title="Delete this rack"
-            className="text-[11px] font-bold text-slate-400 hover:text-riskcrit shrink-0"
-          >
-            ✕
-          </button>
+          <>
+            <button onClick={() => onRename(rack.name, "rack", dcName, blockName)} title="Rename"
+              className="text-[11px] text-slate-400 hover:text-blue-500 shrink-0 leading-none">✎</button>
+            <button onClick={() => onDelete(rack.name, "rack", dcName, blockName)} title="Delete"
+              className="text-[11px] text-slate-400 hover:text-red-500 shrink-0 leading-none">✕</button>
+          </>
         )}
         {canManage && (
-          <button
-            onClick={() => onAddDevice(dcName, blockName, rack.name)}
-            title="Add a device to this rack"
-            className="text-[11px] font-bold text-brandblue hover:text-navy dark:hover:text-white shrink-0"
-          >
+          <button onClick={() => onAddDevice(dcName, blockName, rack.name)}
+            className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-800 shrink-0 border border-blue-300 dark:border-blue-700 rounded px-1.5 py-0.5 transition-colors">
             + Add
           </button>
         )}
       </div>
-      <div className="divide-y divide-slate-100 dark:divide-slate-800">
-        {rack.devices.length === 0 && (
-          <div className="px-4 py-3 flex items-center justify-between gap-2">
-            <p className="text-xs text-slate-400 dark:text-slate-500 italic">
-              {canManage ? "Empty rack — drag a device here, or use \"+ Add\" above." : "Empty rack."}
-            </p>
-          </div>
-        )}
-        {rack.devices.map((d) => (
-          <div
-            key={d.id}
-            draggable={canManage}
-            onDragStart={(e) => e.dataTransfer.setData("text/device-id", d.id)}
-            className="flex items-center gap-2 px-4 py-2 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group"
-          >
-            {canManage && (
-              <input
-                type="checkbox"
-                checked={selected.has(d.id)}
-                onChange={() => onToggleSelect(d.id)}
-                onClick={(e) => e.stopPropagation()}
-                className="shrink-0 accent-brandblue"
-              />
-            )}
-            {d.rack_position != null && (
-              <span className="text-[10px] font-mono text-slate-400 dark:text-slate-500 w-6 text-right">U{d.rack_position}</span>
-            )}
-            <span className={`w-2 h-2 rounded-full shrink-0 ${statusColor[d.status] || statusColor.unknown}`} />
-            <Link
-              to={`/devices?q=${encodeURIComponent(d.hostname)}`}
-              className="text-sm font-medium text-navy dark:text-white group-hover:text-brandblue truncate flex-1"
-            >
-              {d.hostname}
-            </Link>
-            {d.device_type && (
-              <span className="text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">{d.device_type}</span>
-            )}
-          </div>
-        ))}
-      </div>
+
+      {/* Utilization bar */}
+      {total > 0 && (
+        <div className="h-0.5 flex">
+          <div className="bg-emerald-500 transition-all" style={{ width: `${(c.online/total)*100}%` }} />
+          <div className="bg-amber-400 transition-all" style={{ width: `${(c.degraded/total)*100}%` }} />
+          <div className="bg-slate-300 dark:bg-slate-600 transition-all" style={{ width: `${(c.offline/total)*100}%` }} />
+        </div>
+      )}
+
+      {/* Device list */}
+      {!collapsed && (
+        <div className="divide-y divide-slate-100 dark:divide-slate-700/50">
+          {total === 0 ? (
+            <div className="px-4 py-4 flex flex-col items-center gap-1">
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" className="text-slate-300 dark:text-slate-600">
+                <rect x="2" y="3" width="20" height="18" rx="2"/><path d="M8 7h8M8 12h4"/>
+              </svg>
+              <p className="text-[11px] text-slate-400 italic">
+                {canManage ? "Empty — drag a device here or use + Add" : "Empty rack"}
+              </p>
+            </div>
+          ) : (
+            rack.devices.map((d) => (
+              <div key={d.id} draggable={canManage}
+                onDragStart={(e) => e.dataTransfer.setData("text/device-id", d.id)}
+                className="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-700/40 transition-colors group cursor-default">
+                {canManage && (
+                  <input type="checkbox" checked={selected.has(d.id)}
+                    onChange={() => onToggleSelect(d.id)} onClick={(e) => e.stopPropagation()}
+                    className="shrink-0 accent-blue-600" />
+                )}
+                {d.rack_position != null && (
+                  <span className="text-[9px] font-mono text-slate-400 w-5 text-right shrink-0">U{d.rack_position}</span>
+                )}
+                <span className={`w-2 h-2 rounded-full ring-2 shrink-0 ${statusColor[d.status] || statusColor.unknown} ${statusRing[d.status] || statusRing.unknown}`} />
+                <Link to={`/devices?q=${encodeURIComponent(d.hostname)}`}
+                  className="text-xs font-semibold text-slate-800 dark:text-slate-100 group-hover:text-blue-600 dark:group-hover:text-blue-400 truncate flex-1">
+                  {d.hostname}
+                </Link>
+                {d.device_type && (
+                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 shrink-0">
+                    {d.device_type}
+                  </span>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-/** One "block" (building/pod) within a data center -- a named grouping
- * of racks, the middle tier of the DC -> Block -> Rack -> Device
- * hierarchy. Collapsible since a real campus can have dozens of racks
- * spread across a handful of blocks. */
-function BlockCard({
-  block,
-  dcName,
+/** Enterprise Data Center card — collapsible tier between Block and Rack,
+ * with health rollup, rack grid, utilization bar, and drag-drop support. */
+function DataCenterCard({
+  dataCenter,
+  blockName,
   canManage,
   onMove,
   onAddDevice,
@@ -197,107 +225,99 @@ function BlockCard({
   selected,
   onToggleSelect,
 }: {
-  block: GroupBlock;
-  dcName: string;
+  dataCenter: GroupDataCenter;
+  blockName: string;
   canManage: boolean;
-  onMove: (deviceId: string, dataCenter: string, block: string, rack: string) => void;
-  onAddDevice: (dc: string, block: string, rack: string) => void;
-  onRename: (oldName: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
-  onDelete: (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => void;
+  onMove: (deviceId: string, block: string, dataCenter: string, rack: string) => void;
+  onAddDevice: (block: string, dc: string, rack: string) => void;
+  onRename: (oldName: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
+  onDelete: (name: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const isUnassigned = block.name === "Unassigned";
+  const isUnassigned = dataCenter.name === "Unassigned";
+  const allDevices = dataCenter.racks.flatMap((r) => r.devices);
 
   return (
     <div
-      className={`border rounded-xl overflow-hidden transition-colors ${
-        dragOver ? "border-brandblue ring-2 ring-brandblue/20" : "border-slate-200 dark:border-slate-700"
-      } ${isUnassigned ? "bg-white/60 dark:bg-slate-800/40" : "bg-white dark:bg-slate-800"}`}
-      onDragOver={(e) => {
-        // Dropping directly on the block header (not a specific rack)
-        // moves the device into this block's first rack, or a synthetic
-        // "Unassigned" rack if the block has none yet.
-        if (!canManage) return;
-        e.preventDefault();
-        setDragOver(true);
-      }}
+      className={`rounded-xl overflow-hidden border transition-all duration-200 ${
+        dragOver
+          ? "border-blue-400 ring-2 ring-blue-400/20 shadow-md"
+          : isUnassigned
+          ? "border-dashed border-slate-300 dark:border-slate-600"
+          : "border-slate-200 dark:border-slate-700 shadow-sm"
+      } ${isUnassigned ? "bg-white/50 dark:bg-slate-800/30" : "bg-white dark:bg-slate-800"}`}
+      onDragOver={(e) => { if (!canManage) return; e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
         if (!canManage) return;
-        e.preventDefault();
-        setDragOver(false);
+        e.preventDefault(); setDragOver(false);
         const deviceId = e.dataTransfer.getData("text/device-id");
-        if (deviceId) onMove(deviceId, dcName, block.name, block.racks[0]?.name || "Unassigned");
+        if (deviceId) onMove(deviceId, blockName, dataCenter.name, dataCenter.racks[0]?.name || "Unassigned");
       }}
     >
-      <div className="px-3.5 py-2 flex items-center gap-2.5 bg-gradient-to-r from-brandblue/[0.06] to-transparent dark:from-brandblue/10 border-b border-slate-100 dark:border-slate-700">
-        <button
-          onClick={() => setCollapsed((c) => !c)}
-          className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 shrink-0"
-          title={collapsed ? "Expand block" : "Collapse block"}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={`transition-transform ${collapsed ? "-rotate-90" : ""}`}>
-            <path d="M6 9l6 6 6-6" />
+      {/* Header */}
+      <div className="px-4 py-2.5 flex items-center gap-2 bg-gradient-to-r from-indigo-50 to-transparent dark:from-indigo-950/30 dark:to-transparent border-b border-slate-200 dark:border-slate-700">
+        <button onClick={() => setCollapsed(c => !c)}
+          className="text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-300 shrink-0" title={collapsed ? "Expand" : "Collapse"}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            className={`transition-transform duration-200 ${collapsed ? "-rotate-90" : ""}`}>
+            <path d="M6 9l6 6 6-6"/>
           </svg>
         </button>
-        <span className="text-sm font-bold text-navy dark:text-white flex items-center gap-1.5 shrink-0">
-          🧱 {block.name}
+        <div className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20M2 15h20"/>
+          </svg>
+        </div>
+        <span className={`text-sm font-bold ${isUnassigned ? "text-slate-400 dark:text-slate-500 italic" : "text-slate-800 dark:text-slate-100"} truncate flex-1`}>
+          {dataCenter.name}
         </span>
-        <HealthBadge devices={block.racks.flatMap((r) => r.devices)} />
-        <span className="text-[11px] text-slate-400 dark:text-slate-500 ml-auto shrink-0">
-          {block.device_count} device{block.device_count === 1 ? "" : "s"} · {block.racks.length} rack{block.racks.length === 1 ? "" : "s"}
+        <HealthBar devices={allDevices} />
+        <span className="text-[10px] text-slate-400 dark:text-slate-500 shrink-0">
+          {dataCenter.racks.length} rack{dataCenter.racks.length !== 1 ? "s" : ""} · {dataCenter.device_count} dev
         </span>
         {canManage && !isUnassigned && (
-          <button
-            onClick={() => onRename(block.name, "block", dcName)}
-            title="Rename this block"
-            className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0"
-          >
-            ✎
-          </button>
-        )}
-        {canManage && !isUnassigned && (
-          <button
-            onClick={() => onDelete(block.name, "block", dcName)}
-            title="Delete this block"
-            className="text-[11px] font-bold text-slate-400 hover:text-riskcrit shrink-0"
-          >
-            ✕
-          </button>
+          <>
+            <button onClick={() => onRename(dataCenter.name, "data_center", blockName)}
+              className="text-[11px] text-slate-400 hover:text-blue-500 shrink-0" title="Rename">✎</button>
+            <button onClick={() => onDelete(dataCenter.name, "data_center", blockName)}
+              className="text-[11px] text-slate-400 hover:text-red-500 shrink-0" title="Delete">✕</button>
+          </>
         )}
         {canManage && (
-          <button
-            onClick={() => onAddDevice(dcName, block.name, "")}
-            className="text-[11px] font-bold text-brandblue hover:text-navy dark:hover:text-white shrink-0"
-          >
+          <button onClick={() => onAddDevice(blockName, dataCenter.name, "")}
+            className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-700 rounded px-1.5 py-0.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors shrink-0">
             + Add
           </button>
         )}
       </div>
+
       {!collapsed && (
         <div className="p-3">
-          {block.racks.length === 0 ? (
-            <p className="text-xs text-slate-400 dark:text-slate-500 italic px-1">
-              {canManage ? "No racks in this block yet — use \"+ Add\" above." : "No racks in this block."}
-            </p>
+          {dataCenter.racks.length === 0 ? (
+            <div className="flex flex-col items-center py-5 gap-2 border border-dashed border-slate-200 dark:border-slate-700 rounded-lg">
+              <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" className="text-slate-300 dark:text-slate-600">
+                <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M8 9h8M8 13h4"/>
+              </svg>
+              <p className="text-xs text-slate-400 italic">
+                {canManage ? "No racks yet — use + Add above to create one" : "No racks in this data center."}
+              </p>
+            </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {block.racks.map((rack) => (
-                <RackCard
-                  key={rack.name}
-                  rack={rack}
-                  dcName={dcName}
-                  blockName={block.name}
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {dataCenter.racks.map((rack) => (
+                <RackCard key={rack.name} rack={rack} dcName={dataCenter.name} blockName={blockName}
                   canManage={canManage}
-                  onMove={onMove}
-                  onAddDevice={onAddDevice}
-                  onRename={onRename}
-                  onDelete={onDelete}
-                  selected={selected}
-                  onToggleSelect={onToggleSelect}
+                  onMove={(deviceId, dc, block, rackName) => onMove(deviceId, block, dc, rackName)}
+                  onAddDevice={(dc, block, rackName) => onAddDevice(block, dc, rackName)}
+                  onRename={(oldName, type, dcName, blockNameArg) =>
+                    onRename(oldName, type === "data_center" ? "data_center" : type, blockNameArg || blockName, dcName)}
+                  onDelete={(name, type, dcName, blockNameArg) =>
+                    onDelete(name, type === "data_center" ? "data_center" : type, blockNameArg || blockName, dcName)}
+                  selected={selected} onToggleSelect={onToggleSelect}
                 />
               ))}
             </div>
@@ -307,6 +327,139 @@ function BlockCard({
     </div>
   );
 }
+
+/** One "block" (campus/region/business-unit) at the top of the
+ * enterprise hierarchy -- owns one or more data centers, each with its
+ * own racks. The outermost tier under the implicit single "Company"
+ * root shown at the top of the page. Collapsible since a large org can
+ * have many data centers per block. */
+function BlockCard({
+  block,
+  canManage,
+  onMove,
+  onAddDevice,
+  onRename,
+  onDelete,
+  selected,
+  onToggleSelect,
+}: {
+  block: GroupBlock;
+  canManage: boolean;
+  onMove: (deviceId: string, block: string, dataCenter: string, rack: string) => void;
+  onAddDevice: (block: string, dc: string, rack: string) => void;
+  onRename: (oldName: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
+  onDelete: (name: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
+  selected: Set<string>;
+  onToggleSelect: (deviceId: string) => void;
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const isUnassigned = block.name === "Unassigned";
+  const rackCount = block.data_centers.reduce((n, dc) => n + dc.racks.length, 0);
+  const allDevices = block.data_centers.flatMap((dc) => dc.racks.flatMap((r) => r.devices));
+
+  return (
+    <div
+      className={`rounded-2xl overflow-hidden border transition-all duration-200 ${
+        dragOver
+          ? "border-blue-400 ring-2 ring-blue-400/20 shadow-xl"
+          : isUnassigned
+          ? "border-dashed border-slate-300 dark:border-slate-600"
+          : "border-slate-200 dark:border-slate-700 shadow-md hover:shadow-lg"
+      }`}
+      onDragOver={(e) => { if (!canManage) return; e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        if (!canManage) return;
+        e.preventDefault(); setDragOver(false);
+        const deviceId = e.dataTransfer.getData("text/device-id");
+        const firstDc = block.data_centers[0];
+        if (deviceId) onMove(deviceId, block.name, firstDc?.name || "Unassigned", firstDc?.racks[0]?.name || "Unassigned");
+      }}
+    >
+      {/* Block header */}
+      <div className={`px-5 py-3.5 flex items-center gap-3 ${
+        isUnassigned
+          ? "bg-slate-50 dark:bg-slate-900/20 border-b border-slate-200 dark:border-slate-700"
+          : "bg-gradient-to-r from-blue-700 to-blue-600 dark:from-blue-900 dark:to-blue-800"
+      }`}>
+        <button onClick={() => setCollapsed(c => !c)}
+          className={`shrink-0 ${isUnassigned ? "text-slate-400" : "text-blue-200 hover:text-white"}`}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            className={`transition-transform duration-200 ${collapsed ? "-rotate-90" : ""}`}>
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+          isUnassigned ? "bg-slate-200 dark:bg-slate-700 text-slate-400" : "bg-white/15 text-white"
+        }`}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="2" y="7" width="20" height="14" rx="1"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/>
+            <line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="12" x2="14" y2="12"/>
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className={`text-base font-bold truncate ${isUnassigned ? "text-slate-500 dark:text-slate-400 italic" : "text-white"}`}>
+            {block.name}
+          </h2>
+          <p className={`text-[11px] mt-0.5 ${isUnassigned ? "text-slate-400" : "text-blue-200"}`}>
+            {block.data_centers.length} DC{block.data_centers.length !== 1 ? "s" : ""} &middot; {rackCount} rack{rackCount !== 1 ? "s" : ""} &middot; {block.device_count} device{block.device_count !== 1 ? "s" : ""}
+          </p>
+        </div>
+        <div className="shrink-0"><HealthBar devices={allDevices} /></div>
+        {canManage && !isUnassigned && (
+          <>
+            <button onClick={() => onRename(block.name, "block", block.name)} title="Rename"
+              className="text-blue-200 hover:text-white shrink-0 text-sm leading-none">✎</button>
+            <button onClick={() => onDelete(block.name, "block", block.name)} title="Delete"
+              className="text-blue-200 hover:text-red-300 shrink-0 text-sm leading-none">✕</button>
+          </>
+        )}
+        {canManage && (
+          <button onClick={() => onAddDevice(block.name, "", "")}
+            className={`text-[11px] font-bold shrink-0 border rounded-full px-2.5 py-1 transition-colors ${
+              isUnassigned
+                ? "border-slate-300 dark:border-slate-600 text-slate-500 hover:text-slate-800"
+                : "border-white/40 text-white hover:bg-white/20"
+            }`}>
+            + Add device
+          </button>
+        )}
+      </div>
+
+      {!collapsed && (
+        <div className="bg-slate-50 dark:bg-slate-900/30 p-4 flex flex-col gap-3">
+          {block.data_centers.length === 0 ? (
+            <div className="flex flex-col items-center py-8 gap-2 border border-dashed border-slate-200 dark:border-slate-700 rounded-xl">
+              <svg width="28" height="28" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" className="text-slate-300 dark:text-slate-600">
+                <rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20M2 15h20"/>
+              </svg>
+              <p className="text-sm text-slate-400 italic">No data centers in this block yet.</p>
+              {canManage && <button onClick={() => onAddDevice(block.name, "", "")}
+                className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline">+ Add first device</button>}
+            </div>
+          ) : (
+            block.data_centers.map((dc) => (
+              <DataCenterCard
+                key={dc.name}
+                dataCenter={dc}
+                blockName={block.name}
+                canManage={canManage}
+                onMove={onMove}
+                onAddDevice={onAddDevice}
+                onRename={onRename}
+                onDelete={onDelete}
+                selected={selected}
+                onToggleSelect={onToggleSelect}
+              />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 
 /**
@@ -850,7 +1003,7 @@ function NamedGroupsPanel({ canManage }: { canManage: boolean }) {
 export default function Groups() {
   const { user } = useAuth();
   const canManage = user?.role === "network_admin";
-  const [groups, setGroups] = useState<GroupDataCenter[]>([]);
+  const [groups, setGroups] = useState<GroupBlock[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -886,14 +1039,14 @@ export default function Groups() {
       .catch(() => setAllDevices([]));
   };
 
-  const openAddDevice = (prefillDc?: string, prefillBlock?: string, prefillRack?: string) => {
+  const openAddDevice = (prefillBlock?: string, prefillDc?: string, prefillRack?: string) => {
     if (allDevices === null) loadAllDevices();
     setAddDeviceId("");
     setAddDeviceQuery("");
-    setAddDc(prefillDc && prefillDc !== "Unassigned" ? prefillDc : "");
-    setAddDcNew("");
     setAddBlock(prefillBlock && prefillBlock !== "Unassigned" ? prefillBlock : "");
     setAddBlockNew("");
+    setAddDc(prefillDc && prefillDc !== "Unassigned" ? prefillDc : "");
+    setAddDcNew("");
     setAddRack(prefillRack && prefillRack !== "Unassigned" ? prefillRack : "");
     setAddRackNew("");
     setAddPosition("");
@@ -904,7 +1057,7 @@ export default function Groups() {
   const load = () => {
     setLoading(true);
     api
-      .get<GroupDataCenter[]>("/devices/groups/summary")
+      .get<GroupBlock[]>("/devices/groups/summary")
       .then((res) => {
         setGroups(res.data);
         setError(null);
@@ -915,13 +1068,19 @@ export default function Groups() {
 
   useEffect(load, []);
 
-  const handleMove = async (deviceId: string, dataCenter: string, rack: string) => {
+  // Drag-and-drop move: sets all three placement fields (block,
+  // data_center, rack) on the device. Previously this only sent
+  // data_center + rack, silently dropping the block a device was
+  // dropped into -- fixed here so a drag onto a rack under a
+  // non-Unassigned block actually sticks.
+  const handleMove = async (deviceId: string, block: string, dataCenter: string, rack: string) => {
     try {
       await api.patch(`/devices/${deviceId}`, {
+        block: block === "Unassigned" ? null : block,
         data_center: dataCenter === "Unassigned" ? null : dataCenter,
         rack: rack === "Unassigned" ? null : rack,
       });
-      setMoveNotice(`Moved device to ${dataCenter} / ${rack}.`);
+      setMoveNotice(`Moved device to ${block} / ${dataCenter} / ${rack}.`);
       load();
       setTimeout(() => setMoveNotice(null), 3000);
     } catch {
@@ -930,15 +1089,15 @@ export default function Groups() {
   };
 
   const assignDevice = async () => {
-    const dc = (addDc === "__new__" ? addDcNew : addDc).trim();
     const block = (addBlock === "__new__" ? addBlockNew : addBlock).trim();
+    const dc = (addDc === "__new__" ? addDcNew : addDc).trim();
     const rack = (addRack === "__new__" ? addRackNew : addRack).trim();
     if (!addDeviceId) {
       setAddFormError("Pick a device.");
       return;
     }
-    if (!dc || !block || !rack) {
-      setAddFormError("A data center, block, and rack are all required.");
+    if (!block || !dc || !rack) {
+      setAddFormError("A block, data center, and rack are all required.");
       return;
     }
     const position = addPosition.trim() ? Number(addPosition) : null;
@@ -950,13 +1109,13 @@ export default function Groups() {
     setAddFormError(null);
     try {
       await api.patch(`/devices/${addDeviceId}`, {
-        data_center: dc,
         block: block,
+        data_center: dc,
         rack: rack,
         rack_position: position,
       });
       const deviceLabel = allDevices?.find((d) => d.id === addDeviceId)?.hostname || "Device";
-      setMoveNotice(`Added ${deviceLabel} to ${dc} / ${block} / ${rack}.`);
+      setMoveNotice(`Added ${deviceLabel} to ${block} / ${dc} / ${rack}.`);
       setAddOpen(false);
       loadAllDevices();
       load();
@@ -980,29 +1139,38 @@ export default function Groups() {
     });
   };
 
-  // Every known "dataCenter / rack" combo, for the bulk-move target picker.
+  // Every known "block / dataCenter / rack" combo, for the bulk-move
+  // target picker.
   const rackOptions = useMemo(() => {
-    const opts: { label: string; dc: string; rack: string }[] = [];
-    for (const dc of groups) {
-      for (const b of dc.blocks) {
-        for (const r of b.racks) {
-          opts.push({ label: `${dc.name} / ${r.name}`, dc: dc.name, rack: r.name });
+    const opts: { label: string; block: string; dc: string; rack: string }[] = [];
+    for (const block of groups) {
+      for (const dc of block.data_centers) {
+        for (const r of dc.racks) {
+          opts.push({ label: `${block.name} / ${dc.name} / ${r.name}`, block: block.name, dc: dc.name, rack: r.name });
         }
       }
     }
     return opts;
   }, [groups]);
 
-  // Existing data-center names (for the "Add device" picker's dropdown,
-  // separate from rackOptions above which pairs dc+rack together).
-  const dcOptions = useMemo(() => groups.map((dc) => dc.name).filter((n) => n !== "Unassigned"), [groups]);
+  // Existing block names (for the "Add device" picker's dropdown).
+  const blockOptions = useMemo(() => groups.map((b) => b.name).filter((n) => n !== "Unassigned"), [groups]);
+
+  const dcsForAddBlock = useMemo(() => {
+    const blockName = addBlock === "__new__" ? null : addBlock;
+    if (!blockName) return [];
+    const block = groups.find((g) => g.name === blockName);
+    return block ? block.data_centers.map((dc) => dc.name).filter((n) => n !== "Unassigned") : [];
+  }, [groups, addBlock]);
 
   const racksForAddDc = useMemo(() => {
+    const blockName = addBlock === "__new__" ? null : addBlock;
     const dcName = addDc === "__new__" ? null : addDc;
-    if (!dcName) return [];
-    const dc = groups.find((g) => g.name === dcName);
-    return dc ? dc.blocks.flatMap(b => b.racks).map((r) => r.name).filter((n) => n !== "Unassigned") : [];
-  }, [groups, addDc]);
+    if (!blockName || !dcName) return [];
+    const block = groups.find((g) => g.name === blockName);
+    const dc = block?.data_centers.find((d) => d.name === dcName);
+    return dc ? dc.racks.map((r) => r.name).filter((n) => n !== "Unassigned") : [];
+  }, [groups, addBlock, addDc]);
 
   const addDeviceOptions = useMemo(() => {
     const q = addDeviceQuery.trim().toLowerCase();
@@ -1010,6 +1178,12 @@ export default function Groups() {
     const filtered = q ? list.filter((d) => d.hostname.toLowerCase().includes(q)) : list;
     return filtered.slice(0, 50);
   }, [allDevices, addDeviceQuery]);
+
+  useEffect(() => {
+    if (addBlock !== "__new__" && addDc !== "__new__" && addDc && !dcsForAddBlock.includes(addDc)) {
+      setAddDc("");
+    }
+  }, [addBlock]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (addDc !== "__new__" && addRack !== "__new__" && addRack && !racksForAddDc.includes(addRack)) {
@@ -1028,7 +1202,7 @@ export default function Groups() {
         ids.map((id) =>
           api.patch(`/devices/${id}`, {
             data_center: target.dc === "Unassigned" ? null : target.dc,
-            block: target.label.split(" / ")[1] === "Unassigned" ? null : target.label.split(" / ")[1],
+            block: target.block === "Unassigned" ? null : target.block,
             rack: target.rack === "Unassigned" ? null : target.rack,
           })
         )
@@ -1045,20 +1219,25 @@ export default function Groups() {
     }
   };
 
-  const handleRenameGroup = async (oldName: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => {
+  const handleRenameGroup = async (
+    oldName: string,
+    type: "block" | "data_center" | "rack",
+    blockName: string,
+    dcName?: string
+  ) => {
     let devicesToUpdate: string[] = [];
-    const dc = groups.find(g => g.name === dcName);
-    if (!dc) return;
+    const block = groups.find((g) => g.name === blockName);
+    if (!block) return;
 
-    if (type === "data_center") {
-      devicesToUpdate = dc.blocks.flatMap(b => b.racks.flatMap(r => r.devices.map(d => d.id)));
-    } else if (type === "block") {
-      const b = dc.blocks.find(b => b.name === oldName);
-      if (b) devicesToUpdate = b.racks.flatMap(r => r.devices.map(d => d.id));
+    if (type === "block") {
+      devicesToUpdate = block.data_centers.flatMap((dc) => dc.racks.flatMap((r) => r.devices.map((d) => d.id)));
+    } else if (type === "data_center") {
+      const dc = block.data_centers.find((dc) => dc.name === oldName);
+      if (dc) devicesToUpdate = dc.racks.flatMap((r) => r.devices.map((d) => d.id));
     } else if (type === "rack") {
-      const b = dc.blocks.find(b => b.name === blockName);
-      const r = b?.racks.find(r => r.name === oldName);
-      if (r) devicesToUpdate = r.devices.map(d => d.id);
+      const dc = block.data_centers.find((dc) => dc.name === dcName);
+      const r = dc?.racks.find((r) => r.name === oldName);
+      if (r) devicesToUpdate = r.devices.map((d) => d.id);
     }
 
     if (devicesToUpdate.length === 0) return;
@@ -1068,7 +1247,7 @@ export default function Groups() {
 
     setLoading(true);
     try {
-      await Promise.all(devicesToUpdate.map(id => api.patch(`/devices/${id}`, { [type]: newName.trim() })));
+      await Promise.all(devicesToUpdate.map((id) => api.patch(`/devices/${id}`, { [type]: newName.trim() })));
       setMoveNotice(`${type.replace("_", " ")} renamed successfully`);
       load();
     } catch {
@@ -1077,20 +1256,25 @@ export default function Groups() {
     }
   };
 
-  const handleDeleteGroup = async (name: string, type: "data_center"| "block" | "rack", dcName: string, blockName?: string) => {
+  const handleDeleteGroup = async (
+    name: string,
+    type: "block" | "data_center" | "rack",
+    blockName: string,
+    dcName?: string
+  ) => {
     let devicesToUpdate: string[] = [];
-    const dc = groups.find(g => g.name === dcName);
-    if (!dc) return;
+    const block = groups.find((g) => g.name === blockName);
+    if (!block) return;
 
-    if (type === "data_center") {
-      devicesToUpdate = dc.blocks.flatMap(b => b.racks.flatMap(r => r.devices.map(d => d.id)));
-    } else if (type === "block") {
-      const b = dc.blocks.find(b => b.name === name);
-      if (b) devicesToUpdate = b.racks.flatMap(r => r.devices.map(d => d.id));
+    if (type === "block") {
+      devicesToUpdate = block.data_centers.flatMap((dc) => dc.racks.flatMap((r) => r.devices.map((d) => d.id)));
+    } else if (type === "data_center") {
+      const dc = block.data_centers.find((dc) => dc.name === name);
+      if (dc) devicesToUpdate = dc.racks.flatMap((r) => r.devices.map((d) => d.id));
     } else if (type === "rack") {
-      const b = dc.blocks.find(b => b.name === blockName);
-      const r = b?.racks.find(r => r.name === name);
-      if (r) devicesToUpdate = r.devices.map(d => d.id);
+      const dc = block.data_centers.find((dc) => dc.name === dcName);
+      const r = dc?.racks.find((r) => r.name === name);
+      if (r) devicesToUpdate = r.devices.map((d) => d.id);
     }
 
     if (devicesToUpdate.length === 0) {
@@ -1104,7 +1288,7 @@ export default function Groups() {
 
     setLoading(true);
     try {
-      await Promise.all(devicesToUpdate.map(id => api.patch(`/devices/${id}`, { [type]: null })));
+      await Promise.all(devicesToUpdate.map((id) => api.patch(`/devices/${id}`, { [type]: null })));
       setMoveNotice(`${type.replace("_", " ")} deleted successfully`);
       load();
     } catch {
@@ -1117,26 +1301,29 @@ export default function Groups() {
     const q = query.trim().toLowerCase();
     if (!q) return groups;
     return groups
-      .map((dc) => ({
-        ...dc,
-        blocks: dc.blocks.map(b => ({
-          ...b,
-          racks: b.racks
-            .map((r) => ({
-              ...r,
-              devices: r.devices.filter((d) => d.hostname.toLowerCase().includes(q)),
-            }))
-            .filter((r) => r.devices.length > 0 || r.name.toLowerCase().includes(q)),
-        })).filter(b => b.racks.length > 0)
+      .map((block) => ({
+        ...block,
+        data_centers: block.data_centers
+          .map((dc) => ({
+            ...dc,
+            racks: dc.racks
+              .map((r) => ({
+                ...r,
+                devices: r.devices.filter((d) => d.hostname.toLowerCase().includes(q)),
+              }))
+              .filter((r) => r.devices.length > 0 || r.name.toLowerCase().includes(q)),
+          }))
+          .filter((dc) => dc.racks.length > 0 || dc.name.toLowerCase().includes(q)),
       }))
-      .filter((dc) => dc.blocks.length > 0 || dc.name.toLowerCase().includes(q));
+      .filter((block) => block.data_centers.length > 0 || block.name.toLowerCase().includes(q));
   }, [groups, query]);
 
   const totals = useMemo(() => {
-    const dcCount = groups.length;
-    const rackCount = groups.reduce((n, dc) => n + dc.blocks.reduce((m, b) => m + b.racks.length, 0), 0);
-    const deviceCount = groups.reduce((n, dc) => n + dc.device_count, 0);
-    return { dcCount, rackCount, deviceCount };
+    const blockCount = groups.length;
+    const dcCount = groups.reduce((n, block) => n + block.data_centers.length, 0);
+    const rackCount = groups.reduce((n, block) => n + block.data_centers.reduce((m, dc) => m + dc.racks.length, 0), 0);
+    const deviceCount = groups.reduce((n, block) => n + block.device_count, 0);
+    return { blockCount, dcCount, rackCount, deviceCount };
   }, [groups]);
 
   return (
@@ -1145,7 +1332,7 @@ export default function Groups() {
         <div>
           <h1 className="text-3xl font-bold text-navy dark:text-white">Groups</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Named logical groups you define, plus devices organized by physical Data Center → Rack.
+            Named logical groups you define, plus devices organized by physical Company → Block → Data Center → Rack.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1169,139 +1356,140 @@ export default function Groups() {
       <NamedGroupsPanel canManage={canManage} />
 
       <div>
-        <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Data Center / Rack</h2>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">Physical placement — {canManage ? "drag a device onto a rack to move it." : "read-only."}</p>
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 flex items-center gap-1.5">
+            🏛️ Company
+          </span>
+        </div>
+        <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Block / Data Center / Rack</h2>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
+          Physical & organizational placement — every block can own multiple data centers, and every data center can own multiple racks.{" "}
+          {canManage ? "Drag a device onto a rack to move it." : "Read-only."}
+        </p>
       </div>
 
-      <div className="flex flex-wrap gap-3">
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400">
-          Data Centers <span className="text-navy dark:text-white font-bold ml-1">{totals.dcCount}</span>
-        </div>
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400">
-          Racks <span className="text-navy dark:text-white font-bold ml-1">{totals.rackCount}</span>
-        </div>
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400">
-          Devices <span className="text-navy dark:text-white font-bold ml-1">{totals.deviceCount}</span>
-        </div>
+      {/* Enterprise stats bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: "Blocks", value: totals.blockCount, icon: "M2 7h20v14H2zM16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2", color: "blue" },
+          { label: "Data Centers", value: totals.dcCount, icon: "M2 3h20v18H2zM2 9h20M2 15h20", color: "indigo" },
+          { label: "Racks", value: totals.rackCount, icon: "M2 4h20v16H2zM8 4v16M16 4v16", color: "slate" },
+          { label: "Devices", value: totals.deviceCount, icon: "M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18", color: "emerald" },
+        ].map(({ label, value, icon, color }) => (
+          <div key={label} className={`bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 flex items-center gap-3 shadow-sm`}>
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-${color}-100 dark:bg-${color}-900/30 text-${color}-600 dark:text-${color}-400`}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d={icon}/></svg>
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-slate-900 dark:text-white leading-none">{value}</p>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">{label}</p>
+            </div>
+          </div>
+        ))}
       </div>
 
-      <input
-        className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm w-full max-w-sm focus:ring-2 focus:ring-brandblue focus:border-transparent outline-none"
-        placeholder="Search hostname, data center, or rack…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
+      <div className="flex items-center gap-3 flex-wrap">
+        <input
+          className="border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm rounded-full px-4 py-2 text-sm flex-1 max-w-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-shadow"
+          placeholder="Search hostname, block, data center, or rack…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query && (
+          <button onClick={() => setQuery("")} className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+            ✕ Clear
+          </button>
+        )}
+      </div>
 
       {error && (
-        <p className="text-riskcrit font-semibold text-sm bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg">
+        <p className="text-red-600 dark:text-red-400 font-semibold text-sm bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg">
           {error}
         </p>
       )}
       {moveNotice && (
-        <p className="text-[13px] font-medium text-brandblue bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 shadow-sm rounded-lg px-4 py-2.5">
+        <p className="text-[13px] font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 shadow-sm rounded-lg px-4 py-2.5">
           {moveNotice}
         </p>
       )}
 
       {canManage && selected.size > 0 && (
-        <div className="sticky top-2 z-10 flex items-center gap-3 flex-wrap bg-navy text-white shadow-lg rounded-full px-4 py-2 text-sm">
-          <span className="font-bold">{selected.size} selected</span>
+        <div className="sticky top-2 z-10 flex items-center gap-3 flex-wrap bg-slate-900 dark:bg-slate-950 text-white shadow-xl rounded-2xl px-5 py-3 border border-slate-700">
+          <span className="font-bold text-sm">{selected.size} device{selected.size !== 1 ? "s" : ""} selected</span>
           <select
             value={bulkTarget}
             onChange={(e) => setBulkTarget(e.target.value)}
-            className="bg-white/10 border border-white/30 rounded-full px-3 py-1 text-xs outline-none"
+            className="bg-white/10 border border-white/20 rounded-lg px-3 py-1.5 text-xs outline-none flex-1 max-w-xs"
           >
-            <option value="" className="text-navy">Move to rack…</option>
+            <option value="" className="text-slate-900">Move to rack…</option>
             {rackOptions.map((o) => (
-              <option key={o.label} value={o.label} className="text-navy">
-                {o.label}
-              </option>
+              <option key={o.label} value={o.label} className="text-slate-900">{o.label}</option>
             ))}
           </select>
-          <button
-            onClick={runBulkMove}
-            disabled={!bulkTarget || bulkBusy}
-            className="bg-brandblue hover:bg-blue-600 disabled:opacity-40 rounded-full px-3 py-1 text-xs font-bold"
-          >
+          <button onClick={runBulkMove} disabled={!bulkTarget || bulkBusy}
+            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 rounded-lg px-4 py-1.5 text-xs font-bold transition-colors">
             {bulkBusy ? "Moving…" : "Move"}
           </button>
-          <button onClick={() => setSelected(new Set())} className="text-white/70 hover:text-white text-xs ml-auto">
-            Clear
+          <button onClick={() => setSelected(new Set())} className="text-slate-400 hover:text-white text-xs ml-auto">
+            ✕ Clear
           </button>
         </div>
       )}
 
       {loading ? (
-        <p className="text-sm text-slate-400 dark:text-slate-500 italic">Loading groups…</p>
+        <div className="flex items-center justify-center py-16 gap-3">
+          <div className="w-5 h-5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
+          <p className="text-sm text-slate-400">Loading infrastructure…</p>
+        </div>
       ) : filteredGroups.length === 0 ? (
-        <div className="text-center py-10 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl">
-          <p className="text-sm text-slate-400 dark:text-slate-500 italic mb-3">
-            {query.trim() ? "No devices match." : "No devices are placed in a data center or rack yet."}
+        <div className="text-center py-16 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-2xl">
+          <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" className="text-slate-300 dark:text-slate-600 mx-auto mb-3">
+            <rect x="2" y="7" width="20" height="14" rx="1"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="12" x2="14" y2="12"/>
+          </svg>
+          <p className="text-sm text-slate-400 italic mb-4">
+            {query.trim() ? "No devices match your search." : "No devices placed in the infrastructure hierarchy yet."}
           </p>
           {canManage && !query.trim() && (
-            <button
-              onClick={() => openAddDevice()}
-              className="bg-brandblue hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-full transition shadow-sm text-sm"
-            >
-              + Add Device to Rack
+            <button onClick={() => openAddDevice()}
+              className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-2 rounded-full transition shadow-sm text-sm">
+              + Place First Device
             </button>
           )}
         </div>
       ) : (
-        <div className="flex flex-col gap-6">
-          {filteredGroups.map((dc) => (
-            <div key={dc.name} className="bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-3 px-1 gap-3 flex-wrap">
-                 <h2 className="text-lg font-bold text-navy dark:text-white flex items-center gap-2">
-                  🏢 {dc.name}
-                </h2>
-                <HealthBadge devices={dc.blocks.flatMap((b) => b.racks.flatMap(r => r.devices))} />
-                <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{dc.device_count} device{dc.device_count === 1 ? "" : "s"} · {dc.blocks.reduce((m, b) => m + b.racks.length, 0)} rack{dc.blocks.reduce((m, b) => m + b.racks.length, 0) === 1 ? "" : "s"}</span>
-                {canManage && dc.name !== "Unassigned" && (
-                  <button
-                    onClick={() => handleRenameGroup(dc.name, "data_center", dc.name)}
-                    title="Rename this datacenter"
-                    className="text-[11px] font-bold text-slate-400 hover:text-brandblue shrink-0 ml-2"
-                  >
-                    ✎
-                  </button>
-                )}
-                {canManage && dc.name !== "Unassigned" && (
-                  <button
-                    onClick={() => handleDeleteGroup(dc.name, "data_center", dc.name)}
-                    title="Delete this datacenter"
-                    className="text-[11px] font-bold text-slate-400 hover:text-riskcrit shrink-0 ml-1 mr-2"
-                  >
-                    ✕
-                  </button>
-                )}
-                {canManage && (
-                  <button
-                    onClick={() => openAddDevice(dc.name)}
-                    className="text-[11px] font-bold text-brandblue border border-brandblue rounded-full px-2.5 py-1 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition shrink-0 ml-2"
-                  >
-                    + Add device
-                  </button>
-                )}
+        <div className="flex flex-col gap-4">
+          {/* Company root banner */}
+          <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 shadow-sm">
+            <div className="px-5 py-4 flex items-center gap-4 bg-gradient-to-r from-slate-800 to-slate-700 dark:from-slate-950 dark:to-slate-900">
+              <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center shrink-0 text-white">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+                </svg>
               </div>
-              <div className="flex flex-col gap-4">
-                {dc.blocks.map((block) => (
-                  <BlockCard
-                    key={block.name}
-                    block={block}
-                    dcName={dc.name}
-                    canManage={canManage}
-                    onMove={handleMove}
-                    onAddDevice={openAddDevice}
-                    onRename={handleRenameGroup}
-                    onDelete={handleDeleteGroup}
-                    selected={selected}
-                    onToggleSelect={toggleSelect}
-                  />
-                ))}
+              <div className="flex-1 min-w-0">
+                <h2 className="text-lg font-bold text-white">Company</h2>
+                <p className="text-[11px] text-slate-400">
+                  {totals.blockCount} block{totals.blockCount !== 1 ? "s" : ""} &middot; {totals.dcCount} data center{totals.dcCount !== 1 ? "s" : ""} &middot; {totals.rackCount} rack{totals.rackCount !== 1 ? "s" : ""} &middot; {totals.deviceCount} device{totals.deviceCount !== 1 ? "s" : ""}
+                </p>
               </div>
+              <HealthBadge devices={filteredGroups.flatMap(b => b.data_centers.flatMap(dc => dc.racks.flatMap(r => r.devices)))} />
             </div>
-          ))}
+            <div className="p-4 bg-slate-50 dark:bg-slate-900/50 flex flex-col gap-4">
+              {filteredGroups.map((block) => (
+                <BlockCard
+                  key={block.name}
+                  block={block}
+                  canManage={canManage}
+                  onMove={handleMove}
+                  onAddDevice={openAddDevice}
+                  onRename={handleRenameGroup}
+                  onDelete={handleDeleteGroup}
+                  selected={selected}
+                  onToggleSelect={toggleSelect}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -1345,10 +1533,36 @@ export default function Groups() {
                 {allDevices !== null && addDeviceOptions.length === 0 && <option disabled>No devices found</option>}
                 {addDeviceOptions.map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.hostname} {d.data_center ? `(currently ${d.data_center}/${d.rack || "?"})` : "(unplaced)"}
+                    {d.hostname} {d.data_center ? `(currently ${d.block || "?"}/${d.data_center}/${d.rack || "?"})` : "(unplaced)"}
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Block</label>
+              <select
+                value={addBlock}
+                onChange={(e) => setAddBlock(e.target.value)}
+                className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue"
+              >
+                <option value="">Select…</option>
+                {blockOptions.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+                <option value="__new__">+ New block…</option>
+              </select>
+              {addBlock === "__new__" && (
+                <input
+                  autoFocus
+                  value={addBlockNew}
+                  onChange={(e) => setAddBlockNew(e.target.value)}
+                  placeholder="e.g. APAC Region"
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue mt-1"
+                />
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -1357,10 +1571,11 @@ export default function Groups() {
                 <select
                   value={addDc}
                   onChange={(e) => setAddDc(e.target.value)}
-                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue"
+                  disabled={!addBlock}
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1.5 text-sm bg-transparent outline-none focus:ring-2 focus:ring-brandblue disabled:opacity-40"
                 >
                   <option value="">Select…</option>
-                  {dcOptions.map((n) => (
+                  {dcsForAddBlock.map((n) => (
                     <option key={n} value={n}>
                       {n}
                     </option>

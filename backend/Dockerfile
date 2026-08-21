@@ -3,7 +3,7 @@ FROM public.ecr.aws/docker/library/python:3.12-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libpq-dev iputils-ping traceroute nmap postgresql-client git \
+    gcc libpq-dev iputils-ping traceroute mtr-tiny nmap postgresql-client git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
