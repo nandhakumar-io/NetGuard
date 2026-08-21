@@ -135,6 +135,15 @@ function SubscriptionModal({
 
   const handleSave = async () => {
     setError(null);
+    // Mirrors the same check handleTest already does (see the Test
+    // button's `disabled={... || !target}`) -- Save had no equivalent,
+    // so leaving Topic URL/User Key blank silently posted target: "" and
+    // came back as a bare 400 the user had no way to connect to the
+    // empty field above.
+    if (provider !== "browser" && !target.trim()) {
+      setError(provider === "ntfy" ? "Enter a topic URL first." : "Enter a user key first.");
+      return;
+    }
     setSaving(true);
     try {
       let payload: Record<string, unknown>;
@@ -162,8 +171,17 @@ function SubscriptionModal({
       }
       onClose();
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } };
-      setError(err?.response?.data?.detail || "Failed to save subscription.");
+      const err = e as { response?: { data?: { detail?: string } }; message?: string };
+      // Distinguish a real API error (has a response) from a request that
+      // never got one at all (CORS block, backend unreachable, timeout) --
+      // the latter used to collapse into the exact same generic message,
+      // which gave no signal to act on when it wasn't actually a
+      // validation problem with what was typed into the form.
+      if (err?.response) {
+        setError(err.response.data?.detail || "Failed to save subscription.");
+      } else {
+        setError(`Could not reach the server${err?.message ? ` (${err.message})` : ""}. Check your connection and try again.`);
+      }
     } finally {
       setSaving(false);
     }
