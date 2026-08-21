@@ -9,7 +9,8 @@ class AlertRuleCreate(BaseModel):
     name: str
     description: str | None = None
     metric: str  # cpu / memory / bandwidth / temperature / uptime /
-    # interface_errors / interface_down_count / fan_failure / power_supply_failure
+    # interface_errors / interface_down_count / fan_failure / power_supply_failure /
+    # trunk_port_down / sfp_port_down / route_unreachable / ping_packet_loss_pct
     operator: str  # gt / gte / lt / lte / eq
     threshold: float
     severity: str = "warning"

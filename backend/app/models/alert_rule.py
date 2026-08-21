@@ -42,6 +42,17 @@ class AlertRuleMetric(str, enum.Enum):
     FAN_FAILURE = "fan_failure"  # 1 if fan_status == "failed", else 0
     POWER_SUPPLY_FAILURE = "power_supply_failure"  # 1 if power_supply_status == "failed", else 0
 
+    # NOC-specific link/path conditions, on top of the generic resource
+    # and interface-count metrics above -- these are the shapes of
+    # trouble a network operator actually names a rule after ("alert me
+    # if a trunk drops", "alert me if we lose the default route"), not
+    # just another percentage. See alert_rule_engine._metric_value for
+    # how each is computed and what it costs to evaluate.
+    TRUNK_PORT_DOWN = "trunk_port_down"  # count of trunk-mode switchports currently oper-down
+    SFP_PORT_DOWN = "sfp_port_down"  # count of down ports on likely SFP/optic-speed interfaces (>=1G)
+    ROUTE_UNREACHABLE = "route_unreachable"  # 1 if the device's default route is missing from its routing table
+    PING_PACKET_LOSS_PCT = "ping_packet_loss_pct"  # % of ICMP probes lost over a short burst (reachability sweep)
+
 
 class AlertRuleOperator(str, enum.Enum):
     GT = "gt"

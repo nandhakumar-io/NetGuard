@@ -365,6 +365,32 @@ def reachability_task(self, device_id: str) -> str:
         status = reachability_service.check_device(db, device)
         device.last_reachability_poll_at = datetime.now(timezone.utc)
         db.commit()
+
+        # Custom alert rules keyed on ping_packet_loss_pct live on the
+        # SNMP-poll-driven evaluator (alert_rule_engine), but packet loss
+        # is inherently a ping-path measurement, not something the SNMP
+        # poll has any way to compute -- so this sweep is the one that
+        # feeds it. Only bothers with the extra 5-probe burst when a rule
+        # actually asks for this metric (checked once, cheaply) --
+        # fleets that don't use it pay zero extra ping traffic.
+        from app.models.alert_rule import AlertRule, AlertRuleMetric
+
+        wants_loss_metric = (
+            db.query(AlertRule.id)
+            .filter(AlertRule.enabled == True, AlertRule.metric == AlertRuleMetric.PING_PACKET_LOSS_PCT)
+            .first()
+            is not None
+        )
+        if wants_loss_metric:
+            from app.services import alert_rule_engine
+            from app.services.snmp_service import SnmpMetrics
+
+            loss_pct = reachability_service.measure_packet_loss_pct(device.ip_address)
+            if loss_pct is not None:
+                synthetic_metrics = SnmpMetrics(reachable=True, ping_packet_loss_pct=loss_pct)
+                alert_rule_engine.evaluate_rules(db, device, synthetic_metrics)
+                db.commit()
+
         return status.value
     finally:
         db.close()

@@ -315,6 +315,14 @@ class SnmpMetrics:
     # Down" alerts. Defaults to an empty list rather than None so callers
     # never need a null check before iterating.
     per_interface: list[dict] = field(default_factory=list)
+    # Opportunistically filled in by metrics_service.poll_device -- these
+    # aren't part of the base SNMP health walk (see poll_device for why
+    # each is gated) and stay None whenever the poll didn't compute them,
+    # same "don't invent data we don't have" contract as the fields above.
+    trunk_ports_down: int | None = None  # trunk-mode switchports currently oper-down
+    sfp_ports_down: int | None = None  # down ports on likely SFP/optic-speed interfaces
+    route_unreachable: bool | None = None  # True if the default route is missing from the routing table
+    ping_packet_loss_pct: float | None = None  # set by reachability_service, not the SNMP poll path
 
 
 _AUTH_PROTOCOL_NAMES = {
@@ -669,15 +677,21 @@ def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float
             # metrics_service can detect the down transition and raise an
             # alert / write interface_statuses history), just excluded
             # from the fleet utilization/error rollups below -- a down
-            # port has no meaningful "current" traffic rate.
+            # port has no meaningful "current" traffic rate. speed_bps is
+            # still recorded even though it's down: ifHighSpeed reports
+            # the port's configured/negotiated speed regardless of oper
+            # status, and metrics_service's SFP-port heuristic (a down
+            # port whose speed indicates an optic-capable interface) needs
+            # exactly this value on down ports, not just up ones.
             if len(per_interface) < MAX_INTERFACES_WALKED:
+                if_speed_bps = int(float(speed.get(index, 0) or 0) * 1_000_000)
                 per_interface.append(
                     {
                         "if_index": index,
                         "if_descr": if_descr,
                         "status": "down",
                         "octets_total": None,
-                        "speed_bps": None,
+                        "speed_bps": if_speed_bps or None,
                         "errors": None,
                     }
                 )
@@ -900,6 +914,26 @@ def _discover_arp_table_fallback(ip_address: str, auth: "SnmpAuthConfig", timeou
             "mac_address": _mac_from_snmp_value(mac),
         })
     return rows
+
+
+def has_default_route(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> bool | None:
+    """True if the device's IPv4 routing table contains a default route
+    (destination 0.0.0.0), False if the table was read successfully and
+    it's genuinely missing, None if the routing table couldn't be read at
+    all (SNMP unreachable/unsupported) -- kept distinct from False so
+    alert_rule_engine can skip evaluation rather than raising a false
+    "route unreachable" alert just because the walk itself failed.
+    Backs the ROUTE_UNREACHABLE custom alert-rule metric; a device acting
+    as a default gateway itself (destination-only routers with no default
+    route by design) shouldn't have this rule scoped to it.
+    """
+    try:
+        routes = _discover_routing_table(ip_address, auth, timeout)
+    except Exception:  # noqa: BLE001 - any walk failure reads as "couldn't determine"
+        return None
+    if not routes:
+        return None
+    return any(r.get("destination") == "0.0.0.0" for r in routes)
 
 
 def _discover_routing_table(ip_address: str, auth: "SnmpAuthConfig", timeout: float) -> list[dict]:

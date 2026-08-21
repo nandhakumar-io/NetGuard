@@ -20,6 +20,7 @@ const IPAMPage = lazy(() => import("./pages/IPAM"));
 const AuditLog = lazy(() => import("./pages/AuditLog"));
 const TerminalRecordings = lazy(() => import("./pages/TerminalRecordings"));
 const AlertRunbooks = lazy(() => import("./pages/AlertRunbooks"));
+const PushSettings = lazy(() => import("./pages/PushSettings"));
 const Security = lazy(() => import("./pages/Security"));
 const DriftPage = lazy(() => import("./pages/Drift"));
 const AlertCenter = lazy(() => import("./pages/AlertCenter"));
@@ -91,6 +92,7 @@ export default function App() {
           <Route path="/drift" element={withSuspense(<DriftPage />)} />
           <Route path="/alerts" element={withSuspense(<AlertCenter />)} />
           <Route path="/alert-runbooks" element={withSuspense(<AlertRunbooks />)} />
+          <Route path="/push-settings" element={withSuspense(<PushSettings />)} />
           <Route path="/on-call-schedules" element={withSuspense(<OnCallSchedules />)} />
           <Route path="/escalation-policies" element={withSuspense(<EscalationPolicies />)} />
           <Route path="/maintenance-windows" element={withSuspense(<MaintenanceWindowsPage />)} />

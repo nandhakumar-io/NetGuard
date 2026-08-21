@@ -54,6 +54,7 @@ const OP_LABELS: Record<string, string> = { gt: ">", gte: "≥", lt: "<", lte: "
 const METRIC_LABELS: Record<string, string> = {
   cpu: "CPU %", memory: "Memory %", bandwidth: "Bandwidth %", temperature: "Temp °C", uptime: "Uptime (s)",
   interface_errors: "Interface Errors", interface_down_count: "Interfaces Down", fan_failure: "Fan Failure", power_supply_failure: "PSU Failure",
+  trunk_port_down: "Trunk Ports Down", sfp_port_down: "SFP Ports Down", route_unreachable: "Default Route Missing", ping_packet_loss_pct: "Ping Loss %",
 };
 
 type Tab = "alerts" | "rules" | "escalations" | "webhooks" | "push";
@@ -380,6 +381,25 @@ export default function AlertCenter() {
     setShowRuleForm(false);
   };
 
+  // Common NOC-named conditions pre-filled into the form -- saves
+  // hunting through the metric dropdown + guessing a sane operator/
+  // threshold/severity for "alert me if a trunk port drops" and similar
+  // asks that show up constantly but aren't obvious from a bare metric
+  // picker alone.
+  const RULE_PRESETS: Record<string, { name: string; description: string; metric: string; operator: string; threshold: string; severity: string }> = {
+    trunk_down: { name: "Trunk Port Down", description: "Fires when any trunk-mode switchport goes oper-down.", metric: "trunk_port_down", operator: "gte", threshold: "1", severity: "critical" },
+    sfp_down: { name: "SFP/Optic Port Down", description: "Fires when a likely SFP/optic-speed (1G+) port goes down.", metric: "sfp_port_down", operator: "gte", threshold: "1", severity: "warning" },
+    route_unreachable: { name: "Default Route Missing", description: "Fires when the device's routing table has no default route.", metric: "route_unreachable", operator: "eq", threshold: "1", severity: "critical" },
+    ping_drop: { name: "Sustained Ping Loss", description: "Fires when a 5-probe ping burst loses 20% or more.", metric: "ping_packet_loss_pct", operator: "gte", threshold: "20", severity: "warning" },
+  };
+  const applyRulePreset = (key: string) => {
+    const preset = RULE_PRESETS[key];
+    if (!preset) return;
+    setRuleForm({ ...preset, scope_vendor: "", scope_site: "", scope_device_role: "", cooldown_seconds: "300" });
+    setEditingRule(null);
+    setShowRuleForm(true);
+  };
+
   const handleSaveRule = async () => {
     const payload = {
       name: ruleForm.name,
@@ -665,7 +685,12 @@ export default function AlertCenter() {
 
       {/* Tabs */}
       <div className="flex items-center gap-1 mt-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 px-2 py-1.5 shadow-sm">
-        {(["alerts", "rules", "escalations", "webhooks"] as Tab[]).map((t) => (
+        {/* "push" was defined in the Tab type, had its own fetch (fetchPushSubs)
+            and its own render block below, but was never actually added to
+            this button list -- so the Push Notifications tab existed and
+            worked, it just had no way to be clicked into. Webhooks was the
+            only delivery-channel tab visible as a result. */}
+        {(["alerts", "rules", "escalations", "webhooks", "push"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -675,7 +700,15 @@ export default function AlertCenter() {
                 : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
             }`}
           >
-            {t === "alerts" ? "🔔 Alerts" : t === "rules" ? "⚙️ Alert Rules" : t === "escalations" ? "📟 Escalations" : "🔗 Webhooks"}
+            {t === "alerts"
+              ? "🔔 Alerts"
+              : t === "rules"
+              ? "⚙️ Alert Rules"
+              : t === "escalations"
+              ? "📟 Escalations"
+              : t === "webhooks"
+              ? "🔗 Webhooks"
+              : "📱 Push Notifications"}
           </button>
         ))}
       </div>
@@ -1307,6 +1340,28 @@ export default function AlertCenter() {
             </button>
           </div>
 
+          {/* One-click starting points for the conditions a NOC asks for
+              by name most often -- pre-fills the form below rather than
+              creating the rule outright, so scope/cooldown/threshold can
+              still be adjusted before saving. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Quick add:</span>
+            {[
+              { key: "trunk_down", label: "🔌 Trunk Port Down" },
+              { key: "sfp_down", label: "📡 SFP Port Down" },
+              { key: "route_unreachable", label: "🧭 Route Unreachable" },
+              { key: "ping_drop", label: "📶 Ping Drop" },
+            ].map((p) => (
+              <button
+                key={p.key}
+                onClick={() => applyRulePreset(p.key)}
+                className="text-xs font-medium text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-brandblue hover:text-brandblue px-2.5 py-1 rounded-full transition-colors"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
           {/* Rule Form */}
           {showRuleForm && (
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 shadow-sm">
@@ -1328,6 +1383,12 @@ export default function AlertCenter() {
                   <optgroup label="Hardware Health">
                     <option value="fan_failure">Fan Failure (1 = failed)</option>
                     <option value="power_supply_failure">Power Supply Failure (1 = failed)</option>
+                  </optgroup>
+                  <optgroup label="Link &amp; Path Health">
+                    <option value="trunk_port_down">Trunk Ports Down (count)</option>
+                    <option value="sfp_port_down">SFP/Optic Ports Down (count)</option>
+                    <option value="route_unreachable">Default Route Missing (1 = missing)</option>
+                    <option value="ping_packet_loss_pct">Ping Packet Loss (%)</option>
                   </optgroup>
                 </select>
                 <select value={ruleForm.operator} onChange={(e) => setRuleForm({ ...ruleForm, operator: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900">

@@ -59,7 +59,11 @@ const MAX_SCALE = 2.5;
  * first render -- fleet sizes here are small enough (tens, not thousands
  * of devices) that this is cheap and avoids pulling in a graph-layout
  * library for one page. */
-function layoutNodes(nodes: TopologyNode[], edges: TopologyEdge[]): LaidOutNode[] {
+function layoutNodes(
+  nodes: TopologyNode[],
+  edges: TopologyEdge[],
+  seedPositions?: Map<string, { x: number; y: number }>
+): LaidOutNode[] {
   const n = nodes.length;
   if (n === 0) return [];
 
@@ -68,21 +72,45 @@ function layoutNodes(nodes: TopologyNode[], edges: TopologyEdge[]): LaidOutNode[
   const cy = HEIGHT / 2;
   const radius = Math.min(WIDTH, HEIGHT) / 2.6;
 
-  nodes.forEach((node, i) => {
-    const angle = (2 * Math.PI * i) / n;
-    positions.set(node.id, {
-      x: cx + radius * Math.cos(angle),
-      y: cy + radius * Math.sin(angle),
-      vx: 0,
-      vy: 0,
-    });
+  // Warm-start from wherever each node was last laid out (seedPositions,
+  // fed in by the caller from the previous render's result) instead of
+  // always re-seeding on a fresh circle. On a live topology push where
+  // the graph is 99% unchanged, cold-starting from a circle every time
+  // both (a) makes the whole graph visibly reshuffle on every push even
+  // though nothing moved, and (b) needs the full ITERATIONS budget to
+  // re-converge, which reads as "the graph takes forever to update" even
+  // though the underlying data arrived instantly over the websocket.
+  // Genuinely new nodes (just discovered, not in the seed map) still get
+  // placed on the circle so they don't all stack at the origin.
+  let newIndex = 0;
+  const newCount = nodes.filter((node) => !seedPositions?.has(node.id)).length;
+  nodes.forEach((node) => {
+    const seed = seedPositions?.get(node.id);
+    if (seed) {
+      positions.set(node.id, { x: seed.x, y: seed.y, vx: 0, vy: 0 });
+    } else {
+      const angle = (2 * Math.PI * newIndex) / Math.max(newCount, 1);
+      newIndex += 1;
+      positions.set(node.id, {
+        x: cx + radius * Math.cos(angle),
+        y: cy + radius * Math.sin(angle),
+        vx: 0,
+        vy: 0,
+      });
+    }
   });
 
   const k = Math.sqrt((WIDTH * HEIGHT) / Math.max(n, 1));
   const nodeIds = nodes.map((nn) => nn.id);
 
-  for (let iter = 0; iter < ITERATIONS; iter++) {
-    const temp = Math.max(1, 30 * (1 - iter / ITERATIONS));
+  // Warm-started layouts (i.e. every push after the first) only need a
+  // handful of relaxation passes to settle since they're already near
+  // their equilibrium position -- running the full budget every time is
+  // what made updates feel sluggish on anything but the very first load.
+  const effectiveIterations = seedPositions && seedPositions.size > 0 ? Math.min(ITERATIONS, 60) : ITERATIONS;
+
+  for (let iter = 0; iter < effectiveIterations; iter++) {
+    const temp = Math.max(1, 30 * (1 - iter / effectiveIterations));
 
     for (let i = 0; i < nodeIds.length; i++) {
       const a = positions.get(nodeIds[i])!;
@@ -622,8 +650,27 @@ export default function Topology() {
     [filteredEdges]
   );
 
-  const laidOut = useMemo(
-    () => (viewMode === "layered" ? layoutNodesLayered(filteredNodes) : layoutNodes(filteredNodes, filteredEdges)),
+  // Persists across renders/live pushes (see layoutNodes' warm-start
+  // comment above) -- a ref rather than state because writing it must
+  // never itself trigger a re-render, it just informs the *next* layout
+  // computation where things were last.
+  const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+
+  const laidOut = useMemo(() => {
+    const result =
+      viewMode === "layered"
+        ? layoutNodesLayered(filteredNodes)
+        : layoutNodes(filteredNodes, filteredEdges, nodePositionsRef.current);
+    // Layered mode is deterministic from role alone, so it shouldn't seed
+    // the force layout's cache -- only remember positions that actually
+    // came from the force simulation.
+    if (viewMode !== "layered") {
+      const next = new Map<string, { x: number; y: number }>();
+      for (const node of result) next.set(node.id, { x: node.x, y: node.y });
+      nodePositionsRef.current = next;
+    }
+    return result;
+  },
     [filteredNodes, filteredEdges, viewMode]
   );
   const nodeById = useMemo(() => new Map(laidOut.map((n) => [n.id, n])), [laidOut]);

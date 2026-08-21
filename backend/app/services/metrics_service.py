@@ -26,6 +26,7 @@ from app.services import (
     alert_rule_engine,
     alert_service,
     credential_service,
+    event_bus,
     notification_service,
     snmp_service,
 )
@@ -139,6 +140,75 @@ def _compute_interface_utilization(
     bps = bits_transferred / interval_seconds
     utilization = round((bps / metrics.interface_speed_bps) * 100, 1)
     return max(0.0, min(100.0, utilization))
+
+
+_SFP_SPEED_THRESHOLD_BPS = 1_000_000_000  # 1 Gbps -- copper Gig ports exist too, but this is the same
+# heuristic NetGuard has no dedicated optical-transceiver OID for (most
+# vendors gate that behind ENTITY-SENSOR-MIB / vendor-proprietary MIBs
+# that aren't walked anywhere else in this app yet); at-or-above 1G on a
+# switchport is a reasonable proxy for "this is very likely an SFP/SFP+
+# cage, not a fixed copper port" without adding a new per-poll SNMP walk.
+
+
+def _count_sfp_ports_down(metrics: SnmpMetrics) -> int:
+    count = 0
+    for iface in metrics.per_interface:
+        if iface.get("status") != "down":
+            continue
+        speed = iface.get("speed_bps")
+        if speed is not None and speed >= _SFP_SPEED_THRESHOLD_BPS:
+            count += 1
+    return count
+
+
+def _populate_link_metrics(db: Session, device: Device, auth, metrics: SnmpMetrics) -> None:
+    """Fills in the opportunistic SnmpMetrics fields that back the
+    trunk/SFP/route custom alert-rule metrics (see AlertRuleMetric).
+    sfp_ports_down is pure arithmetic over data this poll already
+    collected, so it's always computed. trunk_ports_down and
+    route_unreachable each need an *extra* SNMP walk beyond the base
+    health poll (switchport VLAN table / routing table) -- those only run
+    when at least one enabled AlertRule actually references that metric,
+    so fleets that don't use the feature pay zero extra SNMP traffic for
+    it.
+    """
+    from app.models.alert_rule import AlertRule, AlertRuleMetric
+
+    metrics.sfp_ports_down = _count_sfp_ports_down(metrics)
+
+    needed = {
+        row[0].value if hasattr(row[0], "value") else row[0]
+        for row in db.query(AlertRule.metric)
+        .filter(
+            AlertRule.enabled == True,
+            AlertRule.metric.in_([AlertRuleMetric.TRUNK_PORT_DOWN, AlertRuleMetric.ROUTE_UNREACHABLE]),
+        )
+        .distinct()
+        .all()
+    }
+    if not needed:
+        return
+
+    if "trunk_port_down" in needed:
+        try:
+            switchports = snmp_service.walk_switchport_vlans(device.ip_address, auth)
+        except Exception:  # noqa: BLE001 - best-effort, never break the base poll over this
+            switchports = {}
+        # walk_switchport_vlans keys its result by ifDescr, not ifIndex
+        # (see its docstring) -- match on the same if_descr per_interface
+        # already carries, not if_index.
+        down_if_descrs = {
+            iface.get("if_descr") for iface in metrics.per_interface if iface.get("status") == "down"
+        }
+        metrics.trunk_ports_down = sum(
+            1
+            for if_descr, info in switchports.items()
+            if info.get("mode") == "trunk" and if_descr in down_if_descrs
+        )
+
+    if "route_unreachable" in needed:
+        has_default = snmp_service.has_default_route(device.ip_address, auth)
+        metrics.route_unreachable = None if has_default is None else not has_default
 
 
 def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
@@ -533,6 +603,9 @@ def poll_device(db: Session, device: Device) -> dict:
 
     score, color = snmp_service.compute_health_score(metrics)
 
+    if metrics.reachable:
+        _populate_link_metrics(db, device, auth, metrics)
+
     # poll_health doesn't raise on an unreachable device -- it returns an
     # all-None SnmpMetrics (sysUpTime is the one OID every SNMP agent
     # answers, so its absence means nothing came back at all) and lets
@@ -590,6 +663,28 @@ def poll_device(db: Session, device: Device) -> dict:
     _sync_interface_metrics(db, device, metrics, interval_seconds)
 
     db.commit()
+
+    # This is the main source of what actually changes on the Topology
+    # page minute-to-minute -- health color, interface up/down, trunk/
+    # link utilization -- and it was the one poll path that never told
+    # any open Topology tab about it. reachability_service publishes on
+    # its own (much coarser) up/down sweep, so a device flipping OFFLINE
+    # showed up live, but a port going down, a link saturating, or a
+    # health color changing from an SNMP poll just sat there until the
+    # page's 60s heartbeat resend happened to catch it -- which is why
+    # the graph looked like it "never changes" or "takes a long time" to
+    # a NOC display watching a specific port. Publish on every poll
+    # rather than diffing first: this is a lightweight pub/sub notify
+    # (the actual payload is rebuilt fresh from the DB by each connected
+    # client), and fleet sizes here are small enough that this is cheap.
+    event_bus.publish_event(
+        "device_metrics_polled",
+        channel=event_bus.TOPOLOGY_CHANNEL,
+        device_id=str(device.id),
+        health_color=color,
+        status=device.status.value if hasattr(device.status, "value") else str(device.status),
+    )
+
     return row
 
 

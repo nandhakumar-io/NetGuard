@@ -101,6 +101,27 @@ def ping_host(ip_address: str, timeout: float = 1.0, count: int = 1) -> bool:
     return is_reachable(ip_address, timeout=timeout)
 
 
+def measure_packet_loss_pct(ip_address: str, timeout: float = 1.0, count: int = 5) -> float | None:
+    """Fires `count` individual ICMP probes and returns the % that got no
+    reply (0-100), or None if the `ping` binary isn't available in this
+    image at all (see _icmp_ping's docstring -- same "couldn't even try"
+    vs "confirmed unreachable" distinction). Backs the
+    PING_PACKET_LOSS_PCT custom alert-rule metric.
+
+    Deliberately sends `count` separate single-probe pings rather than
+    one `ping -c N` call and parsing its "X% packet loss" summary line:
+    that summary's wording/format differs across ping implementations
+    (iputils vs BusyBox vs Windows), which is fragile to parse reliably,
+    whereas a bool per _icmp_ping() call is already normalized.
+    """
+    results = [_icmp_ping(ip_address, timeout=timeout, count=1) for _ in range(count)]
+    if all(r is None for r in results):
+        return None  # no `ping` binary at all -- not a loss measurement, just unavailable
+    attempted = [r for r in results if r is not None]
+    lost = sum(1 for r in attempted if r is False)
+    return round(100.0 * lost / len(attempted), 1) if attempted else None
+
+
 def check_device(db: Session, device: Device) -> DeviceStatus:
     """Pings a device and updates+commits its Device.status, returning
     the new status. Reachable devices are further downgraded to DEGRADED
