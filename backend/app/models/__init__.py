@@ -87,6 +87,10 @@ from app.models.notification import (  # noqa: F401
     NotificationSeverity,
 )
 from app.models.notification_settings import NotificationSettings  # noqa: F401
+from app.models.on_call_schedule import (  # noqa: F401
+    OnCallRotationType,
+    OnCallSchedule,
+)
 from app.models.path_trace import (  # noqa: F401
     HopStatus,
     PathHop,

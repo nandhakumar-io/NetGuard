@@ -124,6 +124,170 @@ function StatTile({ label, value, tone, accent }: { label: string; value: string
   );
 }
 
+// Inline trend line for a numeric history series (oldest -> newest), the
+// same shape *_history/history come back as from GET /dashboard/summary.
+// Deliberately tiny/axis-less -- this sits next to a single stat as
+// "which way is this moving", not a standalone chart someone reads
+// values off of.
+function Sparkline({ data, width = 68, height = 22, color = "#2563eb", fill = true }: { data: number[]; width?: number; height?: number; color?: string; fill?: boolean }) {
+  const clean = (data || []).filter((v) => typeof v === "number" && !Number.isNaN(v));
+  if (clean.length < 2) {
+    return <div style={{ width, height }} className="shrink-0" />;
+  }
+  const min = Math.min(...clean);
+  const max = Math.max(...clean);
+  const span = max - min || 1;
+  const stepX = width / (clean.length - 1);
+  const points = clean.map((v, i) => {
+    const x = i * stepX;
+    const y = height - ((v - min) / span) * (height - 3) - 1.5;
+    return [x, y];
+  });
+  const linePath = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const areaPath = `${linePath} L${width},${height} L0,${height} Z`;
+  const last = points[points.length - 1];
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="shrink-0 overflow-visible">
+      {fill && <path d={areaPath} fill={color} opacity={0.12} />}
+      <path d={linePath} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={last[0]} cy={last[1]} r={1.8} fill={color} />
+    </svg>
+  );
+}
+
+// Odometer-style radial gauge -- the "big dial" NOC wallboards use for
+// the handful of numbers a room-wide glance should resolve in under a
+// second (fleet health, availability, uptime%) where a StatTile's plain
+// number doesn't communicate "how close to the edge is this" the way an
+// arc filling up (or draining) toward a colored danger zone does.
+function RadialGauge({
+  value,
+  label,
+  suffix = "%",
+  size = 108,
+  thresholds = { warn: 90, bad: 70 }, // value >= warn -> ok, >= bad -> warn, below -> critical (lower-is-worse gauges)
+  invert = false, // set true for "lower is better" metrics (not currently used, kept for future gauges)
+}: {
+  value: number | null | undefined;
+  label: string;
+  suffix?: string;
+  size?: number;
+  thresholds?: { warn: number; bad: number };
+  invert?: boolean;
+}) {
+  const stroke = Math.max(6, size * 0.09);
+  const r = (size - stroke) / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  // 270° sweep (like a real speedometer) starting at -225deg (bottom-left)
+  // ending at +45deg (bottom-right), leaving a gap at the bottom for the
+  // label -- reads as a dial, not a full/closed ring.
+  const startAngle = -225;
+  const sweep = 270;
+  const pct = value === null || value === undefined ? 0 : Math.max(0, Math.min(100, value));
+  const valueAngle = startAngle + (pct / 100) * sweep;
+
+  const polar = (angleDeg: number) => {
+    const rad = (angleDeg * Math.PI) / 180;
+    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+  };
+  const arcPath = (a0: number, a1: number) => {
+    const [x0, y0] = polar(a0);
+    const [x1, y1] = polar(a1);
+    const largeArc = a1 - a0 > 180 ? 1 : 0;
+    return `M${x0.toFixed(2)},${y0.toFixed(2)} A${r},${r} 0 ${largeArc} 1 ${x1.toFixed(2)},${y1.toFixed(2)}`;
+  };
+
+  const ok = value !== null && value !== undefined && (invert ? value <= thresholds.bad : value >= thresholds.warn);
+  const warn = value !== null && value !== undefined && !ok && (invert ? value <= thresholds.warn : value >= thresholds.bad);
+  const color = value === null || value === undefined ? "#94a3b8" : ok ? "#10b981" : warn ? "#f59e0b" : "#ef4444";
+
+  return (
+    <div className="flex flex-col items-center justify-center shrink-0" style={{ width: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <path d={arcPath(startAngle, startAngle + sweep)} fill="none" stroke="currentColor" className="text-slate-200 dark:text-slate-800" strokeWidth={stroke} strokeLinecap="round" />
+        {pct > 0 && (
+          <path d={arcPath(startAngle, valueAngle)} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round" />
+        )}
+        <text x={cx} y={cy - 2} textAnchor="middle" className="fill-navy dark:fill-white" style={{ fontSize: size * 0.22, fontWeight: 900 }}>
+          {value === null || value === undefined ? "—" : Math.round(value)}
+        </text>
+        <text x={cx} y={cy + size * 0.15} textAnchor="middle" className="fill-slate-400 dark:fill-slate-500" style={{ fontSize: size * 0.11, fontWeight: 700 }}>
+          {value !== null && value !== undefined ? suffix : ""}
+        </text>
+      </svg>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold text-center -mt-1.5">{label}</div>
+    </div>
+  );
+}
+
+// Multi-series area/line chart for fleet_health_history -- avg CPU /
+// memory / bandwidth utilization across the fleet over time, the trend
+// a real NOC keeps in peripheral vision to catch a slow creep (e.g.
+// average CPU climbing over the shift) that no single-point stat tile
+// or per-device sparkline would surface.
+function TrendChart({
+  history,
+  height = 108,
+}: {
+  history: { timestamp: string | null; avg_cpu: number | null; avg_memory: number | null; avg_bandwidth: number | null }[];
+  height?: number;
+}) {
+  const width = 100; // percentage-based viewBox, scales to container via CSS width
+  const series: { key: "avg_cpu" | "avg_memory" | "avg_bandwidth"; label: string; color: string }[] = [
+    { key: "avg_cpu", label: "Avg CPU", color: "#2563eb" },
+    { key: "avg_memory", label: "Avg Memory", color: "#8b5cf6" },
+    { key: "avg_bandwidth", label: "Avg Bandwidth", color: "#0ea5e9" },
+  ];
+
+  const points = (history || []).filter((h) => h.timestamp);
+  if (points.length < 2) {
+    return (
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 flex items-center justify-center text-slate-400 dark:text-slate-600 text-sm font-bold" style={{ height }}>
+        Not enough history yet.
+      </div>
+    );
+  }
+  const stepX = width / (points.length - 1);
+
+  const buildPath = (key: "avg_cpu" | "avg_memory" | "avg_bandwidth") => {
+    const coords = points.map((p, i) => {
+      const v = p[key] ?? 0;
+      const y = height - (Math.max(0, Math.min(100, v)) / 100) * (height - 6) - 3;
+      return [i * stepX, y];
+    });
+    return coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
+  };
+
+  const first = points[0]?.timestamp;
+  const last = points[points.length - 1]?.timestamp;
+  const fmtTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "");
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 px-4 pt-3 pb-2">
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-4">
+          {series.map((s) => (
+            <span key={s.key} className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 dark:text-slate-400">
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: s.color }} />
+              {s.label}
+            </span>
+          ))}
+        </div>
+        <span className="text-[10px] text-slate-400 dark:text-slate-600 tabular-nums">{fmtTime(first)} – {fmtTime(last)}</span>
+      </div>
+      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+        {[25, 50, 75].map((gy) => (
+          <line key={gy} x1={0} x2={width} y1={height - (gy / 100) * (height - 6) - 3} y2={height - (gy / 100) * (height - 6) - 3} stroke="currentColor" className="text-slate-200 dark:text-slate-800" strokeWidth={0.5} />
+        ))}
+        {series.map((s) => (
+          <path key={s.key} d={buildPath(s.key)} fill="none" stroke={s.color} strokeWidth={1.2} vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
 export default function WallBoard() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -320,6 +484,45 @@ export default function WallBoard() {
             </svg>
           </button>
         </div>
+      </div>
+
+      {/* --- Odometer row: the handful of numbers a room-wide glance
+          should resolve as "how close to the edge" in under a second,
+          not just a flat number -- real NOC wallboard dials. --- */}
+      <div className="flex items-center justify-center gap-6 px-5 py-2.5 border-b border-slate-200 dark:border-slate-800 shrink-0 bg-white/50 dark:bg-slate-900/30 overflow-x-auto">
+        <RadialGauge value={summary?.global_health_score} label="Fleet Health" size={104} thresholds={{ warn: 90, bad: 70 }} />
+        <RadialGauge value={summary?.fleet_health_weighted_pct} label="Availability" size={104} thresholds={{ warn: 99, bad: 95 }} />
+        <RadialGauge
+          value={summary?.uplink_availability?.uptime_pct ?? undefined}
+          label={`Uplink Uptime${summary?.uplink_availability ? ` (${summary.uplink_availability.window_days}d)` : ""}`}
+          size={104}
+          thresholds={{ warn: 99.5, bad: 98 }}
+        />
+        <RadialGauge value={summary?.deployment_success_rate} label="Deploy Success" size={104} thresholds={{ warn: 95, bad: 80 }} />
+        {summary?.fleet_health_breakdown && (
+          <div className="flex flex-col items-center justify-center shrink-0 px-2">
+            <div className="flex items-end gap-1 h-[72px]">
+              {(
+                [
+                  ["healthy", summary.fleet_health_breakdown.healthy, "#10b981"],
+                  ["degraded", summary.fleet_health_breakdown.degraded, "#f59e0b"],
+                  ["offline", summary.fleet_health_breakdown.offline, "#ef4444"],
+                  ["unknown", summary.fleet_health_breakdown.unknown, "#94a3b8"],
+                ] as [string, number, string][]
+              ).map(([k, v, color]) => {
+                const total = Object.values(summary.fleet_health_breakdown).reduce((a, b) => a + b, 0) || 1;
+                const h = Math.max(3, (v / total) * 72);
+                return (
+                  <div key={k} title={`${k}: ${v}`} className="flex flex-col items-center justify-end h-full w-4">
+                    <span className="text-[9px] font-black tabular-nums text-slate-500 dark:text-slate-500 mb-0.5">{v}</span>
+                    <div className="w-4 rounded-t-sm" style={{ height: h, backgroundColor: color }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-500 font-bold text-center mt-1">Fleet Mix</div>
+          </div>
+        )}
       </div>
 
       {/* --- Always-visible stat strip -- a real NOC needs more than just
@@ -520,7 +723,9 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
     return <div className="h-full flex items-center justify-center text-slate-400 dark:text-slate-600 text-xl font-bold">Loading fleet metrics…</div>;
   }
   return (
-    <div className="h-full grid grid-cols-4 gap-5 min-h-0">
+    <div className="h-full flex flex-col gap-4 min-h-0">
+      <TrendChart history={summary.fleet_health_history} height={92} />
+      <div className="flex-1 min-h-0 grid grid-cols-4 gap-5">
       <div className="min-h-0 flex flex-col">
         <h2 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Top CPU</h2>
         <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
@@ -528,11 +733,14 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
             <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
           ) : (
             summary.top_cpu_devices.slice(0, 8).map((d) => (
-              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
+              <div key={d.hostname} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <span className="text-sm font-bold truncate">{d.hostname}</span>
-                <span className={`text-sm font-black tabular-nums ${d.cpu >= 90 ? "text-red-600 dark:text-red-400" : d.cpu >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
-                  {d.cpu.toFixed(0)}%
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Sparkline data={d.cpu_history} color={d.cpu >= 90 ? "#ef4444" : d.cpu >= 75 ? "#f59e0b" : "#2563eb"} width={44} height={18} />
+                  <span className={`text-sm font-black tabular-nums ${d.cpu >= 90 ? "text-red-600 dark:text-red-400" : d.cpu >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
+                    {d.cpu.toFixed(0)}%
+                  </span>
+                </div>
               </div>
             ))
           )}
@@ -545,11 +753,14 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
             <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
           ) : (
             summary.top_memory_devices.slice(0, 8).map((d) => (
-              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
+              <div key={d.hostname} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <span className="text-sm font-bold truncate">{d.hostname}</span>
-                <span className={`text-sm font-black tabular-nums ${d.memory >= 90 ? "text-red-600 dark:text-red-400" : d.memory >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
-                  {d.memory.toFixed(0)}%
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Sparkline data={d.memory_history} color={d.memory >= 90 ? "#ef4444" : d.memory >= 75 ? "#f59e0b" : "#8b5cf6"} width={44} height={18} />
+                  <span className={`text-sm font-black tabular-nums ${d.memory >= 90 ? "text-red-600 dark:text-red-400" : d.memory >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
+                    {d.memory.toFixed(0)}%
+                  </span>
+                </div>
               </div>
             ))
           )}
@@ -562,11 +773,14 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
             <div className="text-slate-400 dark:text-slate-600 text-sm">No data.</div>
           ) : (
             summary.top_bandwidth_devices.slice(0, 8).map((d) => (
-              <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
+              <div key={d.hostname} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <span className="text-sm font-bold truncate">{d.hostname}</span>
-                <span className={`text-sm font-black tabular-nums ${d.bandwidth >= 90 ? "text-red-600 dark:text-red-400" : d.bandwidth >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
-                  {d.bandwidth.toFixed(0)}%
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Sparkline data={d.bandwidth_history} color={d.bandwidth >= 90 ? "#ef4444" : d.bandwidth >= 75 ? "#f59e0b" : "#0ea5e9"} width={44} height={18} />
+                  <span className={`text-sm font-black tabular-nums ${d.bandwidth >= 90 ? "text-red-600 dark:text-red-400" : d.bandwidth >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
+                    {d.bandwidth.toFixed(0)}%
+                  </span>
+                </div>
               </div>
             ))
           )}
@@ -594,7 +808,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-500 mt-0.5">
                     <span>{u.role || "uplink"}</span>
-                    <span className="tabular-nums">{u.utilization_pct.toFixed(0)}% · {formatBps(u.throughput_bps)}</span>
+                    <div className="flex items-center gap-1.5">
+                      <Sparkline data={u.history} color={u.utilization_pct >= 90 ? "#ef4444" : u.utilization_pct >= 75 ? "#f59e0b" : "#10b981"} width={36} height={14} fill={false} />
+                      <span className="tabular-nums">{u.utilization_pct.toFixed(0)}% · {formatBps(u.throughput_bps)}</span>
+                    </div>
                   </div>
                 </div>
               ))
@@ -647,6 +864,7 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }

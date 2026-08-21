@@ -27,7 +27,13 @@ from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity
 from app.models.escalation_policy import EscalationPolicy
-from app.services import audit_service, notification_service, push_service
+from app.models.on_call_schedule import OnCallSchedule
+from app.services import (
+    audit_service,
+    notification_service,
+    on_call_service,
+    push_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,19 +56,38 @@ def _due(alert: Alert, policy: EscalationPolicy, now: datetime) -> bool:
     return since_last >= policy.repeat_minutes
 
 
+def _resolve_contacts(db: Session, policy: EscalationPolicy) -> str | None:
+    """Who to name as "escalated to" in the message body -- the current
+    on-call rotation contact if the policy has a schedule attached,
+    otherwise the policy's static secondary_contacts list unchanged.
+    Doesn't affect *delivery* (notify()/push still fan out the same way
+    regardless), just who gets named -- there's no per-user email/push
+    routing here, only a fleet-wide notify() and phone pushes any
+    subscribed device receives.
+    """
+    if policy.on_call_schedule_id:
+        schedule = db.get(OnCallSchedule, policy.on_call_schedule_id)
+        if schedule:
+            contact, _ = on_call_service.current_contact(schedule)
+            if contact:
+                return contact
+    return policy.secondary_contacts
+
+
 def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
     message = (
         f"Alert unacknowledged for {policy.unack_minutes}+ minutes: "
         f"[{alert.severity.value.upper()}] {alert.category} — {alert.message}"
     )
+    contacts = _resolve_contacts(db, policy)
     if policy.channel.value == "email":
         # Reuses the standard notify() fan-out (Slack/Teams/email/in-app)
-        # but callers still get a targeted heads-up: secondary_contacts
-        # is appended to the message body since notify() itself only
-        # supports the fleet-wide NOTIFY_EMAIL_RECIPIENTS list, not a
-        # per-policy recipient override.
-        if policy.secondary_contacts:
-            message = f"{message}\n\nEscalated to: {policy.secondary_contacts}"
+        # but callers still get a targeted heads-up: the resolved
+        # contact(s) are appended to the message body since notify()
+        # itself only supports the fleet-wide NOTIFY_EMAIL_RECIPIENTS
+        # list, not a per-policy recipient override.
+        if contacts:
+            message = f"{message}\n\nEscalated to: {contacts}"
         notification_service.notify(
             event="Alert Escalated",
             message=message,

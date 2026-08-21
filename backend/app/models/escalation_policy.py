@@ -1,7 +1,17 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -71,7 +81,20 @@ class EscalationPolicy(Base):
     # Secondary/on-call contact(s) to notify -- comma-separated email
     # addresses (EMAIL channel) and/or a single webhook URL
     # (WEBHOOK/SLACK/TEAMS channel; whichever the channel needs).
+    # Ignored for EMAIL/PUSH once on_call_schedule_id is set -- see
+    # app.services.on_call_service.current_contact -- but left in place
+    # as the fallback contact if the schedule is later cleared, and it's
+    # still what WEBHOOK/SLACK/TEAMS policies use to name a human in the
+    # message body since those channels have no per-person routing.
     secondary_contacts = Column(Text, nullable=True)  # comma-separated emails
+    # An On-Call Schedule (rotation) to resolve the current contact from
+    # instead of a static secondary_contacts string -- e.g. "whoever's on
+    # call this week" rather than always the same person. Takes priority
+    # over secondary_contacts for EMAIL/PUSH channels when set; NULL means
+    # "use secondary_contacts as a fixed list" (the original behavior).
+    on_call_schedule_id = Column(
+        UUID(as_uuid=True), ForeignKey("on_call_schedules.id", ondelete="SET NULL"), nullable=True
+    )
     channel = Column(Enum(EscalationChannel), nullable=False, default=EscalationChannel.EMAIL)
     webhook_url = Column(String, nullable=True)
 

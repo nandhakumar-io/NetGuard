@@ -161,6 +161,7 @@ def create_escalation_policy(
         unack_minutes=body.unack_minutes,
         repeat_minutes=body.repeat_minutes,
         secondary_contacts=body.secondary_contacts,
+        on_call_schedule_id=body.on_call_schedule_id,
         channel=body.channel,
         webhook_url=body.webhook_url,
         enabled=body.enabled,

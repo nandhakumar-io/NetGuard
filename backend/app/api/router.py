@@ -38,6 +38,7 @@ from app.api import (
     network_discovery,
     notification,
     notification_settings,
+    on_call_schedules,
     path_trace,
     push_subscriptions,
     rbac,
@@ -77,6 +78,7 @@ api_router.include_router(alerts.router)
 api_router.include_router(alert_rules.router)
 api_router.include_router(alert_runbooks.router)
 api_router.include_router(escalation_policies.router)
+api_router.include_router(on_call_schedules.router)
 api_router.include_router(incidents.router)
 api_router.include_router(jit_access.router)
 api_router.include_router(gns3.router)

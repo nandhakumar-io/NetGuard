@@ -32,7 +32,7 @@ import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
@@ -613,12 +613,17 @@ def stale_reservations(db: Session, subnet: Subnet | None = None) -> list[dict]:
             .order_by(DiscoveryScan.completed_at.desc())
             .all()
         )
-    except OperationalError:
+    except (OperationalError, ProgrammingError):
         # Network Discovery's tables (migration 0074+) aren't present in
         # this database yet -- rather than 500ing the whole IPAM page
         # over a feature this deployment hasn't migrated to, report every
         # reservation as never_scanned (the honest answer: we have no
         # scan data to compare against) instead of failing outright.
+        # OperationalError covers SQLite's "no such table"; Postgres
+        # raises ProgrammingError (UndefinedTable) for the same
+        # condition, so both need catching here -- the OperationalError-
+        # only version of this passed against the SQLite test DB but
+        # 500'd for real on Postgres.
         db.rollback()
         completed_scans = []
     # Pre-parse each scan's CIDR once rather than per-reservation.

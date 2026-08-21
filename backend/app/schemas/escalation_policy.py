@@ -12,6 +12,7 @@ class EscalationPolicyCreate(BaseModel):
     unack_minutes: int = 15
     repeat_minutes: int | None = None
     secondary_contacts: str | None = None  # comma-separated emails
+    on_call_schedule_id: uuid.UUID | None = None
     channel: str = "email"  # email / webhook / slack / teams / push
     webhook_url: str | None = None
     enabled: bool = True
@@ -24,6 +25,7 @@ class EscalationPolicyUpdate(BaseModel):
     unack_minutes: int | None = None
     repeat_minutes: int | None = None
     secondary_contacts: str | None = None
+    on_call_schedule_id: uuid.UUID | None = None
     channel: str | None = None
     webhook_url: str | None = None
     enabled: bool | None = None
@@ -37,6 +39,7 @@ class EscalationPolicyRead(BaseModel):
     unack_minutes: int
     repeat_minutes: int | None = None
     secondary_contacts: str | None = None
+    on_call_schedule_id: uuid.UUID | None = None
     channel: str
     webhook_url: str | None = None
     enabled: bool
