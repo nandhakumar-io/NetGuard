@@ -124,7 +124,9 @@ export default function MobileNOC() {
         device_id: alert.device_id,
         alert_id: alert.id,
       });
-      alert.resolved ? null : await api.patch(`/alerts/${alert.id}/resolve`);
+      if (!alert.resolved) {
+        await api.patch(`/alerts/${alert.id}/resolve`);
+      }
       setAlerts((prev) => prev.filter((a) => a.id !== alert.id));
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };

@@ -983,6 +983,17 @@ def metric_history(
     return rows[-limit:]
 
 
+def interface_metric_history(
+    db: Session, device_id: uuid.UUID, if_descr: str, hours: int = 24, limit: int = 500
+) -> list[dict]:
+    """Historical chronological metric samples for one interface."""
+    end = datetime.datetime.now(datetime.timezone.utc)
+    start = end - datetime.timedelta(hours=hours)
+    step_seconds = max(60, int((hours * 3600) / max(limit, 1)))
+    rows = vm_client.interface_metric_history(device_id, if_descr, start, end, step_seconds)
+    return rows[-limit:]
+
+
 def purge_old_metrics(db: Session, retention_days: int) -> int:
     """No-op now that DeviceMetric/InterfaceMetric live in VictoriaMetrics:
     retention there is enforced by the `-retentionPeriod` flag on the

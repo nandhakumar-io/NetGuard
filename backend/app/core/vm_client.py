@@ -451,6 +451,29 @@ def device_metric_history(
     return rows
 
 
+def interface_metric_history(
+    device_id: uuid.UUID, if_descr: str, start: datetime.datetime, end: datetime.datetime, step_seconds: int
+) -> list[dict]:
+    """Same format as device_metric_history but scoped to a single interface."""
+    rows_by_ts: dict[int, dict] = {}
+    for field in INTERFACE_METRIC_FIELDS:
+        promql = f'{_INTERFACE_METRIC_NAME(field=field)}{{device_id="{_label_escape(str(device_id))}", if_descr="{_label_escape(if_descr)}" }}'
+        for series in _range_query(promql, start, end, step_seconds):
+            for ts, value_str in series.get("values", []):
+                ts_ms = int(float(ts) * 1000)
+                row = rows_by_ts.setdefault(ts_ms, {"device_id": device_id, "if_descr": if_descr, "polled_at": _from_ms(ts_ms)})
+                row[field] = float(value_str)
+
+    ordered_ts = sorted(rows_by_ts)
+    rows = []
+    for ts_ms in ordered_ts:
+        row = rows_by_ts[ts_ms]
+        row["id"] = uuid.uuid5(uuid.NAMESPACE_URL, f"netguard-ifmetric:{device_id}:{if_descr}:{ts_ms}")
+        _cast_int_fields(row, INTERFACE_INT_FIELDS)
+        rows.append(row)
+    return rows
+
+
 def delete_device_series(device_id: uuid.UUID) -> None:
     """Deletes every stored series for a device (device-level + interface)
     -- called when a device is removed, mirroring the old

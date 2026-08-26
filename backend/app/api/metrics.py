@@ -132,6 +132,19 @@ def get_metric_history(
     return metrics_service.metric_history(db, device.id, hours=hours, limit=limit)
 
 
+@router.get("/devices/{device_id}/interfaces/metrics/history", response_model=list[InterfaceMetricRead])
+def get_interface_metric_history(
+    device_id: uuid.UUID,
+    if_descr: str = Query(..., description="The physical interface if_descr"),
+    hours: int = Query(24, ge=1, le=24 * 30),
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    device = _get_device(db, device_id)
+    return metrics_service.interface_metric_history(db, device.id, if_descr, hours=hours, limit=limit)
+
+
 @router.get("/devices/{device_id}/metrics/interfaces", response_model=list[InterfaceMetricRead])
 def get_latest_interface_metrics(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
     """Latest per-interface bandwidth/error reading for every interface

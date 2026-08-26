@@ -467,6 +467,20 @@ export default function Topology() {
       .catch(() => setIfaceHistory([]));
   };
 
+  const [edgeIfaceHistory, setEdgeIfaceHistory] = useState<Record<string, any[]>>({});
+  const [edgeIfaceHistoryLoading, setEdgeIfaceHistoryLoading] = useState<Record<string, boolean>>({});
+
+  const loadEdgeIfaceHistory = (deviceId: string, ifDescr: string) => {
+    const key = `${deviceId}-${ifDescr}`;
+    if (edgeIfaceHistory[key] || edgeIfaceHistoryLoading[key]) return;
+    setEdgeIfaceHistoryLoading((prev) => ({ ...prev, [key]: true }));
+    api
+      .get<any[]>(`/devices/${deviceId}/interfaces/metrics/history?if_descr=${encodeURIComponent(ifDescr)}&hours=24&limit=100`)
+      .then((res) => setEdgeIfaceHistory((prev) => ({ ...prev, [key]: res.data })))
+      .catch(() => setEdgeIfaceHistory((prev) => ({ ...prev, [key]: [] })))
+      .finally(() => setEdgeIfaceHistoryLoading((prev) => ({ ...prev, [key]: false })));
+  };
+
   // --- history / diffing ------------------------------------------------
   const [showDiff, setShowDiff] = useState(false);
   const [snapshots, setSnapshots] = useState<TopologySnapshotSummary[]>([]);
@@ -2217,7 +2231,7 @@ export default function Topology() {
                           {e.members.map((m, i) => (
                             <li
                               key={i}
-                              className={`text-[11px] rounded-md px-2 py-1.5 border flex items-center justify-between gap-2 ${
+                              className={`text-[11px] rounded-md px-2 py-1.5 border flex flex-col gap-2 ${
                                 m.status === "down"
                                   ? "bg-slate-50 border-slate-200 text-slate-400"
                                   : m.status === "up"
@@ -2225,45 +2239,91 @@ export default function Topology() {
                                   : "bg-slate-50 border-slate-200 text-slate-600"
                               }`}
                             >
-                              <span className="flex flex-col min-w-0">
-                                <span
-                                  className={`font-mono truncate ${m.status === "down" ? "line-through decoration-slate-300" : ""}`}
-                                >
-                                  {m.local_port || "?"} ↔ {m.neighbor_port || "?"}
-                                </span>
-                                {m.port_mode && (
-                                  <span className="flex items-center gap-1 mt-0.5">
-                                    <span
-                                      className={`px-1 py-0 rounded text-[9px] font-bold uppercase tracking-wide ${
-                                        m.port_mode === "trunk"
-                                          ? "bg-purple-100 text-purple-700"
-                                          : "bg-sky-100 text-sky-700"
-                                      }`}
-                                    >
-                                      {m.port_mode}
-                                    </span>
-                                    {m.vlan && (
-                                      <span className="font-mono text-slate-400 text-[10px]">
-                                        {m.port_mode === "trunk" ? "native " : ""}vlan {m.vlan}
-                                        {m.port_mode === "trunk" && m.trunk_vlans && m.trunk_vlans.length > 1
-                                          ? ` (${m.trunk_vlans.length} tagged)`
-                                          : ""}
-                                      </span>
-                                    )}
+                              <div className="flex items-center justify-between w-full">
+                                <span className="flex flex-col min-w-0">
+                                  <span
+                                    className={`font-mono truncate ${m.status === "down" ? "line-through decoration-slate-300" : ""}`}
+                                  >
+                                    {m.local_port || "?"} ↔ {m.neighbor_port || "?"}
                                   </span>
-                                )}
-                              </span>
-                              <span className="flex items-center gap-1.5 shrink-0">
-                                {m.utilization_pct !== null && m.utilization_pct !== undefined && (
-                                  <span className="font-mono text-slate-400">{m.utilization_pct}%</span>
-                                )}
-                                {m.stale && <span className="text-amber-600">⚠</span>}
-                                <span
-                                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                    m.status === "down" ? "bg-slate-300" : m.status === "up" ? "bg-emerald-500" : "bg-slate-300"
-                                  }`}
-                                />
-                              </span>
+                                  {m.port_mode && (
+                                    <span className="flex items-center gap-1 mt-0.5">
+                                      <span
+                                        className={`px-1 py-0 rounded text-[9px] font-bold uppercase tracking-wide ${
+                                          m.port_mode === "trunk"
+                                            ? "bg-purple-100 text-purple-700"
+                                            : "bg-sky-100 text-sky-700"
+                                        }`}
+                                      >
+                                        {m.port_mode}
+                                      </span>
+                                      {m.vlan && (
+                                        <span className="font-mono text-slate-400 text-[10px]">
+                                          {m.port_mode === "trunk" ? "native " : ""}vlan {m.vlan}
+                                          {m.port_mode === "trunk" && m.trunk_vlans && m.trunk_vlans.length > 1
+                                            ? ` (${m.trunk_vlans.length} tagged)`
+                                            : ""}
+                                        </span>
+                                      )}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="flex items-center gap-1.5 shrink-0">
+                                  {m.utilization_pct !== null && m.utilization_pct !== undefined && (
+                                    <span className="font-mono text-slate-400">{m.utilization_pct}%</span>
+                                  )}
+                                  {m.stale && <span className="text-amber-600">⚠</span>}
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                      m.status === "down" ? "bg-slate-300" : m.status === "up" ? "bg-emerald-500" : "bg-slate-300"
+                                    }`}
+                                  />
+                                </span>
+                              </div>
+                              {src && m.local_port && (
+                                <div className="mt-1 border-t border-slate-200/50 pt-2">
+                                  {!edgeIfaceHistory[`${src.id}-${m.local_port}`] && !edgeIfaceHistoryLoading[`${src.id}-${m.local_port}`] ? (
+                                    <button 
+                                      className="text-[10px] text-brandblue hover:underline font-semibold"
+                                      onClick={() => loadEdgeIfaceHistory(src.id, m.local_port!)}
+                                    >
+                                      Load 24h utilization history
+                                    </button>
+                                  ) : edgeIfaceHistoryLoading[`${src.id}-${m.local_port}`] ? (
+                                    <span className="text-[10px] text-slate-400 italic">Loading metrics...</span>
+                                  ) : edgeIfaceHistory[`${src.id}-${m.local_port}`]?.length === 0 ? (
+                                    <span className="text-[10px] text-slate-400 italic">No historical data found.</span>
+                                  ) : (
+                                    <div className="flex flex-col gap-2">
+                                      <p className="text-[10px] font-bold text-slate-500 uppercase">Last 24h Trend</p>
+                                      <div className="flex items-center justify-between gap-3">
+                                        <div className="flex flex-col">
+                                          <span className="text-[9px] text-slate-400">Utilization</span>
+                                          <span className="text-xs font-bold text-slate-700">
+                                            {edgeIfaceHistory[`${src.id}-${m.local_port}`]?.[edgeIfaceHistory[`${src.id}-${m.local_port}`].length - 1]?.utilization_pct ?? "—"}%
+                                          </span>
+                                        </div>
+                                        <Sparkline 
+                                          values={edgeIfaceHistory[`${src.id}-${m.local_port}`].map((h: any) => h.utilization_pct).filter((v: any) => v !== null)} 
+                                          color="#0891b2" 
+                                        />
+                                      </div>
+                                      <div className="flex items-center justify-between gap-3">
+                                        <div className="flex flex-col">
+                                          <span className="text-[9px] text-slate-400">Errors Delta</span>
+                                          <span className="text-xs font-bold text-slate-700">
+                                            {edgeIfaceHistory[`${src.id}-${m.local_port}`]?.[edgeIfaceHistory[`${src.id}-${m.local_port}`].length - 1]?.error_delta ?? "—"}
+                                          </span>
+                                        </div>
+                                        <Sparkline 
+                                          values={edgeIfaceHistory[`${src.id}-${m.local_port}`].map((h: any) => h.error_delta).filter((v: any) => v !== null)} 
+                                          color="#dc2626" 
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </li>
                           ))}
                         </ul>
