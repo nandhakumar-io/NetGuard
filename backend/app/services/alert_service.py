@@ -274,6 +274,30 @@ def acknowledge_alert(db: Session, alert_id: uuid.UUID, user_email: str) -> Aler
 
 
 # ------------------------------------------------------------------
+# Escalate
+# ------------------------------------------------------------------
+def escalate_alert(db: Session, alert_id: uuid.UUID) -> Alert:
+    alert = db.get(Alert, alert_id)
+    if alert is None:
+        raise ValueError("Alert not found")
+    alert.escalated = True
+    alert.escalation_count += 1
+    now = datetime.now(timezone.utc)
+    if not alert.escalated_at:
+        alert.escalated_at = now
+    alert.last_escalated_at = now
+    db.commit()
+    db.refresh(alert)
+
+    event_bus.publish_event(
+        "alert_escalated",
+        alert_id=str(alert.id),
+        channel=event_bus.ALERTS_CHANNEL,
+    )
+    return alert
+
+
+# ------------------------------------------------------------------
 # Resolve
 # ------------------------------------------------------------------
 def resolve_alert(db: Session, alert_id: uuid.UUID, user_email: str) -> Alert:

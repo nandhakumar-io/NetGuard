@@ -14,7 +14,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_msp_staff
+from app.core.deps import require_msp_staff
 from app.models.device import Device
 from app.models.tenant import Tenant
 from app.models.user import User
@@ -112,7 +112,6 @@ def _tenant_read(db: Session, tenant: Tenant) -> TenantRead:
 @router.get("/public-list", response_model=list[TenantPublic])
 def list_tenants_public(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
 ) -> list[TenantPublic]:
     """Active tenants: id, name, slug only. Any authenticated user can
     call this so the registration form dropdown works for non-MSP staff

@@ -104,6 +104,36 @@ export default function MobileNOC() {
     }
   };
 
+  const escalate = async (id: string) => {
+    setBusyId(id);
+    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, escalated: true } : a)));
+    try {
+      await api.patch(`/alerts/${id}/escalate`);
+    } catch {
+      fetchAlerts();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const executeRunbook = async (alert: Alert) => {
+    if (!alert.runbook?.id || !alert.device_id) return;
+    setBusyId(alert.id);
+    try {
+      await api.post(`/alert-runbooks/${alert.runbook.id}/execute`, {
+        device_id: alert.device_id,
+        alert_id: alert.id,
+      });
+      alert.resolved ? null : await api.patch(`/alerts/${alert.id}/resolve`);
+      setAlerts((prev) => prev.filter((a) => a.id !== alert.id));
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      window.alert(e?.response?.data?.detail ?? "Failed to run remediation");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const visible = alerts
     .filter((a) => !a.resolved)
     .filter((a) => filter === "all" || a.severity === filter)
@@ -193,23 +223,37 @@ export default function MobileNOC() {
                   <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{timeAgo(alert.created_at)}</span>
                 </div>
 
-                <div className="flex gap-2 mt-3">
-                  {!alert.acknowledged && (
-                    <button
-                      onClick={() => acknowledge(alert.id)}
-                      disabled={busyId === alert.id}
-                      className="flex-1 py-2.5 rounded-lg bg-slate-100 text-slate-700 text-sm font-semibold active:bg-slate-200 disabled:opacity-50"
-                    >
-                      Acknowledge
-                    </button>
-                  )}
+                <div className="grid grid-cols-2 gap-2 mt-4">
+                  <button
+                    onClick={() => acknowledge(alert.id)}
+                    disabled={busyId === alert.id || alert.acknowledged}
+                    className="w-full py-3.5 rounded-lg bg-slate-100 text-slate-700 text-[15px] font-semibold active:bg-slate-200 disabled:opacity-50 disabled:bg-slate-50 transition-colors"
+                  >
+                    {alert.acknowledged ? "Acknowledged" : "Acknowledge"}
+                  </button>
                   <button
                     onClick={() => resolve(alert.id)}
                     disabled={busyId === alert.id}
-                    className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-semibold active:bg-emerald-700 disabled:opacity-50"
+                    className="w-full py-3.5 rounded-lg bg-emerald-600 text-white text-[15px] font-semibold active:bg-emerald-700 disabled:opacity-50 transition-colors"
                   >
                     Resolve
                   </button>
+                  <button
+                    onClick={() => escalate(alert.id)}
+                    disabled={busyId === alert.id || alert.escalated}
+                    className="w-full py-3.5 rounded-lg border-2 border-purple-200 text-purple-700 text-[15px] font-semibold active:bg-purple-100 disabled:opacity-50 transition-colors"
+                  >
+                    {alert.escalated ? "Escalated" : "Escalate"}
+                  </button>
+                  {alert.runbook?.remediation_enabled && (
+                    <button
+                      onClick={() => executeRunbook(alert)}
+                      disabled={busyId === alert.id}
+                      className="w-full py-3.5 rounded-lg bg-brandblue text-white text-[15px] font-semibold active:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm"
+                    >
+                      Run Runbook
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

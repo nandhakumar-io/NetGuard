@@ -192,6 +192,14 @@ def acknowledge(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User =
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.patch("/{alert_id}/escalate", response_model=AlertRead)
+def escalate(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    try:
+        return alert_service.escalate_alert(db, alert_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.patch("/{alert_id}/resolve", response_model=AlertRead)
 def resolve(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
