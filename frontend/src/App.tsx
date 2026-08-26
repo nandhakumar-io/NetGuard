@@ -47,6 +47,7 @@ const WallBoard = lazy(() => import("./pages/WallBoard"));
 const OnCallSchedules = lazy(() => import("./pages/OnCallSchedules"));
 const EscalationPolicies = lazy(() => import("./pages/EscalationPolicies"));
 const AuditorExport = lazy(() => import("./pages/AuditorExport"));
+const TenantBoard = lazy(() => import("./pages/TenantBoard"));
 
 function RouteFallback() {
   return (
@@ -110,6 +111,7 @@ export default function App() {
           <Route path="/users" element={withSuspense(<Users />)} />
           <Route path="/backups" element={withSuspense(<Backups />)} />
           <Route path="/discovery" element={withSuspense(<Discovery />)} />
+          <Route path="/tenant-board" element={withSuspense(<TenantBoard />)} />
         </Route>
       </Route>
     </Routes>

@@ -22,6 +22,7 @@ from app.models.interface_status import InterfaceStatus
 from app.models.protocol_operation import ProtocolOperation
 from app.models.snapshot import ConfigSnapshot
 from app.models.subnet import Subnet, SubnetScannedHost
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.dashboard_preference import (
     DashboardLayoutEntry,
@@ -250,6 +251,7 @@ def _compute_summary(db: Session) -> dict:
 
     # 1. Global Health Score & Top CPU/Memory
     all_devices = {d.id: d for d in db.query(Device).all()}
+    tenants_by_id = {t.id: t.name for t in db.query(Tenant).all()}
     latest_metrics = vm_client.fleet_latest_metrics()
 
     metrics_with_device = []
@@ -270,6 +272,7 @@ def _compute_summary(db: Session) -> dict:
             "ip_address": d.ip_address,
             "cpu": row.get("cpu_utilization_pct") or 0,
             "cpu_history": _metric_sparkline(db, d.id, "cpu_utilization_pct"),
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         }
         for row, d in top_cpu
     ]
@@ -279,6 +282,7 @@ def _compute_summary(db: Session) -> dict:
             "ip_address": d.ip_address,
             "memory": row.get("memory_utilization_pct") or 0,
             "memory_history": _metric_sparkline(db, d.id, "memory_utilization_pct"),
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         }
         for row, d in top_memory
     ]
@@ -288,6 +292,7 @@ def _compute_summary(db: Session) -> dict:
             "ip_address": d.ip_address,
             "bandwidth": row.get("interface_utilization_pct") or 0,
             "bandwidth_history": _metric_sparkline(db, d.id, "interface_utilization_pct"),
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         }
         for row, d in top_bandwidth
     ]
@@ -314,6 +319,7 @@ def _compute_summary(db: Session) -> dict:
             "link_speed_bps": speed_bps or None,
             "errors": row.get("interface_errors"),
             "history": _metric_sparkline(db, d.id, "interface_utilization_pct"),
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         })
 
     history_since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
@@ -409,7 +415,7 @@ def _compute_summary(db: Session) -> dict:
         .subquery()
     )
     down_port_rows = (
-        db.query(InterfaceStatus.if_descr, InterfaceStatus.changed_at, Device.hostname)
+        db.query(InterfaceStatus.if_descr, InterfaceStatus.changed_at, Device.hostname, Device.tenant_id)
         .join(
             latest_if_subq,
             (InterfaceStatus.device_id == latest_if_subq.c.device_id)
@@ -427,6 +433,7 @@ def _compute_summary(db: Session) -> dict:
             "hostname": r.hostname,
             "interface": r.if_descr,
             "down_since": r.changed_at.isoformat() if r.changed_at else None,
+            "tenant_name": tenants_by_id.get(r.tenant_id),
         }
         for r in down_port_rows
     ]
@@ -445,6 +452,7 @@ def _compute_summary(db: Session) -> dict:
             "ip_address": d.ip_address,
             "uptime_seconds": row["uptime_seconds"],
             "polled_at": row.get("polled_at").isoformat() if row.get("polled_at") else None,
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         }
         for row, d in recent_reboots_tuples
     ]
@@ -471,6 +479,7 @@ def _compute_summary(db: Session) -> dict:
             "status": d.status.value if hasattr(d.status, "value") else d.status,
             "last_seen": d.last_reachability_poll_at.isoformat() if d.last_reachability_poll_at else None,
             "last_error": d.last_snmp_poll_error,
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         }
         for d in offline_rows
     ]
@@ -491,6 +500,7 @@ def _compute_summary(db: Session) -> dict:
             "hostname": d.hostname,
             "ip_address": d.ip_address,
             "interface_errors": row.get("interface_errors") or 0,
+            "tenant_name": tenants_by_id.get(d.tenant_id),
         }
         for row, d in top_errors_tuples
     ]
@@ -524,6 +534,7 @@ def _compute_summary(db: Session) -> dict:
             "interface": r.if_descr,
             "flap_count": r.flap_count,
             "last_change": r.last_change.isoformat() if r.last_change else None,
+            "tenant_name": tenants_by_id.get(all_devices[r.device_id].tenant_id) if r.device_id in all_devices else None,
         }
         for r in flap_rows
     ]

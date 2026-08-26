@@ -14,6 +14,10 @@ export interface CurrentUser {
   // individual capability/page keys (e.g. "config_management", "page:backups").
   extra_roles: string[];
   extra_permissions: string[];
+  // Scopes this account across every tenant (see backend
+  // app.models.user.User.is_msp_staff) rather than one tenant --
+  // gates visibility of the cross-tenant NOC board.
+  is_msp_staff: boolean;
 }
 
 /** True if `user` has network_admin either as their base role or via a

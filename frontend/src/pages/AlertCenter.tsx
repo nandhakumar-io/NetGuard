@@ -71,6 +71,32 @@ export default function AlertCenter() {
   }, [density]);
   const toast = useToast();
   const confirm = useConfirm();
+  const [runningRunbookAlertId, setRunningRunbookAlertId] = useState<string | null>(null);
+
+  const runRunbookRemediation = async (alert: Alert) => {
+    if (!alert.runbook || !alert.device_id) return;
+    const ok = await confirm(
+      `This pushes the configured remediation command to the device for this alert. Continue?`,
+      { title: "Run remediation now?", confirmLabel: "Run", danger: true }
+    );
+    if (!ok) return;
+    setRunningRunbookAlertId(alert.id);
+    try {
+      const res = await api.post(`/alert-runbooks/${alert.runbook.id}/execute`, {
+        device_id: alert.device_id,
+        alert_id: alert.id,
+      });
+      if (res.data.status === "success") {
+        toast.success("Remediation ran successfully");
+      } else {
+        toast.error(res.data.error || "Remediation failed — check runbook execution history.");
+      }
+    } catch (err) {
+      toast.error(errorMessage(err, "Failed to run remediation."));
+    } finally {
+      setRunningRunbookAlertId(null);
+    }
+  };
   const [tab, setTab] = useState<Tab>("alerts");
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
@@ -1015,6 +1041,16 @@ export default function AlertCenter() {
                                     📖 Runbook
                                   </a>
                                 )}
+                                {alert.runbook?.remediation_enabled && alert.device_id && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); runRunbookRemediation(alert); }}
+                                    disabled={runningRunbookAlertId === alert.id}
+                                    title="Run this runbook's remediation action against the affected device"
+                                    className="flex items-center gap-1 text-violet-600 dark:text-violet-300 hover:underline font-medium disabled:opacity-50"
+                                  >
+                                    {runningRunbookAlertId === alert.id ? "Running…" : "⚡ Run Remediation"}
+                                  </button>
+                                )}
                               </div>
                               {!nested && impacted.length > 0 && (
                                 <button
@@ -1129,6 +1165,16 @@ export default function AlertCenter() {
                             >
                               📖
                             </a>
+                          )}
+                          {alert.runbook?.remediation_enabled && alert.device_id && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); runRunbookRemediation(alert); }}
+                              disabled={runningRunbookAlertId === alert.id}
+                              title="Run this runbook's remediation action against the affected device"
+                              className="text-violet-600 dark:text-violet-300 hover:underline shrink-0 disabled:opacity-50"
+                            >
+                              {runningRunbookAlertId === alert.id ? "…" : "⚡"}
+                            </button>
                           )}
                         </div>
                       </td>

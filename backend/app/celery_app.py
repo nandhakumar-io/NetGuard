@@ -120,6 +120,18 @@ celery_app.conf.update(
             "task": "app.tasks.run_snmp_poll_sweep_task",
             "schedule": float(settings.SNMP_POLL_INTERVAL_SECONDS),
         },
+        # Baseline anomaly detection (app.services.anomaly_service): runs
+        # on a slower cadence than the SNMP poll sweep itself -- checking
+        # for anomalies more often than new device_metrics rows land
+        # would just repeat the same comparison against the same latest
+        # poll. 4x the poll interval is a reasonable default; devices
+        # with a very short SNMP_POLL_INTERVAL_SECONDS will still want
+        # this at least every few minutes so a real spike isn't sitting
+        # unflagged for too long.
+        "anomaly-detection-sweep": {
+            "task": "app.tasks.run_anomaly_detection_sweep_task",
+            "schedule": max(300.0, float(settings.SNMP_POLL_INTERVAL_SECONDS) * 4),
+        },
         # Device reachability (ping) sweep: keeps Device.status accurate
         # for every device, not just SNMP-enabled ones -- see
         # app.services.reachability_service for why this exists (status

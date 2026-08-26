@@ -81,6 +81,15 @@ class Device(Base):
     __tablename__ = "devices"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Which managed customer this device belongs to (see app.models.tenant.
+    # Tenant). Nullable at the column level only for pre-migration safety
+    # during the 0092_tenants backfill window -- every device is expected
+    # to have this set in practice (backfilled onto "Default") and normal,
+    # non-MSP-staff users are always scoped to their own tenant_id when
+    # querying devices (see app.core.deps.get_current_tenant_id).
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
+
     hostname = Column(String, unique=True, index=True, nullable=False)
     ip_address = Column(String, nullable=False)  # management IP
     vendor = Column(Enum(DeviceVendor), nullable=False, default=DeviceVendor.CISCO)

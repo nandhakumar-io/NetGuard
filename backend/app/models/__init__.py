@@ -115,6 +115,7 @@ from app.models.syslog_destination import (  # noqa: F401
     SyslogProtocol,
 )
 from app.models.syslog_message import SyslogMessage, SyslogSeverity  # noqa: F401
+from app.models.tenant import Tenant  # noqa: F401
 from app.models.terminal_session_recording import TerminalSessionRecording  # noqa: F401
 from app.models.topology_snapshot import TopologySnapshot  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401

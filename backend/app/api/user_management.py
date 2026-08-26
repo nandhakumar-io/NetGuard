@@ -20,6 +20,7 @@ from app.core import permissions as permission_registry
 from app.core.database import get_db
 from app.core.deps import require_roles
 from app.core.security import hash_password
+from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.schemas.user_management import (
     AdminUserCreate,
@@ -28,6 +29,7 @@ from app.schemas.user_management import (
     UserPermissionsUpdate,
     UserRoleCounts,
     UserStatusUpdate,
+    UserTenancyUpdate,
 )
 from app.services import audit_service, session_revocation_service
 
@@ -64,7 +66,7 @@ def _parse_extra_permissions(user: User) -> list[str]:
     return [p for p in (raw.strip() for raw in user.extra_permissions.split(",")) if p and p in permission_registry.PERMISSION_KEYS]
 
 
-def _serialize(user: User) -> AdminUserRead:
+def _serialize(user: User, tenant_name: str | None = None) -> AdminUserRead:
     return AdminUserRead(
         id=str(user.id),
         email=user.email,
@@ -77,6 +79,9 @@ def _serialize(user: User) -> AdminUserRead:
         sso_provider=user.sso_provider,
         created_at=user.created_at,
         last_login_at=user.last_login_at,
+        is_msp_staff=user.is_msp_staff,
+        tenant_id=str(user.tenant_id) if user.tenant_id else None,
+        tenant_name=tenant_name,
     )
 
 
@@ -113,6 +118,7 @@ def list_permission_catalog(_: User = Depends(_admin_only)):
 @router.get("", response_model=AdminUserListResponse)
 def list_users(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
     users = db.query(User).order_by(User.email).all()
+    tenant_names = {t.id: t.name for t in db.query(Tenant).all()}
     counts = UserRoleCounts(
         total=len(users),
         network_admin=sum(1 for u in users if u.role == UserRole.NETWORK_ADMIN),
@@ -122,7 +128,20 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
         auditor=sum(1 for u in users if u.role == UserRole.AUDITOR),
         disabled=sum(1 for u in users if not _is_active(u)),
     )
-    return AdminUserListResponse(users=[_serialize(u) for u in users], counts=counts)
+    return AdminUserListResponse(
+        users=[_serialize(u, tenant_names.get(u.tenant_id)) for u in users],
+        counts=counts,
+    )
+
+
+@router.get("/tenants")
+def list_tenants_for_picker(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+    """Backs the Users page's tenant dropdown -- kept here rather than
+    requiring a separate /tenants CRUD surface, since assigning a user to
+    a tenant is the only thing the admin UI currently needs tenants for.
+    """
+    tenants = db.query(Tenant).filter(Tenant.is_active.is_(True)).order_by(Tenant.name).all()
+    return {"tenants": [{"id": str(t.id), "name": t.name, "slug": t.slug} for t in tenants]}
 
 
 @router.post("", response_model=AdminUserRead, status_code=201)
@@ -235,6 +254,52 @@ def update_user_status(
         )
 
     return _serialize(user)
+
+
+@router.patch("/{user_id}/tenancy", response_model=AdminUserRead)
+def update_user_tenancy(
+    user_id: str, payload: UserTenancyUpdate, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)
+):
+    """Assigns a user to a tenant, or flips them to MSP staff (see
+    app.models.user.User.is_msp_staff / app.models.tenant.Tenant). The
+    two are mutually exclusive: is_msp_staff=True always clears
+    tenant_id here regardless of what the request sent, rather than
+    trusting the client to leave tenant_id null itself -- a stray
+    tenant_id on an MSP-staff row would silently scope
+    get_current_tenant_id-style checks in ways nothing in this app
+    expects.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.is_msp_staff:
+        user.is_msp_staff = True
+        user.tenant_id = None
+        detail = f"{user.email}: is_msp_staff=true"
+    else:
+        if not payload.tenant_id:
+            raise HTTPException(status_code=400, detail="tenant_id is required for a non-MSP-staff user")
+        tenant = db.query(Tenant).filter(Tenant.id == payload.tenant_id).first()
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        user.is_msp_staff = False
+        user.tenant_id = tenant.id
+        detail = f"{user.email}: tenant={tenant.name}"
+
+    db.commit()
+    db.refresh(user)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="User Tenancy Updated", result="Success",
+        detail=detail,
+    )
+
+    tenant_name = None
+    if user.tenant_id:
+        t = db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
+        tenant_name = t.name if t else None
+    return _serialize(user, tenant_name)
 
 
 @router.post("/{user_id}/revoke-sessions")

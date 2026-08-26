@@ -485,4 +485,8 @@ def get_me(current_user: User = Depends(get_current_user)):
         "mfa_enabled": current_user.mfa_enabled == "true",
         "extra_roles": [r.strip() for r in (current_user.extra_roles or "").split(",") if r.strip()],
         "extra_permissions": [p.strip() for p in (current_user.extra_permissions or "").split(",") if p.strip()],
+        # Drives the cross-tenant NOC board's nav visibility client-side
+        # (app.api.tenant_board is the real, independent enforcement
+        # point server-side -- see require_msp_staff).
+        "is_msp_staff": current_user.is_msp_staff,
     }

@@ -715,9 +715,13 @@ export interface Alert {
 }
 
 export interface RunbookRef {
+  id: string;
   title: string;
   url: string;
+  remediation_enabled?: boolean;
 }
+
+export type RemediationActionType = "restart_service" | "push_config";
 
 export interface AlertRunbook {
   id: string;
@@ -726,9 +730,27 @@ export interface AlertRunbook {
   title: string;
   url: string;
   notes: string | null;
+  remediation_enabled: boolean;
+  remediation_action_type: RemediationActionType | null;
+  remediation_label: string | null;
+  remediation_command: string | null;
+  remediation_required_role: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string | null;
+}
+
+export interface RunbookExecution {
+  id: string;
+  runbook_id: string;
+  alert_id: string | null;
+  device_id: string;
+  triggered_by: string;
+  status: "pending" | "success" | "failed";
+  output: string | null;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 export interface AlertSummary {

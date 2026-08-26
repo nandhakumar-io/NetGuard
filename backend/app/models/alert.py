@@ -37,6 +37,13 @@ class AlertSource(str, enum.Enum):
     # failure, hardware error, ACL deny, ...) raises one of these -- the
     # one alert source that isn't SNMP-derived at all.
     SYSLOG = "syslog"
+    # Added for app.services.anomaly_service: a metric that's within any
+    # static threshold but is a statistical outlier against that same
+    # device's own historical baseline for this time of day (e.g. CPU
+    # that's "only" at 60% but this device has never been above 20% at
+    # 3am) -- the kind of slow-drift or off-hours anomaly a fixed
+    # threshold alert is structurally unable to catch.
+    ANOMALY = "anomaly"
 
 
 class Alert(Base):

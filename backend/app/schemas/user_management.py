@@ -44,6 +44,19 @@ class UserStatusUpdate(BaseModel):
     is_active: bool
 
 
+class UserTenancyUpdate(BaseModel):
+    """Sets which tenant a user belongs to, or flips them to MSP staff
+    (cross-tenant, no single tenant_id -- see app.models.user.User.
+    is_msp_staff and app.core.deps.get_current_tenant_id). Mutually
+    exclusive by construction: is_msp_staff=True always clears tenant_id
+    server-side regardless of what's sent, since an MSP-staff account
+    being scoped to one tenant would silently defeat the point of the
+    flag (see update_user_tenancy)."""
+
+    is_msp_staff: bool
+    tenant_id: str | None = None
+
+
 class AdminUserRead(BaseModel):
     id: str
     email: str
@@ -56,6 +69,9 @@ class AdminUserRead(BaseModel):
     sso_provider: str | None = None
     created_at: datetime | None = None
     last_login_at: datetime | None = None
+    is_msp_staff: bool = False
+    tenant_id: str | None = None
+    tenant_name: str | None = None
 
 
 class UserRoleCounts(BaseModel):

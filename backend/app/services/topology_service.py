@@ -45,6 +45,7 @@ from app.models.device import Device
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.snapshot import ConfigSnapshot
 from app.models.subnet import Subnet
+from app.models.tenant import Tenant
 from app.services import gns3_service, risk_engine, snapshot_service
 from app.services.snmp_service import walk_switchport_vlans
 
@@ -523,6 +524,7 @@ def build_topology(db: Session) -> TopologyGraph:
     """
     devices = db.query(Device).order_by(Device.hostname).all()
     devices_by_id = {str(d.id): d for d in devices}
+    tenants_by_id = {str(t.id): t.name for t in db.query(Tenant).all()}
     switchport_cache: dict[str, dict] = {}
     metrics_by_device = _latest_metrics_by_device(devices)
     alert_severity_by_device = _active_alert_severity_by_device(db)
@@ -557,6 +559,7 @@ def build_topology(db: Session) -> TopologyGraph:
                 interface_error_rate=interface_error_rate,
                 active_alert_severity=alert_severity_by_device.get(str(device.id)),
                 is_uplink=bool(device.is_uplink),
+                tenant_name=tenants_by_id.get(str(device.tenant_id)) if device.tenant_id else None,
             )
         )
         if config_text:

@@ -998,3 +998,48 @@ def run_discovery_schedule_sweep_task() -> dict:
         return {"swept": swept, "notified": notified}
     finally:
         db.close()
+
+# --- Predictive / Anomaly Alerting ---------------------------------------
+
+@celery_app.task(
+    name="app.tasks.anomaly_detection_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def anomaly_detection_task(self, device_id: str) -> int:
+    """Evaluates a single device's recent metric data against its
+    historical baselines and raises anomaly alerts if it deviates.
+    """
+    from app.services import anomaly_service
+
+    db = SessionLocal()
+    try:
+        device = db.get(Device, uuid.UUID(device_id))
+        if device is None:
+            return 0
+        findings = anomaly_service.check_device_for_anomalies(db, device)
+        if findings:
+            raised = anomaly_service.raise_anomaly_alerts(db, device, findings)
+            db.commit()
+            return raised
+        return 0
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_anomaly_detection_sweep_task")
+def run_anomaly_detection_sweep_task() -> int:
+    """Celery beat entry point: fans out one anomaly_detection_task per
+    device in inventory. Returns the number of devices checked.
+    """
+    db = SessionLocal()
+    try:
+        device_ids = [str(d.id) for d in db.query(Device.id).all()]
+    finally:
+        db.close()
+
+    for device_id in device_ids:
+        anomaly_detection_task.delay(device_id)
+    return len(device_ids)

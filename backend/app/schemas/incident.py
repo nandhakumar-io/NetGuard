@@ -75,6 +75,7 @@ class IncidentRead(BaseModel):
     # on the alert itself, without needing category/source stored again
     # on Incident.
     runbook: RunbookRef | None = None
+    tenant_name: str | None = None
 
 
 class IncidentDetailRead(IncidentRead):

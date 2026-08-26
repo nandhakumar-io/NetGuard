@@ -14,9 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_tenant_scope
 from app.models.alert import Alert
+from app.models.device import Device
 from app.models.incident import Incident
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.alert_runbook import RunbookRef
 from app.schemas.incident import (
@@ -44,6 +46,12 @@ def _to_read(incident: Incident, db: Session | None = None) -> IncidentRead:
             runbook = alert_runbook.resolve_runbook(db, root_alert.category, root_alert.source)
             if runbook:
                 read.runbook = RunbookRef(title=runbook.title, url=runbook.url)
+            if root_alert.device_id:
+                device = db.get(Device, root_alert.device_id)
+                if device and device.tenant_id:
+                    tenant = db.get(Tenant, device.tenant_id)
+                    if tenant:
+                        read.tenant_name = tenant.name
     return read
 
 
@@ -52,8 +60,17 @@ def list_incidents(
     status: str | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     q = db.query(Incident)
+    # Same reasoning as app.api.tenant_board: Incident is reached via its
+    # root-cause alert's device, since it has no tenant_id of its own.
+    if tenant_id is not None:
+        q = (
+            q.join(Alert, Alert.id == Incident.root_cause_alert_id)
+            .join(Device, Device.id == Alert.device_id)
+            .filter(Device.tenant_id == tenant_id)
+        )
     if status:
         q = q.filter(Incident.status == status)
     incidents = q.order_by(Incident.created_at.desc()).all()

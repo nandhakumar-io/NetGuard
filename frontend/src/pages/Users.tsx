@@ -14,6 +14,15 @@ interface AdminUser {
   sso_provider: string | null;
   created_at: string | null;
   last_login_at: string | null;
+  is_msp_staff: boolean;
+  tenant_id: string | null;
+  tenant_name: string | null;
+}
+
+interface TenantOption {
+  id: string;
+  name: string;
+  slug: string;
 }
 
 interface PermissionCatalogEntry {
@@ -68,6 +77,7 @@ export default function Users() {
   const [search, setSearch] = useState("");
   const [showNewUser, setShowNewUser] = useState(false);
   const [permissionsUser, setPermissionsUser] = useState<AdminUser | null>(null);
+  const [tenancyUser, setTenancyUser] = useState<AdminUser | null>(null);
   const [actioningId, setActioningId] = useState<string | null>(null);
 
   const load = async () => {
@@ -239,6 +249,7 @@ export default function Users() {
             <tr>
               <th className="text-left py-2.5 px-4">User</th>
               <th className="text-left py-2.5 px-4">Role</th>
+              <th className="text-left py-2.5 px-4">Tenant</th>
               <th className="text-left py-2.5 px-4">Status</th>
               <th className="text-left py-2.5 px-4">Last Login</th>
               <th className="text-left py-2.5 px-4">MFA</th>
@@ -249,7 +260,7 @@ export default function Users() {
             {loading ? (
               <tr><td colSpan={6} className="text-center py-8 text-slate-400">Loading…</td></tr>
             ) : filtered.length === 0 ? (
-              <tr><td colSpan={6} className="text-center py-8 text-slate-400">No users match.</td></tr>
+              <tr><td colSpan={7} className="text-center py-8 text-slate-400">No users match.</td></tr>
             ) : (
               filtered.map((u) => (
                 <tr key={u.id} className="border-t border-slate-100 dark:border-slate-700/50">
@@ -300,6 +311,15 @@ export default function Users() {
                     )}
                   </td>
                   <td className="py-2.5 px-4">
+                    {u.is_msp_staff ? (
+                      <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-violet-100 text-violet-700 dark:bg-violet-950/50 dark:text-violet-300">
+                        MSP Staff
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-500 dark:text-slate-400">{u.tenant_name || "Unassigned"}</span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${u.is_active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
                       {u.is_active ? "Active" : "Disabled"}
                     </span>
@@ -319,6 +339,14 @@ export default function Users() {
                         className="text-xs font-bold text-slate-500 hover:underline disabled:opacity-40 disabled:no-underline"
                       >
                         Permissions
+                      </button>
+                      <button
+                        disabled={actioningId === u.id}
+                        onClick={() => setTenancyUser(u)}
+                        title="Assign this user to a tenant, or make them MSP staff (cross-tenant access)"
+                        className="text-xs font-bold text-slate-500 hover:underline disabled:opacity-40 disabled:no-underline"
+                      >
+                        Tenancy
                       </button>
                       <button
                         disabled={actioningId === u.id || currentUser?.id === u.id}
@@ -355,6 +383,9 @@ export default function Users() {
       {showNewUser && <NewUserModal onClose={() => setShowNewUser(false)} onCreated={load} />}
       {permissionsUser && (
         <PermissionsModal user={permissionsUser} onClose={() => setPermissionsUser(null)} onSaved={load} />
+      )}
+      {tenancyUser && (
+        <TenancyModal user={tenancyUser} onClose={() => setTenancyUser(null)} onSaved={load} />
       )}
     </div>
   );
@@ -502,6 +533,104 @@ function PermissionsModal({ user, onClose, onSaved }: { user: AdminUser; onClose
             className="px-4 py-2 rounded-lg text-sm font-bold bg-brandblue text-white hover:opacity-90 disabled:opacity-50"
           >
             {submitting ? "Saving…" : "Save Permissions"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TenancyModal({ user, onClose, onSaved }: { user: AdminUser; onClose: () => void; onSaved: () => void }) {
+  const [tenants, setTenants] = useState<TenantOption[]>([]);
+  const [tenantsError, setTenantsError] = useState<string | null>(null);
+  const [isMspStaff, setIsMspStaff] = useState(user.is_msp_staff);
+  const [tenantId, setTenantId] = useState<string>(user.tenant_id || "");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<{ tenants: TenantOption[] }>("/users/tenants")
+      .then((res) => setTenants(res.data.tenants))
+      .catch(() => setTenantsError("Failed to load tenants."));
+  }, []);
+
+  const submit = async () => {
+    if (!isMspStaff && !tenantId) {
+      setError("Select a tenant, or mark this user as MSP staff.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.patch(`/users/${user.id}/tenancy`, {
+        is_msp_staff: isMspStaff,
+        tenant_id: isMspStaff ? null : tenantId,
+      });
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to update tenancy");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-lg font-bold text-navy dark:text-white mb-1">Tenancy</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+          Assign {user.full_name} to a single tenant, or make them MSP staff with cross-tenant access
+          (the Tenant Board and any other cross-tenant views).
+        </p>
+        {error && <div className="mb-3 p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
+        {tenantsError && <div className="mb-3 p-2.5 rounded-lg bg-amber-50 text-amber-700 text-xs">{tenantsError}</div>}
+
+        <label className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900 mb-4">
+          <input
+            type="checkbox"
+            checked={isMspStaff}
+            onChange={(e) => setIsMspStaff(e.target.checked)}
+            className="rounded border-slate-300 dark:border-slate-600"
+          />
+          <div>
+            <div className="font-bold text-navy dark:text-white">MSP Staff</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">Works across every tenant, not scoped to one</div>
+          </div>
+        </label>
+
+        {!isMspStaff && (
+          <div className="mb-2">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Tenant</div>
+            <select
+              value={tenantId}
+              onChange={(e) => setTenantId(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 dark:bg-slate-900 text-sm"
+            >
+              <option value="">Select a tenant…</option>
+              {tenants.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitting}
+            className="px-4 py-2 rounded-lg text-sm font-bold bg-brandblue text-white hover:bg-brandblue/90 disabled:opacity-50"
+          >
+            {submitting ? "Saving…" : "Save Tenancy"}
           </button>
         </div>
       </div>

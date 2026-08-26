@@ -49,6 +49,7 @@ interface Incident {
   alert_ids: string[];
   detected_at: string | null;
   created_at: string;
+  tenant_name?: string | null;
 }
 
 const SEVERITY_DOT: Record<AlertSeverity, string> = {
@@ -626,6 +627,7 @@ function AlertsPanel({ alerts, total }: { alerts: Alert[]; total: number }) {
                   <div className="font-bold text-sm truncate">{a.category}</div>
                   <div className="text-[11px] text-slate-500 dark:text-slate-500 shrink-0">{timeAgo(a.last_seen_at || null)}</div>
                 </div>
+                {a.tenant_name && <div className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 mb-0.5">{a.tenant_name}</div>}
                 <div className="text-sm text-slate-700 dark:text-slate-300 truncate">{a.message}</div>
                 {a.occurrence_count && a.occurrence_count > 1 && (
                   <div className="text-[11px] text-slate-500 dark:text-slate-500 mt-0.5">×{a.occurrence_count} occurrences</div>
@@ -676,7 +678,7 @@ function TopologyPanel({ topology, summary }: { topology: TopologyResponse | nul
               {nodes.map((n) => (
                 <div
                   key={n.id}
-                  title={`${n.hostname} — ${n.status}${n.health_color ? `, health: ${n.health_color}` : ""}`}
+                  title={`${n.hostname} — ${n.status}${n.health_color ? `, health: ${n.health_color}` : ""}${n.tenant_name ? ` (${n.tenant_name})` : ""}`}
                   className={`w-3.5 h-3.5 rounded-sm ${
                     n.status === "offline" ? STATUS_DOT.offline : n.health_color ? HEALTH_DOT[n.health_color] : STATUS_DOT[n.status] || STATUS_DOT.unknown
                   }`}
@@ -700,7 +702,10 @@ function TopologyPanel({ topology, summary }: { topology: TopologyResponse | nul
             {summary.offline_devices.map(d => (
               <div key={d.id} className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold text-sm truncate">{d.hostname}</span>
+                  <span className="font-bold text-sm truncate">
+                    {d.hostname}
+                    {d.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({d.tenant_name})</span>}
+                  </span>
                   <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded border shrink-0 ${d.status === 'offline' ? 'bg-red-50 text-red-700 border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40' : 'bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40'}`}>{d.status}</span>
                 </div>
                 {d.last_seen && <div className="text-xs text-slate-500 dark:text-slate-500 mt-1">Last seen: {timeAgo(d.last_seen)} ago</div>}
@@ -734,7 +739,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           ) : (
             summary.top_cpu_devices.slice(0, 8).map((d) => (
               <div key={d.hostname} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
-                <span className="text-sm font-bold truncate">{d.hostname}</span>
+                <span className="text-sm font-bold truncate">
+                  {d.hostname}
+                  {d.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({d.tenant_name})</span>}
+                </span>
                 <div className="flex items-center gap-2 shrink-0">
                   <Sparkline data={d.cpu_history} color={d.cpu >= 90 ? "#ef4444" : d.cpu >= 75 ? "#f59e0b" : "#2563eb"} width={44} height={18} />
                   <span className={`text-sm font-black tabular-nums ${d.cpu >= 90 ? "text-red-600 dark:text-red-400" : d.cpu >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
@@ -754,7 +762,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           ) : (
             summary.top_memory_devices.slice(0, 8).map((d) => (
               <div key={d.hostname} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
-                <span className="text-sm font-bold truncate">{d.hostname}</span>
+                <span className="text-sm font-bold truncate">
+                  {d.hostname}
+                  {d.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({d.tenant_name})</span>}
+                </span>
                 <div className="flex items-center gap-2 shrink-0">
                   <Sparkline data={d.memory_history} color={d.memory >= 90 ? "#ef4444" : d.memory >= 75 ? "#f59e0b" : "#8b5cf6"} width={44} height={18} />
                   <span className={`text-sm font-black tabular-nums ${d.memory >= 90 ? "text-red-600 dark:text-red-400" : d.memory >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
@@ -774,7 +785,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
           ) : (
             summary.top_bandwidth_devices.slice(0, 8).map((d) => (
               <div key={d.hostname} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
-                <span className="text-sm font-bold truncate">{d.hostname}</span>
+                <span className="text-sm font-bold truncate">
+                  {d.hostname}
+                  {d.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({d.tenant_name})</span>}
+                </span>
                 <div className="flex items-center gap-2 shrink-0">
                   <Sparkline data={d.bandwidth_history} color={d.bandwidth >= 90 ? "#ef4444" : d.bandwidth >= 75 ? "#f59e0b" : "#0ea5e9"} width={44} height={18} />
                   <span className={`text-sm font-black tabular-nums ${d.bandwidth >= 90 ? "text-red-600 dark:text-red-400" : d.bandwidth >= 75 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300"}`}>
@@ -803,7 +817,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
               summary.uplinks.slice(0, 4).map((u) => (
                 <div key={u.hostname + (u.role || "")} className="rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-bold truncate">{u.hostname}</span>
+                    <span className="text-sm font-bold truncate">
+                      {u.hostname}
+                      {u.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({u.tenant_name})</span>}
+                    </span>
                     <span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[u.status] || STATUS_DOT.unknown}`} />
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-500 mt-0.5">
@@ -826,7 +843,10 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
             ) : (
               summary.top_error_devices.slice(0, 4).map((d) => (
                 <div key={d.hostname} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 px-3 py-2">
-                  <span className="text-sm font-bold truncate">{d.hostname}</span>
+                  <span className="text-sm font-bold truncate">
+                    {d.hostname}
+                    {d.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({d.tenant_name})</span>}
+                  </span>
                   <span className="text-sm font-black text-amber-600 dark:text-amber-400 tabular-nums">
                     {d.interface_errors}
                   </span>
@@ -844,7 +864,7 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
               <div className="flex flex-wrap gap-1.5">
                 {summary.down_ports.slice(0, 12).map((p, idx) => (
                   <span key={idx} className="text-[11px] px-2 py-1 rounded-md bg-amber-50 border border-amber-300 text-amber-700 dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-300">
-                    {p.hostname} · {p.interface}
+                    {p.hostname}{p.tenant_name ? ` (${p.tenant_name})` : ""} · {p.interface}
                   </span>
                 ))}
               </div>
@@ -856,7 +876,7 @@ function FleetPanel({ summary }: { summary: DashboardSummary | null }) {
               <div className="flex flex-wrap gap-1.5">
                 {summary.flapping_interfaces.slice(0, 12).map((p, idx) => (
                   <span key={idx} className="text-[11px] px-2 py-1 rounded-md bg-red-50 border border-red-300 text-red-700 dark:bg-red-500/10 dark:border-red-500/30 dark:text-red-300">
-                    {p.hostname} · {p.interface} ×{p.flap_count}
+                    {p.hostname}{p.tenant_name ? ` (${p.tenant_name})` : ""} · {p.interface} ×{p.flap_count}
                   </span>
                 ))}
               </div>
@@ -896,7 +916,10 @@ function OpsPanel({
                   {inc.severity.toUpperCase()}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <div className="font-bold truncate">{inc.title}</div>
+                  <div className="font-bold truncate">
+                    {inc.title}
+                    {inc.tenant_name && <span className="ml-2 text-xs font-normal text-indigo-600 dark:text-indigo-400">({inc.tenant_name})</span>}
+                  </div>
                   <div className="text-xs text-slate-500 dark:text-slate-500">
                     {inc.alert_ids.length} alert{inc.alert_ids.length === 1 ? "" : "s"} · status: {inc.status.replace(/_/g, " ")}
                   </div>
@@ -970,7 +993,10 @@ function OpsPanel({
               summary.recent_reboots.slice(0, 6).map((r) => (
                 <div key={r.hostname} className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 dark:bg-slate-900/60 dark:border-slate-800 rounded-lg px-3 py-1.5 gap-2">
                   <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-amber-400" />
-                  <span className="font-bold truncate flex-1">{r.hostname}</span>
+                  <span className="font-bold truncate flex-1">
+                    {r.hostname}
+                    {r.tenant_name && <span className="ml-2 text-[10px] font-normal text-slate-500 dark:text-slate-400">({r.tenant_name})</span>}
+                  </span>
                   <span className="text-slate-500 dark:text-slate-500 tabular-nums shrink-0">Up {Math.floor(r.uptime_seconds / 60)}m</span>
                 </div>
               ))

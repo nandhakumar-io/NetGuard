@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
@@ -10,6 +12,7 @@ from app.models.user import User, UserRole
 
 # was:  tokenUrl="auth/login"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
 
 def get_current_user(
     token: str | None = Depends(oauth2_scheme),
@@ -89,6 +92,25 @@ def get_current_user_ws(token: str, db: Session, roles: tuple[UserRole, ...] = (
         return None
     if roles and user.role not in roles:
         return None
+    return user
+
+
+def get_tenant_scope(user: User = Depends(get_current_user)) -> uuid.UUID | None:
+    """Resolve the current user's tenant scope.
+
+    For MSP staff (e.g. NETWORK_ADMIN), this returns None (unfiltered access).
+    For tenant users, this returns their assigned tenant_id.
+    """
+    if user.is_msp_staff:
+        return None
+    return user.tenant_id
+
+
+def require_msp_staff(user: User = Depends(get_current_user)) -> User:
+    if not user.is_msp_staff:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Requires MSP staff privileges"
+        )
     return user
 
 

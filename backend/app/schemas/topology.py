@@ -20,6 +20,7 @@ class TopologyNodeRead(BaseModel):
     active_alert_severity: str | None = None
     is_uplink: bool = False
     is_spof: bool = False
+    tenant_name: str | None = None
 
 
 class LinkMemberRead(BaseModel):

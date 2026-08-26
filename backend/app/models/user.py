@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum, String, func
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -19,6 +19,24 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Which managed customer this user belongs to (see app.models.tenant.
+    # Tenant). Nullable specifically so is_msp_staff accounts can be
+    # tenant-less -- they work across every tenant rather than belonging
+    # to one. A non-MSP-staff user should always have this set; every
+    # pre-existing row was backfilled onto the "Default" tenant by
+    # migration 0092_tenants so this addition didn't require picking
+    # nullable=False and breaking existing logins.
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
+
+    # MSP staff see and act across every tenant (the cross-tenant NOC
+    # board, app.api.tenant_board, is gated on this) rather than being
+    # scoped to tenant_id like a regular customer-side user. Distinct
+    # from `role`/`extra_roles` -- this is a tenancy-scope switch, not a
+    # permission level; an msp staff account still has a normal role
+    # (NOC_ENGINEER, NETWORK_ADMIN, ...) that governs what it can *do*.
+    is_msp_staff = Column(Boolean, nullable=False, default=False, server_default="false")
+
     email = Column(String, unique=True, index=True, nullable=False)
     full_name = Column(String, nullable=False)
     # Nullable: an SSO-only user (see sso_provider below) never has a local

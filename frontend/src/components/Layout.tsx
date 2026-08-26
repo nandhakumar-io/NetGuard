@@ -35,7 +35,16 @@ const ROLE_DEFAULT_ACCESS: Record<string, string[]> = {
   "/rbac-audit": ["auditor"],
 };
 
+// Tenancy-scope gate, deliberately separate from RESTRICTED_PAGE_PERMISSIONS
+// above: is_msp_staff is not a grantable permission (see backend
+// app.core.deps.require_msp_staff) -- an admin can't unlock this for
+// themselves the way they can page:backups etc., since a non-MSP-staff
+// account has no cross-tenant data for the page to show even if it were
+// visible.
+const MSP_STAFF_ONLY_PAGES = new Set(["/tenant-board"]);
+
 function canSeePage(user: CurrentUser | null, to: string): boolean {
+  if (MSP_STAFF_ONLY_PAGES.has(to)) return !!user?.is_msp_staff;
   const permKey = RESTRICTED_PAGE_PERMISSIONS[to];
   if (!permKey) return true; // not a restricted page -- unchanged, open to every authenticated role
   if (isAdmin(user)) return true;
@@ -72,6 +81,10 @@ const groups: NavGroup[] = [
       {
         to: "/insights", label: "Insights",
         icon: <svg {...iconProps}><path d="M3 3v18h18" /><path d="M7 15l4-5 3 3 5-7" /></svg>,
+      },
+      {
+        to: "/tenant-board", label: "Tenant Board",
+        icon: <svg {...iconProps}><rect x="3" y="4" width="7" height="16" rx="1" /><rect x="14" y="4" width="7" height="16" rx="1" /><path d="M6.5 9h0M17.5 9h0" /></svg>,
       },
     ],
   },

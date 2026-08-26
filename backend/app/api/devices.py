@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core import vm_client
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, get_tenant_scope, require_roles
 from app.models.alert import Alert
 from app.models.alert_snooze import AlertSnooze
 from app.models.audit_log import AuditLog
@@ -227,18 +227,30 @@ ROLLBACK_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 
 
 @router.get("", response_model=list[DeviceRead])
-def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    return [DeviceRead.from_device(d) for d in db.query(Device).all()]
+def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    q = db.query(Device)
+    # tenant_id is None only for MSP staff (see get_tenant_scope) -- they
+    # see every tenant's devices here; everyone else only sees their own.
+    if tenant_id is not None:
+        q = q.filter(Device.tenant_id == tenant_id)
+    return [DeviceRead.from_device(d) for d in q.all()]
 
 
 @router.post("", response_model=DeviceRead, status_code=201)
-def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+def create_device(payload: DeviceCreate, db: Session = Depends(get_db), user=Depends(INVENTORY_MANAGER_ROLES), tenant_id=Depends(get_tenant_scope)):
     if db.query(Device).filter(Device.hostname == payload.hostname).first():
         raise HTTPException(status_code=400, detail="Device with this hostname already exists")
     data = payload.model_dump()
     data["tags"] = json.dumps(data["tags"]) if data.get("tags") else None
     data["custom_fields"] = json.dumps(data["custom_fields"]) if data.get("custom_fields") else None
     device = Device(**data)
+    # An MSP-staff creator (tenant_id is None from get_tenant_scope) has
+    # no implicit tenant to assign -- for now this leaves the device
+    # tenant-less rather than guessing, same as any pre-migration device;
+    # a real "create device for tenant X" flow for MSP staff is a
+    # follow-up UI decision, not something to silently default here.
+    if tenant_id is not None:
+        device.tenant_id = tenant_id
     db.add(device)
     db.commit()
     db.refresh(device)
@@ -688,9 +700,14 @@ def list_credential_expiry(
 
 
 @router.get("/{device_id}", response_model=DeviceRead)
-def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_device(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     device = db.get(Device, device_id)
     if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    # Same rule as list_devices: a non-MSP-staff user reaching for another
+    # tenant's device by ID gets 404, not 403 -- doesn't confirm the
+    # device exists at all to someone who shouldn't see it.
+    if tenant_id is not None and device.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Device not found")
     return DeviceRead.from_device(device)
 

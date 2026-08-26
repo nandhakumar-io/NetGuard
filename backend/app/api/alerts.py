@@ -28,8 +28,10 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user, get_current_user_ws
+from app.core.deps import get_current_user, get_current_user_ws, get_tenant_scope
 from app.models.alert import Alert, AlertSeverity, AlertSource
+from app.models.device import Device
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.alert import AlertRead, AlertSummary
 from app.schemas.alert_runbook import RunbookRef
@@ -66,8 +68,14 @@ def list_alerts(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     q = db.query(Alert)
+    # Alert has no tenant_id of its own -- scoped via its device, same as
+    # the tenant-board rollup (app.api.tenant_board). None (MSP staff)
+    # means unfiltered, matching get_tenant_scope's contract.
+    if tenant_id is not None:
+        q = q.join(Device, Device.id == Alert.device_id).filter(Device.tenant_id == tenant_id)
     if severity:
         q = q.filter(Alert.severity == AlertSeverity(severity))
     if source:
@@ -96,12 +104,22 @@ def list_alerts(
     # "is this snooze still actually active" check) is applied after.
     mute_map = alert_snooze_service.active_mute_map(db, results)
     runbook_map = alert_runbook.resolve_runbook_map(db, results)
+
+    tenant_name_map = {}
+    if not tenant_id and results:
+        dev_ids = {a.device_id for a in results if a.device_id}
+        devs = db.query(Device.id, Device.tenant_id).filter(Device.id.in_(dev_ids)).all() if dev_ids else []
+        tenant_names = {t.id: t.name for t in db.query(Tenant).all()}
+        device_tenant_map = {d.id: tenant_names.get(d.tenant_id) for d in devs}
+        tenant_name_map = {a.id: device_tenant_map.get(a.device_id) for a in results}
+
     read_results = []
     for alert in results:
         obj = AlertRead.model_validate(alert)
         obj.muted_until = mute_map.get(alert.id)
         if runbook := runbook_map.get(alert.id):
             obj.runbook = RunbookRef(title=runbook.title, url=runbook.url)
+        obj.tenant_name = tenant_name_map.get(alert.id)
         if muted is not None and (obj.muted_until is not None) != muted:
             continue
         read_results.append(obj)
