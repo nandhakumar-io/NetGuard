@@ -129,6 +129,25 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # Resolve tenant: use the supplied tenant_id if provided and active,
+    # otherwise fall back to the "Default" tenant (same backfill logic as
+    # migration 0092_tenants). Leaves tenant_id NULL only if no Default
+    # tenant exists yet (fresh install before first MSP setup).
+    from app.models.tenant import Tenant
+
+    resolved_tenant_id = None
+    if payload.tenant_id is not None:
+        tenant = db.get(Tenant, payload.tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=400, detail="Specified tenant not found")
+        if not tenant.is_active:
+            raise HTTPException(status_code=400, detail="Specified tenant is inactive")
+        resolved_tenant_id = tenant.id
+    else:
+        default_tenant = db.query(Tenant).filter(Tenant.slug == "default").first()
+        if default_tenant:
+            resolved_tenant_id = default_tenant.id
+
     # payload.role is client-controlled and this endpoint is unauthenticated
     # -- never trust it directly, or anyone can self-register as
     # network_admin. sanitized_role() downgrades NETWORK_ADMIN/SECURITY to
@@ -139,6 +158,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
         role=payload.sanitized_role(),
+        tenant_id=resolved_tenant_id,
     )
     db.add(user)
     db.commit()
@@ -146,6 +166,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
 
     token = create_access_token(subject=user.email, role=user.role.value)
     return Token(access_token=token)
+
 
 
 @router.post("/login", response_model=Token | MfaRequiredResponse)

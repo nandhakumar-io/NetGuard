@@ -1043,3 +1043,74 @@ def run_anomaly_detection_sweep_task() -> int:
     for device_id in device_ids:
         anomaly_detection_task.delay(device_id)
     return len(device_ids)
+
+
+# --- Uptime & Incident Report scheduling ----------------------------------
+#
+# Same shape as run_weekly_compliance_report_task / run_monthly_compliance
+# _report_task above: thin Celery entry points that open their own DB
+# session and delegate to the service layer. Scheduled via Celery beat
+# (see app.celery_app.conf.beat_schedule). The on-demand
+# GET /reports/uptime-incident endpoint is unaffected by this schedule.
+
+
+@celery_app.task(
+    name="app.tasks.run_weekly_uptime_report_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_weekly_uptime_report_task(self) -> int:
+    """Celery beat entry point: generates and emails a 7-day uptime &
+    incident report for every active tenant. Returns the number of
+    tenants a report was attempted for.
+    """
+    from app.core.config import settings
+    from app.models.tenant import Tenant
+    from app.services import uptime_report
+
+    if not getattr(settings, "UPTIME_REPORT_WEEKLY_ENABLED", True):
+        return 0
+
+    db = SessionLocal()
+    try:
+        tenants = db.query(Tenant).filter(Tenant.is_active.is_(True)).all()
+        for tenant in tenants:
+            uptime_report.deliver_scheduled_report(
+                db, window_days=7, period_label="Weekly", tenant_id=tenant.id
+            )
+        return len(tenants)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.run_monthly_uptime_report_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_monthly_uptime_report_task(self) -> int:
+    """Celery beat entry point: generates and emails a 30-day uptime &
+    incident report for every active tenant. Returns the number of
+    tenants a report was attempted for.
+    """
+    from app.core.config import settings
+    from app.models.tenant import Tenant
+    from app.services import uptime_report
+
+    if not getattr(settings, "UPTIME_REPORT_MONTHLY_ENABLED", True):
+        return 0
+
+    db = SessionLocal()
+    try:
+        tenants = db.query(Tenant).filter(Tenant.is_active.is_(True)).all()
+        for tenant in tenants:
+            uptime_report.deliver_scheduled_report(
+                db, window_days=30, period_label="Monthly", tenant_id=tenant.id
+            )
+        return len(tenants)
+    finally:
+        db.close()

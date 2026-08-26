@@ -13,7 +13,6 @@ from app.models.user import User, UserRole
 # was:  tokenUrl="auth/login"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
-
 def get_current_user(
     token: str | None = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
@@ -92,25 +91,6 @@ def get_current_user_ws(token: str, db: Session, roles: tuple[UserRole, ...] = (
         return None
     if roles and user.role not in roles:
         return None
-    return user
-
-
-def get_tenant_scope(user: User = Depends(get_current_user)) -> uuid.UUID | None:
-    """Resolve the current user's tenant scope.
-
-    For MSP staff (e.g. NETWORK_ADMIN), this returns None (unfiltered access).
-    For tenant users, this returns their assigned tenant_id.
-    """
-    if user.is_msp_staff:
-        return None
-    return user.tenant_id
-
-
-def require_msp_staff(user: User = Depends(get_current_user)) -> User:
-    if not user.is_msp_staff:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Requires MSP staff privileges"
-        )
     return user
 
 
@@ -220,3 +200,41 @@ def require_permission(permission_key: str):
         )
 
     return _check
+
+
+def require_msp_staff(user: User = Depends(get_current_user)) -> User:
+    """Gate for MSP-staff-only surfaces (currently just the cross-tenant
+    NOC board, app.api.tenant_board) -- deliberately checked on
+    User.is_msp_staff, NOT on role, since "watches every tenant" is an
+    account-level property orthogonal to a user's functional role (an
+    MSP's own network_admin and their noc_engineer both need this, while
+    a customer-side network_admin -- scoped to just their own tenant --
+    must not get it just by holding the same role name).
+    """
+    if not user.is_msp_staff:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This view is only available to MSP staff",
+        )
+    return user
+
+
+def get_current_tenant_id(user: User = Depends(get_current_user)) -> uuid.UUID | None:
+    """Returns the tenant a regular user's data access should be scoped
+    to, or None for MSP staff (see User.is_msp_staff / app.models.tenant.
+    Tenant) to signal "unfiltered -- every tenant". Every non-MSP user is
+    expected to have tenant_id set (backfilled onto a "Default" tenant by
+    migration 0092_tenants for anything that predates multi-tenancy), so
+    this is the single place that "None tenant_id" gets its meaning
+    decided, instead of each caller re-deriving it from is_msp_staff.
+    """
+    if user.is_msp_staff:
+        return None
+    return user.tenant_id
+
+
+# Alias: some call sites (app.api.devices, app.api.alerts, app.api.
+# incidents) were written against this name -- same dependency, kept as
+# one alias rather than two divergent implementations so tenant-scoping
+# behavior can't drift between them.
+get_tenant_scope = get_current_tenant_id

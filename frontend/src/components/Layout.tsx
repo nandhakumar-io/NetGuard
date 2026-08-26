@@ -41,7 +41,7 @@ const ROLE_DEFAULT_ACCESS: Record<string, string[]> = {
 // themselves the way they can page:backups etc., since a non-MSP-staff
 // account has no cross-tenant data for the page to show even if it were
 // visible.
-const MSP_STAFF_ONLY_PAGES = new Set(["/tenant-board"]);
+const MSP_STAFF_ONLY_PAGES = new Set(["/tenant-board", "/tenants"]);
 
 function canSeePage(user: CurrentUser | null, to: string): boolean {
   if (MSP_STAFF_ONLY_PAGES.has(to)) return !!user?.is_msp_staff;
@@ -85,6 +85,14 @@ const groups: NavGroup[] = [
       {
         to: "/tenant-board", label: "Tenant Board",
         icon: <svg {...iconProps}><rect x="3" y="4" width="7" height="16" rx="1" /><rect x="14" y="4" width="7" height="16" rx="1" /><path d="M6.5 9h0M17.5 9h0" /></svg>,
+      },
+      {
+        to: "/tenants", label: "Tenants",
+        icon: <svg {...iconProps}><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87" /><path d="M16 3.13a4 4 0 010 7.75" /></svg>,
+      },
+      {
+        to: "/reports", label: "Reports",
+        icon: <svg {...iconProps}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" /><path d="M8 13h8M8 17h4M8 9h2" /></svg>,
       },
     ],
   },

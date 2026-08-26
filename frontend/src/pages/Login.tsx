@@ -60,6 +60,8 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleEnabled, setGoogleEnabled] = useState(false);
+  const [tenants, setTenants] = useState<{ id: string; name: string }[]>([]);
+  const [tenantId, setTenantId] = useState("");
 
   // Surfaces a friendly message if we just bounced back from a failed
   // GET /sso/google/callback (see app/api/sso.py's _login_error_redirect).
@@ -87,6 +89,16 @@ export default function Login() {
       .catch(() => setGoogleEnabled(false));
   }, []);
 
+  // Fetch active tenant list for the register dropdown.
+  // Gracefully falls back to an empty list if the user is not logged in yet
+  // or the endpoint returns nothing (e.g. no tenants created yet).
+  useEffect(() => {
+    api
+      .get("/tenants/public-list")
+      .then((res) => setTenants(res.data ?? []))
+      .catch(() => setTenants([]));
+  }, []);
+
   // MFA challenge step: set once /auth/login responds with mfa_required.
   const [mfaToken, setMfaToken] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState("");
@@ -104,7 +116,7 @@ export default function Login() {
           return;
         }
       } else {
-        await register(email, fullName, password, role);
+        await register(email, fullName, password, role, tenantId || undefined);
       }
       navigate("/");
     } catch (err: any) {
@@ -313,6 +325,21 @@ export default function Login() {
                       <option key={r.value} value={r.value}>
                         {r.label}
                       </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {mode === "register" && tenants.length > 0 && (
+                <div>
+                  <FieldLabel>Tenant</FieldLabel>
+                  <select
+                    className={inputClass}
+                    value={tenantId}
+                    onChange={(e) => setTenantId(e.target.value)}
+                  >
+                    <option value="">Select a tenant…</option>
+                    {tenants.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
                     ))}
                   </select>
                 </div>

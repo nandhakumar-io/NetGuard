@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, EmailStr
@@ -31,6 +32,10 @@ class UserCreate(BaseModel):
     full_name: str
     password: str
     role: UserRole = UserRole.NETWORK_ENGINEER
+    # Optional: which tenant to place the new user in. If omitted, the
+    # register endpoint falls back to the "Default" tenant (or leaves
+    # tenant_id NULL for MSP-staff-created accounts without a tenant).
+    tenant_id: uuid.UUID | None = None
 
     def sanitized_role(self) -> UserRole:
         """Roles a caller may grant *themselves* via public /auth/register.

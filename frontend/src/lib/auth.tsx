@@ -48,7 +48,7 @@ interface AuthContextValue {
   loading: boolean;
   login: (email: string, password: string) => Promise<LoginOutcome>;
   verifyMfa: (mfaToken: string, code: string) => Promise<void>;
-  register: (email: string, full_name: string, password: string, role: UserRole) => Promise<void>;
+  register: (email: string, full_name: string, password: string, role: UserRole, tenant_id?: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshMe: () => Promise<void>;
   /** Redirects the browser to the backend's Google OIDC login endpoint.
@@ -116,8 +116,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await fetchMe();
   };
 
-  const register = async (email: string, full_name: string, password: string, role: UserRole) => {
-    const res = await api.post("/auth/register", { email, full_name, password, role });
+  const register = async (email: string, full_name: string, password: string, role: UserRole, tenant_id?: string) => {
+    const payload: Record<string, unknown> = { email, full_name, password, role };
+    if (tenant_id) payload.tenant_id = tenant_id;
+    const res = await api.post("/auth/register", payload);
     // /auth/register only returns a single access_token (no refresh cookie) --
     // storing it lets the new user land on their dashboard immediately, but
     // they'll need to log in again once it expires since there is no

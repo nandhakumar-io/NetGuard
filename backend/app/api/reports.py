@@ -1,4 +1,5 @@
 import datetime
+import uuid
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,9 +11,10 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.deployment import Deployment, DeploymentStatus
 from app.models.device import Device
-from app.services import compliance_report
+from app.services import compliance_report, uptime_report
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
 
 # Deployment outcomes that count as "finished" for success-rate purposes --
 # QUEUED/IN_PROGRESS are still in flight and shouldn't dilute the rate.
@@ -160,6 +162,60 @@ def get_compliance_report(
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
     filename = f"netguard-compliance-report-{timestamp}.{format}"
+    return Response(
+        content=body,
+        media_type=_MEDIA_TYPES[format],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/uptime-incident")
+def get_uptime_incident_report(
+    format: str = Query("pdf", pattern="^(pdf|csv)$"),
+    days: int = Query(30, ge=1, le=365, description="Trailing window in days"),
+    tenant_id: uuid.UUID | None = Query(None, description="Scope to a specific tenant (MSP staff only for cross-tenant)"),
+    device_group_id: uuid.UUID | None = Query(None, description="Scope to a specific device group"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Per-tenant (or per-device-group) uptime & incident report: device
+    availability percentages, outage counts, incident MTTA/MTTR, and a
+    full incident list over the trailing window.
+
+    MSP staff may pass any `tenant_id` to get a cross-tenant scoped
+    report. Regular users are automatically scoped to their own tenant
+    and cannot override it.
+    """
+
+    # Non-MSP-staff users can only see their own tenant's data.
+    effective_tenant_id = tenant_id
+    if not current_user.is_msp_staff:
+        effective_tenant_id = current_user.tenant_id
+
+    report = uptime_report.build_report(
+        db,
+        window_days=days,
+        tenant_id=effective_tenant_id,
+        device_group_id=device_group_id,
+    )
+
+    if format == "csv":
+        body = uptime_report.render_csv(report)
+    else:
+        try:
+            body = uptime_report.render_pdf(report)
+        except ImportError:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "PDF generation is unavailable: the 'reportlab' package is not installed on this server. "
+                    "Use format=csv instead, or install reportlab."
+                ),
+            )
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+    scope_slug = report.scope_label.lower().replace(" ", "-").replace("(", "").replace(")", "")
+    filename = f"netguard-uptime-report-{scope_slug}-{days}d-{timestamp}.{format}"
     return Response(
         content=body,
         media_type=_MEDIA_TYPES[format],
