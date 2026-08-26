@@ -593,11 +593,12 @@ export interface DashboardSummary {
   flagged_unstable_devices: { id: string; hostname: string; ip_address: string; unstable_since: string | null }[];
   global_health_score: number;
   deployment_success_rate: number;
-  top_cpu_devices: { hostname: string; ip_address: string; cpu: number; cpu_history: number[] }[];
-  top_memory_devices: { hostname: string; ip_address: string; memory: number; memory_history: number[] }[];
-  top_bandwidth_devices: { hostname: string; ip_address: string; bandwidth: number; bandwidth_history: number[] }[];
+  top_cpu_devices: { hostname: string; tenant_name?: string | null; ip_address: string; cpu: number; cpu_history: number[] }[];
+  top_memory_devices: { hostname: string; tenant_name?: string | null; ip_address: string; memory: number; memory_history: number[] }[];
+  top_bandwidth_devices: { hostname: string; tenant_name?: string | null; ip_address: string; bandwidth: number; bandwidth_history: number[] }[];
   uplinks: {
     hostname: string;
+    tenant_name?: string | null;
     ip_address: string;
     role: string | null;
     status: string;
@@ -626,13 +627,13 @@ export interface DashboardSummary {
     avg_memory: number | null;
     avg_bandwidth: number | null;
   }[];
-  down_ports: { hostname: string; interface: string; down_since: string | null }[];
-  recent_reboots: { hostname: string; ip_address: string; uptime_seconds: number; polled_at: string | null }[];
-  offline_devices: { id: string; hostname: string; ip_address: string; status: string; last_seen: string | null; last_error: string | null }[];
-  top_error_devices: { hostname: string; ip_address: string; interface_errors: number }[];
-  flapping_interfaces: { hostname: string; interface: string; flap_count: number; last_change: string | null }[];
-  recent_backups: { id: string; version: string; created_at: string; hostname: string }[];
-  recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string }[];
+  down_ports: { hostname: string; tenant_name?: string | null; interface: string; down_since: string | null }[];
+  recent_reboots: { hostname: string; tenant_name?: string | null; ip_address: string; uptime_seconds: number; polled_at: string | null }[];
+  offline_devices: { id: string; hostname: string; tenant_name?: string | null; ip_address: string; status: string; last_seen: string | null; last_error: string | null }[];
+  top_error_devices: { hostname: string; tenant_name?: string | null; ip_address: string; interface_errors: number }[];
+  flapping_interfaces: { hostname: string; tenant_name?: string | null; interface: string; flap_count: number; last_change: string | null }[];
+  recent_backups: { id: string; version: string; created_at: string; hostname: string; tenant_name?: string | null; }[];
+  recent_protocol_operations: { id: string; protocol: string; operation: string; success: boolean; created_at: string; operator: string; device_hostname: string; tenant_name?: string | null; }[];
   fleet_health_weighted_pct: number;
   fleet_health_breakdown: { healthy: number; degraded: number; offline: number; unknown: number };
 }
@@ -690,6 +691,7 @@ export type AlertSourceType = "snmp_trap" | "health_poll" | "drift" | "protocol_
 export interface Alert {
   id: string;
   device_id: string | null;
+  tenant_name?: string | null;
   severity: AlertSeverity;
   source: AlertSourceType;
   category: string;
@@ -1018,6 +1020,7 @@ export interface GNS3SyncResponse {
 export interface TopologyNode {
   id: string;
   hostname: string;
+  tenant_name?: string | null;
   ip_address: string;
   vendor: string;
   site?: string | null;

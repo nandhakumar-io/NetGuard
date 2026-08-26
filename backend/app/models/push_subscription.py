@@ -31,7 +31,7 @@ class PushSubscription(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     label = Column(String, nullable=False, default="My Phone")
-    provider = Column(Enum(PushProvider, name="pushprovider"), nullable=False, default=PushProvider.NTFY)
+    provider = Column(Enum(PushProvider, name="pushprovider", values_callable=lambda obj: [e.value for e in obj]), nullable=False, default=PushProvider.NTFY)
     # ntfy topic URL, or Pushover user key. Not encrypted at rest -- an
     # ntfy topic URL is only as secret as a bookmarked link (ntfy's own
     # security model), and a Pushover user key alone can't send

@@ -1,7 +1,21 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { TenantBoardRow } from "../lib/types";
 import { useToast, errorMessage } from "../lib/toast";
+
+export interface TenantBoardRow {
+  tenant_id: string;
+  tenant_name: string;
+  tenant_slug: string;
+  health_score: number;
+  device_count: number;
+  devices_offline: number;
+  devices_degraded: number;
+  open_alerts_critical: number;
+  open_alerts_warning: number;
+  open_incidents: number;
+  latest_critical_alert_message: string | null;
+  latest_critical_alert_at: string | null;
+}
 
 // Single-pane cross-tenant view for MSP staff watching many tenants at
 // once (see backend app.api.tenant_board). Where every other page in
@@ -56,7 +70,7 @@ export default function TenantBoard() {
         }
       } catch (err) {
         if (!cancelled) {
-          const msg = errorMessage(err);
+          const msg = errorMessage(err, "Failed to load tenant board");
           setError(msg);
           toast.error(msg);
         }

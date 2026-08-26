@@ -510,4 +510,6 @@ def get_me(current_user: User = Depends(get_current_user)):
         # (app.api.tenant_board is the real, independent enforcement
         # point server-side -- see require_msp_staff).
         "is_msp_staff": current_user.is_msp_staff,
+        "tenant_id": str(current_user.tenant_id) if current_user.tenant_id else None,
+        "tenant_name": current_user.tenant.name if current_user.tenant else None,
     }

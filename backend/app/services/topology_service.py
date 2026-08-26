@@ -110,6 +110,8 @@ class TopologyNode:
     # point of failure" badge, computed proactively for every node
     # instead of only surfacing on-demand via compute_blast_radius.
     is_spof: bool = False
+    # Identifies which tenant this node belongs to, if any.
+    tenant_name: str | None = None
 
 
 @dataclass

@@ -251,6 +251,21 @@ export default function Login() {
                   />
                 </div>
               )}
+              {mode === "register" && tenants.length > 0 && (
+                <div>
+                  <FieldLabel>Tenant</FieldLabel>
+                  <select
+                    className={inputClass}
+                    value={tenantId}
+                    onChange={(e) => setTenantId(e.target.value)}
+                  >
+                    <option value="">Default Tenant</option>
+                    {tenants.map(t => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div>
                 <FieldLabel>Email</FieldLabel>
                 <input

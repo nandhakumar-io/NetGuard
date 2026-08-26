@@ -236,6 +236,16 @@ celery_app.conf.update(
             "task": "app.tasks.run_ipam_conflict_alert_sweep_task",
             "schedule": float(settings.IPAM_CONFLICT_ALERT_SWEEP_INTERVAL_SECONDS),
         },
+        # Weekly/Monthly Uptime Reports: generates and emails uptime
+        # stats for every active tenant.
+        "weekly-uptime-report": {
+            "task": "app.tasks.run_weekly_uptime_report_task",
+            "schedule": crontab(day_of_week="mon", hour=7, minute=0),
+        },
+        "monthly-uptime-report": {
+            "task": "app.tasks.run_monthly_uptime_report_task",
+            "schedule": crontab(day_of_month=1, hour=7, minute=0),
+        },
         # GitOps: safety-net periodic re-pull for any auto_sync_enabled
         # repo, in case its webhook was never configured or a delivery
         # failed -- see app.tasks.run_gitops_auto_sync_sweep_task.

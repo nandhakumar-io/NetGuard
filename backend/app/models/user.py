@@ -93,3 +93,6 @@ class User(Base):
     # column (app.api.user_management) -- previously there was no way to
     # tell a genuinely stale account from one that logs in weekly.
     last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+    from sqlalchemy.orm import relationship
+    tenant = relationship("Tenant")
