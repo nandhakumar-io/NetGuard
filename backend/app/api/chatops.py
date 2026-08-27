@@ -292,7 +292,7 @@ def create_link(
     db.refresh(target)
 
     audit_service.record_event(
-        db, actor=current_user.email, action=f"ChatOps Link Created ({payload.platform})",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"ChatOps Link Created ({payload.platform})",
         result="Linked", detail=f"Linked {payload.platform} account to {target.email}",
     )
 
@@ -317,6 +317,6 @@ def delete_link(
     db.commit()
 
     audit_service.record_event(
-        db, actor=current_user.email, action=f"ChatOps Link Removed ({platform})",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"ChatOps Link Removed ({platform})",
         result="Unlinked", detail=f"Unlinked {platform} account from {target.email}",
     )

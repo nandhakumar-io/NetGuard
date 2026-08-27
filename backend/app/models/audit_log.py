@@ -19,4 +19,14 @@ class AuditLog(Base):
     change_request_id = Column(UUID(as_uuid=True), ForeignKey("change_requests.id"), nullable=True)
     detail = Column(Text, nullable=True)
 
+    # Tenant scoping (migration 0097_audit_log_tenant_and_rule_inheritance).
+    # NULL = global/system event (login, MSP-staff action, or a row whose
+    # originating device/tenant couldn't be determined at write time) --
+    # same "NULL = global" convention as AlertRule.tenant_id /
+    # WebhookEndpoint.tenant_id. Every write site should pass this
+    # explicitly via app.services.audit_service.record_event rather than
+    # relying on backfill; see app.core.deps.get_tenant_scope for how
+    # reads are filtered.
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())

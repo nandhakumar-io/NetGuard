@@ -515,7 +515,7 @@ def reset_ssh_host_key(
     db.commit()
 
     audit_service.record_event(
-        db, actor=current_user.email, action="SSH Host Key Reset", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="SSH Host Key Reset", result="Success",
         device_hostname=device.hostname,
     )
     return {"device_id": str(device.id), "ssh_host_key_fingerprint": None}

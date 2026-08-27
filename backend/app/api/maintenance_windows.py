@@ -80,7 +80,7 @@ def create_window(
 
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="maintenance_window_created",
         result="success",
         detail=f"{row.name} ({row.scope}) {row.starts_at.isoformat()} -> {row.ends_at.isoformat()}",
@@ -111,6 +111,6 @@ def cancel_window(window_id: uuid.UUID, db: Session = Depends(get_db), user: Use
     db.refresh(row)
 
     audit_service.record_event(
-        db, actor=user.email, action="maintenance_window_cancelled", result="success", detail=row.name
+        db, actor=user.email, tenant_id=user.tenant_id, action="maintenance_window_cancelled", result="success", detail=row.name
     )
     return _annotate_active(row)

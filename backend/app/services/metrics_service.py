@@ -243,7 +243,10 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
         )
         if severity == "critical" and is_new:
             notification_service.notify(
-                event=category, message=f"{device.hostname}: {message}", severity=severity
+                event=category,
+                message=f"{device.hostname}: {message}",
+                severity=severity,
+                tenant_id=device.tenant_id,
             )
 
     # Operator-defined custom rules (Alert Center > Custom Alert Rules) run
@@ -313,6 +316,7 @@ def record_interface_transition(
                     event="Interface Down",
                     message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
                     severity="critical",
+                    tenant_id=device.tenant_id,
                 )
     elif latest is not None:
         alert_service.auto_resolve(
@@ -454,6 +458,7 @@ def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, pre
                 event="Device Restart",
                 message=f"{device.hostname}: device rebooted",
                 severity="warning",
+                tenant_id=device.tenant_id,
             )
 
 

@@ -452,15 +452,34 @@ def deliver_webhook(
     return attempt
 
 
-def _fan_out_user_webhooks(event: str, message: str, severity: str, event_type: str, alert_id: str | None = None) -> None:
-    """Send the notification to all enabled user-configured WebhookEndpoint rows."""
+def _fan_out_user_webhooks(
+    event: str,
+    message: str,
+    severity: str,
+    event_type: str,
+    alert_id: str | None = None,
+    tenant_id=None,
+) -> None:
+    """Send the notification to all enabled user-configured WebhookEndpoint rows.
+
+    tenant_id: when given, only global (tenant_id IS NULL) webhooks and
+    that tenant's own webhooks are notified -- previously this loaded
+    every enabled WebhookEndpoint with no tenant filter at all, so an
+    alert from one tenant's device could fan out to another tenant's
+    Slack/Teams webhook. tenant_id=None (the caller has no device/tenant
+    context -- e.g. a JIT-access or deployment-level event) reaches only
+    global webhooks, same "global unless scoped" convention as the
+    AlertRule engine.
+    """
     import json as _json
 
     from app.models.webhook import WebhookEndpoint
 
     db = SessionLocal()
     try:
-        webhooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.enabled == True).all()
+        q = db.query(WebhookEndpoint).filter(WebhookEndpoint.enabled == True)
+        q = q.filter((WebhookEndpoint.tenant_id == tenant_id) | (WebhookEndpoint.tenant_id.is_(None)))
+        webhooks = q.all()
         for wh in webhooks:
             # Check event subscription filter
             if wh.events:
@@ -523,6 +542,7 @@ def notify(
     change_request_id: uuid.UUID | None = None,
     deployment_id: uuid.UUID | None = None,
     alert_id: uuid.UUID | str | None = None,
+    tenant_id=None,
 ) -> None:
     """Fan out a notification to Slack, Teams, Telegram, Email, user-configured
     webhooks, and the in-app Notification Center.
@@ -537,6 +557,13 @@ def notify(
         lets webhook/push deliveries that opted into response action
         buttons (acknowledge/escalate/run runbook) deep-link straight to
         that alert instead of the general alerts list.
+    tenant_id: the tenant this event is about, if any -- passed through to
+        _fan_out_user_webhooks so a tenant's alert only reaches global or
+        that tenant's own webhooks, never another tenant's. Callers with
+        a device in scope should pass device.tenant_id; callers with no
+        device/tenant context can omit it, which reaches global webhooks
+        only. The global Slack/Teams/Telegram env-var channels and email
+        are unaffected -- those are already operator-wide, not per-tenant.
     """
     emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
     text = f"{emoji} *NetGuard — {event}*\n{message}"
@@ -554,7 +581,7 @@ def notify(
     alert_id_str = str(alert_id) if alert_id else None
 
     # User-configured webhooks (DB-based)
-    _fan_out_user_webhooks(event, message, severity, event_type, alert_id=alert_id_str)
+    _fan_out_user_webhooks(event, message, severity, event_type, alert_id=alert_id_str, tenant_id=tenant_id)
 
     # Mobile/browser push (ntfy, Pushover, Web Push)
     _fan_out_push(event, message, severity, alert_id=alert_id_str)

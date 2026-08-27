@@ -49,7 +49,7 @@ def rotate_secrets(
 
     audit_service.record_event(
         db,
-        actor=current_user.email,
+        actor=current_user.email, tenant_id=current_user.tenant_id,
         action="secrets.rotate",
         result="failed" if summary.total_failed else "success",
         detail=(

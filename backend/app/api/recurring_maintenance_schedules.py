@@ -64,7 +64,7 @@ def create_schedule(
 
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="recurring_maintenance_schedule_created",
         result="success",
         detail=f"{schedule.name} ({schedule.frequency.value}, every {schedule.interval})",
@@ -114,7 +114,7 @@ def delete_schedule(
     db.delete(schedule)
     db.commit()
     audit_service.record_event(
-        db, actor=user.email, action="recurring_maintenance_schedule_deleted", result="success", detail=schedule.name
+        db, actor=user.email, tenant_id=user.tenant_id, action="recurring_maintenance_schedule_deleted", result="success", detail=schedule.name
     )
 
 

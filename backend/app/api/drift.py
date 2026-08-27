@@ -276,7 +276,7 @@ def update_drift_status(
 
     audit_service.record_event(
         db,
-        actor=current_user.email,
+        actor=current_user.email, tenant_id=current_user.tenant_id,
         action="Drift Reviewed",
         result=payload.status.value,
         device_hostname=device.hostname if device else None,

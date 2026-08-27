@@ -20,19 +20,23 @@ from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
+from app.models.device_metric import DeviceMetric
 from app.models.device_status_history import DeviceStatusHistory
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.firmware_upgrade import FirmwareUpgrade
 from app.models.flow_record import FlowRecord
 from app.models.golden_config import GoldenConfig
 from app.models.interface_alert_config import InterfaceAlertConfig
+from app.models.interface_metric import InterfaceMetric
 from app.models.interface_status import InterfaceStatus
 from app.models.maintenance_window import MaintenanceWindow
+from app.models.network_discovery import DiscoveredHost
 from app.models.path_trace import PathHop, PathTrace
 from app.models.protocol_operation import ProtocolOperation
 from app.models.recurring_maintenance_schedule import RecurringMaintenanceSchedule
 from app.models.snapshot import ConfigSnapshot
 from app.models.syslog_message import SyslogMessage
+from app.models.terminal_session_recording import TerminalSessionRecording
 from app.models.user import User, UserRole
 from app.schemas.device import (
     BulkDeviceAction,
@@ -417,7 +421,7 @@ def sync_from_netbox(
 
     if not dry_run and (result["created"] or result["updated"]):
         audit_service.record_event(
-            db, actor=current_user.email, action="NetBox Sync", result="Success",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action="NetBox Sync", result="Success",
             detail=(
                 f"Created {len(result['created'])}, updated {len(result['updated'])}, "
                 f"skipped {len(result['skipped'])} (of {result['netbox_devices_seen']} seen)."
@@ -468,7 +472,7 @@ def import_devices_csv(
     if result["created"] or result["updated"]:
         audit_service.record_event(
             db,
-            actor=current_user.email,
+            actor=current_user.email, tenant_id=current_user.tenant_id,
             action="CSV Import",
             result="Success",
             detail=(
@@ -655,7 +659,7 @@ def bulk_device_action(
 
     if detail:
         audit_service.record_event(
-            db, actor=current_user.email, action=f"Bulk {payload.action.value}", result="Success", detail=detail
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"Bulk {payload.action.value}", result="Success", detail=detail
         )
 
     return BulkDeviceActionResult(
@@ -804,7 +808,7 @@ def update_device(
         new_place = f"{device.data_center or 'Unassigned'} / {device.block or 'Unassigned'} / {device.rack or 'Unassigned'}"
         audit_service.record_event(
             db,
-            actor=current_user.email,
+            actor=current_user.email, tenant_id=current_user.tenant_id,
             action="Moved device",
             result="Success",
             device_hostname=hostname_for_log,
@@ -814,7 +818,7 @@ def update_device(
         changed_fields = ", ".join(sorted(updates.keys()))
         audit_service.record_event(
             db,
-            actor=current_user.email,
+            actor=current_user.email, tenant_id=current_user.tenant_id,
             action="Updated device",
             result="Success",
             device_hostname=hostname_for_log,
@@ -839,10 +843,11 @@ def delete_device(
     """Delete a device and ALL its related records.
 
     If the device has compliance-relevant history (change requests,
-    deployments, config snapshots, golden configs) the caller must pass
-    ``?force=true`` — otherwise a 409 is raised so the UI can warn the
-    operator. Pure telemetry (alerts, drift, metrics, protocol ops) is
-    always purged since it has no standalone value once the device is gone.
+    deployments, config snapshots, golden configs, terminal session
+    recordings) the caller must pass ``?force=true`` — otherwise a 409 is
+    raised so the UI can warn the operator. Pure telemetry (alerts, drift,
+    metrics, protocol ops) is always purged since it has no standalone
+    value once the device is gone.
     """
     device = db.get(Device, device_id)
     if not device:
@@ -853,6 +858,13 @@ def delete_device(
         "deployments": db.query(func.count(Deployment.id)).filter(Deployment.device_id == device_id).scalar(),
         "config_snapshots": db.query(func.count(ConfigSnapshot.id)).filter(ConfigSnapshot.device_id == device_id).scalar(),
         "golden_config": db.query(func.count(GoldenConfig.id)).filter(GoldenConfig.device_id == device_id).scalar(),
+        # Session content captured for PCI DSS/SOC 2 review purposes (see
+        # app.models.terminal_session_recording) -- compliance-relevant in
+        # the same way change/deployment history is, so it gates on
+        # force=true too rather than being silently purged as telemetry.
+        "terminal_recordings": db.query(func.count(TerminalSessionRecording.id))
+        .filter(TerminalSessionRecording.device_id == device_id)
+        .scalar(),
     }
     blocking_counts = {k: v for k, v in blocking_counts.items() if v}
 
@@ -881,6 +893,15 @@ def delete_device(
         db.query(InterfaceAlertConfig).filter(InterfaceAlertConfig.device_id == device_id).delete(synchronize_session=False)
         db.query(SyslogMessage).filter(SyslogMessage.device_id == device_id).delete(synchronize_session=False)
         db.query(FlowRecord).filter(FlowRecord.device_id == device_id).delete(synchronize_session=False)
+        # gNMI streaming telemetry samples (app.services.gnmi_service) --
+        # relational rows with a NOT NULL FK to devices.id, distinct from
+        # the vm_client time-series purge above. Previously not purged
+        # here at all, so any device that had ever received gNMI-streamed
+        # metrics threw an IntegrityError on delete regardless of
+        # ?force=true, surfacing as an opaque "still has related records"
+        # 409 with no way to actually clear it from the UI.
+        db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
+        db.query(InterfaceMetric).filter(InterfaceMetric.device_id == device_id).delete(synchronize_session=False)
         db.query(MaintenanceWindow).filter(MaintenanceWindow.device_id == device_id).delete(synchronize_session=False)
         db.query(RecurringMaintenanceSchedule).filter(RecurringMaintenanceSchedule.device_id == device_id).delete(synchronize_session=False)
         db.query(FirmwareUpgrade).filter(FirmwareUpgrade.device_id == device_id).delete(synchronize_session=False)
@@ -905,6 +926,20 @@ def delete_device(
         # (RTT/loss/timeout) is still valid history for that trace.
         db.query(PathHop).filter(PathHop.device_id == device_id).update(
             {"device_id": None}, synchronize_session=False
+        )
+        # DiscoveredHost.matched_device_id / imported_device_id: nullable
+        # best-effort links back to inventory (network discovery matched or
+        # imported this device from a scan) -- same "detach, don't delete"
+        # treatment as PathHop.device_id above, since the discovery scan
+        # result itself is still valid history independent of whether the
+        # matched device still exists. Previously not detached at all, so
+        # a device that had ever come through network discovery couldn't
+        # be deleted.
+        db.query(DiscoveredHost).filter(DiscoveredHost.matched_device_id == device_id).update(
+            {"matched_device_id": None}, synchronize_session=False
+        )
+        db.query(DiscoveredHost).filter(DiscoveredHost.imported_device_id == device_id).update(
+            {"imported_device_id": None}, synchronize_session=False
         )
 
         # Compliance-relevant records (only reached when force=true or counts are 0).
@@ -943,10 +978,16 @@ def delete_device(
         db.query(ConfigSnapshot).filter(ConfigSnapshot.device_id == device_id).delete(synchronize_session=False)
         db.query(GoldenConfig).filter(GoldenConfig.device_id == device_id).delete(synchronize_session=False)
         db.query(ChangeRequest).filter(ChangeRequest.device_id == device_id).delete(synchronize_session=False)
+        # Recording metadata rows only -- the on-disk transcript files
+        # under settings.TERMINAL_RECORDING_DIR are intentionally left in
+        # place even under force=true, since a filename orphaned from its
+        # DB row is still recoverable by a compliance reviewer, whereas a
+        # deleted row pointing at a missing device is not.
+        db.query(TerminalSessionRecording).filter(TerminalSessionRecording.device_id == device_id).delete(synchronize_session=False)
 
         if blocking_counts:
             audit_service.record_event(
-                db, actor=current_user.email, action="Device Force-Deleted", result="Deleted",
+                db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Device Force-Deleted", result="Deleted",
                 device_hostname=device.hostname,
                 detail=f"Purged history: {blocking_counts}",
             )
@@ -1212,7 +1253,7 @@ def clear_unstable_flag(
     db.refresh(device)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Unstable Flag Cleared", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Unstable Flag Cleared", result="Success",
         device_hostname=device.hostname,
         detail="Manual review completed; automated deploys re-enabled.",
     )
@@ -1259,7 +1300,7 @@ def set_snmp_credentials(
         db.refresh(device)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="SNMP Credentials Updated", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="SNMP Credentials Updated", result="Success",
         device_hostname=device.hostname,
         detail="community" if payload.community is not None else "v3 auth/priv keys",
     )
@@ -1502,7 +1543,7 @@ def set_ssh_credentials(
     db.refresh(device)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="SSH Credentials Updated", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="SSH Credentials Updated", result="Success",
         device_hostname=device.hostname,
         detail=", ".join(touched) if touched else "no-op",
     )

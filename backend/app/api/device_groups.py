@@ -255,7 +255,7 @@ def apply_group_rules(
     if assigned:
         audit_service.record_event(
             db,
-            actor=current_user.email,
+            actor=current_user.email, tenant_id=current_user.tenant_id,
             action="Applied group rules",
             result="Success",
             detail=f"Group '{group.name}': {len(assigned)} device(s) newly assigned by rule",

@@ -426,7 +426,7 @@ def restore_config(
 
     audit_service.record_event(
         db,
-        actor=current_user.email,
+        actor=current_user.email, tenant_id=current_user.tenant_id,
         action="Configuration Restore",
         result="Success" if result.success else "Failed",
         device_hostname=device.hostname,
@@ -573,7 +573,7 @@ def set_golden_config(
     db.refresh(golden)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Golden Config Set", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Golden Config Set", result="Success",
         device_hostname=device.hostname, detail=f"checksum={golden.checksum}",
     )
 
@@ -592,7 +592,7 @@ def clear_golden_config(
         db.delete(golden)
         db.commit()
         audit_service.record_event(
-            db, actor=current_user.email, action="Golden Config Cleared", result="Success",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Golden Config Cleared", result="Success",
             device_hostname=device.hostname,
         )
     return Response(status_code=204)
@@ -628,7 +628,7 @@ def set_golden_config_from_backup(
     db.refresh(golden)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Golden Config Set From Backup", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Golden Config Set From Backup", result="Success",
         device_hostname=device.hostname, detail=f"snapshot={snapshot.id} checksum={golden.checksum}",
     )
 

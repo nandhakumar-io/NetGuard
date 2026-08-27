@@ -127,7 +127,7 @@ def delete_recording(
     if not row:
         raise HTTPException(status_code=404, detail="Recording not found")
     audit_service.record_event(
-        db, actor=current_user.email, action="Deleted Terminal Recording", result="Deleted",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Deleted Terminal Recording", result="Deleted",
         device_hostname=row.device_hostname,
         detail=f"recording_id={row.id} actor_email={row.actor_email} started_at={row.started_at}",
     )
@@ -149,7 +149,7 @@ def bulk_delete_recordings(
         .all()
     )
     audit_service.record_event(
-        db, actor=current_user.email, action="Bulk Deleted Terminal Recordings", result="Deleted",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Bulk Deleted Terminal Recordings", result="Deleted",
         detail=f"count={len(rows)} recording_ids={[str(r.id) for r in rows]}",
     )
     deleted = session_recording_service.delete_recordings(db, rows)
@@ -190,7 +190,7 @@ def delete_all_recordings(
 
     rows = query.all()
     audit_service.record_event(
-        db, actor=current_user.email, action="Deleted All Terminal Recordings", result="Deleted",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Deleted All Terminal Recordings", result="Deleted",
         detail=(
             f"count={len(rows)} filters=(device_id={device_id}, actor_email={actor_email}, "
             f"jit_elevation_id={jit_elevation_id})"

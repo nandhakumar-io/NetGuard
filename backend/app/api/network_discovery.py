@@ -194,7 +194,7 @@ def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = 
     db.refresh(scan)
 
     audit_service.record_event(
-        db, actor=user.email, action="Network Discovery Scan Cancelled", result="Success",
+        db, actor=user.email, tenant_id=user.tenant_id, action="Network Discovery Scan Cancelled", result="Success",
         detail=f"{scan.cidr} (scan={scan.id}); {scan.responsive_hosts} host(s) found before cancelling",
     )
     return scan

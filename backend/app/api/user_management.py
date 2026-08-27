@@ -161,7 +161,7 @@ def approve_user(user_id: str, db: Session = Depends(get_db), current_user: User
     db.refresh(user)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="User Approved", result="Success", detail=user.email,
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="User Approved", result="Success", detail=user.email,
     )
     tenant_name = db.get(Tenant, user.tenant_id).name if user.tenant_id else None
     return _serialize(user, tenant_name)
@@ -187,7 +187,7 @@ def reject_user(user_id: str, db: Session = Depends(get_db), current_user: User 
     db.commit()
 
     audit_service.record_event(
-        db, actor=current_user.email, action="User Registration Rejected", result="Success", detail=email,
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="User Registration Rejected", result="Success", detail=email,
     )
 
 
@@ -224,7 +224,7 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db), current
     db.refresh(user)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="User Created", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="User Created", result="Success",
         detail=f"{user.email} created with role {user.role.value}"
         + (f" (+{', '.join(r.value for r in payload.extra_roles)})" if payload.extra_roles else ""),
     )
@@ -262,7 +262,7 @@ def update_user_permissions(
     db.refresh(user)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="User Permissions Updated", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="User Permissions Updated", result="Success",
         detail=detail,
     )
     return _serialize(user)
@@ -299,7 +299,7 @@ def update_user_status(
     db.refresh(user)
 
     audit_service.record_event(
-        db, actor=current_user.email,
+        db, actor=current_user.email, tenant_id=current_user.tenant_id,
         action="User Enabled" if payload.is_active else "User Disabled",
         result="Success", detail=user.email,
     )
@@ -352,7 +352,7 @@ def update_user_tenancy(
     db.refresh(user)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="User Tenancy Updated", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="User Tenancy Updated", result="Success",
         detail=detail,
     )
 
@@ -405,7 +405,7 @@ def delete_user(user_id: str, db: Session = Depends(get_db), current_user: User 
         raise HTTPException(status_code=400, detail="Disable the account before deleting it")
 
     audit_service.record_event(
-        db, actor=current_user.email, action="User Deleted", result="Success", detail=user.email,
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="User Deleted", result="Success", detail=user.email,
     )
     db.delete(user)
     db.commit()

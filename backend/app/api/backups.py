@@ -255,7 +255,7 @@ def create_destination(
     db.refresh(dest)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Backup Destination Added", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Backup Destination Added", result="Success",
         detail=f"{dest.name} ({dest.type})",
     )
     return _serialize_destination(dest)
@@ -296,7 +296,7 @@ def delete_destination(destination_id: str, db: Session = Depends(get_db), curre
         raise HTTPException(status_code=404, detail="Backup destination not found")
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Backup Destination Removed", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Backup Destination Removed", result="Success",
         detail=f"{dest.name} ({dest.type})",
     )
     db.delete(dest)

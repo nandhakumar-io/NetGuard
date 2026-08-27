@@ -159,7 +159,7 @@ def open_project(
         _raise_gns3(exc)
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="GNS3 Open Project",
         result="Success",
         detail=f"project_id={project_id} name={project.get('name')}",
@@ -205,7 +205,7 @@ def start_node(
         _raise_gns3(exc)
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="GNS3 Start Node",
         result="Success",
         detail=f"project={project_id} node={node_id}",
@@ -235,7 +235,7 @@ def stop_node(
         _raise_gns3(exc)
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="GNS3 Stop Node",
         result="Success",
         detail=f"project={project_id} node={node_id}",
@@ -301,7 +301,7 @@ def bootstrap_node(
     if not result.success:
         audit_service.record_event(
             db,
-            actor=user.email,
+            actor=user.email, tenant_id=user.tenant_id,
             action="GNS3 Bootstrap",
             result="Failed",
             device_hostname=hostname,
@@ -365,7 +365,7 @@ def bootstrap_node(
 
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="GNS3 Bootstrap",
         result="Success",
         device_hostname=hostname,
@@ -505,7 +505,7 @@ def sync_project(
     db.commit()
     audit_service.record_event(
         db,
-        actor=user.email,
+        actor=user.email, tenant_id=user.tenant_id,
         action="GNS3 Sync Project",
         result="Success",
         detail=f"project={project_id} created={created} updated={updated} skipped={skipped}",

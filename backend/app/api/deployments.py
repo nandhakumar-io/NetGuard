@@ -148,7 +148,7 @@ def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), cu
         )
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Deployment Retry Queued", result="Queued",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Deployment Retry Queued", result="Queued",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
         detail=f"Retrying deployment {deployment_id} (was {deployment.status.value}).",
     )
@@ -281,7 +281,7 @@ def rollback_deployment(
         raise HTTPException(status_code=409, detail=str(exc))
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Partial Rollback Queued", result="Queued",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Partial Rollback Queued", result="Queued",
         device_hostname=device.hostname, change_request_id=rollback_cr.id,
         detail=(
             f"Rolling back only {device.hostname} from failed deployment {deployment.id} "

@@ -484,7 +484,7 @@ def create_change_request(
 
     audit_service.record_event(
         db,
-        actor=current_user.email,
+        actor=current_user.email, tenant_id=current_user.tenant_id,
         action="Submitted CR",
         result="Success" if validation.passed else "Validation Failed",
         device_hostname=device.hostname,
@@ -611,7 +611,7 @@ def rescore_change_request(
     db.refresh(cr)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Rescored CR",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Rescored CR",
         result="Success" if validation.passed else "Validation Failed",
         device_hostname=device.hostname, change_request_id=cr.id,
         detail=(
@@ -699,7 +699,7 @@ def act_on_approval_chain(
         cr.status = ChangeStatus.REJECTED
         db.commit()
         audit_service.record_event(
-            db, actor=current_user.email, action=f"Rejected at {stage.stage_type.value}", result="Rejected",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"Rejected at {stage.stage_type.value}", result="Rejected",
             device_hostname=device.hostname if device else None, change_request_id=cr.id, detail=payload.notes,
         )
         event_bus.publish_event(
@@ -707,7 +707,7 @@ def act_on_approval_chain(
         )
     else:
         audit_service.record_event(
-            db, actor=current_user.email, action=f"Approved at {stage.stage_type.value}", result="Approved",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"Approved at {stage.stage_type.value}", result="Approved",
             device_hostname=device.hostname if device else None, change_request_id=cr.id, detail=payload.notes,
         )
 
@@ -795,7 +795,7 @@ def approve_change_request(
         db.refresh(cr)
 
         audit_service.record_event(
-            db, actor=current_user.email, action=f"First Approval ({reason})",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"First Approval ({reason})",
             result="Awaiting Second Approval",
             device_hostname=device.hostname if device else None, change_request_id=cr.id,
             detail=f"{reason}: a second, different Network Administrator must approve before deployment.",
@@ -823,7 +823,7 @@ def approve_change_request(
         else (f"Approved (2nd of 2, {reason})" if cr.requires_dual_approval else "Approved")
     )
     audit_service.record_event(
-        db, actor=current_user.email, action=action, result="Approved",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action=action, result="Approved",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
@@ -854,7 +854,7 @@ def approve_change_request(
         cr.status = ChangeStatus.APPROVED  # leave the approval on record...
         db.commit()
         audit_service.record_event(
-            db, actor=current_user.email, action="Deployment Blocked — Maintenance Window Expired",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Deployment Blocked — Maintenance Window Expired",
             result="Blocked", device_hostname=device.hostname if device else None, change_request_id=cr.id,
             detail=f"Window was {window_start} - {window_end}; approval happened at {now}.",
         )
@@ -881,7 +881,7 @@ def approve_change_request(
     )
     if windows:
         audit_service.record_event(
-            db, actor=current_user.email, action="Alert Suppression Window Created", result="Created",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Alert Suppression Window Created", result="Created",
             device_hostname=device.hostname if device else None, change_request_id=cr.id,
             detail=f"{len(windows)} device(s) suppressed {window_start} - {window_end} for this change.",
         )
@@ -891,7 +891,7 @@ def approve_change_request(
             args=[str(cr.id), current_user.email], eta=window_start
         )
         audit_service.record_event(
-            db, actor=current_user.email, action="Deployment Scheduled For Maintenance Window", result="Scheduled",
+            db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Deployment Scheduled For Maintenance Window", result="Scheduled",
             device_hostname=device.hostname if device else None, change_request_id=cr.id,
             detail=f"Scheduled for {window_start} (window ends {window_end}).",
         )
@@ -919,7 +919,7 @@ def reject_change_request(
 
     device = db.get(Device, cr.device_id)
     audit_service.record_event(
-        db, actor=current_user.email, action="Rejected", result="Rejected",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Rejected", result="Rejected",
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))

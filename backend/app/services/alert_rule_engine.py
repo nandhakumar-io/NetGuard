@@ -62,7 +62,7 @@ def _metric_value(rule: AlertRule, metrics: SnmpMetrics) -> float | None:
     fabricated 0/None, same "don't invent data we don't have" posture as
     the rest of the SNMP pipeline.
     """
-    metric = (rule.metric.value if hasattr(rule.metric, "value") else rule.metric).lower()
+    metric = rule.metric.value if hasattr(rule.metric, "value") else rule.metric
     if metric == "cpu":
         return metrics.cpu_utilization_pct
     if metric == "memory":
@@ -81,14 +81,6 @@ def _metric_value(rule: AlertRule, metrics: SnmpMetrics) -> float | None:
         return 1.0 if metrics.fan_status == "failed" else 0.0
     if metric == "power_supply_failure":
         return 1.0 if metrics.power_supply_status == "failed" else 0.0
-    if metric == "trunk_port_down":
-        return float(metrics.trunk_ports_down) if metrics.trunk_ports_down is not None else None
-    if metric == "sfp_port_down":
-        return float(metrics.sfp_ports_down) if metrics.sfp_ports_down is not None else None
-    if metric == "route_unreachable":
-        return None if metrics.route_unreachable is None else (1.0 if metrics.route_unreachable else 0.0)
-    if metric == "ping_packet_loss_pct":
-        return metrics.ping_packet_loss_pct
     return None
 
 
@@ -131,7 +123,42 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
     if not metrics.reachable:
         return  # evaluate_thresholds() already raises "Device Unreachable"; nothing else is measurable this poll.
 
-    rules = db.query(AlertRule).filter(AlertRule.enabled == True).all()
+    # Tenant scoping: previously this queried every AlertRule regardless
+    # of tenant, so a tenant's custom rule fired against every OTHER
+    # tenant's devices too -- the CRUD API (app.api.alert_rules) already
+    # scoped reads/writes correctly, but nothing scoped evaluation. A
+    # device's rules are the global (tenant_id IS NULL) ones plus its own
+    # tenant's, same "global unless scoped" convention as everywhere else.
+    #
+    # AlertRule.enabled == False rows are still fetched here on purpose --
+    # a disabled row is how a tenant's parent_rule_id override records
+    # "suppress this global rule for us" (see the override resolution
+    # below); excluding disabled rows outright would silently drop that
+    # suppression and let the global rule fire anyway.
+    candidate_rules = (
+        db.query(AlertRule)
+        .filter((AlertRule.tenant_id == device.tenant_id) | (AlertRule.tenant_id.is_(None)))
+        .all()
+    )
+    if not candidate_rules:
+        return
+
+    # Override resolution: a tenant rule with parent_rule_id set replaces
+    # the global rule it points at entirely for this device -- whether
+    # that means a different threshold (tenant rule enabled=True) or full
+    # suppression (tenant rule enabled=False, in which case neither rule
+    # fires). A tenant rule with no parent_rule_id is additive, same as
+    # before this column existed.
+    overridden_ids = {
+        rule.parent_rule_id
+        for rule in candidate_rules
+        if rule.tenant_id is not None and rule.parent_rule_id is not None
+    }
+    rules = [
+        rule
+        for rule in candidate_rules
+        if rule.enabled and rule.id not in overridden_ids
+    ]
     if not rules:
         return
 
@@ -143,8 +170,7 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             value = _metric_value(rule, metrics)
             if value is None:
                 continue
-            op_str = (rule.operator.value if hasattr(rule.operator, "value") else rule.operator).lower()
-            op_fn = _OPERATORS.get(op_str)
+            op_fn = _OPERATORS.get(rule.operator.value if hasattr(rule.operator, "value") else rule.operator)
             if op_fn is None:
                 continue
 
@@ -154,7 +180,7 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             if breached:
                 if _in_cooldown(db, device.id, category, rule.cooldown_seconds, now):
                     continue
-                severity = (rule.severity.value if hasattr(rule.severity, "value") else rule.severity).lower()
+                severity = rule.severity.value if hasattr(rule.severity, "value") else rule.severity
                 alert, is_new = alert_service.raise_alert(
                     db,
                     device_id=device.id,
@@ -163,30 +189,20 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                     category=category,
                     message=f"{device.hostname}: {rule.name} ({rule.metric.value if hasattr(rule.metric, 'value') else rule.metric} {rule.operator.value if hasattr(rule.operator, 'value') else rule.operator} {rule.threshold}, observed {value})",
                 )
-                # Unlike the built-in threshold alerts in metrics_service
-                # (which only notify on "critical" to avoid paging on
-                # every generic warning), a custom rule's severity was
-                # deliberately chosen by the operator who wrote it -- a
-                # "warning" rule they configured on purpose is exactly
-                # the kind of thing they built a webhook/push
-                # subscription for. Gating this to critical-only made
-                # every non-critical custom rule fire silently: the
-                # Alert row and in-app center updated, but nothing ever
-                # reached a webhook or a phone, which is what "the alert
-                # isn't going off" actually meant in practice.
-                if severity in ("critical", "warning") and is_new:
+                if severity == "critical" and is_new:
                     from app.services import notification_service
 
                     notification_service.notify(
-                        event=category, message=alert.message, severity=severity, alert_id=alert.id
+                        event=category,
+                        message=alert.message,
+                        severity=severity,
+                        tenant_id=device.tenant_id,
                     )
             else:
                 alert_service.auto_resolve(
                     db, device_id=device.id, category=category, note=f"{device.hostname}: {rule.name} no longer breached"
                 )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).exception(f"Error evaluating rule {rule.id}: {e}")
+        except Exception:
             # Never let one malformed/legacy rule take down evaluation of
             # every other rule, or the poll itself.
             continue

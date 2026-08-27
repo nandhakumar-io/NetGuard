@@ -79,7 +79,7 @@ def create_repo(
     db.refresh(row)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="GitOps Repo Added", result="Created",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="GitOps Repo Added", result="Created",
         detail=f"{row.name} ({row.repo_url}, branch {row.branch}, direction {row.direction.value})",
     )
     return GitRepoConfigRead.from_orm_row(row)
@@ -109,7 +109,7 @@ def update_repo(
     db.commit()
     db.refresh(row)
     audit_service.record_event(
-        db, actor=current_user.email, action="GitOps Repo Updated", result="Updated", detail=row.name
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="GitOps Repo Updated", result="Updated", detail=row.name
     )
     return GitRepoConfigRead.from_orm_row(row)
 
@@ -123,7 +123,7 @@ def delete_repo(
     db.delete(row)
     db.commit()
     audit_service.record_event(
-        db, actor=current_user.email, action="GitOps Repo Removed", result="Deleted", detail=row.name
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="GitOps Repo Removed", result="Deleted", detail=row.name
     )
 
 
@@ -139,7 +139,7 @@ def trigger_sync(
     row = _get_repo(db, repo_id, tenant_id)
     result = git_sync_service.sync_repo(db, row)
     audit_service.record_event(
-        db, actor=current_user.email, action="GitOps Manual Sync", result=row.last_sync_status.value,
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="GitOps Manual Sync", result=row.last_sync_status.value,
         detail=f"{row.name}: +{result['created']} created, {result['updated']} updated, "
                f"{result['unchanged']} unchanged, {len(result['errors'])} errors",
     )

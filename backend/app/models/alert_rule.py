@@ -107,5 +107,16 @@ class AlertRule(Base):
     # (e.g. the tenant filter in GET /alert-rules) raise AttributeError.
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
 
+    # Inheritance (migration 0097_audit_log_tenant_and_rule_inheritance).
+    # When set, this is a tenant-authored rule that explicitly overrides
+    # the referenced global (tenant_id IS NULL) rule -- either
+    # re-thresholding it (enabled=True, different threshold/operator) or
+    # suppressing it entirely for this tenant (enabled=False). Evaluation
+    # (app.models.alert_rule_engine.evaluate_rules) prefers a tenant rule
+    # over the global rule it points at; a tenant rule with no
+    # parent_rule_id is additive alongside whatever global rules apply,
+    # same as before this column existed.
+    parent_rule_id = Column(UUID(as_uuid=True), ForeignKey("alert_rules.id"), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

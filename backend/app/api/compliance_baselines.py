@@ -126,7 +126,7 @@ def set_compliance_baseline(
     db.refresh(baseline)
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Compliance Baseline Set", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Compliance Baseline Set", result="Success",
         detail=f"device_role={device_role} checksum={baseline.checksum}",
     )
 
@@ -147,6 +147,6 @@ def delete_compliance_baseline(
     db.commit()
 
     audit_service.record_event(
-        db, actor=current_user.email, action="Compliance Baseline Deleted", result="Success",
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action="Compliance Baseline Deleted", result="Success",
         detail=f"device_role={device_role}",
     )
