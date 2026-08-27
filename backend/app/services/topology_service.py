@@ -337,12 +337,24 @@ def _member_switchport_info(
     device = devices_by_id.get(device_id)
     if not device or not device.snmp_version:
         return None, None, None
+    # Skip the live walk entirely for a device we already know is
+    # unreachable -- otherwise every confirmed link touching an
+    # offline/degraded device pays the full SNMP timeout+retry cost
+    # (walk_switchport_vlans alone issues 4 sequential walks, each up to
+    # timeout*(retries+1) seconds) on every single Topology page load.
+    # This is the main reason the page was slow to render on any fleet
+    # with even a few unreachable devices. A short timeout is kept below
+    # (rather than the 3.0s default) as a second guard for devices that
+    # *look* online but have since dropped off, so one flaky device still
+    # can't stall the whole graph for long.
+    if device.status is not None and str(device.status).lower() not in ("online", "degraded"):
+        switchport_cache.setdefault(device_id, {})
     if device_id not in switchport_cache:
         try:
             from app.services import metrics_service
 
             auth = metrics_service.build_snmp_auth(device)
-            switchport_cache[device_id] = walk_switchport_vlans(device.ip_address, auth)
+            switchport_cache[device_id] = walk_switchport_vlans(device.ip_address, auth, timeout=1.0)
         except Exception:
             switchport_cache[device_id] = {}
     info = switchport_cache[device_id].get(local_port)
@@ -375,12 +387,19 @@ def _member_port_duplex(
     device = devices_by_id.get(device_id)
     if not device or not device.snmp_version:
         return None
+    # Same reachability short-circuit and reduced timeout as
+    # _member_switchport_info above, and for the same reason: this is a
+    # best-effort annotation on top of the topology graph, not part of
+    # the graph itself, so it must never be allowed to make the whole
+    # page wait on a device that's known (or turns out) to be down.
+    if device.status is not None and str(device.status).lower() not in ("online", "degraded"):
+        duplex_cache.setdefault(device_id, {})
     if device_id not in duplex_cache:
         try:
             from app.services import metrics_service
 
             auth = metrics_service.build_snmp_auth(device)
-            duplex_cache[device_id] = walk_interface_duplex(device.ip_address, auth)
+            duplex_cache[device_id] = walk_interface_duplex(device.ip_address, auth, timeout=1.0)
         except Exception:
             duplex_cache[device_id] = {}
     return duplex_cache[device_id].get(port)

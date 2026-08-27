@@ -99,6 +99,8 @@ def _connect(
 ):
     from ncclient import manager
 
+    from app.core.config import settings
+
     return manager.connect(
         host=ip_address,
         port=port or 830,
@@ -106,7 +108,11 @@ def _connect(
         password=password,
         hostkey_verify=False,
         device_params=device_params or _device_params_for_vendor(vendor),
-        timeout=30,
+        # Was a hardcoded 30s -- see NETCONF_CONNECT_TIMEOUT_SECONDS in
+        # app.core.config for why that's too slow for a page-load-time
+        # fetch across a fleet with more than a couple of NETCONF
+        # devices.
+        timeout=settings.NETCONF_CONNECT_TIMEOUT_SECONDS,
     )
 
 

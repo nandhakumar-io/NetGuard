@@ -48,6 +48,7 @@ from app.api import (
     sso,
     syslog,
     tenant_board,
+    tenant_digest,
     tenants,
     terminal,
     terminal_recordings,
@@ -113,3 +114,4 @@ api_router.include_router(backups.router)
 api_router.include_router(network_discovery.router)
 api_router.include_router(tenant_board.router)
 api_router.include_router(tenants.router)
+api_router.include_router(tenant_digest.router)

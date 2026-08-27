@@ -134,6 +134,49 @@ def view_startup_config(device_id: uuid.UUID, db: Session = Depends(get_db), _=D
     )
 
 
+def _snmp_interface_fallback(device) -> list[InterfaceStatusOut]:
+    """Best-effort per-interface admin/oper status straight from
+    ifTable/ifXTable (snmp_service.walk_interface_stats), used by
+    view_interfaces when the primary NETCONF/RESTCONF/SSH read fails but
+    the device has SNMP configured. Deliberately thin compared to the
+    NETCONF/RESTCONF path: SNMP's ifTable has no notion of IP addresses,
+    MTU, or MAC beyond what's already covered by other tabs, so those
+    stay unset here rather than guessed -- oper/admin status, description,
+    and speed (what actually matters for "is this port up") are what
+    ifTable reliably gives us. Never raises: any SNMP failure here should
+    fall through to the caller's existing "no data" handling, not replace
+    one empty-page failure mode with a 500.
+    """
+    try:
+        auth = metrics_service.build_snmp_auth(device)
+        stats = snmp_service.walk_interface_stats(device.ip_address, auth)
+    except Exception:
+        return []
+
+    out: list[InterfaceStatusOut] = []
+    for row in stats.get("per_interface", []):
+        status = row.get("status")  # "up" | "down"
+        speed_bps = row.get("speed_bps")
+        out.append(
+            InterfaceStatusOut(
+                name=row.get("if_descr") or f"if{row.get('if_index')}",
+                description=None,
+                # ifTable's ifOperStatus is the only state SNMP directly
+                # gives us here -- admin_status isn't separately walked
+                # (ifAdminStatus isn't in IFTABLE_OIDS), so it's left
+                # unset rather than assumed equal to oper_status.
+                admin_status=None,
+                oper_status=status,
+                ip_addresses=[],
+                mtu=None,
+                speed=f"{speed_bps // 1_000_000} Mbps" if speed_bps else None,
+                mac_address=None,
+                alerts_enabled=True,
+            )
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # View Interface Status
 # ---------------------------------------------------------------------------
@@ -172,13 +215,37 @@ def view_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depen
         parse_protocol = "netconf-junos-opstate"
 
     if not result.success:
+        # SNMP fallback for the Interfaces tab specifically. Some
+        # NETCONF-capable devices (EX3400 in particular -- its NETCONF
+        # server responds to <get-config> fine but has been observed
+        # timing out or resetting the session on the operational
+        # <get-interface-information> RPC this tab needs, see
+        # netconf_service.get_junos_interface_information) leave
+        # get_interfaces() failing even though the device is otherwise
+        # reachable and NETCONF-managed for everything else (config
+        # view/push, drift, snapshots). Previously that meant this tab
+        # came back empty with just an error message no matter how many
+        # times you reloaded it. If the device also has SNMP configured,
+        # fall back to the same ifTable/ifXTable walk the Health
+        # Dashboard's Interface Statistics panel already uses
+        # (snmp_service.walk_interface_stats) so the tab can at least
+        # show admin/oper status, speed, and error counts instead of
+        # nothing. This is a fallback, not a silent success: `error`
+        # stays populated so the UI can still surface that the primary
+        # (NETCONF/RESTCONF/SSH) read failed, just with usable data
+        # alongside it rather than an empty table.
+        snmp_interfaces = _snmp_interface_fallback(device) if device.snmp_version else []
         return InterfacesResponse(
             device_id=device.id,
             hostname=device.hostname,
-            protocol=protocol,
-            interfaces=[],
+            protocol=protocol if not snmp_interfaces else "snmp (fallback)",
+            interfaces=snmp_interfaces,
             retrieved_at=datetime.datetime.utcnow(),
-            error=result.error or "Failed to read interface status",
+            error=(
+                f"{result.error or 'Failed to read interface status'} -- showing SNMP data instead"
+                if snmp_interfaces
+                else (result.error or "Failed to read interface status")
+            ),
         )
 
     parsed = config_format_service.parse_interfaces(result.output, parse_protocol)

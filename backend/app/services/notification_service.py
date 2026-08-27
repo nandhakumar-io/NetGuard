@@ -163,6 +163,7 @@ def send_email_attachment(
     subject: str,
     body: str,
     attachments: list[tuple[str, bytes, str]] | None = None,
+    recipients_override: list[str] | None = None,
 ) -> bool:
     """Send a standalone SMTP email with optional file attachments to
     NOTIFY_EMAIL_RECIPIENTS, using the same SMTP_* settings as `notify()`'s
@@ -176,13 +177,27 @@ def send_email_attachment(
     "application" (application/pdf, application/csv, etc.) -- fine for the
     document types this is used for.
 
+    recipients_override: send to this list instead of the global
+    NOTIFY_EMAIL_RECIPIENTS / NotificationSettings.recipients -- used by
+    app.services.tenant_digest_service, where each subscription has its
+    own delivery list rather than the operator-wide one. Still requires
+    SMTP host/credentials to be configured globally; only the To: list is
+    overridden. Ignored (falls back to the configured list) if empty.
+
     Returns True if the email was sent, False if it was skipped because
-    SMTP_HOST or NOTIFY_EMAIL_RECIPIENTS isn't configured. Never raises for
-    a send failure -- logs and swallows it, same "notifications must never
-    break the caller" policy as notify().
+    SMTP_HOST isn't configured, or (when using the default recipient
+    list) NOTIFY_EMAIL_RECIPIENTS isn't configured either. Never raises
+    for a send failure -- logs and swallows it, same "notifications must
+    never break the caller" policy as notify().
     """
     cfg = _smtp_config()
     if cfg is None:
+        return False
+    if recipients_override:
+        from dataclasses import replace
+
+        cfg = replace(cfg, recipients=recipients_override)
+    elif not cfg.recipients:
         return False
     try:
         send_smtp(cfg, subject, body, attachments)
@@ -190,6 +205,27 @@ def send_email_attachment(
     except Exception:
         logger.warning("Compliance report email send failed", exc_info=True)
         return False
+
+
+def _email_suppressed_by_tenant_digest(tenant_id, severity: str) -> bool:
+    """Best-effort check of tenant_digest_service.is_live_suppressed --
+    swallows its own errors (missing DB, bad tenant_id, etc.) and treats
+    any failure as "don't suppress", same fail-open policy as the rest of
+    this module: a digest-lookup problem should never be the reason a
+    live alert email silently doesn't go out.
+    """
+    if tenant_id is None:
+        return False
+    db = SessionLocal()
+    try:
+        from app.services import tenant_digest_service
+
+        return tenant_digest_service.is_live_suppressed(db, tenant_id, severity)
+    except Exception:
+        logger.warning("Tenant digest suppression check failed", exc_info=True)
+        return False
+    finally:
+        db.close()
 
 
 def _send_email(event_type: str, event: str, message: str) -> None:
@@ -562,8 +598,16 @@ def notify(
         that tenant's own webhooks, never another tenant's. Callers with
         a device in scope should pass device.tenant_id; callers with no
         device/tenant context can omit it, which reaches global webhooks
-        only. The global Slack/Teams/Telegram env-var channels and email
-        are unaffected -- those are already operator-wide, not per-tenant.
+        only. The global Slack/Teams/Telegram env-var channels are
+        unaffected -- those are already operator-wide, not per-tenant.
+        Email IS affected: if `tenant_id` has an active
+        TenantDigestSubscription whose severity_floor covers this
+        severity, the email leg below is held back and only shows up in
+        that tenant's next digest -- see
+        app.services.tenant_digest_service.is_live_suppressed. Slack/
+        Teams/Telegram/in-app/webhooks all still fire immediately
+        regardless; only the email channel is a digest's to gate, since
+        it's the one a digest is meant to stand in for.
     """
     emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
     text = f"{emoji} *NetGuard — {event}*\n{message}"
@@ -573,7 +617,8 @@ def notify(
 
     event_type = _resolve_event_type(event, severity)
 
-    _send_email(event_type, event, message)
+    if not _email_suppressed_by_tenant_digest(tenant_id, severity):
+        _send_email(event_type, event, message)
 
     # Telegram (global env-var-based)
     _post_telegram(event, message, severity)

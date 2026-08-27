@@ -164,6 +164,19 @@ celery_app.conf.update(
             "task": "app.tasks.run_weekly_change_request_digest_task",
             "schedule": crontab(day_of_week="mon", hour=settings.CHANGE_REQUEST_DIGEST_HOUR_UTC, minute=0),
         },
+        # Per-tenant Alert/Incident/AuditLog digest dispatch (see
+        # app.services.tenant_digest_service). Unlike the fixed weekly
+        # crontab above, individual subscriptions can be daily or weekly
+        # with their own hour/day/recipients/severity floor -- a single
+        # static crontab entry can't express that per-tenant variability,
+        # so this runs hourly and the dispatcher itself decides which
+        # subscriptions are due this hour (subscriptions_due_at).
+        # Cheap no-op the other 23 hours out of 24 for any given
+        # subscription: one filtered query, nothing sent.
+        "tenant-digest-dispatch": {
+            "task": "app.tasks.run_tenant_digest_dispatch_task",
+            "schedule": crontab(minute=0),
+        },
         # Configuration Snapshot retention sweep: enforces
         # SNAPSHOT_RETENTION_DAYS / SNAPSHOT_RETENTION_MIN_PER_DEVICE
         # nightly so snapshot history (taken automatically before every

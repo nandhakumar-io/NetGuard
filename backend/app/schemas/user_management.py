@@ -65,6 +65,19 @@ class AdminUserRead(BaseModel):
     extra_roles: list[UserRole] = []
     extra_permissions: list[str] = []
     is_active: bool
+    # NOTE: this field was missing here even though app.api.user_management
+    # _serialize() always passed it in -- Pydantic silently drops unknown
+    # kwargs, so every response through this schema (GET /users, GET
+    # /users/pending, POST /users/{id}/approve, ...) always came back with
+    # is_approved absent. The frontend reads `!u.is_approved` to decide
+    # whether to show "Pending Approval" and the Approve/Reject buttons, so
+    # a missing field (falsy) made *every* user look pending forever --
+    # including already-approved ones -- and clicking Approve on one of
+    # those correctly 409s with "This account is already approved" from
+    # app.api.user_management.approve_user. Restoring the field is the fix;
+    # same migration-vs-model-drift shape as the User.is_approved gap
+    # documented in app.models.user, just one layer further out.
+    is_approved: bool
     mfa_enabled: bool
     sso_provider: str | None = None
     created_at: datetime | None = None

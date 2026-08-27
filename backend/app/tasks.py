@@ -571,6 +571,35 @@ def run_weekly_change_request_digest_task(self) -> bool:
 
 
 @celery_app.task(
+    name="app.tasks.run_tenant_digest_dispatch_task",
+    bind=True,
+    # Infra retries only, same rationale as the other scheduled-report
+    # tasks: an individual subscription's SMTP failure is already logged
+    # + swallowed inside tenant_digest_service.run_due_digests, so a
+    # retry here is only for a DB/broker hiccup around the sweep itself.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 1},
+)
+def run_tenant_digest_dispatch_task(self) -> int:
+    """Celery beat entry point (see app.celery_app.conf.beat_schedule
+    "tenant-digest-dispatch"), run hourly. Finds every active
+    TenantDigestSubscription whose cadence/hour(/day) matches the current
+    UTC hour and delivers each one -- see
+    app.services.tenant_digest_service.run_due_digests. Returns the
+    number of subscriptions processed this run (sent or skipped, not
+    just sent).
+    """
+    from app.services import tenant_digest_service
+
+    db = SessionLocal()
+    try:
+        return tenant_digest_service.run_due_digests(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(
     name="app.tasks.run_firmware_upgrade_task",
     bind=True,
     # Same rationale as deploy_device_task: retries here cover infra

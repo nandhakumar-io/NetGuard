@@ -167,6 +167,20 @@ class Settings(BaseSettings):
     NETBOX_VERIFY_SSL: bool = True
     NETBOX_TIMEOUT_SECONDS: float = 15.0
 
+    # NETCONF session connect timeout (app.services.netconf_service._connect).
+    # Was hardcoded to 30s -- fine for a single interactive config push,
+    # but the Devices/DeviceDetail pages call this synchronously on every
+    # config/interface fetch, so a fleet with several NETCONF devices
+    # that are slow or unreachable (a device mid-reboot, an ACL blocking
+    # port 830, one flaky EX3400) stacks up multiple 30s hangs on what's
+    # supposed to be a live page load. 10s is enough for a healthy
+    # NETCONF listener to complete the SSH+hello handshake; a device that
+    # hasn't responded by then is failing, not just slow, and the
+    # Interfaces tab's SNMP fallback (see api.config_management.
+    # view_interfaces) means a NETCONF timeout no longer has to mean an
+    # empty page for that tab specifically.
+    NETCONF_CONNECT_TIMEOUT_SECONDS: float = 10.0
+
     # Email notifications (FR-11): sent via SMTP using these settings. Email
     # sending is skipped (not an error) whenever SMTP_HOST or
     # NOTIFY_EMAIL_RECIPIENTS is unset, same "optional channel" behavior as
