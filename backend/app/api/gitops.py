@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, get_tenant_scope, require_roles
 from app.models.git_repo_config import GitRepoConfig, GitSyncDirection
 from app.models.user import User, UserRole
 from app.schemas.gitops import (
@@ -34,27 +34,39 @@ router = APIRouter(prefix="/gitops", tags=["gitops"])
 GITOPS_MANAGER_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 
 
-def _get_repo(db: Session, repo_id: uuid.UUID) -> GitRepoConfig:
+def _get_repo(db: Session, repo_id: uuid.UUID, tenant_id) -> GitRepoConfig:
+    """Fetches a GitRepoConfig and enforces tenant ownership -- a repo
+    with tenant_id=None is an MSP-staff-authored/global config, visible
+    to every tenant but only editable by MSP staff (GITOPS_MANAGER_ROLES
+    doesn't currently distinguish that further, same posture as
+    app.api.network_discovery's scans/schedules)."""
     repo = db.get(GitRepoConfig, repo_id)
-    if not repo:
+    if not repo or (tenant_id is not None and repo.tenant_id not in (None, tenant_id)):
         raise HTTPException(status_code=404, detail="Git repo config not found")
     return repo
 
 
 @router.get("/repos", response_model=list[GitRepoConfigRead])
-def list_repos(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    return [GitRepoConfigRead.from_orm_row(r) for r in db.query(GitRepoConfig).order_by(GitRepoConfig.name).all()]
+def list_repos(db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    q = db.query(GitRepoConfig)
+    if tenant_id is not None:
+        q = q.filter((GitRepoConfig.tenant_id == tenant_id) | (GitRepoConfig.tenant_id.is_(None)))
+    return [GitRepoConfigRead.from_orm_row(r) for r in q.order_by(GitRepoConfig.name).all()]
 
 
 @router.post("/repos", response_model=GitRepoConfigRead, status_code=201)
 def create_repo(
-    payload: GitRepoConfigCreate, db: Session = Depends(get_db), current_user: User = Depends(GITOPS_MANAGER_ROLES)
+    payload: GitRepoConfigCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(GITOPS_MANAGER_ROLES),
+    tenant_id=Depends(get_tenant_scope),
 ):
     existing = db.query(GitRepoConfig).filter(GitRepoConfig.name == payload.name).first()
     if existing:
         raise HTTPException(status_code=409, detail=f"A repo config named '{payload.name}' already exists")
 
     row = GitRepoConfig(
+        tenant_id=tenant_id,
         name=payload.name, repo_url=payload.repo_url, branch=payload.branch,
         template_path=payload.template_path, direction=GitSyncDirection(payload.direction),
         auto_sync_enabled=payload.auto_sync_enabled,
@@ -77,8 +89,9 @@ def create_repo(
 def update_repo(
     repo_id: uuid.UUID, payload: GitRepoConfigUpdate, db: Session = Depends(get_db),
     current_user: User = Depends(GITOPS_MANAGER_ROLES),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    row = _get_repo(db, repo_id)
+    row = _get_repo(db, repo_id, tenant_id)
     data = payload.model_dump(exclude_unset=True)
 
     if "access_token" in data:
@@ -102,8 +115,11 @@ def update_repo(
 
 
 @router.delete("/repos/{repo_id}", status_code=204)
-def delete_repo(repo_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(GITOPS_MANAGER_ROLES)):
-    row = _get_repo(db, repo_id)
+def delete_repo(
+    repo_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(GITOPS_MANAGER_ROLES),
+    tenant_id=Depends(get_tenant_scope),
+):
+    row = _get_repo(db, repo_id, tenant_id)
     db.delete(row)
     db.commit()
     audit_service.record_event(
@@ -113,13 +129,14 @@ def delete_repo(repo_id: uuid.UUID, db: Session = Depends(get_db), current_user:
 
 @router.post("/repos/{repo_id}/sync", response_model=GitSyncTriggerResult)
 def trigger_sync(
-    repo_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(GITOPS_MANAGER_ROLES)
+    repo_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(GITOPS_MANAGER_ROLES),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Manual "sync now" -- runs inline (clone/fetch of one repo is
     typically a few seconds) rather than via Celery, so the operator gets
     an immediate created/updated/unchanged/errors summary instead of
     having to poll."""
-    row = _get_repo(db, repo_id)
+    row = _get_repo(db, repo_id, tenant_id)
     result = git_sync_service.sync_repo(db, row)
     audit_service.record_event(
         db, actor=current_user.email, action="GitOps Manual Sync", result=row.last_sync_status.value,
@@ -149,7 +166,13 @@ async def receive_webhook(
     failed (and retry) if it's slow, even though the sync itself
     eventually succeeds.
     """
-    row = _get_repo(db, repo_id)
+    # Unauthenticated external caller (the Git host), not a logged-in
+    # user -- no tenant_id to scope against here. Trust is established by
+    # the HMAC signature check below, not by tenant membership, same as
+    # any other webhook receiver in this codebase.
+    row = db.get(GitRepoConfig, repo_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Git repo config not found")
     if not row.webhook_secret_encrypted:
         raise HTTPException(status_code=409, detail="This repo has no webhook secret configured")
 

@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, func, true
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -45,7 +45,19 @@ class User(Base):
     hashed_password = Column(String, nullable=True)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.NETWORK_ENGINEER)
     is_active = Column(String, default=True)
-    is_approved = Column(Boolean, nullable=False, default=True, server_default="true")
+
+    # Registration-approval gate (migration 0095_approval_and_tenant_scoping).
+    # False only for a brand-new POST /auth/register row -- see
+    # app.api.auth.register, which explicitly overrides this default.
+    # Every other creation path (admin-created via POST /users, seed
+    # scripts, pre-existing rows backfilled by the migration) leaves this
+    # at its True default, since an admin creating the account directly
+    # *is* the approval. NOTE: this column was added to the database by
+    # migration 0095 but was missing from this model for a while -- if
+    # you're here because approve/reject "didn't seem to do anything",
+    # that mapping gap was the cause; it's fixed now, but double check
+    # there isn't a similar migration-vs-model drift elsewhere.
+    is_approved = Column(Boolean, nullable=False, default=True, server_default=true())
 
     # Fine-grained access beyond the base `role`: a comma-separated list of
     # additional UserRole values (e.g. a NETWORK_ENGINEER who also needs

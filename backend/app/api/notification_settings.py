@@ -6,18 +6,25 @@ env vars at deploy time. See app.models.notification_settings.
   PUT   /notification-settings         — update config
   POST  /notification-settings/test    — send a test email to the configured recipients
 
-Write access restricted to NETWORK_ADMIN, same posture as
-app.api.webhooks -- this stores SMTP credentials, which is exactly the
-kind of thing that shouldn't be editable by every authenticated user.
+Access restricted to MSP staff (not just NETWORK_ADMIN) -- flagged in
+the tenancy audit alongside app.api.ipam as a resource that has no
+tenant_id and can't safely get one: this is a single SMTP config for
+the whole install (singleton row, see app.models.notification_settings),
+so any tenant-scoped NETWORK_ADMIN with read/write here could read
+whether email alerting is configured, or silently repoint every other
+tenant's alert emails at credentials/recipients of their choosing.
+Narrowing to MSP staff -- same fix app.api.ipam.IPAM_MANAGER_ROLES
+applied for the same underlying reason -- is the safe option instead of
+forcing a tenant_id onto a config that's genuinely install-wide.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.database import get_db
-from app.core.deps import require_roles
+from app.core.deps import require_msp_staff
 from app.models.notification_settings import SETTINGS_ROW_ID, NotificationSettings
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.schemas.notification_settings import (
     NotificationSettingsRead,
     NotificationSettingsUpdate,
@@ -27,7 +34,7 @@ from app.services import notification_service
 
 router = APIRouter(prefix="/notification-settings", tags=["notification-settings"])
 
-_notification_admin = require_roles(UserRole.NETWORK_ADMIN)
+_notification_admin = require_msp_staff
 
 
 def _get_or_create(db: Session) -> NotificationSettings:

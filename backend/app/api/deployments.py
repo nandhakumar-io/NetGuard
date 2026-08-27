@@ -12,7 +12,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user, get_current_user_ws
+from app.core.deps import get_current_user, get_current_user_ws, get_tenant_scope
 from app.models.change_request import ChangeRequest
 from app.models.deployment import Deployment, DeploymentStatus, HealthCheckResult
 from app.models.device import Device
@@ -31,6 +31,21 @@ RETRYABLE_STATUSES = (DeploymentStatus.FAILED, DeploymentStatus.ROLLED_BACK)
 # self-heal rollback attempt that itself failed) has a live config on the
 # device that still needs undoing.
 PARTIAL_ROLLBACK_STATUSES = (DeploymentStatus.FAILED,)
+
+
+def _get_scoped_deployment(db: Session, deployment_id: uuid.UUID, tenant_id) -> Deployment:
+    """Fetches a Deployment and enforces tenant ownership via its target
+    Device -- Deployment has no tenant_id column of its own (it's a
+    consequence of a ChangeRequest against a Device), so scoping rides on
+    Device.tenant_id, same convention as app.api.change_requests."""
+    deployment = db.get(Deployment, deployment_id)
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    if tenant_id is not None:
+        device = db.get(Device, deployment.device_id)
+        if device is not None and device.tenant_id != tenant_id:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+    return deployment
 
 
 def _serialize(d: Deployment, db: Session) -> dict:
@@ -78,8 +93,11 @@ def list_deployments(
     device_id: uuid.UUID | None = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     q = db.query(Deployment).order_by(Deployment.created_at.desc())
+    if tenant_id is not None:
+        q = q.join(Device, Deployment.device_id == Device.id).filter(Device.tenant_id == tenant_id)
     if change_request_id:
         q = q.filter(Deployment.change_request_id == change_request_id)
     if device_id:
@@ -88,15 +106,13 @@ def list_deployments(
 
 
 @router.get("/{deployment_id}")
-def get_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
-    d = db.get(Deployment, deployment_id)
-    if not d:
-        raise HTTPException(status_code=404, detail="Deployment not found")
+def get_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    d = _get_scoped_deployment(db, deployment_id, tenant_id)
     return _serialize(d, db)
 
 
 @router.post("/{deployment_id}/retry")
-def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     """Re-runs the full snapshot -> deploy -> verify -> (rollback) pipeline
     for the device behind a FAILED or ROLLED_BACK deployment, without
     touching any other device on the same change request (see
@@ -106,9 +122,7 @@ def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), cu
     SUCCEEDED deployment has nothing to retry, and one still IN_PROGRESS
     would race the pipeline that's already running it.
     """
-    deployment = db.get(Deployment, deployment_id)
-    if not deployment:
-        raise HTTPException(status_code=404, detail="Deployment not found")
+    deployment = _get_scoped_deployment(db, deployment_id, tenant_id)
 
     if deployment.status not in RETRYABLE_STATUSES:
         raise HTTPException(
@@ -143,16 +157,14 @@ def retry_deployment(deployment_id: uuid.UUID, db: Session = Depends(get_db), cu
     return {"message": "Retry queued.", "task_id": task.id, "change_request_id": str(cr.id), "device_id": str(deployment.device_id)}
 
 
-def _validate_rollback_target(db: Session, deployment_id: uuid.UUID) -> tuple[Deployment, Device, ConfigSnapshot]:
+def _validate_rollback_target(db: Session, deployment_id: uuid.UUID, tenant_id) -> tuple[Deployment, Device, ConfigSnapshot]:
     """Shared validation for both the dry-run preview and the actual
     partial rollback below -- keeps the two endpoints from drifting on
     what makes a deployment eligible (same checks a preview shows would
     block must be the same checks the real POST enforces, or the preview
     is just decoration).
     """
-    deployment = db.get(Deployment, deployment_id)
-    if not deployment:
-        raise HTTPException(status_code=404, detail="Deployment not found")
+    deployment = _get_scoped_deployment(db, deployment_id, tenant_id)
 
     if deployment.status not in PARTIAL_ROLLBACK_STATUSES:
         raise HTTPException(
@@ -190,6 +202,7 @@ def preview_deployment_rollback(
     deployment_id: uuid.UUID,
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Dry-run counterpart to POST /deployments/{id}/rollback: shows the
     diff a partial rollback would apply -- what's live on this one device
@@ -200,7 +213,7 @@ def preview_deployment_rollback(
     Powers the confirmation step on the Deployments page and the
     `rollback <deployment-id>` ChatOps command.
     """
-    deployment, device, snapshot = _validate_rollback_target(db, deployment_id)
+    deployment, device, snapshot = _validate_rollback_target(db, deployment_id, tenant_id)
 
     try:
         preview = rollback_service.preview_rollback(db, device, snapshot)
@@ -228,6 +241,7 @@ def rollback_deployment(
     deployment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Partial rollback: undoes this ONE device's deployment on a
     multi-device change request, without touching any of the other
@@ -255,7 +269,7 @@ def rollback_deployment(
     before calling this -- that dry run uses the exact same validation as
     here, so anything it doesn't block, this won't either.
     """
-    deployment, device, snapshot = _validate_rollback_target(db, deployment_id)
+    deployment, device, snapshot = _validate_rollback_target(db, deployment_id, tenant_id)
     cr = db.get(ChangeRequest, deployment.change_request_id)
 
     try:
@@ -286,18 +300,23 @@ def rollback_deployment(
 
 
 @router.get("/snapshots/{snapshot_id}/checksum")
-def get_snapshot_checksum(snapshot_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_snapshot_checksum(snapshot_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     """Expose checksum/version only -- never the encrypted config contents."""
     snap = db.get(ConfigSnapshot, snapshot_id)
     if not snap:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+    if tenant_id is not None:
+        device = db.get(Device, snap.device_id)
+        if device is not None and device.tenant_id != tenant_id:
+            raise HTTPException(status_code=404, detail="Snapshot not found")
     return {"id": str(snap.id), "checksum": snap.checksum, "version": snap.version, "created_at": snap.created_at}
 
 
 @router.get("/{deployment_id}/logs")
-def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     """Returns the ordered timeline/logs of a deployment for real-time and historical views."""
     from app.models.deployment import DeploymentLog
+    _get_scoped_deployment(db, deployment_id, tenant_id)  # 404s if out of tenant scope
     logs = db.query(DeploymentLog).filter(DeploymentLog.deployment_id == deployment_id).order_by(DeploymentLog.timestamp.asc()).all()
     return [
         {
@@ -309,6 +328,37 @@ def get_deployment_logs(deployment_id: uuid.UUID, db: Session = Depends(get_db),
         }
         for lg in logs
     ]
+
+
+def _event_in_tenant(data: dict, tenant_id: uuid.UUID) -> bool:
+    """True if a `deployment_status_changed`/`deployment_log` event
+    (see app.services.pipeline_service / _log_deployment) belongs to the
+    caller's tenant. Both event types carry `deployment_id` -- resolved
+    the same way _get_scoped_deployment does for the REST endpoints
+    (Deployment has no tenant_id of its own; it rides on its target
+    Device's), via a short-lived session since the websocket loop has no
+    long-running one of its own. Fails closed: an event this can't
+    positively place in the caller's tenant (missing/unresolvable
+    deployment_id -- e.g. a legacy event published before deployment_id
+    was added, or the deployment/device having since been deleted) is
+    dropped rather than delivered, since a false negative here just
+    costs a UI refresh the next poll picks up, while a false positive
+    leaks another tenant's deployment activity.
+    """
+    deployment_id = data.get("deployment_id")
+    if not deployment_id:
+        return False
+    db = SessionLocal()
+    try:
+        deployment = db.get(Deployment, uuid.UUID(deployment_id))
+        if deployment is None:
+            return False
+        device = db.get(Device, deployment.device_id)
+        return device is not None and device.tenant_id == tenant_id
+    except (ValueError, TypeError):
+        return False
+    finally:
+        db.close()
 
 
 @router.websocket("/ws")
@@ -327,17 +377,32 @@ async def deployments_ws(websocket: WebSocket, token: str = Query("")):
         await websocket.close(code=1008)  # Policy Violation
         return
 
+    # None for MSP staff (unfiltered -- every tenant), same convention as
+    # every REST endpoint in this router -- see app.core.deps.
+    # get_current_tenant_id. Resolved once up front rather than re-run
+    # per message since it only depends on the user, not the event.
+    tenant_id = None if user.is_msp_staff else user.tenant_id
+
     await websocket.accept()
     client = event_bus.get_async_client()
     ps = client.pubsub()
-    await ps.subscribe("netguard:events")
+    # Was subscribing to the literal string "netguard:events", which
+    # doesn't match this JetStream stream's subject space
+    # ("netguard.>", see event_bus.STREAM_SUBJECTS) -- and even had it
+    # matched, was reading `data["event"]` when publish_event() writes
+    # `data["type"]`. Net effect: this socket never actually delivered a
+    # single real update; it just idled until the client disconnected.
+    await ps.subscribe(event_bus.DASHBOARD_CHANNEL)
     try:
         while True:
             message = await ps.get_message(ignore_subscribe_messages=True, timeout=None)
             if message:
                 data = json.loads(message["data"])
-                if data.get("event") in ("deployment_status_changed", "deployment_log"):
-                    await websocket.send_json(data)
+                if data.get("type") not in ("deployment_status_changed", "deployment_log"):
+                    continue
+                if tenant_id is not None and not _event_in_tenant(data, tenant_id):
+                    continue
+                await websocket.send_json(data)
     except WebSocketDisconnect:
         pass
     except Exception:

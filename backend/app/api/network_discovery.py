@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.database import get_db
-from app.core.deps import require_msp_staff, require_roles
+from app.core.deps import get_current_user, get_tenant_scope, require_roles
 from app.models.device import Device, DeviceVendor
 from app.models.network_discovery import (
     DiscoveredHost,
@@ -65,22 +65,35 @@ from app.services import (
 router = APIRouter(prefix="/discovery", tags=["network-discovery"])
 logger = logging.getLogger(__name__)
 
-_network_admin_role = require_roles(UserRole.NETWORK_ADMIN)
+_discovery_admin = require_roles(UserRole.NETWORK_ADMIN)
 
 
-def _discovery_admin(user: User = Depends(_network_admin_role)) -> User:
-    """A scan actively probes machines on the network with no tenant
-    ownership check possible -- DiscoveryScan/DiscoveredHost carry no
-    tenant_id and aren't tied to a Device (a scan target is an arbitrary
-    operator-typed CIDR, not an existing device), so there's no safe way
-    to let a tenant-scoped Network Administrator run or manage scans
-    without risking them probing (or seeing results for) another
-    tenant's network. MSP staff only, same posture as the whole-database
-    backup surfaces in app.api.backups.
-    """
-    if not user.is_msp_staff:
-        raise HTTPException(status_code=403, detail="Network discovery is only available to MSP staff")
-    return user
+def _get_scoped_scan(db: Session, scan_id: uuid.UUID, tenant_id) -> DiscoveryScan:
+    scan = db.get(DiscoveryScan, scan_id)
+    if not scan or (tenant_id is not None and scan.tenant_id not in (None, tenant_id)):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan
+
+
+def _get_scoped_schedule(db: Session, schedule_id: uuid.UUID, tenant_id) -> DiscoverySchedule:
+    schedule = db.get(DiscoverySchedule, schedule_id)
+    if not schedule or (tenant_id is not None and schedule.tenant_id not in (None, tenant_id)):
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return schedule
+
+
+def _get_scoped_host(db: Session, host_id: uuid.UUID, tenant_id) -> DiscoveredHost:
+    """A DiscoveredHost has no tenant_id of its own -- it's always
+    reached through its parent DiscoveryScan, same as Deployment riding
+    on Device.tenant_id in app.api.deployments."""
+    host = db.get(DiscoveredHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="Discovered host not found")
+    if tenant_id is not None:
+        scan = db.get(DiscoveryScan, host.scan_id)
+        if scan is not None and scan.tenant_id not in (None, tenant_id):
+            raise HTTPException(status_code=404, detail="Discovered host not found")
+    return host
 
 
 @router.post("/scans", response_model=DiscoveryScanRead, status_code=202)
@@ -88,6 +101,7 @@ def start_scan(
     body: DiscoveryScanCreate,
     db: Session = Depends(get_db),
     user: User = Depends(_discovery_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
     # Fail fast on a bad/oversized range before ever touching Celery --
     # same reasoning as _reject_unsafe_webhook_url validating at the API
@@ -103,6 +117,8 @@ def start_scan(
         snmp_community_ref=crypto.encrypt(body.snmp_community) if body.snmp_community else None,
         status=DiscoveryScanStatus.PENDING,
         started_by=user.email,
+        # None only for an MSP-staff caller -- see get_tenant_scope.
+        tenant_id=tenant_id,
     )
     db.add(scan)
     db.commit()
@@ -122,7 +138,7 @@ def start_scan(
 
 
 @router.get("/scans", response_model=list[DiscoveryScanRead])
-def list_scans(db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
+def list_scans(db: Session = Depends(get_db), _: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     # Sweeps any PENDING/RUNNING scan that's been stuck way past a
     # reasonable finish time (worker crash, nothing consuming the
     # "polling" queue, ...) to FAILED -- see network_discovery_service.
@@ -131,19 +147,19 @@ def list_scans(db: Session = Depends(get_db), _: User = Depends(require_msp_staf
     # refetching it as "in flight" indefinitely with no results and,
     # previously, no way to cancel it either.
     network_discovery_service.reconcile_stuck_scans(db)
-    return db.query(DiscoveryScan).order_by(DiscoveryScan.started_at.desc()).limit(100).all()
+    q = db.query(DiscoveryScan)
+    if tenant_id is not None:
+        q = q.filter((DiscoveryScan.tenant_id == tenant_id) | (DiscoveryScan.tenant_id.is_(None)))
+    return q.order_by(DiscoveryScan.started_at.desc()).limit(100).all()
 
 
 @router.get("/scans/{scan_id}", response_model=DiscoveryScanRead)
-def get_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
-    scan = db.get(DiscoveryScan, scan_id)
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    return scan
+def get_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    return _get_scoped_scan(db, scan_id, tenant_id)
 
 
 @router.post("/scans/{scan_id}/cancel", response_model=DiscoveryScanRead)
-def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(_discovery_admin)):
+def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(_discovery_admin), tenant_id=Depends(get_tenant_scope)):
     """Stops a PENDING or RUNNING scan. Two layers, best-effort:
 
     1. Revokes the Celery task by id (terminate=True) so a scan that
@@ -160,9 +176,7 @@ def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = 
     Whatever hosts were already written before cancellation stay on the
     scan's results -- cancelling doesn't discard partial progress.
     """
-    scan = db.get(DiscoveryScan, scan_id)
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = _get_scoped_scan(db, scan_id, tenant_id)
     if scan.status not in (DiscoveryScanStatus.PENDING, DiscoveryScanStatus.RUNNING):
         raise HTTPException(status_code=409, detail=f"Scan is '{scan.status.value}', not pending/running -- nothing to cancel")
 
@@ -187,10 +201,8 @@ def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = 
 
 
 @router.get("/scans/{scan_id}/hosts", response_model=list[DiscoveredHostRead])
-def list_scan_hosts(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
-    scan = db.get(DiscoveryScan, scan_id)
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+def list_scan_hosts(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    _get_scoped_scan(db, scan_id, tenant_id)  # 404s if out of tenant scope
     return (
         db.query(DiscoveredHost)
         .filter(DiscoveredHost.scan_id == scan_id)
@@ -200,10 +212,8 @@ def list_scan_hosts(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User =
 
 
 @router.delete("/scans/{scan_id}", status_code=204)
-def delete_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(_discovery_admin)):
-    scan = db.get(DiscoveryScan, scan_id)
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+def delete_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(_discovery_admin), tenant_id=Depends(get_tenant_scope)):
+    scan = _get_scoped_scan(db, scan_id, tenant_id)
     if scan.status == DiscoveryScanStatus.RUNNING:
         raise HTTPException(status_code=409, detail="Cannot delete a scan while it's running")
     db.delete(scan)
@@ -237,7 +247,7 @@ def _resolve_vendor(guess: str | None) -> DeviceVendor:
 
 @router.get("/hosts/{host_id}/suggested-credentials", response_model=CredentialSuggestion | None)
 def suggested_credentials(
-    host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)
+    host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)
 ):
     """Best-effort SSH/SNMP credential-profile suggestion for this host's
     guessed vendor, for the import form to pre-fill (see
@@ -246,9 +256,7 @@ def suggested_credentials(
     leave the credential fields blank in that case, not treat it as an
     error.
     """
-    host = db.get(DiscoveredHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Discovered host not found")
+    host = _get_scoped_host(db, host_id, tenant_id)
 
     # Only suggest against a vendor we're actually confident about --
     # _resolve_vendor's CISCO fallback is meant for import-time device
@@ -267,6 +275,7 @@ def import_host(
     body: DiscoveredHostImport,
     db: Session = Depends(get_db),
     user: User = Depends(_discovery_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Creates a Device row from a discovered host. Mirrors
     POST /devices's own hostname-uniqueness check and best-effort
@@ -276,9 +285,7 @@ def import_host(
     directly, since this needs the discovered IP/host wired in and a
     different source object (DiscoveredHost, not a fresh DeviceCreate).
     """
-    host = db.get(DiscoveredHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Discovered host not found")
+    host = _get_scoped_host(db, host_id, tenant_id)
     if host.imported:
         raise HTTPException(status_code=409, detail="This host has already been imported")
     if host.matched_device_id:
@@ -307,6 +314,15 @@ def import_host(
         snmp_username=body.snmp_username,
         snmp_version=SnmpVersion(body.snmp_version) if body.snmp_version else None,
     )
+    # Same rule as app.api.devices.create_device: a regular tenant-scoped
+    # caller's new device belongs to their tenant. Without this, an
+    # imported device was silently created with tenant_id=NULL -- which
+    # (unlike alert_rules/webhooks' "NULL == visible to everyone") means
+    # INVISIBLE to a regular user under app.api.devices.list_devices'
+    # strict `Device.tenant_id == tenant_id` filter, i.e. the device the
+    # operator just imported would vanish from their own Devices page.
+    if tenant_id is not None:
+        device.tenant_id = tenant_id
     db.add(device)
     db.commit()
     db.refresh(device)
@@ -331,10 +347,8 @@ def import_host(
 
 
 @router.post("/hosts/{host_id}/ignore", response_model=DiscoveredHostRead)
-def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_msp_staff)):
-    host = db.get(DiscoveredHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Discovered host not found")
+def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    host = _get_scoped_host(db, host_id, tenant_id)
     host.ignored = True
     host.ignored_by = user.email
     host.ignored_at = func.now()
@@ -384,6 +398,7 @@ def reserve_host(
     body: DiscoveredHostReserve,
     db: Session = Depends(get_db),
     user: User = Depends(_discovery_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Acknowledges a discovered host in place by creating an IPAM
     IPReservation for its address, so "this is fine, I know about it"
@@ -399,9 +414,7 @@ def reserve_host(
     all; a host outside any configured subnet should be brought under a
     Subnet first (or just ignored here).
     """
-    host = db.get(DiscoveredHost, host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Discovered host not found")
+    host = _get_scoped_host(db, host_id, tenant_id)
     if host.imported or host.ignored:
         raise HTTPException(status_code=409, detail="This host has already been actioned")
     if host.matched_device_id:
@@ -457,6 +470,7 @@ def create_schedule(
     body: DiscoveryScheduleCreate,
     db: Session = Depends(get_db),
     user: User = Depends(_discovery_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
     try:
         network_discovery_service.parse_and_validate_cidr(body.cidr)
@@ -471,6 +485,7 @@ def create_schedule(
         interval_minutes=body.interval_minutes,
         enabled=body.enabled,
         created_by=user.email,
+        tenant_id=tenant_id,
     )
     db.add(schedule)
     db.commit()
@@ -479,8 +494,11 @@ def create_schedule(
 
 
 @router.get("/schedules", response_model=list[DiscoveryScheduleRead])
-def list_schedules(db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
-    return db.query(DiscoverySchedule).order_by(DiscoverySchedule.created_at.desc()).all()
+def list_schedules(db: Session = Depends(get_db), _: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    q = db.query(DiscoverySchedule)
+    if tenant_id is not None:
+        q = q.filter((DiscoverySchedule.tenant_id == tenant_id) | (DiscoverySchedule.tenant_id.is_(None)))
+    return q.order_by(DiscoverySchedule.created_at.desc()).all()
 
 
 @router.patch("/schedules/{schedule_id}", response_model=DiscoveryScheduleRead)
@@ -489,10 +507,9 @@ def update_schedule(
     body: DiscoveryScheduleUpdate,
     db: Session = Depends(get_db),
     _: User = Depends(_discovery_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    schedule = db.get(DiscoverySchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    schedule = _get_scoped_schedule(db, schedule_id, tenant_id)
 
     updates = body.model_dump(exclude_unset=True)
     if updates.get("cidr"):
@@ -516,17 +533,15 @@ def update_schedule(
 
 
 @router.delete("/schedules/{schedule_id}", status_code=204)
-def delete_schedule(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(_discovery_admin)):
-    schedule = db.get(DiscoverySchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+def delete_schedule(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(_discovery_admin), tenant_id=Depends(get_tenant_scope)):
+    schedule = _get_scoped_schedule(db, schedule_id, tenant_id)
     db.delete(schedule)
     db.commit()
 
 
 @router.get("/schedules/{schedule_id}/ignore-rules", response_model=list[DiscoveryIgnoreRuleRead])
 def list_schedule_ignore_rules(
-    schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)
+    schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user), tenant_id=Depends(get_tenant_scope)
 ):
     """Every persisted ignore decision for this schedule -- what
     run_scan is currently auto-suppressing on each sweep. Without this,
@@ -537,9 +552,7 @@ def list_schedule_ignore_rules(
     ignored forever -- see the rule's own note field for context on why
     it was made).
     """
-    schedule = db.get(DiscoverySchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    _get_scoped_schedule(db, schedule_id, tenant_id)  # 404s if out of tenant scope
     return (
         db.query(DiscoveryIgnoreRule)
         .filter(DiscoveryIgnoreRule.schedule_id == schedule_id)
@@ -554,6 +567,7 @@ def delete_schedule_ignore_rule(
     rule_id: uuid.UUID,
     db: Session = Depends(get_db),
     _: User = Depends(_discovery_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Revokes one persisted ignore decision -- the direct undo for a
     rule created via POST /discovery/hosts/{id}/ignore. Deleting the
@@ -566,6 +580,7 @@ def delete_schedule_ignore_rule(
     per-result review action anyone can do, but revoking a standing
     suppression rule is closer to reconfiguring the schedule itself.
     """
+    _get_scoped_schedule(db, schedule_id, tenant_id)  # 404s if out of tenant scope
     rule = db.get(DiscoveryIgnoreRule, rule_id)
     if not rule or rule.schedule_id != schedule_id:
         raise HTTPException(status_code=404, detail="Ignore rule not found")
@@ -574,15 +589,13 @@ def delete_schedule_ignore_rule(
 
 
 @router.post("/schedules/{schedule_id}/run-now", response_model=DiscoveryScanRead, status_code=202)
-def run_schedule_now(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(_discovery_admin)):
+def run_schedule_now(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(_discovery_admin), tenant_id=Depends(get_tenant_scope)):
     """Fires one sweep for this schedule immediately, outside its normal
     interval -- doesn't reset last_run_at's clock for the next scheduled
     fire, same "manual trigger doesn't disturb the timer" behavior as
     app.api.gitops's manual-sync-vs-auto-sync-sweep split.
     """
-    schedule = db.get(DiscoverySchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    schedule = _get_scoped_schedule(db, schedule_id, tenant_id)
 
     community = crypto.decrypt(schedule.snmp_community_ref) if schedule.snmp_community_ref else None
     scan = DiscoveryScan(
@@ -592,6 +605,14 @@ def run_schedule_now(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: U
         status=DiscoveryScanStatus.PENDING,
         started_by=f"schedule:{schedule.name}",
         schedule_id=schedule.id,
+        # Inherit the schedule's own tenant scope rather than the
+        # run-now caller's -- an MSP admin manually triggering a
+        # tenant-owned schedule shouldn't reassign its results to
+        # themselves (tenant_id=None), and a tenant admin can only reach
+        # this schedule at all if _get_scoped_schedule already confirmed
+        # it's theirs (or global), so schedule.tenant_id is always the
+        # correct owner either way.
+        tenant_id=schedule.tenant_id,
     )
     db.add(scan)
     db.commit()

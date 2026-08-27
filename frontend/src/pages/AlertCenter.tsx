@@ -125,6 +125,7 @@ export default function AlertCenter() {
   // Alert Rules state
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [rulesLoading, setRulesLoading] = useState(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
   const [showRuleForm, setShowRuleForm] = useState(false);
   const [editingRule, setEditingRule] = useState<AlertRule | null>(null);
   const [ruleForm, setRuleForm] = useState({ name: "", description: "", metric: "cpu", operator: "gt", threshold: "90", severity: "warning", scope_vendor: "", scope_site: "", scope_device_role: "", cooldown_seconds: "300" });
@@ -189,7 +190,12 @@ export default function AlertCenter() {
 
   const fetchRules = useCallback(() => {
     setRulesLoading(true);
-    api.get<AlertRule[]>("/alert-rules").then((res) => setAlertRules(res.data)).catch(() => {}).finally(() => setRulesLoading(false));
+    setRulesError(null);
+    api
+      .get<AlertRule[]>("/alert-rules")
+      .then((res) => setAlertRules(res.data))
+      .catch((err: any) => setRulesError(err?.response?.data?.detail || "Failed to load alert rules"))
+      .finally(() => setRulesLoading(false));
   }, []);
 
   const fetchWebhooks = useCallback(() => {
@@ -447,8 +453,8 @@ export default function AlertCenter() {
       }
       resetRuleForm();
       fetchRules();
-    } catch {
-      // Best-effort; the surrounding list/table stays on its last good state.
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to save alert rule");
     }
   };
 
@@ -1464,6 +1470,11 @@ export default function AlertCenter() {
           )}
 
           {/* Rules List */}
+          {rulesError && (
+            <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-sm rounded-xl px-4 py-3 mb-4">
+              {rulesError}
+            </div>
+          )}
           {rulesLoading ? (
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-12 text-center">
               <div className="inline-block w-6 h-6 border-2 border-brandblue/30 border-t-brandblue rounded-full animate-spin" />

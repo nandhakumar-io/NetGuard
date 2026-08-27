@@ -239,7 +239,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             device_hostname=device.hostname, change_request_id=cr.id,
             detail="Device flagged unstable; manual review required before further automated deploys.",
         )
-        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
         return deployment
 
     netmiko_type = DEVICE_TYPE_MAP.get(
@@ -269,7 +269,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             "Deployment Failed", f"{device.hostname}: {exc}", severity="critical",
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
-        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
         return deployment
 
     # We have a valid device, proceed to create the Deployment early to attach logs
@@ -280,7 +280,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     db.add(deployment)
     db.commit()
     db.refresh(deployment)
-    event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+    event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
 
     _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Starting deployment pipeline for CR {str(cr.id)[:8]} on {device.hostname}")
 
@@ -382,7 +382,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             severity="critical",
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
-        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
         _check_circuit_breaker(db, device)
         return deployment
     _log_deployment(db, deployment.id, "VALIDATE", "Validation passed.")
@@ -404,7 +404,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             "Deployment Failed", f"{device.hostname}: {deploy_result.error}", severity="critical",
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
-        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
         _check_circuit_breaker(db, device)
         return deployment
 
@@ -482,7 +482,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             "Deployment Succeeded", f"{device.hostname}: change deployed and healthy.", severity="info",
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
-        event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
         return deployment
 
     # --- 5. Self-Healing Rollback Engine (FR-10) ---
@@ -521,7 +521,7 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         severity="critical",
         device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
     )
-    event_bus.publish_event("deployment_status_changed", status=deployment.status.value, device=device.hostname)
+    event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
     _check_circuit_breaker(db, device)
     return deployment
 

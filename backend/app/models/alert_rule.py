@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     Float,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -97,6 +98,14 @@ class AlertRule(Base):
 
     enabled = Column(Boolean, nullable=False, default=True, server_default="true")
     created_by = Column(String, nullable=True)
+
+    # Tenant scoping (migration 0095_approval_and_tenant_scoping). NULL =
+    # global/MSP-authored rule, visible and evaluated across every tenant
+    # -- see app.core.deps.get_tenant_scope and app.api.alert_rules. This
+    # column existed in the database since 0095 but was missing from this
+    # model, which made every non-MSP request touching AlertRule.tenant_id
+    # (e.g. the tenant filter in GET /alert-rules) raise AttributeError.
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

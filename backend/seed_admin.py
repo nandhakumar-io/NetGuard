@@ -30,6 +30,18 @@ try:
         hashed_password=hash_password(PASSWORD),
         role=UserRole.NETWORK_ADMIN,
         mfa_enabled="false",
+        # This is the platform bootstrap account -- it must be able to
+        # manage tenants (POST/PATCH/DELETE /tenants is require_msp_staff-
+        # gated) and see the cross-tenant NOC board from day one, since
+        # it's the only account that exists until it creates others.
+        # Without this, the "no option to create a tenant" symptom shows
+        # up for anyone starting from a fresh install: the Tenants page
+        # renders, but every write 403s for this account.
+        is_msp_staff=True,
+        # Admin bootstrap account created directly by this script, not
+        # through the public registration form -- skip the approval
+        # queue the same way POST /users (admin-created accounts) does.
+        is_approved=True,
     )
     db.add(user)
     db.commit()

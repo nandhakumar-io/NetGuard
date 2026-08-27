@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -65,6 +65,10 @@ class GitRepoConfig(Base):
     __tablename__ = "git_repo_configs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # NULL = MSP-staff-authored / globally visible, same convention as
+    # DiscoveryScan.tenant_id, WebhookEndpoint.tenant_id, etc. -- see
+    # migration 0097_gitops_tenant_scoping.
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, nullable=False, unique=True)
     repo_url = Column(String, nullable=False)  # e.g. https://github.com/org/network-configs.git
     branch = Column(String, nullable=False, default="main")

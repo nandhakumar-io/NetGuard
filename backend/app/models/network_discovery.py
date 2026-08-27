@@ -126,6 +126,15 @@ class DiscoveryScan(Base):
     # without needing a separate results table just for schedules.
     schedule_id = Column(UUID(as_uuid=True), ForeignKey("discovery_schedules.id"), nullable=True, index=True)
 
+    # Tenant scoping -- a scan probes an operator-chosen CIDR range, not a
+    # specific Device, so (unlike ChangeRequest/Deployment) there's no
+    # existing tenant-scoped row to join through; this needs its own
+    # column, same convention as AlertRule.tenant_id / WebhookEndpoint.
+    # tenant_id. NULL = MSP-staff-initiated scan, visible/manageable
+    # across every tenant. Stamped from the caller's tenant at
+    # POST /discovery/scans time (app.api.network_discovery.start_scan).
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
+
     hosts = relationship(
         "DiscoveredHost", back_populates="scan",
         cascade="all, delete-orphan", order_by="DiscoveredHost.ip_sort_key",
@@ -163,6 +172,12 @@ class DiscoverySchedule(Base):
 
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     last_scan_id = Column(UUID(as_uuid=True), ForeignKey("discovery_scans.id"), nullable=True)
+
+    # Tenant scoping -- same rationale/convention as DiscoveryScan.tenant_id
+    # above; stamped at POST /discovery/schedules time and propagated onto
+    # every DiscoveryScan this schedule fires (manual run-now or the beat
+    # sweep task) so results stay scoped the same way the schedule itself is.
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
 
     scans = relationship("DiscoveryScan", back_populates="schedule", foreign_keys="[DiscoveryScan.schedule_id]")
 
