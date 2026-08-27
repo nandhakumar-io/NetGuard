@@ -17,8 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_tenant_scope
 from app.models.alert import Alert
+from app.models.device import Device
 from app.models.escalation_policy import EscalationPolicy
 from app.models.user import User
 from app.schemas.escalation_policy import (
@@ -32,13 +33,27 @@ from app.services import escalation_service
 router = APIRouter(prefix="/escalation-policies", tags=["escalation-policies"])
 
 
+def _get_scoped_policy(db: Session, policy_id: uuid.UUID, tenant_id) -> EscalationPolicy:
+    """Same visibility rule as app.api.alert_rules._get_scoped_rule: a
+    scoped (non-MSP) caller can see/act on a global policy or their own
+    tenant's, never another tenant's.
+    """
+    policy = db.get(EscalationPolicy, policy_id)
+    if not policy or (tenant_id is not None and policy.tenant_id not in (None, tenant_id)):
+        raise HTTPException(status_code=404, detail="Escalation policy not found")
+    return policy
+
+
 @router.get("", response_model=list[EscalationPolicyRead])
 def list_escalation_policies(
     enabled_only: bool = False,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     q = db.query(EscalationPolicy)
+    if tenant_id is not None:
+        q = q.filter((EscalationPolicy.tenant_id == tenant_id) | (EscalationPolicy.tenant_id.is_(None)))
     if enabled_only:
         q = q.filter(EscalationPolicy.enabled == True)
     return q.order_by(EscalationPolicy.created_at.desc()).all()
@@ -49,10 +64,13 @@ def escalation_log(
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Feed of every alert that has been escalated at least once, most
-    recently escalated first -- the "who got paged and when" view."""
-    alerts = escalation_service.list_escalated_alerts(db, limit=limit)
+    recently escalated first -- the "who got paged and when" view. A
+    scoped (non-MSP) caller only sees escalations for their own tenant's
+    devices."""
+    alerts = escalation_service.list_escalated_alerts(db, limit=limit, tenant_id=tenant_id)
     policy_ids = {a.escalation_policy_id for a in alerts if a.escalation_policy_id}
     names = {p.id: p.name for p in db.query(EscalationPolicy).filter(EscalationPolicy.id.in_(policy_ids)).all()} if policy_ids else {}
 
@@ -69,6 +87,7 @@ def on_call_load(
     days: int = Query(30, ge=1, le=365, description="Trailing window in days"),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """On-call load: how many escalations each policy (and, within it,
     each secondary contact) has fired over the trailing window, plus a
@@ -85,16 +104,18 @@ def on_call_load(
     undercounts *which* day repeat pages landed on for long-lived
     unacknowledged alerts, but correctly reflects total on-call load
     attributable to each policy/contact over the window.
+
+    A scoped (non-MSP) caller only sees load for their own tenant's
+    devices; global policies still show up since they may have fired
+    against this tenant's alerts too.
     """
     since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
     policies = {p.id: p for p in db.query(EscalationPolicy).all()}
 
-    escalated_alerts = (
-        db.query(Alert)
-        .filter(Alert.escalated == True, Alert.escalated_at >= since)
-        .order_by(Alert.escalated_at)
-        .all()
-    )
+    q = db.query(Alert).filter(Alert.escalated == True, Alert.escalated_at >= since)
+    if tenant_id is not None:
+        q = q.join(Device, Device.id == Alert.device_id).filter(Device.tenant_id == tenant_id)
+    escalated_alerts = q.order_by(Alert.escalated_at).all()
 
     by_policy: dict[uuid.UUID, dict] = {}
     by_contact: dict[str, dict] = defaultdict(lambda: {"escalations": 0, "alerts": 0})
@@ -143,7 +164,9 @@ def on_call_load(
 def run_escalation_sweep_now(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     """Manually trigger an escalation sweep instead of waiting for the
     next scheduled tick -- useful right after creating/editing a policy
-    to confirm it fires as expected."""
+    to confirm it fires as expected. Runs the full fleet-wide sweep
+    (every tenant), same as the scheduled task -- per-tenant policy
+    resolution happens inside run_escalation_sweep itself, not here."""
     fired = escalation_service.run_escalation_sweep(db)
     return {"escalations_fired": fired}
 
@@ -153,7 +176,10 @@ def create_escalation_policy(
     body: EscalationPolicyCreate,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
+    # tenant_id is None only for an MSP-staff creator (a global/MSP-default
+    # policy every tenant inherits) -- see get_tenant_scope.
     policy = EscalationPolicy(
         name=body.name,
         description=body.description,
@@ -166,6 +192,17 @@ def create_escalation_policy(
         webhook_url=body.webhook_url,
         enabled=body.enabled,
         created_by=user.email,
+        tenant_id=tenant_id,
+        # A scoped caller can only override a policy they can already see
+        # (global or their own tenant's) -- _get_scoped_policy enforces
+        # that instead of trusting the id blindly. MSP staff (tenant_id
+        # is None) have no override concept of their own, so this field
+        # is only meaningful for tenant-owned policies.
+        parent_policy_id=(
+            _get_scoped_policy(db, body.parent_policy_id, tenant_id).id
+            if body.parent_policy_id and tenant_id is not None
+            else None
+        ),
     )
     db.add(policy)
     db.commit()
@@ -179,11 +216,15 @@ def update_escalation_policy(
     body: EscalationPolicyUpdate,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    policy = db.get(EscalationPolicy, policy_id)
-    if not policy:
-        raise HTTPException(status_code=404, detail="Escalation policy not found")
-    for field, value in body.model_dump(exclude_unset=True).items():
+    policy = _get_scoped_policy(db, policy_id, tenant_id)
+    updates = body.model_dump(exclude_unset=True)
+    if "parent_policy_id" in updates and updates["parent_policy_id"] and tenant_id is not None:
+        # Validate the new parent is itself visible to this caller, same
+        # as on create.
+        _get_scoped_policy(db, updates["parent_policy_id"], tenant_id)
+    for field, value in updates.items():
         setattr(policy, field, value)
     db.commit()
     db.refresh(policy)
@@ -195,10 +236,9 @@ def delete_escalation_policy(
     policy_id: uuid.UUID,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    policy = db.get(EscalationPolicy, policy_id)
-    if not policy:
-        raise HTTPException(status_code=404, detail="Escalation policy not found")
+    policy = _get_scoped_policy(db, policy_id, tenant_id)
     db.delete(policy)
     db.commit()
 
@@ -208,10 +248,9 @@ def toggle_escalation_policy(
     policy_id: uuid.UUID,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    policy = db.get(EscalationPolicy, policy_id)
-    if not policy:
-        raise HTTPException(status_code=404, detail="Escalation policy not found")
+    policy = _get_scoped_policy(db, policy_id, tenant_id)
     policy.enabled = not policy.enabled
     db.commit()
     db.refresh(policy)

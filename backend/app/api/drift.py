@@ -2,17 +2,20 @@ import datetime
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, get_tenant_scope, require_roles
 from app.models.config_drift import ConfigDrift, DriftStatus
 from app.models.device import Device
 from app.models.device_group import DeviceGroup
+from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.schemas.drift import (
     BulkApproveRequest,
     BulkApproveResponse,
+    ComplianceRollupResponse,
     DriftDetail,
     DriftFleetSummary,
     DriftRead,
@@ -24,6 +27,7 @@ from app.schemas.drift import (
     FlappingDevicesResponse,
     LowRiskDriftCandidate,
     RollbackRecommendationResponse,
+    TenantComplianceRollup,
     WeeklyGoldenDriftEntry,
     WeeklyGoldenDriftGroup,
     WeeklyGoldenDriftReport,
@@ -41,6 +45,85 @@ DRIFT_REVIEW_ROLES = require_roles(UserRole.NETWORK_ADMIN)
 def get_fleet_drift_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
     """Powers the Drift Dashboard Widget (fleet-wide drift posture)."""
     return drift_service.fleet_summary(db)
+
+
+@router.get("/drift/compliance-rollup", response_model=ComplianceRollupResponse)
+def get_compliance_rollup(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
+):
+    """Per-tenant compliance dashboard rollup: what fraction of each
+    tenant's fleet is currently free of open drift ("in baseline"), for
+    the same "how healthy is each customer" glance the tenant notification
+    digest gives for alert volume. A scoped (non-MSP) caller gets a
+    single-tenant array (their own); MSP staff (tenant_id is None) get
+    every active tenant, worst-compliance first -- same ordering
+    convention as app.api.tenant_board.get_tenant_board.
+
+    "In baseline" here means zero currently-OPEN ConfigDrift rows for
+    that device -- a binary presence/absence measure, distinct from
+    ConfigDrift.compliance_score (0-100 severity of a *given* drift) that
+    drift_service.fleet_summary already averages fleet-wide. This is the
+    per-tenant complement to that fleet-wide number.
+    """
+    tenants_q = db.query(Tenant).filter(Tenant.is_active.is_(True))
+    if tenant_id is not None:
+        tenants_q = tenants_q.filter(Tenant.id == tenant_id)
+    tenants = tenants_q.order_by(Tenant.name).all()
+    if not tenants:
+        return ComplianceRollupResponse(tenants=[])
+
+    tenant_ids = [t.id for t in tenants]
+
+    device_counts = dict(
+        db.query(Device.tenant_id, func.count(Device.id))
+        .filter(Device.tenant_id.in_(tenant_ids))
+        .group_by(Device.tenant_id)
+        .all()
+    )
+
+    # Devices with at least one OPEN drift, and the count/avg score of
+    # that open drift, grouped by tenant via the drift's device.
+    drift_rows = (
+        db.query(Device.tenant_id, ConfigDrift.device_id, ConfigDrift.compliance_score)
+        .join(Device, Device.id == ConfigDrift.device_id)
+        .filter(ConfigDrift.status == DriftStatus.OPEN, Device.tenant_id.in_(tenant_ids))
+        .all()
+    )
+    devices_out_by_tenant: dict[uuid.UUID, set[uuid.UUID]] = {}
+    scores_by_tenant: dict[uuid.UUID, list[int]] = {}
+    for t_id, device_id, score in drift_rows:
+        devices_out_by_tenant.setdefault(t_id, set()).add(device_id)
+        scores_by_tenant.setdefault(t_id, []).append(score)
+
+    rows: list[TenantComplianceRollup] = []
+    for tenant in tenants:
+        total = device_counts.get(tenant.id, 0)
+        out_of_baseline = len(devices_out_by_tenant.get(tenant.id, ()))
+        in_baseline = total - out_of_baseline
+        pct = round((in_baseline / total) * 100, 1) if total else 100.0
+        scores = scores_by_tenant.get(tenant.id, [])
+        avg_score = round(sum(scores) / len(scores), 1) if scores else None
+
+        rows.append(
+            TenantComplianceRollup(
+                tenant_id=tenant.id,
+                tenant_name=tenant.name,
+                tenant_slug=tenant.slug,
+                device_count=total,
+                devices_in_baseline=in_baseline,
+                devices_out_of_baseline=out_of_baseline,
+                compliance_pct=pct,
+                open_drift_count=len(scores),
+                average_open_drift_score=avg_score,
+            )
+        )
+
+    # Worst-compliance tenants first -- same "the point of a rollup is to
+    # surface who needs attention" ordering as the tenant board.
+    rows.sort(key=lambda r: r.compliance_pct)
+    return ComplianceRollupResponse(tenants=rows)
 
 
 @router.get("/drift/trends", response_model=DriftTrendResponse)

@@ -20,14 +20,12 @@ from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
 from app.models.device_status_history import DeviceStatusHistory
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.firmware_upgrade import FirmwareUpgrade
 from app.models.flow_record import FlowRecord
 from app.models.golden_config import GoldenConfig
 from app.models.interface_alert_config import InterfaceAlertConfig
-from app.models.interface_metric import InterfaceMetric
 from app.models.interface_status import InterfaceStatus
 from app.models.maintenance_window import MaintenanceWindow
 from app.models.network_discovery import DiscoveredHost
@@ -900,8 +898,6 @@ def delete_device(
         # metrics threw an IntegrityError on delete regardless of
         # ?force=true, surfacing as an opaque "still has related records"
         # 409 with no way to actually clear it from the UI.
-        db.query(DeviceMetric).filter(DeviceMetric.device_id == device_id).delete(synchronize_session=False)
-        db.query(InterfaceMetric).filter(InterfaceMetric.device_id == device_id).delete(synchronize_session=False)
         db.query(MaintenanceWindow).filter(MaintenanceWindow.device_id == device_id).delete(synchronize_session=False)
         db.query(RecurringMaintenanceSchedule).filter(RecurringMaintenanceSchedule.device_id == device_id).delete(synchronize_session=False)
         db.query(FirmwareUpgrade).filter(FirmwareUpgrade.device_id == device_id).delete(synchronize_session=False)

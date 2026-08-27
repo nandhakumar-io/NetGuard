@@ -101,5 +101,23 @@ class EscalationPolicy(Base):
     enabled = Column(Boolean, nullable=False, default=True, server_default="true")
     created_by = Column(String, nullable=True)
 
+    # Tenant scoping (migration 0098_escalation_policy_tenant_scoping).
+    # NULL = global/MSP-authored policy, evaluated against every tenant's
+    # alerts -- same "global unless scoped" convention as
+    # AlertRule.tenant_id / WebhookEndpoint.tenant_id. See
+    # app.core.deps.get_tenant_scope and app.services.escalation_service.
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
+
+    # Inheritance: when set, this is a tenant-authored policy that
+    # explicitly overrides the referenced global (tenant_id IS NULL)
+    # policy -- either re-tuning it (different unack_minutes/contacts/
+    # channel) or suppressing it for this tenant (enabled=False +
+    # parent_policy_id set). Mirrors AlertRule.parent_rule_id; a tenant
+    # policy with no parent_policy_id is additive alongside whatever
+    # global policies apply, same as before this column existed.
+    parent_policy_id = Column(
+        UUID(as_uuid=True), ForeignKey("escalation_policies.id"), nullable=True, index=True
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

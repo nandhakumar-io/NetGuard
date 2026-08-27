@@ -134,3 +134,35 @@ class FlappingDevicesResponse(BaseModel):
     days: int
     min_events: int
     devices: list[FlappingDeviceEntry]
+
+
+class TenantComplianceRollup(BaseModel):
+    """One tenant's compliance posture: what fraction of its fleet is
+    currently free of open drift ("in baseline"), for the per-tenant
+    compliance dashboard. Powers both the MSP cross-tenant rollup and a
+    single tenant's own compliance card."""
+
+    tenant_id: uuid.UUID
+    tenant_name: str
+    tenant_slug: str
+
+    device_count: int
+    devices_in_baseline: int
+    devices_out_of_baseline: int
+    # 100.0 when device_count is 0 -- an empty fleet has nothing to be
+    # out of compliance with, same "vacuously compliant" convention as
+    # drift_service.fleet_summary's average_compliance_score defaulting
+    # to 100 when there's no open drift to average.
+    compliance_pct: float
+
+    open_drift_count: int
+    # Average ConfigDrift.compliance_score across this tenant's currently
+    # OPEN drifts (not the fraction above -- this is drift *severity*,
+    # the fraction above is drift *presence*). None when there's no open
+    # drift to average, distinct from 100 to avoid implying a computed
+    # score where there was nothing to score.
+    average_open_drift_score: float | None = None
+
+
+class ComplianceRollupResponse(BaseModel):
+    tenants: list[TenantComplianceRollup]

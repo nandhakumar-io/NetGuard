@@ -16,6 +16,11 @@ class EscalationPolicyCreate(BaseModel):
     channel: str = "email"  # email / webhook / slack / teams / push
     webhook_url: str | None = None
     enabled: bool = True
+    # Set to override a global (MSP-authored) policy instead of adding an
+    # unrelated one alongside it -- see EscalationPolicy.parent_policy_id.
+    # Only meaningful for a tenant-owned policy; ignored for a policy
+    # created by MSP staff (tenant_id will be NULL regardless).
+    parent_policy_id: uuid.UUID | None = None
 
 
 class EscalationPolicyUpdate(BaseModel):
@@ -29,6 +34,7 @@ class EscalationPolicyUpdate(BaseModel):
     channel: str | None = None
     webhook_url: str | None = None
     enabled: bool | None = None
+    parent_policy_id: uuid.UUID | None = None
 
 
 class EscalationPolicyRead(BaseModel):
@@ -44,6 +50,9 @@ class EscalationPolicyRead(BaseModel):
     webhook_url: str | None = None
     enabled: bool
     created_by: str | None = None
+    # NULL = global/MSP-authored, applies across every tenant.
+    tenant_id: uuid.UUID | None = None
+    parent_policy_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime | None = None
 

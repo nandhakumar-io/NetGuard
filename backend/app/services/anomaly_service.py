@@ -20,14 +20,14 @@ separate code path) so anomaly alerts get the same dedup-by-category,
 maintenance-window suppression, and correlation behavior as every other
 alert source.
 """
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import vm_client
 from app.models.device import Device
-from app.models.device_metric import DeviceMetric
 from app.services import alert_service
 
 # How far back to look when building a device's baseline. Long enough to
@@ -79,32 +79,6 @@ class AnomalyFinding:
     sample_count: int
 
 
-def _baseline_for_hour(
-    db: Session, device_id, metric_column, hour: int, since: datetime
-) -> tuple[float | None, float | None, int]:
-    """Mean, stddev, and sample count for one metric/device/hour-of-day
-    bucket over the trailing baseline window, excluding the metric's own
-    NULLs (a device that doesn't report a given OID shouldn't drag its
-    own baseline toward zero).
-    """
-    row = (
-        db.query(
-            func.avg(metric_column),
-            func.stddev(metric_column),
-            func.count(metric_column),
-        )
-        .filter(
-            DeviceMetric.device_id == device_id,
-            DeviceMetric.polled_at >= since,
-            metric_column.isnot(None),
-            func.extract("hour", DeviceMetric.polled_at) == hour,
-        )
-        .one()
-    )
-    mean, stddev, count = row
-    return (float(mean) if mean is not None else None, float(stddev) if stddev is not None else None, count or 0)
-
-
 def check_device_for_anomalies(db: Session, device: Device) -> list[AnomalyFinding]:
     """Compares a device's latest metric poll against its own hour-of-day
     baseline for each tracked metric and returns any anomalous findings.
@@ -113,28 +87,34 @@ def check_device_for_anomalies(db: Session, device: Device) -> list[AnomalyFindi
     run_anomaly_detection_task in app.tasks, which raises an Alert per
     finding via alert_service.raise_alert).
     """
-    latest = (
-        db.query(DeviceMetric)
-        .filter(DeviceMetric.device_id == device.id)
-        .order_by(DeviceMetric.polled_at.desc())
-        .first()
-    )
-    if latest is None:
+    latest = vm_client.latest_device_metrics(device.id)
+    if not latest:
         return []
 
+    polled_at = latest.get("polled_at")
+    hour = polled_at.hour if polled_at else datetime.now(timezone.utc).hour
     since = datetime.now(timezone.utc) - timedelta(days=BASELINE_WINDOW_DAYS)
-    hour = latest.polled_at.hour if latest.polled_at else datetime.now(timezone.utc).hour
+
+    history = vm_client.device_metric_history(device.id, since, datetime.now(timezone.utc), step_seconds=300)
 
     findings: list[AnomalyFinding] = []
     for metric_name, min_stddev in MIN_STDDEV_FOR_METRIC.items():
-        latest_value = getattr(latest, metric_name)
+        latest_value = latest.get(metric_name)
         if latest_value is None:
             continue
 
-        metric_column = getattr(DeviceMetric, metric_name)
-        mean, stddev, count = _baseline_for_hour(db, device.id, metric_column, hour, since)
-        if mean is None or stddev is None or count < MIN_SAMPLES_FOR_BASELINE:
+        values = [
+            row[metric_name]
+            for row in history
+            if row.get("polled_at") and row["polled_at"].hour == hour and row.get(metric_name) is not None
+        ]
+        count = len(values)
+        if count < MIN_SAMPLES_FOR_BASELINE:
             continue
+
+        mean = statistics.mean(values)
+        stddev = statistics.stdev(values) if count > 1 else 0.0
+
         if stddev < min_stddev:
             continue
 

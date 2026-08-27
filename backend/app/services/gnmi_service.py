@@ -53,7 +53,6 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.device import Device
-from app.models.interface_metric import InterfaceMetric
 from app.services import credential_service
 
 logger = logging.getLogger("netguard.gnmi")
@@ -244,23 +243,35 @@ class _DeviceSubscription:
                 for acc in self._accumulators.values():
                     acc.errors = None
 
+        from app.core import vm_client
+
         def _write(db: Session) -> None:
+            entries = []
+            timestamp = datetime.datetime.now(datetime.timezone.utc)
             for iface, acc in snapshot.items():
                 octets_total = None
                 if acc.in_octets is not None or acc.out_octets is not None:
                     octets_total = (acc.in_octets or 0) + (acc.out_octets or 0)
-                db.add(
-                    InterfaceMetric(
-                        device_id=self.device_id,
-                        if_index=iface,
-                        if_descr=acc.if_descr,
-                        octets_total=octets_total,
-                        errors=acc.errors,
-                        error_delta=acc.errors,
-                        source="gnmi",
-                    )
+                entries.append(
+                    {
+                        "if_index": iface,
+                        "if_descr": acc.if_descr,
+                        "octets_total": octets_total,
+                        "errors": acc.errors,
+                        "error_delta": acc.errors,
+                    }
                 )
-            db.commit()
+
+            if entries:
+                device = db.query(Device).filter(Device.id == self.device_id).first()
+                if not device:
+                    return
+                vm_client.write_interface_polls(
+                    device_id=self.device_id,
+                    hostname=device.hostname,
+                    timestamp=timestamp,
+                    entries=entries,
+                )
 
         db = SessionLocal()
         try:

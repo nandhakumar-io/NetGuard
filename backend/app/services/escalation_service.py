@@ -26,6 +26,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models.alert import Alert, AlertSeverity
+from app.models.device import Device
 from app.models.escalation_policy import EscalationPolicy
 from app.models.on_call_schedule import OnCallSchedule
 from app.services import (
@@ -56,6 +57,25 @@ def _due(alert: Alert, policy: EscalationPolicy, now: datetime) -> bool:
     return since_last >= policy.repeat_minutes
 
 
+def _policies_for_tenant(
+    all_policies: list[EscalationPolicy], tenant_id
+) -> list[EscalationPolicy]:
+    """Resolve the effective policy set for a device's tenant: every
+    global (tenant_id IS NULL) policy plus this tenant's own, with a
+    tenant policy that names a parent_policy_id replacing (not
+    supplementing) the global policy it overrides -- same override
+    semantics as app.models.alert_rule_engine.evaluate_rules. A tenant
+    policy with no parent_policy_id is additive.
+    """
+    candidates = [p for p in all_policies if p.tenant_id is None or p.tenant_id == tenant_id]
+    overridden_ids = {
+        p.parent_policy_id
+        for p in candidates
+        if p.tenant_id is not None and p.parent_policy_id is not None
+    }
+    return [p for p in candidates if p.enabled and p.id not in overridden_ids]
+
+
 def _resolve_contacts(db: Session, policy: EscalationPolicy) -> str | None:
     """Who to name as "escalated to" in the message body -- the current
     on-call rotation contact if the policy has a schedule attached,
@@ -74,7 +94,7 @@ def _resolve_contacts(db: Session, policy: EscalationPolicy) -> str | None:
     return policy.secondary_contacts
 
 
-def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
+def _send(db: Session, policy: EscalationPolicy, alert: Alert, tenant_id=None) -> None:
     message = (
         f"Alert unacknowledged for {policy.unack_minutes}+ minutes: "
         f"[{alert.severity.value.upper()}] {alert.category} — {alert.message}"
@@ -93,6 +113,7 @@ def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
             message=message,
             severity=alert.severity.value,
             device_hostname=None,
+            tenant_id=tenant_id,
         )
     elif policy.channel.value == "push":
         # PUSH: the policy's own dedicated channel, for teams that want
@@ -108,7 +129,7 @@ def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
         )
         # Still write an in-app Notification Center row so the escalation
         # is visible even if nobody's phone is subscribed to push.
-        notification_service.notify(event="Alert Escalated", message=message, severity=alert.severity.value)
+        notification_service.notify(event="Alert Escalated", message=message, severity=alert.severity.value, tenant_id=tenant_id)
     else:
         # WEBHOOK / SLACK / TEAMS: post directly to the policy's own
         # webhook, independent of the fleet-wide SLACK_WEBHOOK_URL /
@@ -124,7 +145,7 @@ def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
         # Still write an in-app Notification Center row + fleet default
         # channels so the escalation is visible even if the webhook post
         # above fails or nobody's watching that channel.
-        notification_service.notify(event="Alert Escalated", message=message, severity=alert.severity.value)
+        notification_service.notify(event="Alert Escalated", message=message, severity=alert.severity.value, tenant_id=tenant_id)
 
     # Mobile push, on top of whichever channel above -- an escalation is
     # by definition something that already sat unacknowledged past its
@@ -149,10 +170,18 @@ def _send(db: Session, policy: EscalationPolicy, alert: Alert) -> None:
 def run_escalation_sweep(db: Session) -> int:
     """Evaluate every enabled EscalationPolicy against active alerts.
     Returns the number of (alert, policy) escalations fired this sweep.
+
+    Tenant scoping: previously every enabled policy ran against every
+    active alert fleet-wide, so one tenant's escalation policy could page
+    a contact over another tenant's unacknowledged alert. A device-linked
+    alert is now only evaluated against the global policies plus its own
+    device's tenant's policies (see _policies_for_tenant); an alert with
+    no device_id (some system-level alert sources set none) is only
+    evaluated against global policies, since it has no tenant to resolve.
     """
     now = datetime.now(timezone.utc)
-    policies = db.query(EscalationPolicy).filter(EscalationPolicy.enabled == True).all()
-    if not policies:
+    all_policies = db.query(EscalationPolicy).filter(EscalationPolicy.enabled == True).all()
+    if not all_policies:
         return 0
 
     candidates = (
@@ -168,15 +197,31 @@ def run_escalation_sweep(db: Session) -> int:
     if not candidates:
         return 0
 
+    device_ids = {a.device_id for a in candidates if a.device_id}
+    tenant_by_device = (
+        {d.id: d.tenant_id for d in db.query(Device).filter(Device.id.in_(device_ids)).all()}
+        if device_ids
+        else {}
+    )
+    # Cache the resolved policy list per tenant_id (including None for
+    # device-less alerts) so it's computed once per distinct tenant in
+    # this sweep, not once per alert.
+    policies_by_tenant: dict = {}
+
     fired = 0
-    for policy in policies:
-        for alert in candidates:
+    for alert in candidates:
+        tenant_id = tenant_by_device.get(alert.device_id) if alert.device_id else None
+        if tenant_id not in policies_by_tenant:
+            policies_by_tenant[tenant_id] = _policies_for_tenant(all_policies, tenant_id)
+        policies = policies_by_tenant[tenant_id]
+
+        for policy in policies:
             if not _matches_scope(alert, policy.severity_scope.value):
                 continue
             if not _due(alert, policy, now):
                 continue
 
-            _send(db, policy, alert)
+            _send(db, policy, alert, tenant_id=tenant_id)
 
             alert.escalated = True
             alert.escalated_at = alert.escalated_at or now
@@ -191,6 +236,7 @@ def run_escalation_sweep(db: Session) -> int:
                 action="Alert Escalated",
                 result=policy.name,
                 detail=f"alert_id={alert.id} policy_id={policy.id} unack_minutes={policy.unack_minutes}",
+                tenant_id=tenant_id,
             )
             fired += 1
 
@@ -199,11 +245,18 @@ def run_escalation_sweep(db: Session) -> int:
     return fired
 
 
-def list_escalated_alerts(db: Session, limit: int = 100) -> list[Alert]:
+def list_escalated_alerts(db: Session, limit: int = 100, tenant_id=None) -> list[Alert]:
+    """tenant_id=None returns the fleet-wide feed (MSP staff / no scope);
+    otherwise the feed is limited to alerts whose device belongs to that
+    tenant. Alerts with no device_id (never had a tenant to begin with)
+    are excluded once a tenant scope is applied, matching how they're
+    excluded from run_escalation_sweep's per-tenant policy resolution.
+    """
+    q = db.query(Alert).filter(Alert.escalated == True)
+    if tenant_id is not None:
+        q = q.join(Device, Device.id == Alert.device_id).filter(Device.tenant_id == tenant_id)
     return (
-        db.query(Alert)
-        .filter(Alert.escalated == True)
-        .order_by(Alert.last_escalated_at.desc().nullslast(), Alert.escalated_at.desc())
+        q.order_by(Alert.last_escalated_at.desc().nullslast(), Alert.escalated_at.desc())
         .limit(limit)
         .all()
     )
