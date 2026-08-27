@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, getAccessToken } from "../lib/api";
 import {
@@ -981,6 +981,15 @@ export default function Topology() {
             />
             Color links by utilization
           </label>
+          <div
+            className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm"
+            title="Animated yellow dashes mean that link (or trunk member) is actively passing traffic right now, per its latest SNMP poll. A solid line with no animation means it's up but idle."
+          >
+            <svg width="18" height="10" viewBox="0 0 18 10">
+              <line x1="0" y1="5" x2="18" y2="5" stroke="#facc15" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 5" />
+            </svg>
+            Flowing traffic
+          </div>
           <label
             className="flex items-center gap-1.5 text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-2 shadow-sm"
             title="Badges each node with its interface error count since the last SNMP poll (amber, red at 100+). Devices with zero errors or no recent poll show no badge."
@@ -1387,41 +1396,84 @@ export default function Topology() {
                               ? utilColor || "#16a34a"
                               : utilColor || "#94a3b8";
                             return (
-                              <line
-                                key={`${key}-m${i}`}
-                                x1={mx1}
-                                y1={my1}
-                                x2={mx2}
-                                y2={my2}
-                                stroke={memberColor}
-                                strokeWidth={active ? 2.5 : e.is_uplink ? 2.75 : 1.6}
-                                strokeDasharray={
-                                  member.status === "down" ? "3 3" : isStaleLink ? "5 3" : undefined
-                                }
-                                strokeLinecap="round"
-                              >
-                                <title>
-                                  {`${e.link_source.toUpperCase()} ${member.local_port || "?"} \u2194 ${
-                                    member.neighbor_port || "?"
-                                  } \u2014 ${member.status}${member.stale ? " (stale)" : ""}${
-                                    member.port_mode
-                                      ? ` \u2014 ${member.port_mode}${member.vlan ? ` (vlan ${member.vlan})` : ""}`
-                                      : ""
-                                  }`}
-                                </title>
-                              </line>
+                              <Fragment key={`${key}-m${i}`}>
+                                <line
+                                  x1={mx1}
+                                  y1={my1}
+                                  x2={mx2}
+                                  y2={my2}
+                                  stroke={memberColor}
+                                  strokeWidth={active ? 2.5 : e.is_uplink ? 2.75 : 1.6}
+                                  strokeDasharray={
+                                    member.status === "down" ? "3 3" : isStaleLink ? "5 3" : undefined
+                                  }
+                                  strokeLinecap="round"
+                                >
+                                  <title>
+                                    {`${e.link_source.toUpperCase()} ${member.local_port || "?"} \u2194 ${
+                                      member.neighbor_port || "?"
+                                    } \u2014 ${member.status}${member.stale ? " (stale)" : ""}${
+                                      member.port_mode
+                                        ? ` \u2014 ${member.port_mode}${member.vlan ? ` (vlan ${member.vlan})` : ""}`
+                                        : ""
+                                    }${member.traffic_state ? ` \u2014 ${member.traffic_state}` : ""}${
+                                      member.duplex_mismatch ? ` \u2014 \u26a0 duplex mismatch (${member.local_duplex} \u2194 ${member.neighbor_duplex})` : ""
+                                    }`}
+                                  </title>
+                                </line>
+                                {/* Marching-ants overlay: a live link actually passing
+                                    traffic gets small bright dashes animating from
+                                    source to target, on top of the static colored
+                                    line above -- the same "is this port idle or
+                                    really forwarding right now" signal a NOC engineer
+                                    reads off a real switch's port LEDs, but for the
+                                    logical map. Idle/down members get no overlay so
+                                    a busy trunk visually stands out from a quiet one. */}
+                                {member.traffic_state === "flowing" && (
+                                  <line
+                                    x1={mx1}
+                                    y1={my1}
+                                    x2={mx2}
+                                    y2={my2}
+                                    stroke="#facc15"
+                                    strokeWidth={active ? 2.5 : 1.8}
+                                    strokeLinecap="round"
+                                    strokeDasharray="2 7"
+                                    opacity={0.9}
+                                  >
+                                    <animate attributeName="stroke-dashoffset" from="18" to="0" dur="0.6s" repeatCount="indefinite" />
+                                  </line>
+                                )}
+                              </Fragment>
                             );
                           })
                         ) : (
-                          <line
-                            x1={a.x}
-                            y1={a.y}
-                            x2={b.x}
-                            y2={b.y}
-                            stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : e.is_uplink ? "#0f766e" : utilColor || "#94a3b8"}
-                            strokeWidth={active ? 2.75 : e.is_uplink ? 3 : 1.5}
-                            strokeDasharray={isStaleLink ? "5 3" : undefined}
-                          />
+                          <>
+                            <line
+                              x1={a.x}
+                              y1={a.y}
+                              x2={b.x}
+                              y2={b.y}
+                              stroke={onTracedPath ? "#7c3aed" : edgeAlerting ? "#dc2626" : active ? "#2563eb" : e.is_uplink ? "#0f766e" : utilColor || "#94a3b8"}
+                              strokeWidth={active ? 2.75 : e.is_uplink ? 3 : 1.5}
+                              strokeDasharray={isStaleLink ? "5 3" : undefined}
+                            />
+                            {e.traffic_state === "flowing" && (
+                              <line
+                                x1={a.x}
+                                y1={a.y}
+                                x2={b.x}
+                                y2={b.y}
+                                stroke="#facc15"
+                                strokeWidth={active ? 2.75 : 2}
+                                strokeLinecap="round"
+                                strokeDasharray="2 7"
+                                opacity={0.9}
+                              >
+                                <animate attributeName="stroke-dashoffset" from="18" to="0" dur="0.6s" repeatCount="indefinite" />
+                              </line>
+                            )}
+                          </>
                         )}
                         {/* Alert overlay: a pulsing red line laid on top so an actively
                             alerting link reads as "live incident", not just a static color. */}
@@ -1731,6 +1783,11 @@ export default function Topology() {
                       </span>
                     )}
                     {e.stale && <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-600">stale</span>}
+                    {e.duplex_mismatch && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-600" title="One end is set to half duplex, the other full — classic silent cause of packet loss/retransmits on this link.">
+                        duplex mismatch
+                      </span>
+                    )}
                   </div>
                   {e.members && e.members.length > 1 && (
                     <div className="text-slate-400 mt-1">{e.members.length} physical cables — click for details</div>
@@ -2267,6 +2324,14 @@ export default function Topology() {
                                       )}
                                     </span>
                                   )}
+                                  {m.duplex_mismatch && (
+                                    <span
+                                      className="flex items-center gap-1 mt-0.5 text-[10px] font-bold text-red-600"
+                                      title="Half/full duplex mismatch between the two ends of this cable."
+                                    >
+                                      ⚠ duplex mismatch ({m.local_duplex} ↔ {m.neighbor_duplex})
+                                    </span>
+                                  )}
                                 </span>
                                 <span className="flex items-center gap-1.5 shrink-0">
                                   {m.utilization_pct !== null && m.utilization_pct !== undefined && (
@@ -2339,6 +2404,20 @@ export default function Topology() {
                             <dt className="text-slate-500">Utilization</dt>
                             <dd className="font-mono font-bold" style={{ color: utilizationColor(e.utilization_pct) || "#334155" }}>
                               {e.utilization_pct}% (busier endpoint)
+                            </dd>
+                          </>
+                        )}
+                        {e.traffic_state && e.traffic_state !== "unknown" && (
+                          <>
+                            <dt className="text-slate-500">Traffic</dt>
+                            <dd
+                              className="font-mono font-bold capitalize"
+                              style={{
+                                color:
+                                  e.traffic_state === "flowing" ? "#ca8a04" : e.traffic_state === "down" ? "#dc2626" : "#64748b",
+                              }}
+                            >
+                              {e.traffic_state}
                             </dd>
                           </>
                         )}

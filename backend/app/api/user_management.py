@@ -75,6 +75,7 @@ def _serialize(user: User, tenant_name: str | None = None) -> AdminUserRead:
         extra_roles=_parse_extra_roles(user),
         extra_permissions=_parse_extra_permissions(user),
         is_active=_is_active(user),
+        is_approved=bool(user.is_approved),
         mfa_enabled=str(user.mfa_enabled).lower() == "true",
         sso_provider=user.sso_provider,
         created_at=user.created_at,
@@ -127,10 +128,66 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
         security=sum(1 for u in users if u.role == UserRole.SECURITY),
         auditor=sum(1 for u in users if u.role == UserRole.AUDITOR),
         disabled=sum(1 for u in users if not _is_active(u)),
+        pending_approval=sum(1 for u in users if not u.is_approved),
     )
     return AdminUserListResponse(
         users=[_serialize(u, tenant_names.get(u.tenant_id)) for u in users],
         counts=counts,
+    )
+
+
+@router.get("/pending", response_model=list[AdminUserRead])
+def list_pending_users(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+    """Self-registered accounts (POST /auth/register) still awaiting
+    approval -- backs the Users page's "Pending Approval" queue. Kept as
+    a separate endpoint (rather than a query param on GET /users) so the
+    queue can poll/badge independently of whatever filters are active on
+    the main table."""
+    users = db.query(User).filter(User.is_approved.is_(False)).order_by(User.created_at.desc()).all()
+    tenant_names = {t.id: t.name for t in db.query(Tenant).all()}
+    return [_serialize(u, tenant_names.get(u.tenant_id)) for u in users]
+
+
+@router.post("/{user_id}/approve", response_model=AdminUserRead)
+def approve_user(user_id: str, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_approved:
+        raise HTTPException(status_code=409, detail="This account is already approved")
+
+    user.is_approved = True
+    db.commit()
+    db.refresh(user)
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="User Approved", result="Success", detail=user.email,
+    )
+    tenant_name = db.get(Tenant, user.tenant_id).name if user.tenant_id else None
+    return _serialize(user, tenant_name)
+
+
+@router.post("/{user_id}/reject", status_code=204)
+def reject_user(user_id: str, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+    """Rejects (deletes) a pending self-registration. Only ever valid
+    against an unapproved account -- rejecting an already-approved user
+    isn't "reject", that's account deletion, which DELETE /users/{id}
+    already covers with its own active-admin-count safety check."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_approved:
+        raise HTTPException(
+            status_code=409,
+            detail="This account is already approved -- use DELETE /users/{id} to remove an active account",
+        )
+
+    email = user.email
+    db.delete(user)
+    db.commit()
+
+    audit_service.record_event(
+        db, actor=current_user.email, action="User Registration Rejected", result="Success", detail=email,
     )
 
 
@@ -157,6 +214,10 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db), current
         extra_roles=",".join(r.value for r in payload.extra_roles) or None,
         extra_permissions=",".join(_valid_permission_keys(payload.extra_permissions)) or None,
         is_active=True,
+        # Admin-created accounts skip the approval queue entirely -- an
+        # admin creating the account directly *is* the approval. Only
+        # the public POST /auth/register path ever leaves this False.
+        is_approved=True,
     )
     db.add(user)
     db.commit()

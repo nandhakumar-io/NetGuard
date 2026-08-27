@@ -266,12 +266,18 @@ function PlaybackModal({ recording, onClose }: { recording: TerminalSessionRecor
 export default function TerminalRecordings() {
   const { user } = useAuth();
   const canView = user?.role === "network_admin" || user?.role === "security";
+  // Deletion is destructive to what's functionally a compliance artifact
+  // (PCI DSS 10.2 / SOC 2 CC6.1 evidence) -- narrower than view access,
+  // matching the backend's SECURITY-only delete endpoints.
+  const canDelete = user?.role === "security";
 
   const [recordings, setRecordings] = useState<TerminalSessionRecording[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [protocolFilter, setProtocolFilter] = useState("all");
   const [selected, setSelected] = useState<TerminalSessionRecording | null>(null);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
 
   const load = () => {
     if (!canView) {
@@ -281,7 +287,10 @@ export default function TerminalRecordings() {
     setLoading(true);
     api
       .get<TerminalSessionRecording[]>("/terminal-recordings")
-      .then((res) => setRecordings(res.data))
+      .then((res) => {
+        setRecordings(res.data);
+        setCheckedIds(new Set());
+      })
       .finally(() => setLoading(false));
   };
 
@@ -311,6 +320,56 @@ export default function TerminalRecordings() {
       </div>
     );
   }
+
+  const toggleChecked = (id: string) => {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleCheckedAll = () => {
+    setCheckedIds((prev) => (prev.size === filtered.length ? new Set() : new Set(filtered.map((r) => r.id))));
+  };
+
+  const deleteOne = async (id: string) => {
+    if (!window.confirm("Delete this recording? This can't be undone.")) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/terminal-recordings/${id}`);
+      if (selected?.id === id) setSelected(null);
+      load();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const deleteSelected = async () => {
+    if (checkedIds.size === 0) return;
+    if (!window.confirm(`Delete ${checkedIds.size} selected recording(s)? This can't be undone.`)) return;
+    setDeleting(true);
+    try {
+      await api.post("/terminal-recordings/bulk-delete", { recording_ids: Array.from(checkedIds) });
+      load();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const deleteAll = async () => {
+    if (!window.confirm(`Delete ALL ${recordings.length} terminal recordings on the server? This can't be undone.`))
+      return;
+    if (!window.confirm("Are you sure? This removes every recorded session, including live evidence for past reviews.")) return;
+    setDeleting(true);
+    try {
+      await api.delete("/terminal-recordings/", { params: { confirm: true } });
+      load();
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div>
@@ -342,6 +401,24 @@ export default function TerminalRecordings() {
             </option>
           ))}
         </select>
+        {canDelete && checkedIds.size > 0 && (
+          <button
+            onClick={deleteSelected}
+            disabled={deleting}
+            className="text-xs text-red-600 font-semibold hover:text-red-800 border border-red-200 rounded-lg px-3 py-2 disabled:opacity-50"
+          >
+            Delete {checkedIds.size} selected
+          </button>
+        )}
+        {canDelete && recordings.length > 0 && (
+          <button
+            onClick={deleteAll}
+            disabled={deleting}
+            className="text-xs text-red-600 font-semibold hover:text-red-800 border border-red-200 rounded-lg px-3 py-2 disabled:opacity-50"
+          >
+            Delete all
+          </button>
+        )}
         <button onClick={load} className="text-xs text-brandblue font-medium hover:text-navy ml-auto">
           ↻ Refresh
         </button>
@@ -351,6 +428,16 @@ export default function TerminalRecordings() {
         <table className="w-full text-sm min-w-[820px]">
           <thead className="bg-navy text-white">
             <tr>
+              {canDelete && (
+                <th className="text-left px-4 py-3 font-semibold w-8">
+                  <input
+                    type="checkbox"
+                    checked={filtered.length > 0 && checkedIds.size === filtered.length}
+                    onChange={toggleCheckedAll}
+                    aria-label="Select all"
+                  />
+                </th>
+              )}
               <th className="text-left px-4 py-3 font-semibold">Started</th>
               <th className="text-left px-4 py-3 font-semibold">Device</th>
               <th className="text-left px-4 py-3 font-semibold">Actor</th>
@@ -364,20 +451,30 @@ export default function TerminalRecordings() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={8} className="text-center text-slate-400 py-8">
+                <td colSpan={canDelete ? 9 : 8} className="text-center text-slate-400 py-8">
                   Loading recordings…
                 </td>
               </tr>
             )}
             {!loading && filtered.length === 0 && (
               <tr>
-                <td colSpan={8} className="text-center text-slate-400 py-8">
+                <td colSpan={canDelete ? 9 : 8} className="text-center text-slate-400 py-8">
                   {recordings.length === 0 ? "No terminal sessions recorded yet." : "No recordings match your search."}
                 </td>
               </tr>
             )}
             {filtered.map((r, i) => (
               <tr key={r.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
+                {canDelete && (
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={checkedIds.has(r.id)}
+                      onChange={() => toggleChecked(r.id)}
+                      aria-label={`Select recording ${r.id}`}
+                    />
+                  </td>
+                )}
                 <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{new Date(r.started_at).toLocaleString()}</td>
                 <td className="px-4 py-3 font-medium text-navy">{r.device_hostname || "—"}</td>
                 <td className="px-4 py-3 text-slate-600">{r.actor_email}</td>
@@ -401,13 +498,22 @@ export default function TerminalRecordings() {
                     <span className="px-2 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600">Closed</span>
                   )}
                 </td>
-                <td className="px-4 py-3 text-right">
+                <td className="px-4 py-3 text-right whitespace-nowrap">
                   <button
                     onClick={() => setSelected(r)}
                     className="text-brandblue hover:text-navy text-xs font-semibold"
                   >
                     ▶ Playback
                   </button>
+                  {canDelete && (
+                    <button
+                      onClick={() => deleteOne(r.id)}
+                      disabled={deleting}
+                      className="text-red-500 hover:text-red-700 text-xs font-semibold ml-3 disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

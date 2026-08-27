@@ -810,6 +810,50 @@ def walk_switchport_vlans(ip_address: str, auth: "SnmpAuthConfig", timeout: floa
         return {}
 
 
+_DUPLEX_ENUM = {"1": "unknown", "2": "half", "3": "full"}
+
+
+def walk_interface_duplex(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
+    """Best-effort per-port duplex mode via EtherLike-MIB's
+    dot3StatsDuplexStatus (1.3.6.1.2.1.10.7.2.1.19), keyed by ifDescr
+    like walk_switchport_vlans -- powers duplex-mismatch detection on
+    confirmed LLDP/CDP topology links (app.services.topology_service).
+    A half/full mismatch between the two ends of a link is a classic
+    silent cause of packet loss, retransmits, and "slow but not down"
+    complaints that never trips an interface-down alert, so it's worth
+    surfacing on the link itself rather than only in raw port config.
+
+    dot3StatsIndex is defined by the MIB as the ifIndex of the
+    underlying interface, so -- unlike walk_switchport_vlans, which has
+    to translate a separate dot1dBasePortIfIndex mapping first -- this
+    can join straight against ifDescr.
+
+    Returns ``{ifDescr: "half" | "full" | "unknown"}`` for every port
+    that answered. Ports that don't implement EtherLike-MIB at all
+    (non-Ethernet interfaces, some platforms) are simply absent from
+    the result, not reported as "unknown" -- that distinction matters
+    to the mismatch check, which must never compare against data it
+    doesn't actually have. Any failure here is swallowed and just
+    leaves duplex unresolved for this device, same posture as every
+    other best-effort SNMP enrichment in this module.
+    """
+    try:
+        if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+        duplex_raw = _walk(ip_address, auth, "1.3.6.1.2.1.10.7.2.1.19", timeout)
+        if not if_descr or not duplex_raw:
+            return {}
+        result: dict[str, str] = {}
+        for if_index, raw in duplex_raw.items():
+            descr = if_descr.get(str(if_index))
+            if not descr:
+                continue
+            val = str(_parse_snmp_enum_int(raw) if _parse_snmp_enum_int(raw) is not None else raw)
+            result[descr.strip()] = _DUPLEX_ENUM.get(val, "unknown")
+        return result
+    except Exception:
+        return {}
+
+
 def walk_stp_edge_ports(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
     """Best-effort STP edge-port (PortFast) state via Cisco's
     CISCO-STP-EXTENSIONS-MIB (stpxFastPortOperState, .1.3.6.1.4.1.9.9.87.1.4.1.1.2),

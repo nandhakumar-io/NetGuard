@@ -69,8 +69,18 @@ class AlertRule(Base):
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
 
-    metric = Column(Enum(AlertRuleMetric), nullable=False)
-    operator = Column(Enum(AlertRuleOperator), nullable=False)
+    # values_callable is required here: SQLAlchemy's default Enum(cls)
+    # persistence keys off the Python member NAME ("CPU", "GT"), not the
+    # str value ("cpu", "gt") the member's `.value` mixin suggests. Every
+    # other layer of this feature -- AlertRuleCreate/Update/Read schemas,
+    # the frontend's <select> options, and alert_rule_engine._metric_value
+    # -- sends/reads the lowercase *value* string, so without this the
+    # ORM raises `LookupError: 'cpu' is not among the defined enum
+    # values` on every single insert/update, i.e. no custom rule (any
+    # metric, any operator) could ever be saved. See migration 0094 for
+    # the corresponding Postgres enum-label + existing-row backfill.
+    metric = Column(Enum(AlertRuleMetric, values_callable=lambda e: [m.value for m in e]), nullable=False)
+    operator = Column(Enum(AlertRuleOperator, values_callable=lambda e: [m.value for m in e]), nullable=False)
     threshold = Column(Float, nullable=False)
 
     severity = Column(String, nullable=False, default="warning")  # critical / warning / info

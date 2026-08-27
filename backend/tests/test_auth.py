@@ -50,7 +50,24 @@ def _register(client, email="user@netguard.ai", role="network_admin"):
         "email": email, "full_name": "Test User", "password": "correct-horse-1", "role": role,
     })
     assert r.status_code == 201
-    return r.json()["access_token"]
+
+    from app.core.database import get_db
+    from app.main import app
+    from app.models.user import User
+
+    db_gen = app.dependency_overrides[get_db]()
+    db = next(db_gen)
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if user:
+            user.is_approved = True
+            db.commit()
+    finally:
+        db_gen.close()
+
+    login = client.post("/api/v1/auth/login", json={"email": email, "password": "correct-horse-1"})
+    assert login.status_code == 200
+    return login.json().get("access_token")
 
 
 def test_login_without_mfa_returns_token_pair(client):

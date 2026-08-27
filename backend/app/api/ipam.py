@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import require_msp_staff, require_roles
 from app.models.subnet import IPAddressState, IPReservation, Subnet
 from app.models.user import UserRole
 from app.schemas.subnet import (
@@ -30,10 +30,20 @@ from app.services import ipam_service
 
 router = APIRouter(prefix="/ipam", tags=["ipam"])
 
-# Same posture as devices/device-groups: everyone authenticated can view
-# the address plan, only Network Admins create/edit/delete subnets and
-# reservations.
-IPAM_MANAGER_ROLES = require_roles(UserRole.NETWORK_ADMIN, UserRole.NETWORK_ENGINEER)
+_ipam_role = require_roles(UserRole.NETWORK_ADMIN, UserRole.NETWORK_ENGINEER)
+
+
+def IPAM_MANAGER_ROLES(user=Depends(_ipam_role)):
+    """Subnet/reservation create/edit/delete, plus live scan/fingerprint
+    (which actively probes hosts on the subnet's range). Subnet carries
+    no tenant_id and isn't tied to any Device, so -- same reasoning as
+    app.api.network_discovery._discovery_admin -- there's no safe way to
+    let a tenant-scoped Network Admin/Engineer manage or scan IP space
+    without risking another tenant's subnets. MSP staff only.
+    """
+    if not user.is_msp_staff:
+        raise HTTPException(status_code=403, detail="IPAM management is only available to MSP staff")
+    return user
 
 
 def _tags_to_json(tags: list[str] | None) -> str | None:
@@ -68,7 +78,7 @@ def _to_read(db: Session, subnet: Subnet) -> SubnetRead:
 
 
 @router.get("", response_model=list[SubnetRead])
-def list_subnets(site: str | None = None, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_subnets(site: str | None = None, db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     q = db.query(Subnet)
     if site:
         q = q.filter(Subnet.site == site)
@@ -113,7 +123,7 @@ def _networks_overlap(cidr_a: str, cidr_b: str) -> bool:
 
 
 @router.get("/conflicts", response_model=ConflictReport)
-def get_conflicts(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_conflicts(db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     """Fleet-wide: every IP address currently claimed by more than one
     device, regardless of whether a subnet has been defined for it.
     """
@@ -121,7 +131,7 @@ def get_conflicts(db: Session = Depends(get_db), _=Depends(get_current_user)):
 
 
 @router.get("/lookup")
-def lookup_ip(ip_address: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def lookup_ip(ip_address: str, db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     """Which managed subnet (if any) an address belongs to, plus whether
     it's already in use -- handy for "is 10.20.30.55 free before I hand
     it out" without knowing the subnet id up front.
@@ -137,7 +147,7 @@ def lookup_ip(ip_address: str, db: Session = Depends(get_db), _=Depends(get_curr
 
 
 @router.get("/reservations/stale", response_model=list[StaleReservation])
-def list_stale_reservations(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_stale_reservations(db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     """Fleet-wide: RESERVED reservations discovery scans haven't found a
     live host at -- the reverse of Network Discovery's rogue/expected
     split. Registered ahead of GET /{subnet_id} so "reservations" and
@@ -147,7 +157,7 @@ def list_stale_reservations(db: Session = Depends(get_db), _=Depends(get_current
 
 
 @router.get("/{subnet_id}", response_model=SubnetRead)
-def get_subnet(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_subnet(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     subnet = db.get(Subnet, subnet_id)
     if not subnet:
         raise HTTPException(status_code=404, detail="Subnet not found")
@@ -183,7 +193,7 @@ def delete_subnet(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends
 
 
 @router.get("/{subnet_id}/addresses", response_model=list[SubnetAddressEntry])
-def list_addresses(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_addresses(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     subnet = db.get(Subnet, subnet_id)
     if not subnet:
         raise HTTPException(status_code=404, detail="Subnet not found")
@@ -246,7 +256,7 @@ def fingerprint_subnet(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=De
 
 
 @router.get("/{subnet_id}/free-ip", response_model=FreeIPResult)
-def free_ip(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def free_ip(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     subnet = db.get(Subnet, subnet_id)
     if not subnet:
         raise HTTPException(status_code=404, detail="Subnet not found")
@@ -263,7 +273,7 @@ def free_ip(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_c
 
 
 @router.get("/{subnet_id}/reservations", response_model=list[IPReservationRead])
-def list_reservations(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_reservations(subnet_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_msp_staff)):
     subnet = db.get(Subnet, subnet_id)
     if not subnet:
         raise HTTPException(status_code=404, detail="Subnet not found")

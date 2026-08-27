@@ -10,6 +10,7 @@ interface AdminUser {
   extra_roles: string[];
   extra_permissions: string[];
   is_active: boolean;
+  is_approved: boolean;
   mfa_enabled: boolean;
   sso_provider: string | null;
   created_at: string | null;
@@ -44,6 +45,7 @@ interface RoleCounts {
   security: number;
   auditor: number;
   disabled: number;
+  pending_approval: number;
 }
 
 const ROLE_OPTIONS = ["network_admin", "network_engineer", "noc_engineer", "security", "auditor"];
@@ -124,6 +126,31 @@ export default function Users() {
     }
   };
 
+  const approveUser = async (u: AdminUser) => {
+    setActioningId(u.id);
+    try {
+      await api.post(`/users/${u.id}/approve`);
+      await load();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to approve user");
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const rejectUser = async (u: AdminUser) => {
+    if (!confirm(`Reject ${u.email}'s registration? This deletes the pending account and cannot be undone.`)) return;
+    setActioningId(u.id);
+    try {
+      await api.post(`/users/${u.id}/reject`);
+      await load();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to reject user");
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   const removeUser = async (u: AdminUser) => {
     if (!confirm(`Permanently delete ${u.email}? This cannot be undone.`)) return;
     setActioningId(u.id);
@@ -178,6 +205,51 @@ export default function Users() {
 
       {error && <div className="mb-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm">{error}</div>}
 
+      {/* Pending approval queue -- self-registered accounts (POST
+         /auth/register) can't sign in until approved here. Only rendered
+         when there's actually something waiting, so it doesn't take up
+         permanent space on a deployment where nobody self-registers. */}
+      {!!counts?.pending_approval && (
+        <div className="mb-6 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 flex items-center gap-2 border-b border-amber-200 dark:border-amber-900/50">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-600 shrink-0">
+              <circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span className="font-bold text-sm text-amber-800 dark:text-amber-300">
+              {counts.pending_approval} account{counts.pending_approval === 1 ? "" : "s"} awaiting approval
+            </span>
+          </div>
+          <div className="divide-y divide-amber-200/70 dark:divide-amber-900/40">
+            {users.filter((u) => !u.is_approved).map((u) => (
+              <div key={u.id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-bold text-sm text-navy dark:text-white">{u.full_name}</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    {u.email} · requested {roleLabel(u.role)}{u.tenant_name ? ` · ${u.tenant_name}` : ""}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    disabled={actioningId === u.id}
+                    onClick={() => approveUser(u)}
+                    className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-lg disabled:opacity-40"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    disabled={actioningId === u.id}
+                    onClick={() => rejectUser(u)}
+                    className="text-xs font-bold text-red-600 hover:underline disabled:opacity-40 disabled:no-underline"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Role descriptions */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 flex gap-3">
@@ -205,13 +277,14 @@ export default function Users() {
 
       {/* Stat cards */}
       {counts && (
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-7 gap-3 mb-6">
           {[
             { label: "Total", value: counts.total, color: "text-navy dark:text-white" },
             { label: "Admin", value: counts.network_admin, color: "text-red-600" },
             { label: "Engineer", value: counts.network_engineer, color: "text-blue-600" },
             { label: "NOC", value: counts.noc_engineer, color: "text-purple-600" },
             { label: "Security", value: counts.security, color: "text-amber-600" },
+            { label: "Pending", value: counts.pending_approval, color: "text-amber-500" },
             { label: "Disabled", value: counts.disabled, color: "text-slate-400" },
           ].map((c) => (
             <div key={c.label} className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
@@ -320,9 +393,15 @@ export default function Users() {
                     )}
                   </td>
                   <td className="py-2.5 px-4">
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${u.is_active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-                      {u.is_active ? "Active" : "Disabled"}
-                    </span>
+                    {!u.is_approved ? (
+                      <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">
+                        Pending Approval
+                      </span>
+                    ) : (
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${u.is_active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                        {u.is_active ? "Active" : "Disabled"}
+                      </span>
+                    )}
                   </td>
                   <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400">{fmtDate(u.last_login_at)}</td>
                   <td className="py-2.5 px-4">
@@ -331,6 +410,24 @@ export default function Users() {
                       : <span className="text-xs text-slate-400">Off</span>}
                   </td>
                   <td className="py-2.5 px-4 text-right">
+                    {!u.is_approved ? (
+                      <div className="flex justify-end gap-3">
+                        <button
+                          disabled={actioningId === u.id}
+                          onClick={() => approveUser(u)}
+                          className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-lg disabled:opacity-40"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          disabled={actioningId === u.id}
+                          onClick={() => rejectUser(u)}
+                          className="text-xs font-bold text-red-600 hover:underline disabled:opacity-40 disabled:no-underline"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    ) : (
                     <div className="flex justify-end gap-3">
                       <button
                         disabled={actioningId === u.id}
@@ -372,6 +469,7 @@ export default function Users() {
                         Delete
                       </button>
                     </div>
+                    )}
                   </td>
                 </tr>
               ))

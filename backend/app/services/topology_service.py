@@ -33,6 +33,7 @@ fleet.
 from __future__ import annotations
 
 import ipaddress
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -47,7 +48,7 @@ from app.models.snapshot import ConfigSnapshot
 from app.models.subnet import Subnet
 from app.models.tenant import Tenant
 from app.services import gns3_service, risk_engine, snapshot_service
-from app.services.snmp_service import walk_switchport_vlans
+from app.services.snmp_service import walk_interface_duplex, walk_switchport_vlans
 
 if TYPE_CHECKING:
     from app.models.topology_snapshot import TopologySnapshot
@@ -134,6 +135,13 @@ class TopologyEdge:
     # one that would actually bottleneck this link), which is a reasonable
     # stand-in until per-interface octet counters are tracked per edge.
     utilization_pct: int | None = None
+    # Derived, coarse real-time state for the Topology page's live-link
+    # rendering: "flowing" (up + utilization_pct above IDLE_UTILIZATION_PCT_THRESHOLD),
+    # "idle" (up but at/under the threshold, incl. 0%), "down", or
+    # "unknown" (no utilization data to classify from -- e.g. a
+    # subnet-inferred edge with no recent poll on either endpoint). See
+    # _traffic_state.
+    traffic_state: str = "unknown"
     # When this edge was last confirmed by an LLDP/CDP discovery run (ISO
     # timestamp), or None for subnet-inferred/GNS3 edges where "confirmed"
     # doesn't apply the same way. Powers the "live vs. inferred" link-age
@@ -161,6 +169,11 @@ class TopologyEdge:
     # Empty for subnet/mgmt_subnet-inferred edges, which have no
     # per-port data at all.
     members: list["LinkMember"] = field(default_factory=list)
+    # True when at least one member has a confirmed half/full duplex
+    # mismatch between its two ends (see LinkMember.duplex_mismatch) --
+    # rolled up here so the Topology page can badge the link itself
+    # without a caller having to walk every member.
+    duplex_mismatch: bool = False
 
 
 @dataclass
@@ -186,6 +199,30 @@ class LinkMember:
     port_mode: str | None = None
     vlan: str | None = None
     trunk_vlans: list[str] | None = None
+    # Same coarse classification as TopologyEdge.traffic_state, computed
+    # per-member from its own status/utilization_pct rather than the
+    # edge's aggregate -- lets the UI animate individual trunk members
+    # independently (one member of a port-channel can be idle while
+    # another is saturated).
+    traffic_state: str = "unknown"
+    # Best-effort duplex mode read off *this member's* local_port via
+    # EtherLike-MIB (snmp_service.walk_interface_duplex) -- "half" |
+    # "full" | "unknown" | None (unresolved: no SNMP, or the platform
+    # doesn't expose dot3StatsDuplexStatus for that port).
+    local_duplex: str | None = None
+    # Same read taken from the *neighbor* device's own SNMP session at
+    # neighbor_port -- i.e. what the other end of this exact cable
+    # thinks its duplex is set to. Kept alongside local_duplex (rather
+    # than just a bool) so the Topology page's link-detail panel can
+    # show "this end: full / that end: half" instead of only a flag.
+    neighbor_duplex: str | None = None
+    # True only when both ends resolved to a real, differing duplex
+    # setting (half vs full) -- never fabricated from a missing or
+    # "unknown" reading on either side, same "don't invent data we
+    # don't have" posture as the rest of this module. A classic silent
+    # cause of packet loss/retransmits that never trips an
+    # interface-down alert, so it's worth flagging on the link itself.
+    duplex_mismatch: bool = False
 
 
 @dataclass
@@ -216,6 +253,27 @@ class BlastRadiusResult:
     dependent_device_ids: list[str] = field(default_factory=list)
     dependent_count: int = 0
     unknown_device_ids: list[str] = field(default_factory=list)  # requested but not found in inventory
+
+
+# Below this, a link is considered idle rather than actively passing
+# meaningful traffic -- low enough to still show a live-but-quiet link
+# distinctly from one saturated or trending toward it, high enough that
+# background/control-plane chatter on an otherwise-quiet port doesn't
+# read as "flowing".
+IDLE_UTILIZATION_PCT_THRESHOLD = 2
+
+
+def _traffic_state(status: str, utilization_pct: int | None) -> str:
+    """Coarse real-time classification for the Topology page's live link
+    rendering. Never fabricates a state from missing data -- "unknown"
+    for anything without a recent enough poll to say otherwise, same
+    "don't invent data we don't have" posture as the rest of this module.
+    """
+    if status == "down":
+        return "down"
+    if status != "up" or utilization_pct is None:
+        return "unknown"
+    return "flowing" if utilization_pct > IDLE_UTILIZATION_PCT_THRESHOLD else "idle"
 
 
 def _member_port_state(db: Session, device_id: str, local_port: str | None) -> tuple[str, int | None]:
@@ -291,6 +349,41 @@ def _member_switchport_info(
     if not info:
         return None, None, None
     return info.get("mode"), info.get("vlan"), info.get("trunk_vlans")
+
+
+def _member_port_duplex(
+    devices_by_id: dict[str, Device],
+    duplex_cache: dict[str, dict],
+    device_id: str,
+    port: str | None,
+) -> str | None:
+    """Best-effort duplex mode for one end of a link, read off
+    `device_id`'s own SNMP session at `port` (see
+    snmp_service.walk_interface_duplex) and cached per device_id --
+    called once per member for the local side and once for the
+    neighbor side, so a trunk with several members, or two members
+    landing on the same neighbor, don't re-walk the same device's
+    EtherLike-MIB table more than once.
+
+    Returns None wherever it can't be resolved (no SNMP configured, no
+    port name, walk failed, or the platform doesn't expose duplex for
+    that port) -- duplex_mismatch below only ever compares two actually
+    -known readings, never a fabricated default.
+    """
+    if not port:
+        return None
+    device = devices_by_id.get(device_id)
+    if not device or not device.snmp_version:
+        return None
+    if device_id not in duplex_cache:
+        try:
+            from app.services import metrics_service
+
+            auth = metrics_service.build_snmp_auth(device)
+            duplex_cache[device_id] = walk_interface_duplex(device.ip_address, auth)
+        except Exception:
+            duplex_cache[device_id] = {}
+    return duplex_cache[device_id].get(port)
 
 
 def uplink_interfaces_for_device(db: Session, device_id) -> set[str]:
@@ -518,16 +611,26 @@ def _active_alert_severity_by_device(db: Session) -> dict[str, str]:
     return out
 
 
-def build_topology(db: Session) -> TopologyGraph:
-    """Builds the fleet-wide topology graph: one node per device, edges
-    inferred from shared interface subnets across each device's latest
-    config snapshot. O(devices^2 * interfaces) -- fine at prototype fleet
+def build_topology(db: Session, tenant_id: uuid.UUID | None = None) -> TopologyGraph:
+    """Builds the topology graph: one node per device, edges inferred
+    from shared interface subnets across each device's latest config
+    snapshot. O(devices^2 * interfaces) -- fine at prototype fleet
     sizes; revisit (e.g. index by subnet first) if this becomes hot.
+
+    `tenant_id=None` returns the fleet-wide graph across every tenant --
+    only appropriate for MSP staff (app.core.deps.get_tenant_scope
+    returns None for them, same convention as app.api.devices). A
+    regular tenant user's tenant_id must always be passed so their
+    topology view can't include another customer's devices.
     """
-    devices = db.query(Device).order_by(Device.hostname).all()
+    q = db.query(Device)
+    if tenant_id is not None:
+        q = q.filter(Device.tenant_id == tenant_id)
+    devices = q.order_by(Device.hostname).all()
     devices_by_id = {str(d.id): d for d in devices}
     tenants_by_id = {str(t.id): t.name for t in db.query(Tenant).all()}
     switchport_cache: dict[str, dict] = {}
+    duplex_cache: dict[str, dict] = {}
     metrics_by_device = _latest_metrics_by_device(devices)
     alert_severity_by_device = _active_alert_severity_by_device(db)
 
@@ -665,9 +768,17 @@ def build_topology(db: Session) -> TopologyGraph:
                 > timedelta(days=LINK_STALE_AFTER_DAYS)
             )
             member_device_id = str(row.device_id)
+            member_neighbor_id = str(row.neighbor_device_id)
             status, member_util = _member_port_state(db, member_device_id, row.local_port)
             port_mode, vlan, trunk_vlans = _member_switchport_info(
                 devices_by_id, switchport_cache, member_device_id, row.local_port
+            )
+            local_duplex = _member_port_duplex(devices_by_id, duplex_cache, member_device_id, row.local_port)
+            neighbor_duplex = _member_port_duplex(devices_by_id, duplex_cache, member_neighbor_id, row.neighbor_port)
+            duplex_mismatch = (
+                local_duplex in ("half", "full")
+                and neighbor_duplex in ("half", "full")
+                and local_duplex != neighbor_duplex
             )
             members.append(
                 LinkMember(
@@ -681,11 +792,30 @@ def build_topology(db: Session) -> TopologyGraph:
                     port_mode=port_mode,
                     vlan=vlan,
                     trunk_vlans=trunk_vlans,
+                    traffic_state=_traffic_state(status, member_util),
+                    local_duplex=local_duplex,
+                    neighbor_duplex=neighbor_duplex,
+                    duplex_mismatch=duplex_mismatch,
                 )
             )
         members.sort(key=lambda m: (m.local_port or "", m.neighbor_port or ""))
         newest_confirmed = max((m.last_confirmed_at for m in members if m.last_confirmed_at), default=None)
         all_stale = all(m.stale for m in members) if members else False
+        any_duplex_mismatch = any(m.duplex_mismatch for m in members)
+        # Edge-level state rolls up its members: "flowing" if any member
+        # is actively passing traffic (the link as a whole is live even
+        # if one trunk member is idle), else "down" if every member is
+        # down, else "idle" if at least one member has a known up-but-
+        # quiet state, else "unknown".
+        member_states = {m.traffic_state for m in members}
+        if "flowing" in member_states:
+            edge_traffic_state = "flowing"
+        elif member_states and member_states == {"down"}:
+            edge_traffic_state = "down"
+        elif "idle" in member_states:
+            edge_traffic_state = "idle"
+        else:
+            edge_traffic_state = "unknown"
         edges.append(
             TopologyEdge(
                 source=source_id,
@@ -699,6 +829,8 @@ def build_topology(db: Session) -> TopologyGraph:
                 last_confirmed_at=newest_confirmed,
                 stale=all_stale,
                 members=members,
+                traffic_state=edge_traffic_state,
+                duplex_mismatch=any_duplex_mismatch,
             )
         )
 
@@ -760,6 +892,16 @@ def build_topology(db: Session) -> TopologyGraph:
             if m is not None and m.get("interface_utilization_pct") is not None
         ]
         edge.utilization_pct = round(max(readings)) if readings else None
+        # Edges with confirmed LLDP/CDP members already got a real,
+        # per-port traffic_state rolled up from those members above --
+        # only derive it from the device-wide figure here for edges that
+        # never went through that path (subnet/mgmt_subnet/gns3-inferred,
+        # which have no per-port data).
+        if not edge.members:
+            src_status = "unknown"
+            if src_metric is not None or tgt_metric is not None:
+                src_status = "up"  # a device with a recent poll at all is reachable
+            edge.traffic_state = _traffic_state(src_status, edge.utilization_pct)
 
     # Stamp uplink highlighting: a link touching a WAN/uplink-flagged
     # device on either end is itself an uplink link for map styling.

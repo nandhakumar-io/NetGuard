@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_roles
+from app.core.deps import get_tenant_scope, require_roles
 from app.models.backup_destination import BackupDestination
 from app.models.backup_job import BackupJob
 from app.models.device import Device
@@ -32,6 +32,21 @@ from app.services import audit_service, backup_destination_service, backup_servi
 router = APIRouter(prefix="/backups", tags=["backups"])
 
 _admin_only = require_roles(UserRole.NETWORK_ADMIN)
+
+
+def _msp_admin_only(user: User = Depends(_admin_only)) -> User:
+    """Gate for the whole-application-database backup surfaces (plain
+    NETWORK_ADMIN below covers only the per-device config backup
+    surfaces). A database backup is a full pg_dump of every tenant's data
+    at once -- credentials table included -- so unlike an ordinary
+    NETWORK_ADMIN-gated action, a customer-side Network Administrator
+    (scoped to just their own tenant, see User.is_msp_staff) must not get
+    it just by holding the same role name. Same posture as
+    app.core.deps.require_msp_staff / app.api.tenant_board / app.api.tenants.
+    """
+    if not user.is_msp_staff:
+        raise HTTPException(status_code=403, detail="Database backups are only available to MSP staff")
+    return user
 
 
 class FleetConfigBackupRequest(BaseModel):
@@ -88,7 +103,7 @@ def _serialize_destination(dest: BackupDestination) -> BackupDestinationRead:
 
 
 @router.get("")
-def list_backups(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+def list_backups(db: Session = Depends(get_db), _: User = Depends(_msp_admin_only)):
     """Archive history plus the summary stat-card figures the Backups page
     header shows (total/completed/failed counts, total bytes stored
     locally across completed rows)."""
@@ -106,7 +121,7 @@ def list_backups(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
 
 
 @router.post("/database", status_code=201)
-def trigger_database_backup(db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+def trigger_database_backup(db: Session = Depends(get_db), current_user: User = Depends(_msp_admin_only)):
     """Runs a pg_dump of the NetGuard database right now and returns the
     resulting row -- status is "completed" or "failed" on the same
     response (see backup_service.run_database_backup's docstring for why
@@ -128,12 +143,15 @@ def trigger_database_backup(db: Session = Depends(get_db), current_user: User = 
 # app.services.backup_service.device_backup_summary / run_fleet_config_backup.
 # ---------------------------------------------------------------------------
 @router.get("/devices")
-def list_device_backups(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+def list_device_backups(
+    db: Session = Depends(get_db), _: User = Depends(_admin_only), tenant_id=Depends(get_tenant_scope),
+):
     """Per-device config backup coverage for the Backups page: last backup
     time/version, how many are on file, and days since the last one --
     sorted so devices needing attention (never backed up, or most overdue)
-    come first."""
-    rows = backup_service.device_backup_summary(db)
+    come first. Scoped to the caller's own tenant's devices; MSP staff
+    (tenant_id is None) see every device, as before."""
+    rows = backup_service.device_backup_summary(db, tenant_id=tenant_id)
     never_backed_up = sum(1 for r in rows if r["last_backup_at"] is None)
     return {
         "devices": [
@@ -161,6 +179,7 @@ def trigger_device_backup(
     payload: DeviceConfigBackupRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(_admin_only),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Backs up a single device's config right now -- same underlying call
     as the device Config tab's Backup button, just reachable from the
@@ -168,7 +187,7 @@ def trigger_device_backup(
     "local only" ([]), a specific subset, or the default (omitted/None =
     every enabled destination, matching the historical behavior)."""
     device = db.query(Device).filter(Device.id == device_id).first()
-    if not device:
+    if not device or (tenant_id is not None and device.tenant_id != tenant_id):
         raise HTTPException(status_code=404, detail="Device not found")
     destination_ids = payload.destination_ids if payload else None
     try:
@@ -191,20 +210,23 @@ def trigger_fleet_backup(
     payload: FleetConfigBackupRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(_admin_only),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """"Back Up All Devices Now" -- runs a config backup against every
     managed device (or just `device_ids` if given), best-effort per device.
-    Returns which hostnames succeeded/failed so the UI can show a real
-    summary instead of a single pass/fail toast."""
+    Scoped to the caller's own tenant (both the "every device" default and
+    an explicit device_ids list); MSP staff (tenant_id is None) reach
+    every device, as before. Returns which hostnames succeeded/failed so
+    the UI can show a real summary instead of a single pass/fail toast."""
     device_ids = payload.device_ids if payload else None
     destination_ids = payload.destination_ids if payload else None
     return backup_service.run_fleet_config_backup(
-        db, current_user.email, device_ids=device_ids, destination_ids=destination_ids
+        db, current_user.email, device_ids=device_ids, destination_ids=destination_ids, tenant_id=tenant_id
     )
 
 
 @router.get("/destinations", response_model=list[BackupDestinationRead])
-def list_destinations(db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+def list_destinations(db: Session = Depends(get_db), _: User = Depends(_msp_admin_only)):
     """Off-site copy targets (S3 / Azure Blob / SFTP) that every future
     successful database backup gets pushed to -- see
     app.services.backup_service and app.services.backup_destination_service.
@@ -215,7 +237,7 @@ def list_destinations(db: Session = Depends(get_db), _: User = Depends(_admin_on
 
 @router.post("/destinations", response_model=BackupDestinationRead, status_code=201)
 def create_destination(
-    payload: BackupDestinationCreate, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)
+    payload: BackupDestinationCreate, db: Session = Depends(get_db), current_user: User = Depends(_msp_admin_only)
 ):
     if payload.type not in backup_destination_service.DESTINATION_TYPES:
         raise HTTPException(status_code=422, detail=f"Unknown destination type: {payload.type}")
@@ -244,7 +266,7 @@ def update_destination(
     destination_id: str,
     payload: BackupDestinationUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_admin_only),
+    current_user: User = Depends(_msp_admin_only),
 ):
     dest = db.query(BackupDestination).filter(BackupDestination.id == destination_id).first()
     if not dest:
@@ -268,7 +290,7 @@ def update_destination(
 
 
 @router.delete("/destinations/{destination_id}", status_code=204)
-def delete_destination(destination_id: str, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)):
+def delete_destination(destination_id: str, db: Session = Depends(get_db), current_user: User = Depends(_msp_admin_only)):
     dest = db.query(BackupDestination).filter(BackupDestination.id == destination_id).first()
     if not dest:
         raise HTTPException(status_code=404, detail="Backup destination not found")
@@ -282,7 +304,7 @@ def delete_destination(destination_id: str, db: Session = Depends(get_db), curre
 
 
 @router.post("/destinations/{destination_id}/test")
-def test_destination(destination_id: str, db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+def test_destination(destination_id: str, db: Session = Depends(get_db), _: User = Depends(_msp_admin_only)):
     """Connectivity/auth check without uploading anything -- backs the
     "Test" button on the Cloud Destinations panel."""
     dest = db.query(BackupDestination).filter(BackupDestination.id == destination_id).first()
@@ -298,7 +320,7 @@ def test_destination(destination_id: str, db: Session = Depends(get_db), _: User
 
 
 @router.get("/{backup_id}/download")
-def download_backup(backup_id: str, db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+def download_backup(backup_id: str, db: Session = Depends(get_db), _: User = Depends(_msp_admin_only)):
     job = db.query(BackupJob).filter(BackupJob.id == backup_id).first()
     if not job or job.status != "completed" or not job.file_path:
         raise HTTPException(status_code=404, detail="Backup not found or not completed")
@@ -306,7 +328,7 @@ def download_backup(backup_id: str, db: Session = Depends(get_db), _: User = Dep
 
 
 @router.delete("/{backup_id}", status_code=204)
-def delete_backup(backup_id: str, db: Session = Depends(get_db), _: User = Depends(_admin_only)):
+def delete_backup(backup_id: str, db: Session = Depends(get_db), _: User = Depends(_msp_admin_only)):
     job = db.query(BackupJob).filter(BackupJob.id == backup_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Backup not found")

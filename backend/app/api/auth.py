@@ -27,6 +27,7 @@ from app.schemas.auth import (
     MfaSetupResponse,
     MfaVerifyRequest,
     RefreshRequest,
+    RegisterResponse,
     SessionRead,
     Token,
     UserCreate,
@@ -114,7 +115,8 @@ def _issue_token_pair(
     # place that needs to stamp "last login" rather than duplicating it in
     # both -- backs the User Management page's Last Login column (see
     # app.api.user_management).
-    user.last_login_at = datetime.utcnow()
+    from datetime import timezone
+    user.last_login_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(session_record)
 
@@ -124,7 +126,7 @@ def _issue_token_pair(
     return Token(access_token=access_token)
 
 
-@router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -153,19 +155,37 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     # network_admin. sanitized_role() downgrades NETWORK_ADMIN/SECURITY to
     # NETWORK_ENGINEER; those roles can only be granted afterward by an
     # existing admin via PATCH /auth/users/{user_id}/role.
+    #
+    # is_approved is always explicitly False here, regardless of the
+    # column's server_default -- this is the one code path a self-service
+    # sign-up goes through, and it must never be usable until a
+    # NETWORK_ADMIN approves it from the Users page (POST
+    # /users/{id}/approve). Every other place a User row is created
+    # (app.api.user_management.create_user, SSO first-login) is an
+    # authenticated admin action or an already-vetted identity provider,
+    # so those leave is_approved at its True default.
     user = User(
         email=payload.email,
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
         role=payload.sanitized_role(),
         tenant_id=resolved_tenant_id,
+        is_approved=False,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    token = create_access_token(subject=user.email, role=user.role.value)
-    return Token(access_token=token)
+    # No token issued -- registering no longer logs the user in. They
+    # can't do anything with a token yet anyway, since /auth/login (and
+    # every other authenticated route, via get_current_user) now rejects
+    # an unapproved account. Returning a plain status instead lets the
+    # frontend show "pending approval" immediately rather than the new
+    # user discovering it's stuck the moment they try to load anything.
+    return RegisterResponse(
+        status="pending_approval",
+        message="Your account has been created and is awaiting administrator approval.",
+    )
 
 
 
@@ -189,6 +209,18 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     # would have silently done nothing for anyone still using a password.
     if user.is_active in (False, "false", "False"):
         raise HTTPException(status_code=403, detail="This account has been disabled")
+
+    # Self-registered accounts (app.api.auth.register always sets
+    # is_approved=False) can't log in until a NETWORK_ADMIN approves them
+    # from the Users page. Checked after the password/is_active gates
+    # above (so a wrong password still reports as wrong password, not as
+    # "pending approval" -- that would leak account existence) but before
+    # the rate limiter is reset, same ordering as the is_active check.
+    if not user.is_approved:
+        raise HTTPException(
+            status_code=403,
+            detail="Your account is pending administrator approval. You'll be able to sign in once an admin approves it.",
+        )
 
     rate_limiter.reset_attempts(payload.email)
 

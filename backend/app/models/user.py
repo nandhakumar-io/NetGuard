@@ -45,6 +45,7 @@ class User(Base):
     hashed_password = Column(String, nullable=True)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.NETWORK_ENGINEER)
     is_active = Column(String, default=True)
+    is_approved = Column(Boolean, nullable=False, default=True, server_default="true")
 
     # Fine-grained access beyond the base `role`: a comma-separated list of
     # additional UserRole values (e.g. a NETWORK_ENGINEER who also needs

@@ -134,6 +134,28 @@ def read_transcript(recording: TerminalSessionRecording) -> list[dict]:
     return records
 
 
+def delete_recordings(db: Session, rows: list[TerminalSessionRecording]) -> int:
+    """Deletes the given TerminalSessionRecording rows and their backing
+    files -- the reviewer-initiated counterpart to purge_expired's
+    scheduled sweep (same delete-file-then-delete-row mechanics), used
+    by the single/bulk/all delete endpoints in api.terminal_recordings.
+    Caller is responsible for authorization and audit logging; this is
+    just the deletion mechanics, kept separate so all three endpoints
+    share exactly one code path.
+    """
+    deleted = 0
+    for row in rows:
+        if row.file_path:
+            try:
+                Path(row.file_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        db.delete(row)
+        deleted += 1
+    db.commit()
+    return deleted
+
+
 def purge_expired(db: Session) -> int:
     """Deletes TerminalSessionRecording rows (and their backing files)
     older than settings.TERMINAL_RECORDING_RETENTION_DAYS. Mirrors flow_

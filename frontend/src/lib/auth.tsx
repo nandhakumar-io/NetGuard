@@ -48,7 +48,9 @@ interface AuthContextValue {
   loading: boolean;
   login: (email: string, password: string) => Promise<LoginOutcome>;
   verifyMfa: (mfaToken: string, code: string) => Promise<void>;
-  register: (email: string, full_name: string, password: string, role: UserRole, tenant_id?: string) => Promise<void>;
+  /** Resolves to the backend's pending-approval message on success --
+   *  registering no longer logs the user in (see app.api.auth.register). */
+  register: (email: string, full_name: string, password: string, role: UserRole, tenant_id?: string) => Promise<string>;
   logout: () => Promise<void>;
   refreshMe: () => Promise<void>;
   /** Redirects the browser to the backend's Google OIDC login endpoint.
@@ -120,12 +122,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const payload: Record<string, unknown> = { email, full_name, password, role };
     if (tenant_id) payload.tenant_id = tenant_id;
     const res = await api.post("/auth/register", payload);
-    // /auth/register only returns a single access_token (no refresh cookie) --
-    // storing it lets the new user land on their dashboard immediately, but
-    // they'll need to log in again once it expires since there is no
-    // refresh token yet.
-    setAccessToken(res.data.access_token);
-    await fetchMe();
+    // The backend no longer issues a token here -- a new account starts
+    // is_approved=False and can't log in until a NETWORK_ADMIN approves
+    // it from the Users page (see app.api.auth.register). Just surface
+    // the pending-approval message; there's no session to establish yet.
+    return res.data.message as string;
   };
 
   const logout = async () => {

@@ -34,6 +34,10 @@ class LinkMemberRead(BaseModel):
     port_mode: str | None = None  # "trunk" | "access" | "routed" | None if unresolved
     vlan: str | None = None
     trunk_vlans: list[str] | None = None
+    traffic_state: str = "unknown"  # "flowing" | "idle" | "down" | "unknown"
+    local_duplex: str | None = None  # "half" | "full" | "unknown" | None if unresolved
+    neighbor_duplex: str | None = None
+    duplex_mismatch: bool = False
 
 
 class TopologyEdgeRead(BaseModel):
@@ -46,9 +50,15 @@ class TopologyEdgeRead(BaseModel):
     local_port: str | None = None
     neighbor_port: str | None = None
     utilization_pct: int | None = None
+    traffic_state: str = "unknown"  # "flowing" | "idle" | "down" | "unknown"
     last_confirmed_at: str | None = None
     stale: bool = False
     is_uplink: bool = False
+    # True when any physical member of this link has a confirmed
+    # half/full duplex mismatch between its two ends (see
+    # LinkMemberRead.duplex_mismatch) -- lets the Topology page badge
+    # the link itself without walking every member.
+    duplex_mismatch: bool = False
     # Physical members of this logical link (see TopologyEdge.members) --
     # empty for subnet/mgmt_subnet-inferred edges. >1 member means this
     # line on the map represents a real multi-cable trunk (e.g. LACP

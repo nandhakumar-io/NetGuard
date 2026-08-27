@@ -62,6 +62,10 @@ export default function Login() {
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [tenants, setTenants] = useState<{ id: string; name: string }[]>([]);
   const [tenantId, setTenantId] = useState("");
+  // Set once POST /auth/register succeeds -- registration no longer logs
+  // the user in immediately (see app.api.auth.register), so this is
+  // shown instead of navigating away.
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
 
   // Surfaces a friendly message if we just bounced back from a failed
   // GET /sso/google/callback (see app/api/sso.py's _login_error_redirect).
@@ -106,6 +110,7 @@ export default function Login() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setPendingMessage(null);
     setLoading(true);
     try {
       if (mode === "login") {
@@ -115,10 +120,17 @@ export default function Login() {
           setLoading(false);
           return;
         }
+        navigate("/");
       } else {
-        await register(email, fullName, password, role, tenantId || undefined);
+        const message = await register(email, fullName, password, role, tenantId || undefined);
+        // Stay on this screen and drop back into login mode with the
+        // fields cleared -- there's no session yet, the new account
+        // needs an admin to approve it first.
+        setPendingMessage(message);
+        setMode("login");
+        setPassword("");
+        setFullName("");
       }
-      navigate("/");
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Authentication failed.");
     } finally {
@@ -211,6 +223,12 @@ export default function Login() {
             <h1 className="text-xl font-bold text-brandblue text-center mb-6">
               {mode === "login" ? "Hi, Welcome Back!" : "Create Your Account"}
             </h1>
+
+            {pendingMessage && (
+              <p className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3.5 py-2.5 mb-4">
+                {pendingMessage}
+              </p>
+            )}
 
             <div className="flex mb-6 rounded-lg bg-slate-100 p-1 text-sm font-medium">
               <button

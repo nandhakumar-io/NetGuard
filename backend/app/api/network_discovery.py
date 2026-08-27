@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import require_msp_staff, require_roles
 from app.models.device import Device, DeviceVendor
 from app.models.network_discovery import (
     DiscoveredHost,
@@ -65,7 +65,22 @@ from app.services import (
 router = APIRouter(prefix="/discovery", tags=["network-discovery"])
 logger = logging.getLogger(__name__)
 
-_discovery_admin = require_roles(UserRole.NETWORK_ADMIN)
+_network_admin_role = require_roles(UserRole.NETWORK_ADMIN)
+
+
+def _discovery_admin(user: User = Depends(_network_admin_role)) -> User:
+    """A scan actively probes machines on the network with no tenant
+    ownership check possible -- DiscoveryScan/DiscoveredHost carry no
+    tenant_id and aren't tied to a Device (a scan target is an arbitrary
+    operator-typed CIDR, not an existing device), so there's no safe way
+    to let a tenant-scoped Network Administrator run or manage scans
+    without risking them probing (or seeing results for) another
+    tenant's network. MSP staff only, same posture as the whole-database
+    backup surfaces in app.api.backups.
+    """
+    if not user.is_msp_staff:
+        raise HTTPException(status_code=403, detail="Network discovery is only available to MSP staff")
+    return user
 
 
 @router.post("/scans", response_model=DiscoveryScanRead, status_code=202)
@@ -107,7 +122,7 @@ def start_scan(
 
 
 @router.get("/scans", response_model=list[DiscoveryScanRead])
-def list_scans(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_scans(db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
     # Sweeps any PENDING/RUNNING scan that's been stuck way past a
     # reasonable finish time (worker crash, nothing consuming the
     # "polling" queue, ...) to FAILED -- see network_discovery_service.
@@ -120,7 +135,7 @@ def list_scans(db: Session = Depends(get_db), _: User = Depends(get_current_user
 
 
 @router.get("/scans/{scan_id}", response_model=DiscoveryScanRead)
-def get_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def get_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
     scan = db.get(DiscoveryScan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -172,7 +187,7 @@ def cancel_scan(scan_id: uuid.UUID, db: Session = Depends(get_db), user: User = 
 
 
 @router.get("/scans/{scan_id}/hosts", response_model=list[DiscoveredHostRead])
-def list_scan_hosts(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_scan_hosts(scan_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
     scan = db.get(DiscoveryScan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -222,7 +237,7 @@ def _resolve_vendor(guess: str | None) -> DeviceVendor:
 
 @router.get("/hosts/{host_id}/suggested-credentials", response_model=CredentialSuggestion | None)
 def suggested_credentials(
-    host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    host_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)
 ):
     """Best-effort SSH/SNMP credential-profile suggestion for this host's
     guessed vendor, for the import form to pre-fill (see
@@ -316,7 +331,7 @@ def import_host(
 
 
 @router.post("/hosts/{host_id}/ignore", response_model=DiscoveredHostRead)
-def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def ignore_host(host_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_msp_staff)):
     host = db.get(DiscoveredHost, host_id)
     if not host:
         raise HTTPException(status_code=404, detail="Discovered host not found")
@@ -464,7 +479,7 @@ def create_schedule(
 
 
 @router.get("/schedules", response_model=list[DiscoveryScheduleRead])
-def list_schedules(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_schedules(db: Session = Depends(get_db), _: User = Depends(require_msp_staff)):
     return db.query(DiscoverySchedule).order_by(DiscoverySchedule.created_at.desc()).all()
 
 
@@ -511,7 +526,7 @@ def delete_schedule(schedule_id: uuid.UUID, db: Session = Depends(get_db), _: Us
 
 @router.get("/schedules/{schedule_id}/ignore-rules", response_model=list[DiscoveryIgnoreRuleRead])
 def list_schedule_ignore_rules(
-    schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    schedule_id: uuid.UUID, db: Session = Depends(get_db), _: User = Depends(require_msp_staff)
 ):
     """Every persisted ignore decision for this schedule -- what
     run_scan is currently auto-suppressing on each sweep. Without this,

@@ -13,7 +13,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user, get_current_user_ws
+from app.core.deps import get_current_user, get_current_user_ws, get_tenant_scope
 from app.models.topology_snapshot import TopologySnapshot
 from app.schemas.topology import (
     TopologyDiffResponse,
@@ -31,10 +31,10 @@ router = APIRouter(prefix="/topology", tags=["topology"])
 HEARTBEAT_INTERVAL_SECONDS = 60
 
 
-def _build_topology_payload(db: Session) -> TopologyResponse:
+def _build_topology_payload(db: Session, tenant_id: uuid.UUID | None = None) -> TopologyResponse:
     """Shared by GET /topology and the /topology/ws push feed, so the two
     can never drift out of sync with each other."""
-    graph = topology_service.build_topology(db)
+    graph = topology_service.build_topology(db, tenant_id=tenant_id)
     return TopologyResponse(
         nodes=[
             {
@@ -70,9 +70,11 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                 "local_port": e.local_port,
                 "neighbor_port": e.neighbor_port,
                 "utilization_pct": e.utilization_pct,
+                "traffic_state": e.traffic_state,
                 "last_confirmed_at": e.last_confirmed_at,
                 "stale": e.stale,
                 "is_uplink": e.is_uplink,
+                "duplex_mismatch": e.duplex_mismatch,
                 "members": [
                     {
                         "local_port": m.local_port,
@@ -82,9 +84,13 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
                         "stale": m.stale,
                         "status": m.status,
                         "utilization_pct": m.utilization_pct,
+                        "traffic_state": m.traffic_state,
                         "port_mode": m.port_mode,
                         "vlan": m.vlan,
                         "trunk_vlans": m.trunk_vlans,
+                        "local_duplex": m.local_duplex,
+                        "neighbor_duplex": m.neighbor_duplex,
+                        "duplex_mismatch": m.duplex_mismatch,
                     }
                     for m in e.members
                 ],
@@ -95,25 +101,26 @@ def _build_topology_payload(db: Session) -> TopologyResponse:
 
 
 @router.get("", response_model=TopologyResponse)
-def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Fleet-wide network topology: one node per device, edges inferred
-    from shared interface subnets found in each device's latest config
-    snapshot (see app.services.topology_service for how links are
-    derived -- there's no CDP/LLDP discovery in NetGuard, so this is the
-    data-grounded substitute).
+def get_topology(db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    """Network topology: one node per device, edges inferred from shared
+    interface subnets and LLDP/CDP-confirmed links (see
+    app.services.topology_service).
 
     Available to any authenticated user (read-only), consistent with the
-    other dashboard/summary endpoints in this API.
+    other dashboard/summary endpoints in this API. Scoped to the caller's
+    tenant like every other device-scoped endpoint (app.api.devices) --
+    `tenant_id` is None only for MSP staff, who see the full cross-tenant
+    graph.
     """
-    return _build_topology_payload(db)
+    return _build_topology_payload(db, tenant_id=tenant_id)
 
 
-async def _topology_heartbeat_loop(websocket: WebSocket):
+async def _topology_heartbeat_loop(websocket: WebSocket, tenant_id: uuid.UUID | None):
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
         db = SessionLocal()
         try:
-            await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db).model_dump()})
+            await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db, tenant_id=tenant_id).model_dump()})
         finally:
             db.close()
 
@@ -144,12 +151,16 @@ async def topology_ws(websocket: WebSocket, token: str = Query("")):
     if not user:
         await websocket.close(code=1008)  # Policy Violation
         return
+    # Same tenant-scoping contract as GET /topology and app.api.devices:
+    # None only for MSP staff, otherwise the graph must never cross into
+    # another tenant's devices.
+    tenant_id = None if user.is_msp_staff else user.tenant_id
 
     await websocket.accept()
 
     db = SessionLocal()
     try:
-        await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db).model_dump()})
+        await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db, tenant_id=tenant_id).model_dump()})
     finally:
         db.close()
 
@@ -157,7 +168,7 @@ async def topology_ws(websocket: WebSocket, token: str = Query("")):
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(event_bus.TOPOLOGY_CHANNEL)
 
-    heartbeat_task = asyncio.create_task(_topology_heartbeat_loop(websocket))
+    heartbeat_task = asyncio.create_task(_topology_heartbeat_loop(websocket, tenant_id))
 
     try:
         while True:
@@ -166,7 +177,7 @@ async def topology_ws(websocket: WebSocket, token: str = Query("")):
                 continue
             db = SessionLocal()
             try:
-                await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db).model_dump()})
+                await websocket.send_json({"type": "topology_snapshot", "data": _build_topology_payload(db, tenant_id=tenant_id).model_dump()})
             finally:
                 db.close()
     except WebSocketDisconnect:

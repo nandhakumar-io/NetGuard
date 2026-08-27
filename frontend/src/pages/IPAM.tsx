@@ -57,7 +57,13 @@ export default function IPAMPage() {
   const { user } = useAuth();
   const confirm = useConfirm();
   const toast = useToast();
-  const canManage = user?.role === "network_admin" || user?.role === "network_engineer";
+  // Subnets/reservations carry no tenant ownership (see backend
+  // app.api.ipam module docstring) -- viewing or managing IP address
+  // space is MSP-staff-only, not just role-gated, so a tenant-scoped
+  // Network Admin/Engineer doesn't end up seeing another tenant's
+  // subnets.
+  const canView = !!user?.is_msp_staff;
+  const canManage = canView && (user?.role === "network_admin" || user?.role === "network_engineer");
 
   const [subnets, setSubnets] = useState<Subnet[]>([]);
   const [subnetsLoading, setSubnetsLoading] = useState(true);
@@ -116,13 +122,22 @@ export default function IPAMPage() {
   };
 
   useEffect(() => {
+    if (!canView) {
+      setSubnetsLoading(false);
+      return;
+    }
     loadSubnets();
-  }, [siteFilter]);
+  }, [siteFilter, canView]);
 
   useEffect(() => {
+    if (!canView) {
+      setConflictsLoading(false);
+      setStaleLoading(false);
+      return;
+    }
     loadConflicts();
     loadStaleReservations();
-  }, []);
+  }, [canView]);
 
   const sites = useMemo(() => Array.from(new Set(subnets.map((s) => s.site).filter(Boolean))) as string[], [subnets]);
 
@@ -186,6 +201,16 @@ export default function IPAMPage() {
       toast.error("Failed to delete subnet.");
     }
   };
+
+  if (!canView) {
+    return (
+      <div className="p-6">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-8 text-center text-slate-500 dark:text-slate-400">
+          IP address management is only available to MSP staff.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">

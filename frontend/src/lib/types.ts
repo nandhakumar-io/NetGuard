@@ -1070,6 +1070,11 @@ export interface TopologyEdge {
   // the higher of the two endpoints' whole-device interface utilization
   // readings, not a true per-port figure.
   utilization_pct: number | null;
+  // Coarse real-time classification derived from utilization_pct/status
+  // for live-link rendering: "flowing" (up, above the idle threshold),
+  // "idle" (up but quiet, incl. 0%), "down", or "unknown" (no recent
+  // poll to classify from). See backend topology_service._traffic_state.
+  traffic_state?: "flowing" | "idle" | "down" | "unknown";
   // ISO timestamp of the LLDP/CDP discovery run that last confirmed this
   // edge, or null for subnet-inferred/GNS3 edges. Powers the "live vs.
   // inferred" link-age display.
@@ -1082,6 +1087,11 @@ export interface TopologyEdge {
   // thicker / distinctly colored on the map so the WAN/uplink boundary
   // is visible at a glance.
   is_uplink?: boolean;
+  // True when any physical member of this link has a confirmed
+  // half/full duplex mismatch between its two ends (see
+  // LinkMember.duplex_mismatch) -- rolled up here so the map can badge
+  // the link itself without walking every member.
+  duplex_mismatch?: boolean;
   // Physical members of this logical link. >1 means this line represents
   // a real multi-cable trunk (e.g. LACP port-channel) -- every LLDP/CDP-
   // confirmed port pair between the same two devices, previously
@@ -1101,6 +1111,10 @@ export interface LinkMember {
   // that port. "unknown": no independent per-port poll data yet.
   status: "up" | "down" | "unknown";
   utilization_pct: number | null;
+  // Same classification as TopologyEdge.traffic_state, computed for this
+  // member individually -- lets the UI animate one trunk member as
+  // flowing while a sibling member sits idle.
+  traffic_state?: "flowing" | "idle" | "down" | "unknown";
   // Best-effort switchport mode for this member's local_port, resolved
   // via SNMP (Q-BRIDGE-MIB) against the device that reported it -- null
   // if unresolved (no SNMP configured, or the platform doesn't expose
@@ -1109,6 +1123,16 @@ export interface LinkMember {
   port_mode?: "trunk" | "access" | null;
   vlan?: string | null;
   trunk_vlans?: string[] | null;
+  // Best-effort duplex mode read off this member's local_port and off
+  // the neighbor device's own SNMP session at neighbor_port
+  // (EtherLike-MIB dot3StatsDuplexStatus) -- null/"unknown" wherever
+  // unresolved. duplex_mismatch is only ever true when BOTH sides
+  // resolved to a real, differing setting (half vs full); a silent
+  // cause of packet loss/retransmits that never trips an
+  // interface-down alert.
+  local_duplex?: "half" | "full" | "unknown" | null;
+  neighbor_duplex?: "half" | "full" | "unknown" | null;
+  duplex_mismatch?: boolean;
 }
 
 export interface TopologyResponse {

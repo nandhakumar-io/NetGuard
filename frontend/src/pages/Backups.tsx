@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { useAuth } from "../lib/auth";
 
 interface BackupJob {
   id: string;
@@ -113,6 +114,14 @@ function fmtDuration(seconds: number | null): string {
 }
 
 export default function Backups() {
+  const { user } = useAuth();
+  // Whole-database backups and off-site destinations are a full export
+  // of every tenant's data at once -- MSP-staff-only, same posture as
+  // the backend's _msp_admin_only gate in app.api.backups. Per-device
+  // config backups below stay available to a tenant's own Network
+  // Administrator (backend scopes those to their own devices).
+  const isMspStaff = !!user?.is_msp_staff;
+
   const [backups, setBackups] = useState<BackupJob[]>([]);
   const [total, setTotal] = useState(0);
   const [completed, setCompleted] = useState(0);
@@ -265,10 +274,15 @@ export default function Backups() {
   };
 
   useEffect(() => {
-    load();
-    loadDestinations();
+    if (isMspStaff) {
+      load();
+      loadDestinations();
+    } else {
+      setLoading(false);
+      setDestLoading(false);
+    }
     loadDeviceBackups();
-  }, []);
+  }, [isMspStaff]);
 
   const runBackup = async () => {
     setRunning(true);
@@ -316,6 +330,8 @@ export default function Backups() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
+      {isMspStaff && (
+        <>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <div className="w-11 h-11 rounded-xl bg-brandblue flex items-center justify-center text-white">
@@ -459,6 +475,15 @@ export default function Backups() {
           </div>
         )}
       </div>
+        </>
+      )}
+
+      {!isMspStaff && (
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-navy dark:text-white">Device Configuration Backups</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400">Per-device running-config snapshots for your fleet.</p>
+        </div>
+      )}
 
       {/* Device Config Backups */}
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mb-6">

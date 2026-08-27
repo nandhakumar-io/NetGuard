@@ -46,7 +46,11 @@ def get_current_user(
     # returns before any refresh token exists) skip this check.
     sid = payload.get("sid")
     if sid:
-        session = db.get(RefreshToken, sid)
+        try:
+            session_uuid = uuid.UUID(sid)
+        except ValueError:
+            raise credentials_exception
+        session = db.get(RefreshToken, session_uuid)
         if session is None or session.revoked:
             raise credentials_exception
 

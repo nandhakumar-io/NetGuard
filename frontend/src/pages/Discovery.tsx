@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { useAuth } from "../lib/auth";
 
 interface DiscoveryScan {
   id: string;
@@ -82,6 +83,12 @@ function fmtDate(iso: string | null): string {
 const POLL_INTERVAL_MS = 3000;
 
 export default function Discovery() {
+  const { user } = useAuth();
+  // Discovery scans have no tenant ownership (arbitrary operator-typed
+  // CIDR, not tied to a device) -- MSP-staff-only, same posture as the
+  // backend's app.api.network_discovery gate.
+  const canView = !!user?.is_msp_staff;
+
   const [scans, setScans] = useState<DiscoveryScan[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -137,12 +144,17 @@ export default function Discovery() {
   };
 
   useEffect(() => {
+    if (!canView) {
+      setLoading(false);
+      return;
+    }
     loadScans();
-  }, []);
+  }, [canView]);
 
   // Poll while any scan is pending/running; also refreshes the open
   // results panel so newly-found hosts stream in without a manual click.
   useEffect(() => {
+    if (!canView) return;
     const hasInFlight = scans.some((s) => s.status === "pending" || s.status === "running");
     if (!hasInFlight) return;
 
@@ -362,6 +374,16 @@ export default function Discovery() {
       setActioningHostId(null);
     }
   };
+
+  if (!canView) {
+    return (
+      <div className="p-6">
+        <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
+          Network discovery is only available to MSP staff.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">

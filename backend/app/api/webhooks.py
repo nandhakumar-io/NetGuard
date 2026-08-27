@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, get_tenant_scope, require_roles
 from app.models.user import User, UserRole
 from app.models.webhook import WebhookDeliveryAttempt, WebhookEndpoint
 from app.schemas.webhook import (
@@ -167,8 +167,17 @@ def list_webhooks(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    rows = db.query(WebhookEndpoint).order_by(WebhookEndpoint.created_at.desc()).limit(limit).all()
+    q = db.query(WebhookEndpoint)
+    # tenant_id is None only for MSP staff (see get_tenant_scope) -- they
+    # see every tenant's webhooks here; everyone else only sees their own
+    # tenant's webhooks plus any tenant_id=NULL (MSP-authored global) ones.
+    if tenant_id is not None:
+        q = q.filter(
+            (WebhookEndpoint.tenant_id == tenant_id) | (WebhookEndpoint.tenant_id.is_(None))
+        )
+    rows = q.order_by(WebhookEndpoint.created_at.desc()).limit(limit).all()
     from app.models.alert_runbook import AlertRunbook
 
     runbook_ids = {r.default_runbook_id for r in rows if r.default_runbook_id}
@@ -179,11 +188,23 @@ def list_webhooks(
     return [_webhook_to_read(r, runbook_names) for r in rows]
 
 
+def _get_scoped_webhook(db: Session, webhook_id: uuid.UUID, tenant_id) -> WebhookEndpoint:
+    """Fetches a webhook and enforces tenant ownership. Returns 404 (not
+    403) on a cross-tenant hit, same posture as api.devices.get_device --
+    doesn't confirm to the caller that a webhook with this ID exists in
+    someone else's tenant."""
+    wh = db.get(WebhookEndpoint, webhook_id)
+    if not wh or (tenant_id is not None and wh.tenant_id not in (None, tenant_id)):
+        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    return wh
+
+
 @router.post("", response_model=WebhookRead, status_code=201)
 def create_webhook(
     body: WebhookCreate,
     db: Session = Depends(get_db),
     user: User = Depends(_webhook_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
     _reject_unsafe_webhook_url(body.url)
     wh = WebhookEndpoint(
@@ -195,6 +216,9 @@ def create_webhook(
         telegram_chat_id=body.telegram_chat_id,
         enabled=body.enabled,
         created_by=user.email,
+        # tenant_id is None only for MSP-staff creators, same "leave it
+        # tenant-less rather than guessing" posture as api.devices.create_device.
+        tenant_id=tenant_id,
     )
     db.add(wh)
     db.commit()
@@ -208,10 +232,9 @@ def update_webhook(
     body: WebhookUpdate,
     db: Session = Depends(get_db),
     _: User = Depends(_webhook_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    wh = db.get(WebhookEndpoint, webhook_id)
-    if not wh:
-        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    wh = _get_scoped_webhook(db, webhook_id, tenant_id)
     updates = body.model_dump(exclude_unset=True)
     if updates.get("url"):
         _reject_unsafe_webhook_url(updates["url"])
@@ -229,10 +252,9 @@ def delete_webhook(
     webhook_id: uuid.UUID,
     db: Session = Depends(get_db),
     _: User = Depends(_webhook_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    wh = db.get(WebhookEndpoint, webhook_id)
-    if not wh:
-        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    wh = _get_scoped_webhook(db, webhook_id, tenant_id)
     db.delete(wh)
     db.commit()
 
@@ -242,10 +264,9 @@ def test_webhook(
     webhook_id: uuid.UUID,
     db: Session = Depends(get_db),
     _: User = Depends(_webhook_admin),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    wh = db.get(WebhookEndpoint, webhook_id)
-    if not wh:
-        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    wh = _get_scoped_webhook(db, webhook_id, tenant_id)
     # Re-validated here too, not just at create/update -- covers rows
     # written before this check existed, and closes most of the DNS-
     # rebinding gap called out in _reject_unsafe_webhook_url's docstring
@@ -312,11 +333,16 @@ def list_all_deliveries(
     success: bool | None = Query(None, description="Filter to only successful (true) or only failed (false) attempts."),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Recent delivery attempts across every webhook endpoint, newest
     first -- backs the top-level delivery log view (as opposed to
     GET /webhooks/{id}/deliveries, scoped to one endpoint)."""
-    q = db.query(WebhookDeliveryAttempt).order_by(WebhookDeliveryAttempt.attempted_at.desc())
+    q = db.query(WebhookDeliveryAttempt).join(
+        WebhookEndpoint, WebhookDeliveryAttempt.webhook_endpoint_id == WebhookEndpoint.id
+    ).order_by(WebhookDeliveryAttempt.attempted_at.desc())
+    if tenant_id is not None:
+        q = q.filter((WebhookEndpoint.tenant_id == tenant_id) | (WebhookEndpoint.tenant_id.is_(None)))
     if success is not None:
         q = q.filter(WebhookDeliveryAttempt.success == success)
     rows = q.limit(limit).all()
@@ -329,10 +355,9 @@ def list_webhook_deliveries(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
-    wh = db.get(WebhookEndpoint, webhook_id)
-    if not wh:
-        raise HTTPException(status_code=404, detail="Webhook endpoint not found")
+    wh = _get_scoped_webhook(db, webhook_id, tenant_id)
     rows = (
         db.query(WebhookDeliveryAttempt)
         .filter(WebhookDeliveryAttempt.webhook_endpoint_id == webhook_id)
@@ -348,6 +373,7 @@ def retry_delivery(
     attempt_id: uuid.UUID,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Manually resends the same event to the same webhook endpoint,
     logging a brand-new WebhookDeliveryAttempt row (is_retry=True,
@@ -368,6 +394,11 @@ def retry_delivery(
     wh = db.get(WebhookEndpoint, original.webhook_endpoint_id)
     if not wh:
         raise HTTPException(status_code=409, detail="The webhook endpoint this was sent to no longer exists")
+    if tenant_id is not None and wh.tenant_id not in (None, tenant_id):
+        # Same "don't confirm cross-tenant existence" posture as
+        # _get_scoped_webhook, but this is a 409 path (endpoint gone) not
+        # a lookup-by-id path, so 404 here instead of leaking a 403.
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
     if not wh.enabled:
         raise HTTPException(status_code=409, detail="This webhook endpoint is disabled -- enable it before retrying")
 

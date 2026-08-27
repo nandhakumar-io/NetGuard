@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_tenant_scope
 from app.models.alert import Alert
 from app.models.approval_chain import ApprovalStageStatus, ApprovalStageType
 from app.models.change_request import ChangeRequest, ChangeStatus
@@ -205,34 +205,56 @@ def _dual_approval(risk: RiskAnalysisResult, device_count: int) -> tuple[bool, s
     return requires_dual_approval, reason
 
 
+def _get_scoped_change_request(db: Session, cr_id: uuid.UUID, tenant_id) -> ChangeRequest:
+    """Fetches a ChangeRequest and enforces tenant ownership via its
+    target Device -- ChangeRequest has no tenant_id column of its own
+    (migration-free retrofit, same join-based approach as api.devices),
+    so scoping rides on Device.tenant_id through the required device_id
+    FK. 404 (not 403) on a cross-tenant hit, same posture as
+    api.devices.get_device."""
+    cr = db.get(ChangeRequest, cr_id)
+    if not cr:
+        raise HTTPException(status_code=404, detail="Change request not found")
+    if tenant_id is not None:
+        device = db.get(Device, cr.device_id)
+        if device is not None and device.tenant_id != tenant_id:
+            raise HTTPException(status_code=404, detail="Change request not found")
+    return cr
+
+
 @router.get("", response_model=list[ChangeRequestRead])
 def list_change_requests(
     alert_id: uuid.UUID | None = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """List change requests, optionally filtered to those auto-linked to a
     given alert (?alert_id=...) -- used by the Alert Center postmortem
     view to show "what change(s) were raised for this incident"."""
     query = db.query(ChangeRequest).order_by(ChangeRequest.created_at.desc())
+    if tenant_id is not None:
+        # No tenant_id column on ChangeRequest -- join through the
+        # required device_id FK, same pattern as api.devices. A change
+        # request always targets a real device, so this is an inner join
+        # (unlike webhooks/alert-rules, there's no "global CR" concept).
+        query = query.join(Device, ChangeRequest.device_id == Device.id).filter(Device.tenant_id == tenant_id)
     if alert_id is not None:
         query = query.filter(ChangeRequest.triggering_alert_id == alert_id)
     return _hydrate(db, query.all())
 
 
 @router.get("/pending-approvals", response_model=list[PendingApprovalItem])
-def list_pending_approvals(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_pending_approvals(db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     """Approval workflow visibility (FR-1/FR-6): every PENDING_APPROVAL
     change request with its SLA timer, sorted most-overdue-first so an
     approver's queue surfaces what needs attention first rather than just
     submission order. See settings.APPROVAL_SLA_HOURS for the thresholds.
     """
-    crs = (
-        db.query(ChangeRequest)
-        .filter(ChangeRequest.status == ChangeStatus.PENDING_APPROVAL)
-        .order_by(ChangeRequest.created_at.asc())
-        .all()
-    )
+    crs_query = db.query(ChangeRequest).filter(ChangeRequest.status == ChangeStatus.PENDING_APPROVAL)
+    if tenant_id is not None:
+        crs_query = crs_query.join(Device, ChangeRequest.device_id == Device.id).filter(Device.tenant_id == tenant_id)
+    crs = crs_query.order_by(ChangeRequest.created_at.asc()).all()
     hydrated = {cr.id: h for cr, h in zip(crs, _hydrate(db, crs))}
     now = datetime.now(timezone.utc)
 
@@ -264,6 +286,7 @@ def preview_blast_radius(
     additional_device_ids: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Blast-radius preview for a not-yet-submitted change: "this touches
     N devices, M are core, K devices depend on them via topology" --
@@ -275,6 +298,11 @@ def preview_blast_radius(
     endpoint takes it as a query param since there's no CR yet to hang
     it off).
     """
+    if tenant_id is not None:
+        anchor = db.get(Device, device_id)
+        if not anchor or anchor.tenant_id != tenant_id:
+            raise HTTPException(status_code=404, detail="Device not found")
+
     target_ids = [str(device_id)]
     if additional_device_ids:
         target_ids += [part.strip() for part in additional_device_ids.split(",") if part.strip()]
@@ -340,6 +368,7 @@ def simulate_impact(
     payload: ImpactSimulationRequest,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Pre-deployment "what-if" dry run (SRS-adjacent to blast-radius, but
     routing/reachability-aware rather than just a device-count fan-out):
@@ -352,7 +381,7 @@ def simulate_impact(
     /blast-radius above.
     """
     device = db.get(Device, payload.device_id)
-    if not device:
+    if not device or (tenant_id is not None and device.tenant_id != tenant_id):
         raise HTTPException(status_code=404, detail="Device not found")
 
     current_config = _latest_config(db, device.id)
@@ -365,6 +394,7 @@ def simulate_impact_for_change_request(
     cr_id: uuid.UUID,
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Same dry run as POST /simulate-impact above, but re-run against an
     already-submitted change request's stored current_config/proposed_config
@@ -372,9 +402,7 @@ def simulate_impact_for_change_request(
     without retyping the diff, and reflects whatever the topology looks
     like *right now* (which may have drifted since submission).
     """
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
     device = db.get(Device, cr.device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -388,9 +416,10 @@ def create_change_request(
     payload: ChangeRequestCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     device = db.get(Device, payload.device_id)
-    if not device:
+    if not device or (tenant_id is not None and device.tenant_id != tenant_id):
         raise HTTPException(status_code=404, detail="Device not found")
 
     triggering_alert = None
@@ -402,7 +431,8 @@ def create_change_request(
     additional_device_ids_json = None
     if payload.additional_device_ids:
         for extra_id in payload.additional_device_ids:
-            if not db.get(Device, extra_id):
+            extra_device = db.get(Device, extra_id)
+            if not extra_device or (tenant_id is not None and extra_device.tenant_id != tenant_id):
                 raise HTTPException(status_code=404, detail=f"Device {extra_id} not found")
         import json
         additional_device_ids_json = json.dumps([str(i) for i in payload.additional_device_ids])
@@ -470,15 +500,13 @@ def create_change_request(
 
 
 @router.get("/{cr_id}", response_model=ChangeRequestRead)
-def get_change_request(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+def get_change_request(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
     return _hydrate(db, [cr])[0]
 
 
 @router.get("/{cr_id}/three-way-diff", response_model=ThreeWayDiffResponse)
-def get_three_way_diff(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_three_way_diff(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     """Running vs. golden vs. proposed, for a reviewer deciding whether to
     approve. The plain `config_diff` on the CR already shows what the
     change itself does (current -> proposed); this adds the two legs
@@ -491,9 +519,7 @@ def get_three_way_diff(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depend
     still returned (against an empty baseline) so the response shape is
     always the same, but they aren't meaningful without a real baseline.
     """
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
 
     golden = db.query(GoldenConfig).filter(GoldenConfig.device_id == cr.device_id).first()
     golden_text = snapshot_service.decrypt_config(golden.config_encrypted) if golden else None
@@ -514,6 +540,7 @@ def rescore_change_request(
     cr_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Retry/re-score an existing change request in place, instead of the
     submitter having to discard it and resubmit from scratch.
@@ -532,9 +559,7 @@ def rescore_change_request(
     dual-approval fields with the fresh result. Only allowed while the CR
     hasn't been acted on yet (DRAFT or PENDING_APPROVAL).
     """
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
     if cr.status not in RESCORE_ALLOWED_STATUSES:
         raise HTTPException(
             status_code=409,
@@ -600,15 +625,13 @@ def rescore_change_request(
 
 
 @router.get("/{cr_id}/approval-chain", response_model=ApprovalChainRead)
-def get_approval_chain(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_approval_chain(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
     """The role-based approval chain (if any) attached to this change
     request -- empty `stages` means this CR only needs the plain single
     (or dual, see requires_dual_approval) Network Administrator approval,
     same as before this feature existed.
     """
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    _get_scoped_change_request(db, cr_id, tenant_id)
 
     stages = approval_chain_service.get_chain(db, cr_id)
     actor_ids = {s.acted_by for s in stages if s.acted_by}
@@ -640,6 +663,7 @@ def act_on_approval_chain(
     payload: ApprovalStageActionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Approves or rejects whatever stage is currently pending on this
     change request's approval chain (Peer Review or Manager Sign-off --
@@ -652,9 +676,7 @@ def act_on_approval_chain(
     cannot have already acted on an earlier stage of the same chain.
     Rejecting immediately rejects the whole change request.
     """
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
     if cr.status != ChangeStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail=f"Cannot act on a request in status '{cr.status.value}'")
 
@@ -689,7 +711,7 @@ def act_on_approval_chain(
             device_hostname=device.hostname if device else None, change_request_id=cr.id, detail=payload.notes,
         )
 
-    return get_approval_chain(cr_id, db, current_user)
+    return get_approval_chain(cr_id, db, current_user, tenant_id)
 
 
 @router.post("/{cr_id}/approve", response_model=ChangeRequestRead)
@@ -697,6 +719,7 @@ def approve_change_request(
     cr_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """Approves a pending change request and enqueues the deployment
     pipeline (Snapshot -> Deploy -> Health Monitor -> Success/Rollback) as
@@ -710,9 +733,7 @@ def approve_change_request(
     if current_user.role not in APPROVER_ROLES:
         raise HTTPException(status_code=403, detail="Only Network Administrators may approve change requests")
 
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
     if cr.status != ChangeStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail=f"Cannot approve a request in status '{cr.status.value}'")
 
@@ -885,13 +906,12 @@ def reject_change_request(
     cr_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     if current_user.role not in APPROVER_ROLES:
         raise HTTPException(status_code=403, detail="Only Network Administrators may reject change requests")
 
-    cr = db.get(ChangeRequest, cr_id)
-    if not cr:
-        raise HTTPException(status_code=404, detail="Change request not found")
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
 
     cr.status = ChangeStatus.REJECTED
     db.commit()

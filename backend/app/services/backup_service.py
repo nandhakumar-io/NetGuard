@@ -433,13 +433,21 @@ def run_device_config_backup(
     return snapshot
 
 
-def device_backup_summary(db: Session) -> list[dict]:
+def device_backup_summary(db: Session, tenant_id=None) -> list[dict]:
     """One row per managed device for the Backups page's Device Config
     Backups panel: latest snapshot's timestamp/version/checksum, a running
     count of how many backups are on file, and how many days it's been
     since the last one -- so an operator can see at a glance which devices
     haven't been backed up recently (or ever) without opening each one's
     Config tab individually.
+
+    `tenant_id`: None (MSP staff) sees every device, same as before this
+    param existed. Set for a tenant-scoped caller -- restricts the panel
+    to that tenant's own devices, matching the join-based scoping used
+    throughout app.api.devices/app.api.change_requests (no tenant_id
+    column on ConfigSnapshot, so this only needs to filter the Device
+    query itself; the snapshot lookups below are already keyed by
+    device_id).
 
     `never_backed_up` devices sort first, then oldest-last-backup-first --
     the devices most in need of attention naturally bubble to the top
@@ -450,7 +458,10 @@ def device_backup_summary(db: Session) -> list[dict]:
     from app.models.device import Device
     from app.models.snapshot import ConfigSnapshot
 
-    devices = db.query(Device).order_by(Device.hostname).all()
+    device_query = db.query(Device)
+    if tenant_id is not None:
+        device_query = device_query.filter(Device.tenant_id == tenant_id)
+    devices = device_query.order_by(Device.hostname).all()
     latest_by_device: dict = {}
     count_by_device: dict = {}
     for device_id, count in db.query(ConfigSnapshot.device_id, _func.count(ConfigSnapshot.id)).group_by(
@@ -496,18 +507,28 @@ def device_backup_summary(db: Session) -> list[dict]:
 
 
 def run_fleet_config_backup(
-    db: Session, operator_email: str, device_ids: list | None = None, destination_ids: list | None = None
+    db: Session, operator_email: str, device_ids: list | None = None, destination_ids: list | None = None,
+    tenant_id=None,
 ) -> dict:
     """Bulk "back up every device's config right now" sweep for the Backups
-    page's fleet-wide button -- device_ids=None means every managed device.
-    Each device is independently best-effort (an unreachable device just
-    lands in `failed`, same as a single manual backup failing wouldn't stop
-    anyone else's), so one down switch never blocks the rest of the fleet
-    from getting a fresh backup.
+    page's fleet-wide button -- device_ids=None means every managed device
+    (or, for a tenant-scoped caller, every device *of that tenant*; see
+    `tenant_id`). Each device is independently best-effort (an unreachable
+    device just lands in `failed`, same as a single manual backup failing
+    wouldn't stop anyone else's), so one down switch never blocks the rest
+    of the fleet from getting a fresh backup.
+
+    `tenant_id`: None (MSP staff) reaches every device, same as before this
+    param existed. Set for a tenant-scoped caller -- both the "back up
+    everything" default and an explicit `device_ids` list are filtered to
+    that tenant's own devices, so a tenant admin can't fleet-backup (or
+    probe the existence of) another tenant's devices by ID.
     """
     from app.models.device import Device
 
     query = db.query(Device)
+    if tenant_id is not None:
+        query = query.filter(Device.tenant_id == tenant_id)
     if device_ids:
         query = query.filter(Device.id.in_(device_ids))
     devices = query.all()

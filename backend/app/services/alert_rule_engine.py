@@ -62,7 +62,7 @@ def _metric_value(rule: AlertRule, metrics: SnmpMetrics) -> float | None:
     fabricated 0/None, same "don't invent data we don't have" posture as
     the rest of the SNMP pipeline.
     """
-    metric = rule.metric.value if hasattr(rule.metric, "value") else rule.metric
+    metric = (rule.metric.value if hasattr(rule.metric, "value") else rule.metric).lower()
     if metric == "cpu":
         return metrics.cpu_utilization_pct
     if metric == "memory":
@@ -143,7 +143,8 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             value = _metric_value(rule, metrics)
             if value is None:
                 continue
-            op_fn = _OPERATORS.get(rule.operator.value if hasattr(rule.operator, "value") else rule.operator)
+            op_str = (rule.operator.value if hasattr(rule.operator, "value") else rule.operator).lower()
+            op_fn = _OPERATORS.get(op_str)
             if op_fn is None:
                 continue
 
@@ -153,7 +154,7 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             if breached:
                 if _in_cooldown(db, device.id, category, rule.cooldown_seconds, now):
                     continue
-                severity = rule.severity.value if hasattr(rule.severity, "value") else rule.severity
+                severity = (rule.severity.value if hasattr(rule.severity, "value") else rule.severity).lower()
                 alert, is_new = alert_service.raise_alert(
                     db,
                     device_id=device.id,
@@ -162,7 +163,18 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                     category=category,
                     message=f"{device.hostname}: {rule.name} ({rule.metric.value if hasattr(rule.metric, 'value') else rule.metric} {rule.operator.value if hasattr(rule.operator, 'value') else rule.operator} {rule.threshold}, observed {value})",
                 )
-                if severity == "critical" and is_new:
+                # Unlike the built-in threshold alerts in metrics_service
+                # (which only notify on "critical" to avoid paging on
+                # every generic warning), a custom rule's severity was
+                # deliberately chosen by the operator who wrote it -- a
+                # "warning" rule they configured on purpose is exactly
+                # the kind of thing they built a webhook/push
+                # subscription for. Gating this to critical-only made
+                # every non-critical custom rule fire silently: the
+                # Alert row and in-app center updated, but nothing ever
+                # reached a webhook or a phone, which is what "the alert
+                # isn't going off" actually meant in practice.
+                if severity in ("critical", "warning") and is_new:
                     from app.services import notification_service
 
                     notification_service.notify(
@@ -172,7 +184,9 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                 alert_service.auto_resolve(
                     db, device_id=device.id, category=category, note=f"{device.hostname}: {rule.name} no longer breached"
                 )
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"Error evaluating rule {rule.id}: {e}")
             # Never let one malformed/legacy rule take down evaluation of
             # every other rule, or the poll itself.
             continue

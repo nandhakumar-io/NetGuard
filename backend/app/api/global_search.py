@@ -23,7 +23,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_tenant_scope
 from app.models.alert import Alert
 from app.models.change_request import ChangeRequest
 from app.models.config_template import ConfigTemplate
@@ -69,7 +69,7 @@ def _parse_ip_query(q: str) -> "ipaddress.IPv4Network | ipaddress.IPv6Network | 
         return None
 
 
-def _devices_in_network(db: Session, network, limit: int) -> list[dict]:
+def _devices_in_network(db: Session, network, limit: int, tenant_id=None) -> list[dict]:
     """Devices whose management IP falls in `network`, plus devices whose
     *latest config* declares an interface IP in `network` -- a CIDR search
     for "what's using 10.20.0.0/24" should surface a device even if its
@@ -82,7 +82,10 @@ def _devices_in_network(db: Session, network, limit: int) -> list[dict]:
 
     matches: dict[str, dict] = {}
 
-    for device in db.query(Device).order_by(Device.hostname).all():
+    q = db.query(Device).order_by(Device.hostname)
+    if tenant_id is not None:
+        q = q.filter(Device.tenant_id == tenant_id)
+    for device in q.all():
         if len(matches) >= limit:
             break
         try:
@@ -132,6 +135,7 @@ def global_search(
     query: str = Query(..., min_length=1, max_length=MAX_QUERY_LENGTH),
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
 ):
     """One query, fanned out across devices / groups / alerts / change
     requests / configs. Returns partial results per category rather than
@@ -146,21 +150,29 @@ def global_search(
     categories still run their normal ILIKE search alongside it -- a
     change request description or alert message could still legitimately
     contain that literal IP/CIDR string.
+
+    Every category is scoped to the caller's tenant (None only for MSP
+    staff, per get_tenant_scope) -- this is a cross-entity search box, so
+    without scoping it a regular tenant user could search their way into
+    another tenant's devices, alerts, change requests, or incidents just
+    by typing a guess. DeviceGroup and ConfigTemplate have no
+    device/tenant linkage of their own (they're role/type-keyed
+    definitions, not per-device records) so they're left fleet-wide, same
+    as they behave everywhere else in the app today.
     """
     q = query.strip()
     like = f"%{q}%"
     ip_network = _parse_ip_query(q)
 
     if ip_network is not None:
-        device_results = _devices_in_network(db, ip_network, PER_CATEGORY_LIMIT)
+        device_results = _devices_in_network(db, ip_network, PER_CATEGORY_LIMIT, tenant_id=tenant_id)
     else:
-        devices = (
-            db.query(Device)
-            .filter(or_(Device.hostname.ilike(like), Device.ip_address.ilike(like), Device.site.ilike(like)))
-            .order_by(Device.hostname)
-            .limit(PER_CATEGORY_LIMIT)
-            .all()
+        device_q = db.query(Device).filter(
+            or_(Device.hostname.ilike(like), Device.ip_address.ilike(like), Device.site.ilike(like))
         )
+        if tenant_id is not None:
+            device_q = device_q.filter(Device.tenant_id == tenant_id)
+        devices = device_q.order_by(Device.hostname).limit(PER_CATEGORY_LIMIT).all()
         device_results = [
             {
                 "id": str(d.id),
@@ -188,13 +200,10 @@ def global_search(
         for g in groups
     ]
 
-    alerts = (
-        db.query(Alert)
-        .filter(or_(Alert.category.ilike(like), Alert.message.ilike(like)))
-        .order_by(Alert.created_at.desc())
-        .limit(PER_CATEGORY_LIMIT)
-        .all()
-    )
+    alert_q = db.query(Alert).filter(or_(Alert.category.ilike(like), Alert.message.ilike(like)))
+    if tenant_id is not None:
+        alert_q = alert_q.join(Device, Device.id == Alert.device_id).filter(Device.tenant_id == tenant_id)
+    alerts = alert_q.order_by(Alert.created_at.desc()).limit(PER_CATEGORY_LIMIT).all()
     alert_results = [
         {
             "id": str(a.id),
@@ -205,13 +214,10 @@ def global_search(
         for a in alerts
     ]
 
-    changes = (
-        db.query(ChangeRequest)
-        .filter(ChangeRequest.description.ilike(like))
-        .order_by(ChangeRequest.created_at.desc())
-        .limit(PER_CATEGORY_LIMIT)
-        .all()
-    )
+    change_q = db.query(ChangeRequest).filter(ChangeRequest.description.ilike(like))
+    if tenant_id is not None:
+        change_q = change_q.join(Device, Device.id == ChangeRequest.device_id).filter(Device.tenant_id == tenant_id)
+    changes = change_q.order_by(ChangeRequest.created_at.desc()).limit(PER_CATEGORY_LIMIT).all()
     change_results = [
         {
             "id": str(c.id),
@@ -239,13 +245,16 @@ def global_search(
         for t in templates
     ]
 
-    incidents = (
-        db.query(Incident)
-        .filter(or_(Incident.title.ilike(like), Incident.summary.ilike(like)))
-        .order_by(Incident.created_at.desc())
-        .limit(PER_CATEGORY_LIMIT)
-        .all()
-    )
+    incident_q = db.query(Incident).filter(or_(Incident.title.ilike(like), Incident.summary.ilike(like)))
+    if tenant_id is not None:
+        # Incident has no tenant_id/device_id of its own -- reached via its
+        # root-cause alert's device, same join app.api.incidents.list_incidents uses.
+        incident_q = (
+            incident_q.join(Alert, Alert.id == Incident.root_cause_alert_id)
+            .join(Device, Device.id == Alert.device_id)
+            .filter(Device.tenant_id == tenant_id)
+        )
+    incidents = incident_q.order_by(Incident.created_at.desc()).limit(PER_CATEGORY_LIMIT).all()
     incident_results = [
         {
             "id": str(i.id),
@@ -258,14 +267,18 @@ def global_search(
 
     from app.models.user import User
 
-    jit_rows = (
+    jit_q = (
         db.query(JitElevation, User)
         .join(User, User.id == JitElevation.user_id)
         .filter(or_(JitElevation.elevated_role.ilike(like), JitElevation.reason.ilike(like), User.email.ilike(like)))
-        .order_by(JitElevation.requested_at.desc())
-        .limit(PER_CATEGORY_LIMIT)
-        .all()
     )
+    if tenant_id is not None:
+        # JIT elevation requests are scoped by the *requesting user's*
+        # tenant (there's no device on the row) -- an MSP-staff row has
+        # User.tenant_id None and is correctly excluded here, matching
+        # the "MSP staff aren't in any tenant's data" contract elsewhere.
+        jit_q = jit_q.filter(User.tenant_id == tenant_id)
+    jit_rows = jit_q.order_by(JitElevation.requested_at.desc()).limit(PER_CATEGORY_LIMIT).all()
     jit_results = [
         {
             "id": str(j.id),
@@ -278,7 +291,7 @@ def global_search(
 
     config_results: list[dict] = []
     if ip_network is None and len(q) >= CONFIG_MIN_QUERY_LENGTH:
-        config_results = _search_configs_brief(db, q, limit=CONFIG_MATCH_LIMIT)
+        config_results = _search_configs_brief(db, q, limit=CONFIG_MATCH_LIMIT, tenant_id=tenant_id)
 
     return {
         "query": q,
@@ -294,7 +307,7 @@ def global_search(
     }
 
 
-def _search_configs_brief(db: Session, query: str, limit: int) -> list[dict]:
+def _search_configs_brief(db: Session, query: str, limit: int, tenant_id=None) -> list[dict]:
     """Best-effort plain-substring config grep for the palette -- a
     trimmed version of config_search.search_configs's scan (no regex
     option, no per-device match list, just "which devices matched and
@@ -309,7 +322,10 @@ def _search_configs_brief(db: Session, query: str, limit: int) -> list[dict]:
     pattern = re.compile(re.escape(query), re.IGNORECASE)
     results: list[dict] = []
 
-    devices = db.query(Device).order_by(Device.hostname).all()
+    device_q = db.query(Device).order_by(Device.hostname)
+    if tenant_id is not None:
+        device_q = device_q.filter(Device.tenant_id == tenant_id)
+    devices = device_q.all()
     for device in devices:
         if len(results) >= limit:
             break

@@ -27,6 +27,11 @@ class MfaRequiredResponse(BaseModel):
     mfa_token: str
 
 
+class RegisterResponse(BaseModel):
+    status: str
+    message: str
+
+
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: str
