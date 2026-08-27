@@ -75,13 +75,11 @@ def upgrade() -> None:
 
     for name, value in _METRIC_NAME_TO_VALUE.items():
         bind.execute(
-            sa.text("UPDATE alert_rules SET metric = :value::alertrulemetric WHERE metric::varchar = :name"),
-            {"value": value, "name": name},
+            sa.text(f"UPDATE alert_rules SET metric = '{value}'::alertrulemetric WHERE metric::varchar = '{name}'")
         )
     for name, value in _OPERATOR_NAME_TO_VALUE.items():
         bind.execute(
-            sa.text("UPDATE alert_rules SET operator = :value::alertruleoperator WHERE operator::varchar = :name"),
-            {"value": value, "name": name},
+            sa.text(f"UPDATE alert_rules SET operator = '{value}'::alertruleoperator WHERE operator::varchar = '{name}'")
         )
 
 
