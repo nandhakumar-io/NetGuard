@@ -1,0 +1,13 @@
+nohup: ignoring input
+
+> netguard-frontend@1.0.0 dev
+> vite
+
+Re-optimizing dependencies because lockfile has changed
+
+  VITE v5.4.21  ready in 321 ms
+
+  ➜  Local:   http://localhost:6001/
+  ➜  Network: http://10.10.144.233:6001/
+  ➜  Network: http://100.75.175.88:6001/
+  ➜  Network: http://172.26.0.1:6001/

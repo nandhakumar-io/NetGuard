@@ -156,10 +156,13 @@ function portModeBadge(mode?: "trunk" | "access" | null) {
   );
 }
 
-function vlanCell(mode?: "trunk" | "access" | null, vlan?: string | null, trunkVlans?: string[] | null) {
+function vlanCell(mode?: "trunk" | "access" | null | string, vlan?: string | null, trunkVlans?: any) {
   if (!mode) return <span className="text-slate-400 dark:text-slate-500">—</span>;
-  if (mode === "trunk" && trunkVlans?.length) {
-    return `${vlan ?? "—"} (native), ${trunkVlans.join(", ")}`;
+  if (mode === "trunk" && trunkVlans) {
+    const arr = Array.isArray(trunkVlans) ? trunkVlans : (typeof trunkVlans === 'string' ? trunkVlans.split(',') : []);
+    if (arr.length > 0) {
+      return `${vlan ?? "—"} (native), ${arr.join(", ")}`;
+    }
   }
   return vlan ?? "—";
 }
@@ -1544,11 +1547,11 @@ function DeviceInlineDetails({
                   <DiscoveryTable
                     empty="No LLDP neighbors reported (LLDP may be disabled on this device)."
                     columns={["Local Port", "Neighbor", "Neighbor Port", "Port Mode", "VLAN"]}
-                    rows={discovery.lldp_neighbors.map((n) => [
+                    rows={(discovery.lldp_neighbors || []).map((n) => [
                       n.local_port || n.local_port_index,
                       n.neighbor_name || "—",
                       n.neighbor_port || "—",
-                      portModeBadge(n.port_mode),
+                      portModeBadge(n.port_mode as any),
                       vlanCell(n.port_mode, n.vlan, n.trunk_vlans),
                     ])}
                   />
@@ -1557,12 +1560,12 @@ function DeviceInlineDetails({
                   <DiscoveryTable
                     empty="No CDP neighbors reported (CDP may be disabled, or this isn't a Cisco device)."
                     columns={["Local Interface", "Neighbor", "Neighbor Port", "Platform", "Port Mode", "VLAN"]}
-                    rows={discovery.cdp_neighbors.map((n) => [
+                    rows={(discovery.cdp_neighbors || []).map((n) => [
                       n.local_port || n.local_if_index,
                       n.neighbor_id || "—",
                       n.neighbor_port || "—",
                       n.neighbor_platform || "—",
-                      portModeBadge(n.port_mode),
+                      portModeBadge(n.port_mode as any),
                       vlanCell(n.port_mode, n.vlan, n.trunk_vlans),
                     ])}
                   />
@@ -1571,14 +1574,14 @@ function DeviceInlineDetails({
                   <DiscoveryTable
                     empty="No ARP entries reported."
                     columns={["Interface Index", "IP Address", "MAC Address"]}
-                    rows={discovery.arp_table.map((a) => [a.if_index, a.ip_address, a.mac_address])}
+                    rows={(discovery.arp_table || []).map((a) => [a.if_index, a.ip_address, a.mac_address])}
                   />
                 )}
                 {discoverySubTab === "routes" && (
                   <DiscoveryTable
                     empty="No routing table entries reported."
                     columns={["Destination", "Mask", "Next Hop", "Interface Index"]}
-                    rows={discovery.routing_table.map((r) => [
+                    rows={(discovery.routing_table || []).map((r) => [
                       r.destination,
                       r.mask || "—",
                       r.next_hop,
@@ -1590,7 +1593,7 @@ function DeviceInlineDetails({
                   <DiscoveryTable
                     empty="No chassis/module inventory reported."
                     columns={["Index", "Name", "Description", "Model", "Serial Number"]}
-                    rows={discovery.inventory.map((i) => [
+                    rows={(discovery.inventory || []).map((i) => [
                       i.index,
                       i.name || "—",
                       i.description || "—",
