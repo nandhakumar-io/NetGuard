@@ -180,12 +180,7 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
                 category="Device Unreachable",
                 message=f"{device.hostname} ({device.ip_address}) is not responding to ping/TCP probes",
             )
-            if is_new:
-                notification_service.notify(
-                    event="Device Unreachable",
-                    message=f"{device.hostname} ({device.ip_address}) is down",
-                    severity="critical",
-                )
+            # Notification fan-out now happens inside alert_service.raise_alert.
         elif was_offline:
             resolved_alert = alert_service.auto_resolve(
                 db,

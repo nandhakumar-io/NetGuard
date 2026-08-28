@@ -73,16 +73,17 @@ export default function AlertCenter() {
   const confirm = useConfirm();
   const [runningRunbookAlertId, setRunningRunbookAlertId] = useState<string | null>(null);
 
-  const runRunbookRemediation = async (alert: Alert) => {
-    if (!alert.runbook || !alert.device_id) return;
+  const runRunbookRemediation = async (alert: Alert, runbook?: AlertRunbook) => {
+    const rb = runbook || alert.runbook;
+    if (!rb || !alert.device_id) return;
     const ok = await confirm(
-      `This pushes the configured remediation command to the device for this alert. Continue?`,
-      { title: "Run remediation now?", confirmLabel: "Run", danger: true }
+      `This pushes "${rb.remediation_label || rb.title}" to the device for this alert. Continue?`,
+      { title: "Run playbook now?", confirmLabel: "Run", danger: true }
     );
     if (!ok) return;
     setRunningRunbookAlertId(alert.id);
     try {
-      const res = await api.post(`/alert-runbooks/${alert.runbook.id}/execute`, {
+      const res = await api.post(`/alert-runbooks/${rb.id}/execute`, {
         device_id: alert.device_id,
         alert_id: alert.id,
       });
@@ -95,8 +96,25 @@ export default function AlertCenter() {
       toast.error(errorMessage(err, "Failed to run remediation."));
     } finally {
       setRunningRunbookAlertId(null);
+      setPlaybookMenuAlertId(null);
     }
   };
+  // Menu of applicable playbooks for one alert row -- lets an operator
+  // run any remediation-enabled runbook against this alert's device
+  // (previously only the exact category/source match auto-attached to
+  // the alert could ever be run; a real NOC operator often wants to
+  // reach for a broader playbook -- e.g. a generic "restart agent" or
+  // "clear ARP cache" runbook -- that wasn't specifically mapped to this
+  // alert's category). Backend already supports this: POST
+  // /alert-runbooks/{id}/execute only needs a runbook_id + device_id,
+  // it was never restricted to the alert's own matched runbook.
+  const [playbookMenuAlertId, setPlaybookMenuAlertId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!playbookMenuAlertId) return;
+    const close = () => setPlaybookMenuAlertId(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [playbookMenuAlertId]);
   const [tab, setTab] = useState<Tab>("alerts");
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
@@ -282,9 +300,49 @@ export default function AlertCenter() {
     api.patch(`/alerts/${id}/acknowledge`).then(() => { fetchAlerts(); fetchSummary(); }).catch(() => {});
   };
 
+  const handleEscalate = (id: string) => {
+    api.patch(`/alerts/${id}/escalate`)
+      .then(() => { toast.success("Alert escalated"); fetchAlerts(); fetchSummary(); })
+      .catch((err) => toast.error(errorMessage(err)));
+  };
+
   const handleResolve = (id: string) => {
     api.patch(`/alerts/${id}/resolve`).then(() => { fetchAlerts(); fetchSummary(); }).catch(() => {});
   };
+
+  // Deep-link handling for notification action buttons (ntfy/browser push/
+  // webhook payloads all point back to
+  // /alerts?alert={id}&action=acknowledge|escalate -- see
+  // push_service._action_deep_link and notification_service._action_url).
+  // Before this, tapping "Escalate" or "Acknowledge" on a phone
+  // notification just opened the plain alert list with no effect: nothing
+  // here ever read the query string.
+  const [highlightedAlertId, setHighlightedAlertId] = useState<string | null>(null);
+  const deepLinkHandledRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandledRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const alertId = params.get("alert");
+    const action = params.get("action");
+    if (!alertId) return;
+    deepLinkHandledRef.current = true;
+    setTab("alerts");
+    setHighlightedAlertId(alertId);
+    if (action === "acknowledge") handleAcknowledge(alertId);
+    else if (action === "escalate") handleEscalate(alertId);
+    // Strip the query string so a page refresh doesn't re-fire the action.
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
+  useEffect(() => {
+    if (!highlightedAlertId) return;
+    const el = document.getElementById(`alert-row-${highlightedAlertId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      const t = setTimeout(() => setHighlightedAlertId(null), 5000);
+      return () => clearTimeout(t);
+    }
+  }, [highlightedAlertId, alerts]);
 
   // --- Bulk selection -- lets an admin triaging a pile of alerts after a
   // change window or outage ack/resolve many at once instead of one click
@@ -962,9 +1020,12 @@ export default function AlertCenter() {
                   return (
                     <div
                       key={alert.id}
+                      id={`alert-row-${alert.id}`}
                       className={`bg-white dark:bg-slate-800 rounded-xl border ${sev.border} shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden ${
                         alert.resolved ? "opacity-60" : ""
-                      } ${nested ? "ml-6 border-dashed" : ""}`}
+                      } ${nested ? "ml-6 border-dashed" : ""} ${
+                        highlightedAlertId === alert.id ? "ring-2 ring-brandblue" : ""
+                      }`}
                     >
                       <div className="flex items-stretch">
                         {!nested && !alert.resolved && (
@@ -1057,6 +1118,36 @@ export default function AlertCenter() {
                                     {runningRunbookAlertId === alert.id ? "Running…" : "⚡ Run Remediation"}
                                   </button>
                                 )}
+                                {alert.device_id && runbooks.some((r) => r.remediation_enabled) && (
+                                  <div className="relative" onClick={(e) => e.stopPropagation()}>
+                                    <button
+                                      onClick={() => setPlaybookMenuAlertId(playbookMenuAlertId === alert.id ? null : alert.id)}
+                                      disabled={runningRunbookAlertId === alert.id}
+                                      title="Run any remediation-enabled playbook against this alert's device, not just the auto-matched one"
+                                      className="flex items-center gap-1 text-slate-600 dark:text-slate-300 hover:underline font-medium disabled:opacity-50"
+                                    >
+                                      🛠️ Playbooks
+                                    </button>
+                                    {playbookMenuAlertId === alert.id && (
+                                      <div className="absolute z-20 top-full left-0 mt-1 w-64 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg shadow-lg py-1 max-h-64 overflow-auto">
+                                        {runbooks.filter((r) => r.remediation_enabled).map((r) => (
+                                          <button
+                                            key={r.id}
+                                            onClick={() => runRunbookRemediation(alert, r)}
+                                            title={r.remediation_command || undefined}
+                                            className="w-full text-left px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700"
+                                          >
+                                            {r.remediation_label || r.title}
+                                            <span className="block text-[10px] text-slate-400">{r.category}{r.source ? ` · ${r.source}` : ""}</span>
+                                          </button>
+                                        ))}
+                                        {runbooks.filter((r) => r.remediation_enabled).length === 0 && (
+                                          <div className="px-3 py-1.5 text-xs text-slate-400">No remediation-enabled playbooks configured.</div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                               {!nested && impacted.length > 0 && (
                                 <button
@@ -1103,6 +1194,15 @@ export default function AlertCenter() {
                                     Acknowledge
                                   </button>
                                 )}
+                                {!alert.resolved && (
+                                  <button
+                                    onClick={() => handleEscalate(alert.id)}
+                                    title="Notify the secondary/on-call contact for this alert's escalation policy right now, without waiting for the unacknowledged-minutes threshold"
+                                    className="text-xs font-medium text-orange-700 hover:text-orange-900 dark:text-orange-300 bg-orange-50 hover:bg-orange-100 dark:bg-orange-950/40 px-3 py-1.5 rounded-lg transition-colors"
+                                  >
+                                    Escalate
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => handleResolve(alert.id)}
                                   className="text-xs font-medium text-risklow hover:text-green-800 bg-green-50 hover:bg-green-100 px-3 py-1.5 rounded-lg transition-colors"
@@ -1138,9 +1238,10 @@ export default function AlertCenter() {
                   return (
                     <tr
                       key={alert.id}
+                      id={`alert-row-${alert.id}`}
                       className={`border-b border-slate-100 dark:border-slate-700 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-700/40 ${
                         alert.resolved ? "opacity-60" : ""
-                      }`}
+                      } ${highlightedAlertId === alert.id ? "bg-blue-50 dark:bg-blue-950/30" : ""}`}
                     >
                       <td className="pl-3 py-1.5 w-8">
                         {!alert.resolved && (
@@ -1181,6 +1282,35 @@ export default function AlertCenter() {
                             >
                               {runningRunbookAlertId === alert.id ? "…" : "⚡"}
                             </button>
+                          )}
+                          {alert.device_id && runbooks.some((r) => r.remediation_enabled) && (
+                            <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => setPlaybookMenuAlertId(playbookMenuAlertId === alert.id ? null : alert.id)}
+                                disabled={runningRunbookAlertId === alert.id}
+                                title="Run any remediation-enabled playbook against this device"
+                                className="text-slate-500 dark:text-slate-300 hover:underline disabled:opacity-50"
+                              >
+                                🛠️
+                              </button>
+                              {playbookMenuAlertId === alert.id && (
+                                <div className="absolute z-20 top-full left-0 mt-1 w-56 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg shadow-lg py-1 max-h-56 overflow-auto">
+                                  {runbooks.filter((r) => r.remediation_enabled).map((r) => (
+                                    <button
+                                      key={r.id}
+                                      onClick={() => runRunbookRemediation(alert, r)}
+                                      title={r.remediation_command || undefined}
+                                      className="w-full text-left px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700"
+                                    >
+                                      {r.remediation_label || r.title}
+                                    </button>
+                                  ))}
+                                  {runbooks.filter((r) => r.remediation_enabled).length === 0 && (
+                                    <div className="px-3 py-1.5 text-xs text-slate-400">No remediation-enabled playbooks configured.</div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       </td>
@@ -1239,6 +1369,13 @@ export default function AlertCenter() {
                                 Ack
                               </button>
                             )}
+                            <button
+                              onClick={() => handleEscalate(alert.id)}
+                              title="Escalate now"
+                              className="text-[10px] font-medium text-orange-700 hover:text-orange-900 dark:text-orange-300 bg-orange-50 hover:bg-orange-100 dark:bg-orange-950/40 px-2 py-1 rounded-md transition-colors"
+                            >
+                              Esc
+                            </button>
                             <button
                               onClick={() => handleResolve(alert.id)}
                               title="Resolve"

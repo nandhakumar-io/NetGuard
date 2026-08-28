@@ -22,6 +22,39 @@ from app.services import (
 )
 
 
+def _dispatch_notification(alert: Alert) -> None:
+    """Fans an alert out to Slack/Teams/DB webhooks/ntfy/Pushover/Web
+    Push/in-app -- the single place that decides "did anything just
+    change that a human should be told about", called from every path
+    below instead of left to each of the ~10 raise_alert() call sites
+    (trap_service, alert_rule_engine, metrics_service, reachability_service,
+    drift_service, topology_service, anomaly_service, protocol_manager,
+    syslog_service, tasks.py) to remember individually. Before this,
+    most of those either never called notification_service.notify() at
+    all, or only did on a narrow "severity == critical and is_new" gate
+    copied ad hoc from alert_rule_engine -- so a new warning alert, or a
+    critical alert that re-escalated from warning on a standing row,
+    never published anywhere except the in-app Alert Center.
+
+    Deliberately imported locally (not at module level) to avoid a
+    notification_service <-> alert_service import cycle -- notification_service
+    doesn't import alert_service, but several of *its* callers do.
+    """
+    from app.services import notification_service
+
+    try:
+        notification_service.notify(
+            event=alert.category,
+            message=alert.message,
+            severity=alert.severity.value if hasattr(alert.severity, "value") else alert.severity,
+            device_hostname=alert.device.hostname if alert.device_id and alert.device else None,
+            tenant_id=alert.device.tenant_id if alert.device_id and alert.device else None,
+            alert_id=str(alert.id),
+        )
+    except Exception:  # noqa: BLE001 -- notification delivery must never break alert creation
+        pass
+
+
 # ------------------------------------------------------------------
 # Create
 # ------------------------------------------------------------------
@@ -71,6 +104,7 @@ def create_alert(
         )
         # Also nudge dashboard so the summary stat cards refresh.
         event_bus.publish_event("alert_created", alert_id=str(alert.id))
+        _dispatch_notification(alert)
 
     return alert
 
@@ -138,10 +172,11 @@ def raise_alert(
     )
 
     if existing is not None:
+        escalated = _SEVERITY_RANK[severity] > _SEVERITY_RANK[existing.severity]
         existing.message = message
         existing.last_seen_at = now
         existing.occurrence_count = (existing.occurrence_count or 1) + 1
-        if _SEVERITY_RANK[severity] > _SEVERITY_RANK[existing.severity]:
+        if escalated:
             existing.severity = severity
         # Attribute suppression the moment a window opens over an
         # already-standing alert too (don't require a brand new row to
@@ -166,6 +201,13 @@ def raise_alert(
                 channel=event_bus.ALERTS_CHANNEL,
             )
             alert_correlation_service.correlate_downstream(db, existing)
+            # A re-occurrence at the *same* severity doesn't re-notify
+            # (that's the whole point of dedup -- a still-active problem
+            # shouldn't re-page every poll cycle), but an escalation
+            # (warning -> critical) is new information a human needs to
+            # see even though the row itself isn't new.
+            if escalated:
+                _dispatch_notification(existing)
         return existing, False
 
     alert = Alert(
@@ -192,6 +234,7 @@ def raise_alert(
             channel=event_bus.ALERTS_CHANNEL,
         )
         event_bus.publish_event("alert_created", alert_id=str(alert.id))
+        _dispatch_notification(alert)
 
     alert_correlation_service.correlate_downstream(db, alert)
 

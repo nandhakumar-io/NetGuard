@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
-import { Alert, AlertSeverity, DashboardSummary, SyslogSummary, TopologyResponse } from "../lib/types";
+import { Alert, AlertSeverity, DashboardSummary, OnCallSchedule, SyslogSummary, TopologyResponse } from "../lib/types";
 
 // Fullscreen, kiosk-style rollup for a wall monitor in the NOC -- the
 // desktop counterpart to pages/MobileNOC.tsx (also routed outside
@@ -302,6 +302,7 @@ export default function WallBoard() {
   const [connError, setConnError] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [onCallNames, setOnCallNames] = useState<string[] | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const loadAll = useCallback(() => {
@@ -332,6 +333,47 @@ export default function WallBoard() {
     const t = setInterval(loadAll, POLL_MS);
     return () => clearInterval(t);
   }, [loadAll]);
+
+  // Who's on call right now -- a NOC wallboard's classic "who do I call"
+  // answer, previously nowhere on this screen at all. Separate,
+  // much slower poll than the main loadAll: a rotation's current holder
+  // only ever changes at a shift handover, not every 20s, and this is
+  // one extra request per enabled schedule (GET .../current has no
+  // batch form), so there's no reason to hit it on the same cadence as
+  // alerts/topology.
+  useEffect(() => {
+    let mounted = true;
+    const loadOnCall = () => {
+      api
+        .get<OnCallSchedule[]>("/on-call-schedules")
+        .then((res) => {
+          const enabled = res.data.filter((s) => s.enabled);
+          return Promise.all(
+            enabled.map((s) =>
+              api
+                .get<{ schedule_id: string; current_contact: string | null; is_secondary: boolean }>(
+                  `/on-call-schedules/${s.id}/current`
+                )
+                .then((r) => r.data.current_contact)
+                .catch(() => null)
+            )
+          );
+        })
+        .then((contacts) => {
+          if (!mounted) return;
+          setOnCallNames(contacts.filter((c): c is string => !!c));
+        })
+        .catch(() => {
+          if (mounted) setOnCallNames(null);
+        });
+    };
+    loadOnCall();
+    const t = setInterval(loadOnCall, 5 * 60 * 1000);
+    return () => {
+      mounted = false;
+      clearInterval(t);
+    };
+  }, []);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), CLOCK_MS);
@@ -532,6 +574,12 @@ export default function WallBoard() {
           on-call engineer actually glances up for. Wraps to a second row
           on smaller wall displays rather than clipping. --- */}
       <div className="flex flex-wrap gap-2 px-3 py-2.5 border-b border-slate-200 dark:border-slate-800 shrink-0">
+        <StatTile
+          label="On-Call"
+          value={onCallNames === null ? "—" : onCallNames.length === 0 ? "Unstaffed" : onCallNames.join(", ")}
+          tone={onCallNames && onCallNames.length === 0 ? "text-red-600 dark:text-red-400" : "text-navy dark:text-white"}
+          accent={onCallNames && onCallNames.length === 0 ? "critical" : onCallNames ? "ok" : undefined}
+        />
         <StatTile label="Devices Online" value={summary ? `${summary.devices_online}/${summary.devices_total}` : "—"} />
         <StatTile label="Fleet Health" value={summary ? `${summary.global_health_score}` : "—"} tone={healthTone(summary?.global_health_score)} />
         <StatTile

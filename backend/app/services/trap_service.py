@@ -217,15 +217,8 @@ def ingest_trap(db: Session, *, source_ip: str, parsed: ParsedTrap) -> None:
         message=f"{device.hostname}: received {category} trap ({parsed.trap_name})",
     )
     db.commit()
-    if is_new:
-        from app.services import notification_service
-
-        notification_service.notify(
-            event=category,
-            message=f"{device.hostname}: received {category} trap ({parsed.trap_name})",
-            severity=severity,
-            device_hostname=device.hostname,
-        )
+    # Notification fan-out (webhook/ntfy/Slack/etc.) now happens inside
+    # alert_service.raise_alert itself -- see alert_service._dispatch_notification.
 
 
 def _ingest_sync(source_ip: str, raw: bytes) -> None:

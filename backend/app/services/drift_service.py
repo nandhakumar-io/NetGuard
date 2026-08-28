@@ -20,7 +20,9 @@ Reuses existing building blocks rather than duplicating them:
   - app.services.snapshot_service.decrypt_config to read baseline configs
   - app.services.audit_service.record_event / app.services.event_bus for
     the same audit-trail + live-dashboard visibility every other action gets
-  - app.services.notification_service for HIGH/CRITICAL drift alerts
+  - app.services.alert_service.raise_alert, which now dispatches
+    HIGH/CRITICAL (and escalated) drift alerts to
+    notification_service itself
 
 Called by:
   - app.api.drift (on-demand scan, GET .../drift/scan)
@@ -56,7 +58,6 @@ from app.services import (
     diff_engine,
     event_bus,
     maintenance_window_service,
-    notification_service,
     risk_engine,
     snapshot_service,
 )
@@ -269,13 +270,7 @@ def detect_drift(
             ),
         )
 
-        if is_new:
-            notification_service.notify(
-                event="Configuration Drift Detected",
-                message=alert.message,
-                severity="critical" if severity == DriftSeverity.CRITICAL else "warning",
-                device_hostname=device.hostname,
-            )
+        # Notification fan-out now happens inside alert_service.raise_alert.
 
     event_bus.publish_event(
         "drift_detected",

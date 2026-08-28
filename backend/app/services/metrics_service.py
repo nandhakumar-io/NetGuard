@@ -258,15 +258,9 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             category=category,
             message=f"{device.hostname}: {message}",
         )
-        if severity == "critical" and is_new:
-            notification_service.notify(
-                event=category,
-                message=f"{device.hostname}: {message}",
-                severity=severity,
-                device_hostname=device.hostname,
-                alert_id=alert.id,
-                tenant_id=device.tenant_id,
-            )
+        # Notification fan-out now happens inside alert_service.raise_alert
+        # itself (all severities, not just critical) -- see
+        # alert_service._dispatch_notification.
 
     # Operator-defined custom rules (Alert Center > Custom Alert Rules) run
     # against the same sample right after the built-in thresholds above --
@@ -330,15 +324,7 @@ def record_interface_transition(
                 category=category,
                 message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
             )
-            if is_new:
-                notification_service.notify(
-                    event="Interface Down",
-                    message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
-                    severity="critical",
-                    device_hostname=device.hostname,
-                    alert_id=alert.id,
-                    tenant_id=device.tenant_id,
-                )
+            # Notification fan-out now happens inside alert_service.raise_alert.
     elif latest is not None:
         uplink_tag = " [WAN/UPLINK]" if device.is_uplink else ""
         resolved_alert = alert_service.auto_resolve(
@@ -505,13 +491,10 @@ def _check_device_restart(db: Session, device: Device, metrics: SnmpMetrics, pre
             category="Device Restart",
             message=f"{device.hostname}: device rebooted (uptime reset, now {metrics.uptime_seconds}s)",
         )
-        if is_new:
-            notification_service.notify(
-                event="Device Restart",
-                message=f"{device.hostname}: device rebooted",
-                severity="warning",
-                tenant_id=device.tenant_id,
-            )
+        # Notification fan-out now happens inside alert_service.raise_alert
+        # (this warning-severity restart previously never notified at all,
+        # since the old ad hoc calls elsewhere in this file only fired for
+        # severity == "critical").
 
 
 # Metric family -> (SnmpMetrics attribute, Device freshness-column attribute).

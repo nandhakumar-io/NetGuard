@@ -189,15 +189,9 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                     category=category,
                     message=f"{device.hostname}: {rule.name} ({rule.metric.value if hasattr(rule.metric, 'value') else rule.metric} {rule.operator.value if hasattr(rule.operator, 'value') else rule.operator} {rule.threshold}, observed {value})",
                 )
-                if severity == "critical" and is_new:
-                    from app.services import notification_service
-
-                    notification_service.notify(
-                        event=category,
-                        message=alert.message,
-                        severity=severity,
-                        tenant_id=device.tenant_id,
-                    )
+                # Notification fan-out now happens inside
+                # alert_service.raise_alert itself (all severities, not
+                # just critical) -- see alert_service._dispatch_notification.
             else:
                 alert_service.auto_resolve(
                     db, device_id=device.id, category=category, note=f"{device.hostname}: {rule.name} no longer breached"
