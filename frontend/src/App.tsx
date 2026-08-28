@@ -4,6 +4,8 @@ import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
+import { TerminalSessionsProvider } from "./lib/terminalSessions";
+import { TerminalWindowManager } from "./components/TerminalWindowManager";
 
 // Everything but Login/Dashboard is code-split at the route level: each page
 // only downloads when the person actually navigates to it, instead of all
@@ -65,7 +67,8 @@ function withSuspense(el: JSX.Element) {
 
 export default function App() {
   return (
-    <Routes>
+    <TerminalSessionsProvider>
+      <Routes>
       <Route path="/login" element={<Login />} />
       <Route element={<ProtectedRoute />}>
         {/* Deliberately outside <Layout> -- no sidebar/topbar chrome, just
@@ -118,6 +121,12 @@ export default function App() {
           <Route path="/reports" element={withSuspense(<Reports />)} />
         </Route>
       </Route>
-    </Routes>
+      </Routes>
+      {/* Global floating terminal window -- mounted once outside <Routes>
+          so open sessions (and their live WebSocket connections) survive
+          navigating between pages, not just switching tabs within one
+          page. Renders nothing itself when no terminal is open. */}
+      <TerminalWindowManager />
+    </TerminalSessionsProvider>
   );
 }
