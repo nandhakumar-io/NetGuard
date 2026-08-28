@@ -115,4 +115,14 @@ class PathHop(Base):
     worst_rtt_ms = Column(Float, nullable=True)
     stddev_rtt_ms = Column(Float, nullable=True)
 
+    # Live NetFlow/sFlow bandwidth for this hop, sourced from
+    # flow_service.recent_bandwidth_for_device -- only ever populated when
+    # the hop resolves to a managed `device_id` that is also an active flow
+    # exporter (app.services.flow_service). NULL means "no flow data for
+    # this hop", not "zero traffic" -- the UI must keep those distinct
+    # rather than rendering a bare 0, since an unmonitored hop and an idle
+    # one look identical otherwise.
+    flow_bytes_per_sec = Column(Float, nullable=True)
+    flow_top_protocol = Column(String, nullable=True)  # e.g. "TCP" -- the largest protocol by bytes in the window
+
     trace = relationship("PathTrace", back_populates="hops")

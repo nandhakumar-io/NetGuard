@@ -22,6 +22,8 @@ class PathHopRead(BaseModel):
     best_rtt_ms: float | None = None
     worst_rtt_ms: float | None = None
     stddev_rtt_ms: float | None = None
+    flow_bytes_per_sec: float | None = None
+    flow_top_protocol: str | None = None
 
 
 class PathTraceRead(BaseModel):

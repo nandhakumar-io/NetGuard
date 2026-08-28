@@ -15,6 +15,14 @@ const STATUS_BADGE: Record<string, { label: string; color: string; bg: string }>
   failed: { label: "Failed", color: "text-riskcrit", bg: "bg-red-50" },
 };
 
+function formatBps(bytesPerSec: number): string {
+  const bits = bytesPerSec * 8;
+  if (bits >= 1e9) return `${(bits / 1e9).toFixed(2)} Gbps`;
+  if (bits >= 1e6) return `${(bits / 1e6).toFixed(2)} Mbps`;
+  if (bits >= 1e3) return `${(bits / 1e3).toFixed(1)} Kbps`;
+  return `${bits.toFixed(0)} bps`;
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const secs = Math.floor(diff / 1000);
@@ -277,18 +285,29 @@ export default function PathTracePage() {
                               {hop.packet_loss_pct != null && hop.packet_loss_pct > 0 && (
                                 <span className="text-riskcrit">{hop.packet_loss_pct.toFixed(0)}% loss</span>
                               )}
+                              {hop.flow_bytes_per_sec != null && (
+                                <span
+                                  className="font-semibold text-brandblue bg-blue-50 dark:bg-blue-900/30 px-1.5 py-0.5 rounded"
+                                  title={hop.flow_top_protocol ? `Top protocol: ${hop.flow_top_protocol}` : undefined}
+                                >
+                                  {formatBps(hop.flow_bytes_per_sec)}
+                                </span>
+                              )}
                             </div>
                           </div>
-                          {/* Extra mtr stats (best/worst/stddev/sent) -- only
-                              present for real mtr-sourced hops, not the
-                              single-sample topology fallback. */}
-                          {(hop.best_rtt_ms != null || hop.worst_rtt_ms != null || hop.stddev_rtt_ms != null || hop.sent != null) && (
+                          {/* Extra mtr stats (best/worst/stddev/sent) plus live
+                              flow bandwidth -- mtr stats only present for real
+                              mtr-sourced hops, flow stats only present when this
+                              hop is a managed device actively exporting
+                              NetFlow/sFlow (app.services.flow_service). */}
+                          {(hop.best_rtt_ms != null || hop.worst_rtt_ms != null || hop.stddev_rtt_ms != null || hop.sent != null || hop.flow_bytes_per_sec != null) && (
                             <div className="flex items-center gap-3 flex-wrap mt-1.5 pt-1.5 border-t border-black/5 dark:border-white/5 text-[10px] text-slate-400 dark:text-slate-500">
                               {hop.last_rtt_ms != null && <span>Last <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.last_rtt_ms.toFixed(1)}</b> ms</span>}
                               {hop.best_rtt_ms != null && <span>Best <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.best_rtt_ms.toFixed(1)}</b> ms</span>}
                               {hop.worst_rtt_ms != null && <span>Worst <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.worst_rtt_ms.toFixed(1)}</b> ms</span>}
                               {hop.stddev_rtt_ms != null && <span>StDev <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.stddev_rtt_ms.toFixed(1)}</b> ms</span>}
                               {hop.sent != null && <span>Sent <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.sent}</b></span>}
+                              {hop.flow_top_protocol != null && <span>Top proto <b className="font-semibold text-slate-500 dark:text-slate-400">{hop.flow_top_protocol}</b></span>}
                             </div>
                           )}
                         </div>

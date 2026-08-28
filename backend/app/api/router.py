@@ -56,6 +56,7 @@ from app.api import (
     user_management,
     war_room,
     webhooks,
+    wireless,
 )
 
 api_router = APIRouter()
@@ -115,3 +116,4 @@ api_router.include_router(network_discovery.router)
 api_router.include_router(tenant_board.router)
 api_router.include_router(tenants.router)
 api_router.include_router(tenant_digest.router)
+api_router.include_router(wireless.router)

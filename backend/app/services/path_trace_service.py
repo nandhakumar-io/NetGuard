@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from app.models.device import Device
 from app.models.path_trace import HopStatus, PathHop, PathTrace, PathTraceStatus
-from app.services import reachability_service, topology_service
+from app.services import flow_service, reachability_service, topology_service
 
 _TRACE_TOOL_TIMEOUT_SECONDS = 15
 _MAX_HOPS = 30
@@ -396,6 +396,23 @@ def run_trace(
         rtt_ms = h.get("rtt_ms")
         loss_pct = h.get("loss_pct")
         status = _hop_status_for(rtt_ms, loss_pct)
+
+        # Overlay live flow/bandwidth data when this hop is a managed
+        # device that's also an active flow exporter -- turns "here's the
+        # path" into "here's the path and which hop is actually
+        # congested", using the same data the Traffic Analysis page
+        # (app.services.flow_service) is built on. Best-effort: a device
+        # with no flow data (not exporting, or exporting nothing in the
+        # window) just leaves these fields None rather than failing the
+        # trace.
+        flow_bytes_per_sec = None
+        flow_top_protocol = None
+        if device is not None:
+            bandwidth = flow_service.recent_bandwidth_for_device(db, device.id)
+            if bandwidth is not None:
+                flow_bytes_per_sec = bandwidth["bytes_per_sec"]
+                flow_top_protocol = bandwidth["top_protocol"]
+
         hop_rows.append(
             PathHop(
                 hop_index=h["hop_index"],
@@ -410,6 +427,8 @@ def run_trace(
                 best_rtt_ms=h.get("best_rtt_ms"),
                 worst_rtt_ms=h.get("worst_rtt_ms"),
                 stddev_rtt_ms=h.get("stddev_rtt_ms"),
+                flow_bytes_per_sec=flow_bytes_per_sec,
+                flow_top_protocol=flow_top_protocol,
             )
         )
         if ip == target_ip:

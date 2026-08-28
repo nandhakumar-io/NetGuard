@@ -178,6 +178,10 @@ const groups: NavGroup[] = [
         to: "/drift", label: "Drift",
         icon: <svg {...iconProps}><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M6 9v6" /><path d="M18 6a9 9 0 01-9 9" /></svg>,
       },
+      {
+        to: "/wireless", label: "Wireless / APs",
+        icon: <svg {...iconProps}><path d="M5 12.55a11 11 0 0114.08 0" /><path d="M1.42 9a16 16 0 0121.16 0" /><path d="M8.53 16.11a6 6 0 016.95 0" /><circle cx="12" cy="20" r="1" fill="currentColor" /></svg>,
+      },
     ],
   },
   {

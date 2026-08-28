@@ -1545,6 +1545,8 @@ export interface PathHop {
   best_rtt_ms: number | null;
   worst_rtt_ms: number | null;
   stddev_rtt_ms: number | null;
+  flow_bytes_per_sec: number | null;
+  flow_top_protocol: string | null;
 }
 
 export interface PathTrace {

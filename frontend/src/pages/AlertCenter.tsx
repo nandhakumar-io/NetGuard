@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState, useCallback } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../lib/api";
 import { Alert, AlertSummary, AlertRule, AlertRunbook, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry, PushSubscription } from "../lib/types";
@@ -378,6 +379,8 @@ export default function AlertCenter() {
 
   // --- Snooze / mute (per-device, per-rule/category, or both) ---
   const [snoozeTarget, setSnoozeTarget] = useState<Alert | null>(null);
+  const snoozeModalRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(snoozeModalRef, !!snoozeTarget, () => setSnoozeTarget(null));
   const [snoozeScope, setSnoozeScope] = useState<"device" | "category" | "both">("both");
   const [snoozeDuration, setSnoozeDuration] = useState("4h");
   const [snoozeReason, setSnoozeReason] = useState("");
@@ -897,6 +900,7 @@ export default function AlertCenter() {
               <button
                 onClick={() => setDensity("comfortable")}
                 title="Card view -- one card per alert, more detail per row"
+                aria-pressed={density === "comfortable"}
                 className={`text-xs font-bold px-2.5 py-1 rounded-md transition-colors ${
                   density === "comfortable"
                     ? "bg-white dark:bg-slate-700 text-navy dark:text-white shadow-sm"
@@ -908,6 +912,7 @@ export default function AlertCenter() {
               <button
                 onClick={() => setDensity("compact")}
                 title="Compact table -- scan and select across many alerts at once"
+                aria-pressed={density === "compact"}
                 className={`text-xs font-bold px-2.5 py-1 rounded-md transition-colors ${
                   density === "compact"
                     ? "bg-white dark:bg-slate-700 text-navy dark:text-white shadow-sm"
@@ -963,7 +968,9 @@ export default function AlertCenter() {
           )}
 
           {/* Alert Timeline */}
-          <div className="mt-6 space-y-3">
+          {/* role="log" + aria-live: screen readers announce incoming alerts
+              pushed by the WebSocket / poll without requiring focus change. */}
+          <div className="mt-6 space-y-3" role="log" aria-live="polite" aria-label="Alert feed">
             {selectedIds.size > 0 && (
               <div className="sticky top-0 z-10 flex items-center gap-3 bg-navy dark:bg-slate-950 text-white rounded-xl px-4 py-2.5 shadow-md flex-wrap">
                 <span className="text-xs font-bold">{selectedIds.size} selected</span>
@@ -1255,7 +1262,7 @@ export default function AlertCenter() {
                         )}
                       </td>
                       <td className="py-1.5 pr-2 w-8 text-center">
-                        <span title={sev.label}>{sev.icon}</span>
+                        <span aria-label={sev.label} title={sev.label}>{sev.icon}</span>
                       </td>
                       <td className={`py-1.5 pr-3 min-w-0 ${nested ? "pl-6" : ""}`}>
                         <div className="flex items-center gap-1.5 min-w-0">
@@ -1268,9 +1275,10 @@ export default function AlertCenter() {
                               rel="noreferrer"
                               onClick={(e) => e.stopPropagation()}
                               title={alert.runbook.title}
+                              aria-label={`Open runbook: ${alert.runbook.title}`}
                               className="text-indigo-600 dark:text-indigo-300 hover:underline shrink-0"
                             >
-                              📖
+                              <span aria-hidden="true">📖</span>
                             </a>
                           )}
                           {alert.runbook?.remediation_enabled && alert.device_id && (
@@ -1278,9 +1286,10 @@ export default function AlertCenter() {
                               onClick={(e) => { e.stopPropagation(); runRunbookRemediation(alert); }}
                               disabled={runningRunbookAlertId === alert.id}
                               title="Run this runbook's remediation action against the affected device"
+                              aria-label="Run runbook remediation action against the affected device"
                               className="text-violet-600 dark:text-violet-300 hover:underline shrink-0 disabled:opacity-50"
                             >
-                              {runningRunbookAlertId === alert.id ? "…" : "⚡"}
+                              {runningRunbookAlertId === alert.id ? "…" : <span aria-hidden="true">⚡</span>}
                             </button>
                           )}
                           {alert.device_id && runbooks.some((r) => r.remediation_enabled) && (
@@ -1289,15 +1298,19 @@ export default function AlertCenter() {
                                 onClick={() => setPlaybookMenuAlertId(playbookMenuAlertId === alert.id ? null : alert.id)}
                                 disabled={runningRunbookAlertId === alert.id}
                                 title="Run any remediation-enabled playbook against this device"
+                                aria-label="Run any remediation-enabled playbook against this device"
+                                aria-haspopup="menu"
+                                aria-expanded={playbookMenuAlertId === alert.id}
                                 className="text-slate-500 dark:text-slate-300 hover:underline disabled:opacity-50"
                               >
-                                🛠️
+                                <span aria-hidden="true">🛠️</span>
                               </button>
                               {playbookMenuAlertId === alert.id && (
-                                <div className="absolute z-20 top-full left-0 mt-1 w-56 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg shadow-lg py-1 max-h-56 overflow-auto">
+                                <div role="menu" aria-label="Remediation playbooks" className="absolute z-20 top-full left-0 mt-1 w-56 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg shadow-lg py-1 max-h-56 overflow-auto">
                                   {runbooks.filter((r) => r.remediation_enabled).map((r) => (
                                     <button
                                       key={r.id}
+                                      role="menuitem"
                                       onClick={() => runRunbookRemediation(alert, r)}
                                       title={r.remediation_command || undefined}
                                       className="w-full text-left px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700"
@@ -1330,8 +1343,16 @@ export default function AlertCenter() {
                           {alert.suppressed && (
                             <span className="text-[10px] font-medium text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 px-1.5 py-0.5 rounded-full">Impacted</span>
                           )}
-                          {alert.muted_until && <span className="text-[10px] font-medium text-purple-600 bg-purple-50 dark:bg-purple-950/40 dark:text-purple-300 px-1.5 py-0.5 rounded-full">🔕</span>}
-                          {alert.escalated && <span className="text-[10px] font-medium text-orange-600 bg-orange-50 dark:bg-orange-950/40 dark:text-orange-300 px-1.5 py-0.5 rounded-full">📟{(alert.escalation_count ?? 0) > 1 ? `×${alert.escalation_count}` : ""}</span>}
+                          {alert.muted_until && (
+                            <span className="text-[10px] font-medium text-purple-600 bg-purple-50 dark:bg-purple-950/40 dark:text-purple-300 px-1.5 py-0.5 rounded-full" aria-label="Snoozed" title="Snoozed">
+                              <span aria-hidden="true">🔕</span>
+                            </span>
+                          )}
+                          {alert.escalated && (
+                            <span className="text-[10px] font-medium text-orange-600 bg-orange-50 dark:bg-orange-950/40 dark:text-orange-300 px-1.5 py-0.5 rounded-full" aria-label={`Escalated${(alert.escalation_count ?? 0) > 1 ? ` ×${alert.escalation_count}` : ""}`}>
+                              <span aria-hidden="true">📟</span>{(alert.escalation_count ?? 0) > 1 ? `×${alert.escalation_count}` : ""}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-1.5 pr-3 whitespace-nowrap text-[11px] text-slate-400 dark:text-slate-500">{timeAgo(alert.created_at)}</td>
@@ -1351,9 +1372,12 @@ export default function AlertCenter() {
                         {!nested && impacted.length > 0 && (
                           <button
                             onClick={() => toggleExpanded(alert.id)}
+                            aria-expanded={isExpanded}
+                            aria-controls={`impacted-${alert.id}`}
+                            aria-label={`${isExpanded ? "Collapse" : "Expand"} ${impacted.length} impacted alert${impacted.length === 1 ? "" : "s"}`}
                             className="text-[10px] font-semibold text-brandblue hover:text-navy dark:text-white whitespace-nowrap"
                           >
-                            {isExpanded ? "▾" : "▸"} +{impacted.length}
+                            <span aria-hidden="true">{isExpanded ? "▾" : "▸"}</span> +{impacted.length}
                           </button>
                         )}
                       </td>
@@ -1409,18 +1433,34 @@ export default function AlertCenter() {
                 if (density === "compact") {
                   return (
                     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
+                      <table className="w-full text-left border-collapse" aria-label="Alerts, compact table view">
                         <thead>
                           <tr className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 border-b border-slate-200 dark:border-slate-700">
-                            <th className="pl-3 py-2 w-8" />
-                            <th className="py-2 w-8" />
-                            <th className="py-2 pr-3">Alert</th>
-                            <th className="py-2 pr-3">Source</th>
-                            <th className="py-2 pr-3">Status</th>
-                            <th className="py-2 pr-3">Age</th>
-                            <th className="py-2 pr-3">Device</th>
-                            <th className="py-2 pr-3" />
-                            <th className="py-2 pr-3 text-right">Actions</th>
+                            <th scope="col" className="pl-3 py-2 w-8">
+                              <input
+                                type="checkbox"
+                                className="w-3.5 h-3.5 accent-brandblue cursor-pointer"
+                                aria-label={selectedIds.size > 0 ? "Deselect all alerts" : "Select all alerts"}
+                                checked={topLevel.length > 0 && topLevel.every((a) => a.resolved || selectedIds.has(a.id))}
+                                onChange={() => {
+                                  const selectable = topLevel.filter((a) => !a.resolved);
+                                  const allSelected = selectable.length > 0 && selectable.every((a) => selectedIds.has(a.id));
+                                  setSelectedIds(allSelected ? new Set() : new Set(selectable.map((a) => a.id)));
+                                }}
+                              />
+                            </th>
+                            <th scope="col" className="py-2 w-8" aria-sort="none">
+                              <span className="sr-only">Severity</span>
+                            </th>
+                            <th scope="col" className="py-2 pr-3" aria-sort="none">Alert</th>
+                            <th scope="col" className="py-2 pr-3" aria-sort="none">Source</th>
+                            <th scope="col" className="py-2 pr-3" aria-sort="none">Status</th>
+                            <th scope="col" className="py-2 pr-3" aria-sort="none">Age</th>
+                            <th scope="col" className="py-2 pr-3" aria-sort="none">Device</th>
+                            <th scope="col" className="py-2 pr-3">
+                              <span className="sr-only">Related alerts</span>
+                            </th>
+                            <th scope="col" className="py-2 pr-3 text-right">Actions</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1452,12 +1492,20 @@ export default function AlertCenter() {
 
       {/* Snooze creation modal */}
       {snoozeTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setSnoozeTarget(null)}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+          onClick={() => setSnoozeTarget(null)}
+          onKeyDown={(e) => e.key === "Escape" && setSnoozeTarget(null)}
+        >
           <div
+            ref={snoozeModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="snooze-modal-title"
             className="w-full max-w-md bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 p-5 flex flex-col gap-3"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-bold text-navy dark:text-white">Snooze this alert</h3>
+            <h3 id="snooze-modal-title" className="text-sm font-bold text-navy dark:text-white">Snooze this alert</h3>
             <p className="text-xs text-slate-500 dark:text-slate-400">
               {snoozeTarget.category} {snoozeTarget.device_id ? `on device ${snoozeTarget.device_id.slice(0, 8)}…` : "(no device)"}
             </p>
@@ -2106,4 +2154,4 @@ export default function AlertCenter() {
       )}
     </div>
   );
-}
+}1

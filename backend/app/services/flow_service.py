@@ -845,6 +845,32 @@ def traffic_bytes_for_device(db: Session, device_id, *, since: datetime.datetime
     return int(total or 0)
 
 
+def recent_bandwidth_for_device(db: Session, device_id, *, minutes: int = 5) -> dict | None:
+    """Live-ish per-device bandwidth for the last `minutes`, used to
+    annotate a path-trace hop with "is this hop actually congested"
+    rather than just reachability (see app.services.path_trace_service).
+    Returns None if this device has exported no flow data in the window
+    at all -- callers must keep that distinct from a real 0 bytes/sec,
+    since "unmonitored hop" and "idle hop" are different facts.
+    """
+    cutoff = _since(minutes)
+    rows = (
+        db.query(FlowRecord.ip_protocol, func.sum(FlowRecord.bytes).label("b"))
+        .filter(FlowRecord.device_id == device_id, FlowRecord.received_at >= cutoff)
+        .group_by(FlowRecord.ip_protocol)
+        .all()
+    )
+    if not rows:
+        return None
+
+    total_bytes = sum(int(r.b or 0) for r in rows)
+    top_protocol_row = max(rows, key=lambda r: int(r.b or 0))
+    return {
+        "bytes_per_sec": round(total_bytes / (minutes * 60), 1),
+        "top_protocol": protocol_name(top_protocol_row.ip_protocol),
+    }
+
+
 def traffic_bytes_for_subnet(
     db: Session, cidr: str, *, since: datetime.datetime, until: datetime.datetime, device_id=None
 ) -> int:
