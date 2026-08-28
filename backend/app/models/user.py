@@ -89,6 +89,25 @@ class User(Base):
     mfa_secret = Column(String, nullable=True)  # TOTP secret; set on /mfa/setup, unused until enabled
     mfa_enabled = Column(String, default="false")  # "true" / "false" -- string for SQLite/Postgres portability
 
+    # Security PIN (step-up auth): a short numeric PIN, separate from the
+    # login password, that can be required as a second check immediately
+    # before opening a device terminal or firing a critical, high-blast-
+    # radius action (device delete, config rollback, etc.) -- see
+    # app.core.deps.require_pin_step_up. Opt-in per user (pin_required
+    # defaults False so setting this up never locks anyone out
+    # retroactively); hashed with the same bcrypt helper as the login
+    # password (app.core.security.hash_password/verify_password), just
+    # applied to the PIN string instead. Nullable: most users will never
+    # set one.
+    security_pin_hash = Column(String, nullable=True)
+    security_pin_set_at = Column(DateTime(timezone=True), nullable=True)
+    # Whether the PIN, once set, is actually *enforced* for terminal/
+    # critical-action step-up -- kept separate from security_pin_hash so a
+    # user can set a PIN in advance and only flip enforcement on when
+    # ready, and so turning enforcement off doesn't require throwing away
+    # (and later re-typing) the PIN itself.
+    pin_required = Column(Boolean, nullable=False, default=False, server_default="false")
+
     # ChatOps identity links (FR: two-way Slack/Teams). Populated only via
     # POST /chatops/links by a Network Admin -- never self-service from an
     # unauthenticated Slack/Teams message, since that would let anyone who

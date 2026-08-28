@@ -84,6 +84,33 @@ class MfaDisableRequest(BaseModel):
     password: str
 
 
+class SecurityPinStatus(BaseModel):
+    pin_set: bool
+    pin_required: bool
+
+
+class SecurityPinSetRequest(BaseModel):
+    password: str  # current login password, to prove it's really the account owner
+    pin: str
+
+
+class SecurityPinDisableRequest(BaseModel):
+    password: str
+
+
+class SecurityPinRequiredRequest(BaseModel):
+    pin_required: bool
+
+
+class SecurityPinVerifyRequest(BaseModel):
+    pin: str
+
+
+class SecurityPinVerifyResponse(BaseModel):
+    pin_token: str
+    expires_in_minutes: int
+
+
 class SessionRead(BaseModel):
     """A single active (non-revoked, non-expired) refresh token issued to
     the current user -- i.e. a logged-in "session" on some device/browser.

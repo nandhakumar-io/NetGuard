@@ -2,7 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
-import { getAccessToken } from '../lib/api';
+import { api, getAccessToken } from '../lib/api';
+import { useAuth } from '../lib/auth';
 
 interface WebTerminalProps {
   deviceId: string;
@@ -11,9 +12,39 @@ interface WebTerminalProps {
 export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
   const terminalRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const { user } = useAuth();
+
+  // Security PIN step-up (see backend app.core.deps.check_pin_step_up_ws).
+  // Only relevant when the current user has both set a PIN and turned on
+  // enforcement (user.pin_required) -- everyone else skips straight past
+  // this and the terminal connects the same way it always did.
+  const [pinToken, setPinToken] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState('');
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+  const needsPinPrompt = !!user?.pin_required && !pinToken;
+
+  const verifyPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinError(null);
+    setPinBusy(true);
+    try {
+      const res = await api.post('/auth/security-pin/verify', { pin: pinInput });
+      setPinToken(res.data.pin_token);
+      setPinInput('');
+    } catch (err: any) {
+      setPinError(err?.response?.data?.detail || 'Incorrect PIN.');
+    } finally {
+      setPinBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (!terminalRef.current) return;
+    // Wait for PIN step-up before opening the socket at all when it's
+    // required -- avoids a doomed connection attempt (and the resulting
+    // confusing 1008 close) when we already know it'll be rejected.
+    if (needsPinPrompt) return;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -49,8 +80,9 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token = getAccessToken() || '';
-    
-    const wsUrl = `${protocol}//${wsHost}/api/v1/devices/${deviceId}/terminal?token=${token}`;
+
+    const pinParam = pinToken ? `&pin_token=${encodeURIComponent(pinToken)}` : '';
+    const wsUrl = `${protocol}//${wsHost}/api/v1/devices/${deviceId}/terminal?token=${token}${pinParam}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
@@ -73,6 +105,15 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
     };
 
     ws.onclose = (event) => {
+      if (event.reason === 'Security PIN verification required') {
+        // Step-up token was rejected or expired between verifying and
+        // connecting (e.g. it timed out) -- clear it so needsPinPrompt
+        // flips back on and the user gets the prompt again instead of a
+        // silent dead terminal.
+        setPinToken(null);
+        setPinError('PIN verification expired -- enter your PIN again.');
+        return;
+      }
       if (event.wasClean && event.reason) {
         // Backend already sent a human-readable reason as terminal output
         // right before closing (see terminal.py's _run_pumped_session) --
@@ -102,7 +143,36 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
       ws.close();
       term.dispose();
     };
-  }, [deviceId]);
+  }, [deviceId, needsPinPrompt, pinToken]);
+
+  if (needsPinPrompt) {
+    return (
+      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <form onSubmit={verifyPin} className="bg-slate-800 rounded-xl p-6 w-full max-w-xs space-y-3">
+          <p className="text-sm text-slate-200 font-semibold">Enter your Security PIN to open a terminal.</p>
+          {pinError && <p className="text-xs text-red-400">{pinError}</p>}
+          <input
+            autoFocus
+            type="password"
+            inputMode="numeric"
+            maxLength={8}
+            value={pinInput}
+            onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-slate-100 text-sm tracking-widest text-center"
+            placeholder="PIN"
+            required
+          />
+          <button
+            type="submit"
+            disabled={pinBusy || pinInput.length < 4}
+            className="w-full bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+          >
+            {pinBusy ? 'Verifying…' : 'Verify & Continue'}
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>

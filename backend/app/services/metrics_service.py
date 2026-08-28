@@ -138,7 +138,24 @@ def _compute_interface_utilization(
 
     bits_transferred = delta_octets * 8
     bps = bits_transferred / interval_seconds
-    utilization = round((bps / metrics.interface_speed_bps) * 100, 1)
+    # `interface_octets_total` (see snmp_service.walk_interface_stats)
+    # is ifHCInOctets + ifHCOutOctets summed across every up interface --
+    # i.e. combined *bidirectional* traffic. `interface_speed_bps` is
+    # ifHighSpeed summed the same way, but ifHighSpeed is a link's
+    # single-direction nominal speed (a "1 Gbps" switchport can do 1 Gbps
+    # in AND 1 Gbps out at once over full duplex, not 1 Gbps combined).
+    # Dividing combined in+out bits by that single-direction figure
+    # silently doubled every reading -- a perfectly healthy port pushing
+    # an ordinary 30% in / 30% out came back as "60% utilized", and any
+    # port genuinely busy in both directions could peg at/near 100% even
+    # though neither direction was actually maxed. That inflated
+    # utilization then dragged compute_health_score()'s average down
+    # into the yellow/red band -- and with it Device.status into
+    # DEGRADED -- for devices that were, by every other measure (CPU,
+    # memory, temperature, reachability), completely healthy. Doubling
+    # the denominator here (full-duplex combined capacity) is what
+    # actually matches what the numerator counts.
+    utilization = round((bps / (metrics.interface_speed_bps * 2)) * 100, 1)
     return max(0.0, min(100.0, utilization))
 
 
@@ -246,6 +263,8 @@ def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:
                 event=category,
                 message=f"{device.hostname}: {message}",
                 severity=severity,
+                device_hostname=device.hostname,
+                alert_id=alert.id,
                 tenant_id=device.tenant_id,
             )
 
@@ -316,6 +335,8 @@ def record_interface_transition(
                     event="Interface Down",
                     message=f"{device.hostname}: interface {if_descr} is down{uplink_tag}",
                     severity="critical",
+                    device_hostname=device.hostname,
+                    alert_id=alert.id,
                     tenant_id=device.tenant_id,
                 )
     elif latest is not None:
@@ -406,7 +427,18 @@ def _sync_interface_metrics(db: Session, device: Device, metrics: SnmpMetrics, p
             delta_octets = octets_total - previous["octets_total"]
             if delta_octets >= 0:  # negative delta = counter reset/reboot -- not a valid rate
                 bps = (delta_octets * 8) / poll_interval_seconds
-                utilization_pct = max(0.0, min(100.0, round((bps / speed_bps) * 100, 1)))
+                # `octets_total` is ifHCInOctets + ifHCOutOctets -- combined
+                # bidirectional traffic. `speed_bps` is ifHighSpeed × 1_000_000:
+                # a port's single-direction nominal speed (a 1 Gbps switchport
+                # can send 1 Gbps in AND 1 Gbps out simultaneously on full
+                # duplex). Dividing combined in+out bits by the unidirectional
+                # speed silently doubles every utilization reading -- a healthy
+                # port at 30% in / 30% out was reported as 60%, dragging
+                # compute_health_score() into DEGRADED even though neither
+                # direction was actually stressed. Use speed_bps × 2 (full-
+                # duplex combined capacity) to match what the numerator counts.
+                # Mirrors the identical fix in _compute_interface_utilization.
+                utilization_pct = max(0.0, min(100.0, round((bps / (speed_bps * 2)) * 100, 1)))
 
         if errors is not None and previous is not None and previous.get("errors") is not None:
             delta_errors = errors - previous["errors"]

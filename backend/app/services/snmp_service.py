@@ -1625,7 +1625,18 @@ def poll_health(
         temp_raw = _get_first_table_value(ip_address, auth, OIDS["temperature"], timeout)
         fan_state_raw = _get_first_table_value(ip_address, auth, OIDS["fan_state"], timeout)
         power_state_raw = _get_first_table_value(ip_address, auth, OIDS["power_supply_state"], timeout)
-    interface_stats = walk_interface_stats(ip_address, auth, timeout)
+    # The Juniper path above runs 6+ sequential _get_first_table_value_matching
+    # calls (cpu, buffer, temp, fan, PSU descriptions) before we get here. On a
+    # loaded EX3400 with many interfaces, each of those calls can consume a big
+    # slice of the shared `timeout` budget, leaving too little for the
+    # walk_interface_stats call below -- which needs MORE OIDs (7 columns across
+    # every interface), not fewer. A 3.0 s `timeout` that's already been
+    # partially spent by the Juniper scalar phase comes out the other side as
+    # effectively 0-1 s for the interface walk, which silently returns {} (same
+    # as "device unreachable") instead of raising. Floor it at 5.0 s so the
+    # interface walk always gets at least 5 s regardless of how long the scalar
+    # phase took. Callers that already pass ≥ 5 s are unaffected.
+    interface_stats = walk_interface_stats(ip_address, auth, timeout=max(timeout, 5.0))
 
     mem_pct = None
     if is_juniper:

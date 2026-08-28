@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from sqlalchemy.orm import Session
@@ -242,3 +242,65 @@ def get_current_tenant_id(user: User = Depends(get_current_user)) -> uuid.UUID |
 # one alias rather than two divergent implementations so tenant-scoping
 # behavior can't drift between them.
 get_tenant_scope = get_current_tenant_id
+
+
+def _valid_pin_step_up(token: str | None, user: User) -> bool:
+    if not token:
+        return False
+    from jose import JWTError
+
+    from app.core.security import decode_pin_step_up_token
+
+    try:
+        payload = decode_pin_step_up_token(token)
+    except JWTError:
+        return False
+    return payload.get("sub") == user.email
+
+
+def require_pin_step_up(
+    x_pin_token: str | None = Header(default=None, alias="X-Pin-Token"),
+    user: User = Depends(get_current_user),
+) -> User:
+    """Dependency factory... actually usable directly (not a factory) --
+    drop straight onto any critical/high-blast-radius HTTP endpoint (e.g.
+    device delete, config rollback) alongside its usual `require_roles`
+    check: `Depends(require_pin_step_up)`.
+
+    Only actually enforces anything for a user who both has a PIN set
+    AND has opted into requiring it (User.pin_required) -- see
+    app.models.user.User.security_pin_hash. For everyone else this is a
+    no-op, since the PIN is an opt-in extra step-up, not a blanket new
+    requirement retrofitted onto every existing account.
+
+    When enforced, the caller must have already exchanged their PIN for
+    a short-lived step-up token via POST /auth/security-pin/verify and
+    sent it back as the `X-Pin-Token` header -- same shape as the
+    Authorization bearer token, just proving a different, more recent
+    check. See device_terminal's `_check_pin_step_up_ws` for the
+    WebSocket equivalent (headers aren't available on a `/ws` upgrade
+    the same way, hence the separate query-param-based check there).
+    """
+    if user.pin_required and user.security_pin_hash:
+        if not _valid_pin_step_up(x_pin_token, user):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Security PIN verification required -- verify your PIN and retry with the resulting token",
+            )
+    return user
+
+
+def check_pin_step_up_ws(pin_token: str | None, user: User) -> bool:
+    """WebSocket counterpart to require_pin_step_up -- see
+    app.api.terminal.device_terminal, which calls this itself (before
+    `websocket.accept()`, same convention as get_current_user_ws) rather
+    than using a raising Depends(), since there's no HTTP response to
+    attach a 401 to once a WS upgrade is already accepted.
+
+    Returns True when the caller is cleared to proceed: either PIN
+    step-up isn't enforced for this user at all, or a valid,
+    not-yet-expired step-up token for this exact user was supplied.
+    """
+    if not (user.pin_required and user.security_pin_hash):
+        return True
+    return _valid_pin_step_up(pin_token, user)

@@ -101,7 +101,7 @@ def _connect(
 
     from app.core.config import settings
 
-    return manager.connect(
+    conn = manager.connect(
         host=ip_address,
         port=port or 830,
         username=username,
@@ -114,6 +114,18 @@ def _connect(
         # devices.
         timeout=settings.NETCONF_CONNECT_TIMEOUT_SECONDS,
     )
+    # ncclient reuses the `timeout` kwarg above as the default reply
+    # timeout for every RPC on this session too, not just the SSH
+    # handshake (ncclient.manager.Manager.timeout). Once the session is
+    # actually up, widen that to NETCONF_OPERATION_TIMEOUT_SECONDS so a
+    # legitimately slow-but-healthy RPC (e.g. Junos
+    # <get-interface-information> on a many-port EX3400) has room to
+    # finish instead of being cut off at the same 10s budget meant for
+    # detecting an unreachable device. A still-unreachable device fails at
+    # connect() above, before this line ever runs, so this can't make an
+    # actually-down device hang longer.
+    conn.timeout = settings.NETCONF_OPERATION_TIMEOUT_SECONDS
+    return conn
 
 
 def get_junos_interface_information(

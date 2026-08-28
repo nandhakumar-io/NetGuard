@@ -50,6 +50,19 @@ export default function Security() {
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
+  // Security PIN (step-up auth for terminal access + critical actions).
+  // Separate error/message/busy state from MFA above so an error in one
+  // card never clobbers or clears the other's.
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [pinMessage, setPinMessage] = useState<string | null>(null);
+  const [pinBusy, setPinBusy] = useState(false);
+  const [showPinSetup, setShowPinSetup] = useState(false);
+  const [pinPassword, setPinPassword] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [newPinConfirm, setNewPinConfirm] = useState("");
+  const [disablePinPassword, setDisablePinPassword] = useState("");
+  const [showDisablePin, setShowDisablePin] = useState(false);
+
   // Admins can additionally see and revoke *every* user's active
   // sessions, not just their own -- separate state/endpoint
   // (GET/DELETE /auth/sessions/all) so the default "my sessions" view
@@ -300,6 +313,62 @@ export default function Security() {
     }
   };
 
+  const setPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinError(null);
+    setPinMessage(null);
+    if (newPin !== newPinConfirm) {
+      setPinError("PINs don't match.");
+      return;
+    }
+    setPinBusy(true);
+    try {
+      await api.post("/auth/security-pin", { password: pinPassword, pin: newPin });
+      setPinPassword("");
+      setNewPin("");
+      setNewPinConfirm("");
+      setShowPinSetup(false);
+      setPinMessage("Security PIN saved. Turn on \"Require for terminal & critical actions\" below to start enforcing it.");
+      await refreshMe();
+    } catch (err: any) {
+      setPinError(err?.response?.data?.detail || "Failed to set PIN.");
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
+  const togglePinRequired = async (nextValue: boolean) => {
+    setPinError(null);
+    setPinMessage(null);
+    setPinBusy(true);
+    try {
+      await api.post("/auth/security-pin/require", { pin_required: nextValue });
+      await refreshMe();
+    } catch (err: any) {
+      setPinError(err?.response?.data?.detail || "Failed to update PIN enforcement.");
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
+  const disablePin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinError(null);
+    setPinMessage(null);
+    setPinBusy(true);
+    try {
+      await api.delete("/auth/security-pin", { data: { password: disablePinPassword } });
+      setDisablePinPassword("");
+      setShowDisablePin(false);
+      setPinMessage("Security PIN removed.");
+      await refreshMe();
+    } catch (err: any) {
+      setPinError(err?.response?.data?.detail || "Incorrect password.");
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
   return (
     <div className="max-w-xl">
       <h1 className="text-xl font-bold text-navy mb-1">Security</h1>
@@ -386,6 +455,148 @@ export default function Security() {
               Disable MFA
             </button>
           </form>
+        )}
+      </div>
+
+      <h2 className="text-lg font-bold text-navy mt-8 mb-1">Security PIN</h2>
+      <p className="text-sm text-slate-500 mb-4">
+        An extra numeric PIN, separate from your password, that can be required immediately before opening a
+        device terminal or performing a critical action (device delete, config rollback). Optional -- nothing
+        changes for you until you set a PIN and turn on enforcement below.
+      </p>
+
+      {pinError && <p className="text-riskcrit text-sm mb-4">{pinError}</p>}
+      {pinMessage && <p className="text-sm mb-4 text-green-700">{pinMessage}</p>}
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <p className="text-sm font-semibold text-navy">PIN status</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {user?.pin_set ? (
+                <span className="text-green-700 font-medium">PIN set</span>
+              ) : (
+                <span className="text-slate-500">No PIN set</span>
+              )}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {!showPinSetup && (
+              <button
+                onClick={() => setShowPinSetup(true)}
+                disabled={pinBusy}
+                className="bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
+              >
+                {user?.pin_set ? "Change PIN" : "Set PIN"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {showPinSetup && (
+          <form onSubmit={setPin} className="border-t border-slate-100 pt-4 space-y-3">
+            <p className="text-xs text-slate-500">Enter your account password to confirm, then choose a 4-8 digit PIN.</p>
+            <input
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              type="password"
+              placeholder="Account password"
+              value={pinPassword}
+              onChange={(e) => setPinPassword(e.target.value)}
+              required
+            />
+            <input
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm tracking-widest text-center"
+              inputMode="numeric"
+              maxLength={8}
+              placeholder="New PIN"
+              value={newPin}
+              onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ""))}
+              required
+            />
+            <input
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm tracking-widest text-center"
+              inputMode="numeric"
+              maxLength={8}
+              placeholder="Confirm PIN"
+              value={newPinConfirm}
+              onChange={(e) => setNewPinConfirm(e.target.value.replace(/\D/g, ""))}
+              required
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => { setShowPinSetup(false); setPinPassword(""); setNewPin(""); setNewPinConfirm(""); }}
+                className="w-full bg-white border border-slate-200 text-slate-500 rounded-lg px-4 py-2 text-sm font-semibold hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={pinBusy || newPin.length < 4 || newPinConfirm.length < 4}
+                className="w-full bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
+              >
+                Save PIN
+              </button>
+            </div>
+          </form>
+        )}
+
+        {user?.pin_set && !showPinSetup && (
+          <div className="border-t border-slate-100 pt-4 mt-4 space-y-4">
+            <label className="flex items-center justify-between cursor-pointer">
+              <span className="text-sm text-navy">
+                Require for terminal access &amp; critical actions
+                <span className="block text-xs text-slate-400 mt-0.5">
+                  Applies to opening a device terminal and to device delete / config rollback.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={!!user?.pin_required}
+                disabled={pinBusy}
+                onChange={(e) => togglePinRequired(e.target.checked)}
+                className="w-4 h-4 shrink-0"
+              />
+            </label>
+
+            {!showDisablePin ? (
+              <button
+                onClick={() => setShowDisablePin(true)}
+                disabled={pinBusy}
+                className="text-xs font-semibold text-riskcrit hover:underline"
+              >
+                Remove PIN
+              </button>
+            ) : (
+              <form onSubmit={disablePin} className="space-y-3">
+                <p className="text-xs text-slate-500">Enter your password to remove the PIN and turn off enforcement.</p>
+                <input
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  type="password"
+                  placeholder="Password"
+                  value={disablePinPassword}
+                  onChange={(e) => setDisablePinPassword(e.target.value)}
+                  required
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setShowDisablePin(false); setDisablePinPassword(""); }}
+                    className="w-full bg-white border border-slate-200 text-slate-500 rounded-lg px-4 py-2 text-sm font-semibold hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={pinBusy}
+                    className="w-full bg-white border border-riskcrit text-riskcrit rounded-lg px-4 py-2 text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-50"
+                  >
+                    Remove PIN
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
         )}
       </div>
 

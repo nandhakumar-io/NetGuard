@@ -10,6 +10,7 @@ from app.core.deps import get_current_user, require_roles
 from app.core.security import (
     create_access_token,
     create_mfa_challenge_token,
+    create_pin_step_up_token,
     decode_mfa_challenge_token,
     generate_refresh_token,
     hash_password,
@@ -28,6 +29,12 @@ from app.schemas.auth import (
     MfaVerifyRequest,
     RefreshRequest,
     RegisterResponse,
+    SecurityPinDisableRequest,
+    SecurityPinRequiredRequest,
+    SecurityPinSetRequest,
+    SecurityPinStatus,
+    SecurityPinVerifyRequest,
+    SecurityPinVerifyResponse,
     SessionRead,
     Token,
     UserCreate,
@@ -295,6 +302,121 @@ def mfa_disable(payload: MfaDisableRequest, db: Session = Depends(get_db), curre
     return {"mfa_enabled": False}
 
 
+# --- Security PIN (step-up auth for terminal access + critical actions) ---
+#
+# A separate, short numeric PIN from the login password -- see
+# app.models.user.User.security_pin_hash/pin_required and
+# app.core.deps.require_pin_step_up/check_pin_step_up_ws for where it's
+# actually enforced. This block only covers setting it up and exchanging
+# it for a short-lived step-up token; opt-in the whole way through, same
+# posture as MFA above.
+
+_PIN_MIN_LENGTH = 4
+_PIN_MAX_LENGTH = 8
+
+
+def _validate_pin_format(pin: str) -> None:
+    if not pin.isdigit() or not (_PIN_MIN_LENGTH <= len(pin) <= _PIN_MAX_LENGTH):
+        raise HTTPException(
+            status_code=422, detail=f"PIN must be {_PIN_MIN_LENGTH}-{_PIN_MAX_LENGTH} digits"
+        )
+
+
+@router.get("/security-pin", response_model=SecurityPinStatus)
+def security_pin_status(current_user: User = Depends(get_current_user)):
+    return SecurityPinStatus(
+        pin_set=bool(current_user.security_pin_hash),
+        pin_required=current_user.pin_required,
+    )
+
+
+@router.post("/security-pin", response_model=SecurityPinStatus)
+def security_pin_set(
+    payload: SecurityPinSetRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    """Sets or replaces the caller's Security PIN. Requires the current
+    login password (not the old PIN, if any) -- same "prove it's really
+    you" bar as changing a password, and simpler than requiring the old
+    PIN too when the whole point is often "I forgot it, let me reset it".
+    Does NOT turn enforcement on by itself -- see POST
+    .../security-pin/require for that, kept as a separate explicit step
+    so setting a PIN in advance can never surprise-lock a fresh terminal
+    open before the user meant to turn it on.
+    """
+    if not verify_password(payload.password, current_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+    _validate_pin_format(payload.pin)
+
+    current_user.security_pin_hash = hash_password(payload.pin)
+    current_user.security_pin_set_at = datetime.utcnow()
+    db.commit()
+    return SecurityPinStatus(pin_set=True, pin_required=current_user.pin_required)
+
+
+@router.post("/security-pin/require", response_model=SecurityPinStatus)
+def security_pin_set_required(
+    payload: SecurityPinRequiredRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    """Toggles whether the PIN is actually enforced (terminal open /
+    critical actions) once it's been set. Turning this on with no PIN set
+    yet is rejected -- otherwise a user could end up "required" with
+    nothing to verify against, unable to ever pass the check.
+    """
+    if payload.pin_required and not current_user.security_pin_hash:
+        raise HTTPException(status_code=400, detail="Set a PIN via POST /auth/security-pin before requiring it")
+    current_user.pin_required = payload.pin_required
+    db.commit()
+    return SecurityPinStatus(pin_set=bool(current_user.security_pin_hash), pin_required=current_user.pin_required)
+
+
+@router.delete("/security-pin", response_model=SecurityPinStatus)
+def security_pin_disable(
+    payload: SecurityPinDisableRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    """Removes the PIN entirely and turns off enforcement -- same
+    password-confirmation bar as setting one, so a captured, still-logged-
+    -in session can't unilaterally strip step-up protection without the
+    account password.
+    """
+    if not verify_password(payload.password, current_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+
+    current_user.security_pin_hash = None
+    current_user.security_pin_set_at = None
+    current_user.pin_required = False
+    db.commit()
+    return SecurityPinStatus(pin_set=False, pin_required=False)
+
+
+@router.post("/security-pin/verify", response_model=SecurityPinVerifyResponse)
+def security_pin_verify(
+    payload: SecurityPinVerifyRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    """Exchanges a correct PIN for a short-lived step-up token (see
+    create_pin_step_up_token) -- sent back as the `X-Pin-Token` header on
+    a critical HTTP action, or the `pin_token` query param when opening a
+    device terminal WebSocket. Rate-limited the same way as MFA codes
+    (same lockout window/threshold, separate counter namespace) since
+    this is exactly the kind of short numeric secret brute-forcing
+    targets.
+    """
+    if not current_user.security_pin_hash:
+        raise HTTPException(status_code=400, detail="No Security PIN set for this account")
+
+    limiter_key = f"pin:{current_user.email}"
+    locked_out, retry_after = rate_limiter.is_locked_out(limiter_key)
+    if locked_out:
+        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {retry_after}s")
+
+    if not verify_password(payload.pin, current_user.security_pin_hash):
+        rate_limiter.record_failed_attempt(limiter_key)
+        raise HTTPException(status_code=401, detail="Incorrect PIN")
+
+    rate_limiter.reset_attempts(limiter_key)
+    token = create_pin_step_up_token(subject=current_user.email)
+    return SecurityPinVerifyResponse(pin_token=token, expires_in_minutes=settings.PIN_STEP_UP_EXPIRE_MINUTES)
+
+
 @router.post("/refresh", response_model=Token)
 def refresh(
     request: Request,
@@ -536,6 +658,8 @@ def get_me(current_user: User = Depends(get_current_user)):
         "full_name": current_user.full_name,
         "role": current_user.role.value,
         "mfa_enabled": current_user.mfa_enabled == "true",
+        "pin_set": bool(current_user.security_pin_hash),
+        "pin_required": current_user.pin_required,
         "extra_roles": [r.strip() for r in (current_user.extra_roles or "").split(",") if r.strip()],
         "extra_permissions": [p.strip() for p in (current_user.extra_permissions or "").split(",") if p.strip()],
         # Drives the cross-tenant NOC board's nav visibility client-side

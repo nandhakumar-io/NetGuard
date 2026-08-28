@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     MFA_CHALLENGE_EXPIRE_MINUTES: int = 5
+
+    # Security PIN step-up (app.core.security.create_pin_step_up_token):
+    # how long a single "PIN verified" token is good for before the next
+    # terminal open / critical action has to re-verify. Short on purpose --
+    # this is a just-in-time proof, not a session.
+    PIN_STEP_UP_EXPIRE_MINUTES: int = 5
     MFA_ISSUER_NAME: str = "NetGuard"
 
     # Login lockout (FR-1 / NFR Security): brute-force protection
@@ -180,6 +186,23 @@ class Settings(BaseSettings):
     # view_interfaces) means a NETCONF timeout no longer has to mean an
     # empty page for that tab specifically.
     NETCONF_CONNECT_TIMEOUT_SECONDS: float = 10.0
+
+    # RPC reply timeout used for operations issued *after* the session is
+    # already up (ncclient's manager.connect(timeout=...) doubles as both
+    # the SSH connect timeout above AND the default per-RPC reply timeout
+    # for the rest of that session -- see ncclient.manager.Manager.timeout
+    # -- so leaving it at NETCONF_CONNECT_TIMEOUT_SECONDS meant every RPC,
+    # not just the handshake, got cut off at 10s). <get-config> is
+    # comparatively light (it's just handing back provisioned config) and
+    # was surviving under 10s in practice, if slowly; Junos's
+    # <get-interface-information> operational RPC has to gather live
+    # per-interface counters/state for every port on the box, which on an
+    # EX3400 (24-48 ports) routinely runs past 10s even on a healthy,
+    # otherwise-responsive switch -- see
+    # netconf_service.get_junos_interface_information. That RPC (and any
+    # other post-connect NETCONF call) now gets this longer budget instead
+    # of the connect one.
+    NETCONF_OPERATION_TIMEOUT_SECONDS: float = 45.0
 
     # Email notifications (FR-11): sent via SMTP using these settings. Email
     # sending is skipped (not an error) whenever SMTP_HOST or

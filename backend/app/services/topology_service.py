@@ -587,19 +587,23 @@ def _interface_networks(config_text: str) -> list[ipaddress.IPv4Network]:
 
 def _latest_metrics_by_device(devices: list[Device]) -> dict[str, dict]:
     """device_id -> its most recent VictoriaMetrics sample (full dict, not
-    just health), so callers can pull health_color/health_score *and*
-    interface_utilization_pct off one lookup instead of two near-identical
-    ones. One vm_client call per device -- fine at prototype fleet sizes
-    (same O(devices) tradeoff build_topology already accepts below); a
-    device the map has never polled simply isn't in the returned dict
-    (caller treats that as unknown/gray, not an error).
+    just health), keyed by str(device.id), so callers can pull health_color/
+    health_score *and* interface_utilization_pct off one lookup instead of
+    two near-identical ones.
+
+    Previously this looped over every device and called
+    vm_client.latest_device_metrics(device.id) once per device -- N
+    serialized HTTP round-trips to VictoriaMetrics for an N-device fleet
+    (every one is a separate /api/v1/query call). fleet_latest_metrics()
+    fetches the same data for ALL devices with exactly two flat PromQL
+    queries (one for scalar gauges, one for info labels), regardless of
+    fleet size -- same O(constant) tradeoff fleet_health_summary() already
+    uses for its fleet_latest_health(). A device the map has never polled
+    simply isn't in the returned dict (caller treats that as unknown/gray).
     """
-    out: dict[str, dict] = {}
-    for device in devices:
-        latest = vm_client.latest_device_metrics(device.id)
-        if latest is not None:
-            out[str(device.id)] = latest
-    return out
+    fleet = vm_client.fleet_latest_metrics()
+    # fleet_latest_metrics() keys by uuid.UUID; callers here use str(device.id)
+    return {str(dev_id): row for dev_id, row in fleet.items()}
 
 
 def _active_alert_severity_by_device(db: Session) -> dict[str, str]:

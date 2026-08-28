@@ -83,6 +83,29 @@ def create_mfa_challenge_token(subject: str) -> str:
     )
 
 
+def create_pin_step_up_token(subject: str) -> str:
+    """Short-lived token proving "the security PIN was just verified",
+    exchanged by a terminal-open request or a critical-action call for
+    step-up authorization -- see app.core.deps.require_pin_step_up. Kept
+    deliberately short-lived (PIN_STEP_UP_EXPIRE_MINUTES) so a captured
+    token is only useful for the next few minutes, not a standing
+    credential; the caller re-verifies the PIN for the next sensitive
+    action rather than reusing one token indefinitely.
+    """
+    return _create_token(
+        subject,
+        token_type="pin_step_up",
+        expires_delta=timedelta(minutes=settings.PIN_STEP_UP_EXPIRE_MINUTES),
+    )
+
+
+def decode_pin_step_up_token(token: str) -> dict:
+    payload = decode_token(token)
+    if payload.get("type") != "pin_step_up":
+        raise jwt.JWTError("Not a PIN step-up token")
+    return payload
+
+
 def create_sso_state_token(extra_claims: dict | None = None) -> str:
     """Short-lived, signed CSRF-protection token for the Google OIDC
     redirect round-trip (the `state` param). A JWT here rather than a

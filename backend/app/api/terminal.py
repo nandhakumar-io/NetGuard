@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_user_ws, require_roles
+from app.core.deps import check_pin_step_up_ws, get_current_user_ws, require_roles
 from app.models.device import Device
 from app.models.user import User, UserRole
 from app.services import (
@@ -526,6 +526,7 @@ async def device_terminal(
     websocket: WebSocket,
     device_id: uuid.UUID,
     token: str = Query(""),
+    pin_token: str = Query(""),
     db: Session = Depends(get_db),
 ):
     """Interactive device terminal over a WebSocket. Tries SSH first
@@ -547,6 +548,15 @@ async def device_terminal(
         return
     if user.role not in TERMINAL_ALLOWED_ROLES:
         await websocket.close(code=1008, reason="Role not permitted to open a device terminal")
+        return
+    # Only actually enforced for a user who has both set a Security PIN
+    # and opted into requiring it (User.pin_required) -- see
+    # app.core.deps.check_pin_step_up_ws. Distinct close reason from the
+    # role check above so the frontend can tell "not allowed at all" from
+    # "allowed, but verify your PIN first" and prompt accordingly instead
+    # of just showing a generic access-denied message.
+    if not check_pin_step_up_ws(pin_token or None, user):
+        await websocket.close(code=1008, reason="Security PIN verification required")
         return
 
     await websocket.accept()

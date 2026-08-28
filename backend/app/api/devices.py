@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 
 from app.core import vm_client
 from app.core.database import get_db
-from app.core.deps import get_current_user, get_tenant_scope, require_roles
+from app.core.deps import (
+    get_current_user,
+    get_tenant_scope,
+    require_pin_step_up,
+    require_roles,
+)
 from app.models.alert import Alert
 from app.models.alert_snooze import AlertSnooze
 from app.models.audit_log import AuditLog
@@ -837,6 +842,7 @@ def delete_device(
     force: bool = Query(False, description="Also permanently delete this device's change/deployment/config history"),
     db: Session = Depends(get_db),
     current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+    _pin: User = Depends(require_pin_step_up),
 ):
     """Delete a device and ALL its related records.
 
@@ -1102,6 +1108,7 @@ def rollback_device(
     payload: RollbackRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(ROLLBACK_ROLES),
+    _pin: User = Depends(require_pin_step_up),
 ):
     """Manually roll a device back to a prior configuration snapshot.
 
@@ -1187,6 +1194,7 @@ def rollback_device_partial(
     payload: PartialRollbackRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(ROLLBACK_ROLES),
+    _pin: User = Depends(require_pin_step_up),
 ):
     """Section-level (partial) rollback: reverts only `section_key`
     (e.g. `"ACL:BLOCK_TELNET"`, from GET .../rollback/sections) to its

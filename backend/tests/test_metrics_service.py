@@ -18,10 +18,15 @@ def test_interface_utilization_none_without_previous_sample():
 def test_interface_utilization_computes_delta_over_interval():
     now = datetime.datetime.now(datetime.timezone.utc)
     previous = _metric(octets_total=0, polled_at=now - datetime.timedelta(seconds=60))
-    # 60s window, 1 Gbps link, transferred 60,000,000 bytes -> 8,000,000 bps -> 0.8%
+    # 60s window, 1 Gbps link, transferred 60,000,000 bytes in+out combined.
+    # octets_total is ifHCInOctets + ifHCOutOctets -- combined bidirectional.
+    # Speed is the single-direction nominal speed. For a full-duplex link the
+    # combined capacity is speed * 2, so:
+    #   bps = 60_000_000 * 8 / 60 = 8_000_000 bps
+    #   utilization = 8_000_000 / (1_000_000_000 * 2) * 100 = 0.4%
     metrics = SnmpMetrics(reachable=True, interface_octets_total=60_000_000, interface_speed_bps=1_000_000_000)
     pct = _compute_interface_utilization(metrics, previous, interval_seconds=60)
-    assert pct == 0.8
+    assert pct == 0.4
 
 
 def test_interface_utilization_none_on_counter_reset():

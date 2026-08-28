@@ -9,6 +9,12 @@ export interface CurrentUser {
   full_name: string;
   role: UserRole;
   mfa_enabled: boolean;
+  // Security PIN step-up (see backend app.models.user.User.
+  // security_pin_hash/pin_required) -- pin_set: whether a PIN exists at
+  // all; pin_required: whether it's actually enforced for terminal open /
+  // critical actions. A PIN can be set without being required yet.
+  pin_set: boolean;
+  pin_required: boolean;
   // Fine-grained grants beyond base role -- see backend app.core.permissions.
   // extra_roles: whole other roles' worth of access. extra_permissions:
   // individual capability/page keys (e.g. "config_management", "page:backups").
