@@ -2585,8 +2585,8 @@ export default function Devices() {
       if (roleFilter !== "all" && d.device_role !== roleFilter) return false;
       if (!q) return true;
       return (
-        d.hostname.toLowerCase().includes(q) ||
-        d.ip_address.toLowerCase().includes(q) ||
+        (d.hostname || "").toLowerCase().includes(q) ||
+        (d.ip_address || "").toLowerCase().includes(q) ||
         (d.site || "").toLowerCase().includes(q) ||
         (d.data_center || "").toLowerCase().includes(q) ||
         (d.rack || "").toLowerCase().includes(q)
