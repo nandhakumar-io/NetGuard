@@ -1,8 +1,18 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
@@ -50,3 +60,55 @@ class PushSubscription(Base):
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_pushed_at = Column(DateTime(timezone=True), nullable=True)
+
+    delivery_attempts = relationship(
+        "PushDeliveryAttempt", back_populates="push_subscription",
+        cascade="all, delete-orphan", order_by="PushDeliveryAttempt.attempted_at.desc()",
+    )
+
+
+class PushDeliveryAttempt(Base):
+    """One outbound push notification_service/push_service attempted (or
+    skipped) for a PushSubscription -- success, provider failure, or
+    filtered out before ever hitting the network. Same rationale as
+    app.models.webhook.WebhookDeliveryAttempt: without a durable log, "my
+    phone never buzzed" is indistinguishable from "it was never sent",
+    "the provider rejected it", or "it was filtered by
+    include_non_critical" short of grepping server logs -- and severity
+    filtering in particular (see push_service.send_push) is a common,
+    easy-to-miss reason a subscription looks broken when it's actually
+    working exactly as configured.
+    """
+
+    __tablename__ = "push_delivery_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    push_subscription_id = Column(
+        UUID(as_uuid=True), ForeignKey("push_subscriptions.id"), nullable=False, index=True
+    )
+
+    event = Column(String, nullable=False)  # human-readable event title, e.g. "Interface Down"
+    severity = Column(String, nullable=True)  # "info" | "warning" | "critical" | "resolved"
+    provider = Column(String, nullable=True)  # snapshot of the subscription's provider at send time
+
+    # True only for an attempt that actually reached the provider's API
+    # (ntfy/Pushover HTTP call, or Web Push) and got a non-error
+    # response. A filtered/skipped attempt is always success=False with
+    # skipped=True instead, so the two "didn't get a push" causes stay
+    # distinguishable in the log.
+    success = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    # True when this attempt never reached the provider at all because
+    # send_push's own filtering held it back (severity below the
+    # subscription's include_non_critical threshold, or the subscription
+    # was disabled) -- as opposed to a real delivery failure the
+    # provider rejected. `skip_reason` is a short machine string, e.g.
+    # "severity_below_threshold".
+    skipped = Column(Boolean, nullable=False, default=False, server_default="false")
+    skip_reason = Column(String, nullable=True)
+
+    error = Column(Text, nullable=True)  # exception text when the provider call itself failed
+
+    attempted_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    push_subscription = relationship("PushSubscription", back_populates="delivery_attempts")

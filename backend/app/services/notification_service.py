@@ -303,7 +303,7 @@ def _post_telegram(event: str, message: str, severity: str) -> None:
     chat_id = settings.TELEGRAM_CHAT_ID
     if not bot_token or not chat_id:
         return
-    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨", "resolved": "🟢"}.get(severity, "ℹ️")
     text = f"{emoji} <b>NetGuard — {event}</b>\n{message}"
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
@@ -373,7 +373,7 @@ def _build_webhook_payload(
     resend what a fresh delivery of the same event would send today, not
     replay a stored payload that might be built from a since-removed
     field shape."""
-    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨", "resolved": "🟢"}.get(severity, "ℹ️")
     buttons = _build_action_buttons(actions, event_type, alert_id, runbook_id)
     if wh_type == "telegram":
         payload = {
@@ -583,7 +583,10 @@ def notify(
     """Fan out a notification to Slack, Teams, Telegram, Email, user-configured
     webhooks, and the in-app Notification Center.
 
-    severity: "info" | "warning" | "critical"
+    severity: "info" | "warning" | "critical" | "resolved" -- "resolved" is
+        for a recovery notice (e.g. a down interface/device coming back
+        up) and renders with a green check instead of the info/warning/
+        critical icons, both here and on ntfy (see push_service).
     event: short human label (e.g. "Deployment Failed") -- also used to
         pick the in-app event_type/email template via _EVENT_TYPE_MAP.
     device_hostname / change_request_id / deployment_id: optional context
@@ -609,7 +612,7 @@ def notify(
         regardless; only the email channel is a digest's to gate, since
         it's the one a digest is meant to stand in for.
     """
-    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "ℹ️")
+    emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨", "resolved": "🟢"}.get(severity, "ℹ️")
     text = f"{emoji} *NetGuard — {event}*\n{message}"
 
     _post_webhook(settings.SLACK_WEBHOOK_URL, {"text": text})
@@ -636,7 +639,18 @@ def notify(
 
     _persist_and_broadcast(
         event_type=event_type,
-        severity=severity,
+        # NotificationSeverity (the in-app model's DB enum) only has
+        # info/warning/critical -- it predates the "resolved" severity
+        # added for recovery notices (interface/device back up), and
+        # widening a Postgres enum type is its own migration. Store
+        # "resolved" notices as "info" here (a real recovery event is
+        # more interesting than routine info but not a warning) rather
+        # than let the raw string hit the enum column and get this whole
+        # in-app leg silently swallowed by the except below. Slack/
+        # Teams/ntfy/webhooks above already got the real "resolved"
+        # severity (green icon/tag), which is what actually matters for
+        # "is this a recovery or a new problem" at a glance.
+        severity="info" if severity == "resolved" else severity,
         title=event,
         message=message,
         device_hostname=device_hostname,

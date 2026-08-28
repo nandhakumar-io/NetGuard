@@ -29,8 +29,8 @@ TIMEOUT_SECONDS = 5.0
 # ntfy priority levels: 1 min .. 5 max. "urgent" (5) bypasses the phone's
 # silent/DND mode on supported ntfy clients, which is exactly what a P1
 # page needs at 3am.
-_NTFY_PRIORITY = {"critical": "urgent", "warning": "high", "info": "default"}
-_PUSHOVER_PRIORITY = {"critical": 2, "warning": 1, "info": 0}  # 2 = emergency (repeats until acked)
+_NTFY_PRIORITY = {"critical": "urgent", "warning": "high", "info": "default", "resolved": "default"}
+_PUSHOVER_PRIORITY = {"critical": 2, "warning": 1, "info": 0, "resolved": 0}  # 2 = emergency (repeats until acked)
 
 _ACTION_LABELS = {"acknowledge": "Acknowledge", "escalate": "Escalate", "run_runbook": "Run Runbook"}
 
@@ -73,10 +73,11 @@ def _ntfy_actions_header(include_actions: str | None, alert_id: str | None) -> s
 
 
 def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, url: str | None, alert_id: str | None = None) -> bool:
+    _NTFY_TAGS = {"critical": "rotating_light", "resolved": "white_check_mark"}
     headers = {
         "Title": title,
         "Priority": _NTFY_PRIORITY.get(severity, "default"),
-        "Tags": "rotating_light" if severity == "critical" else "warning",
+        "Tags": _NTFY_TAGS.get(severity, "warning"),
     }
     if url:
         headers["Click"] = url
@@ -201,6 +202,47 @@ def _send_one(sub: PushSubscription, title: str, message: str, severity: str, ur
     return _send_ntfy(sub, title, message, severity, url, alert_id=alert_id)
 
 
+def _record_attempt(
+    db: Session,
+    sub: PushSubscription,
+    *,
+    event_title: str,
+    severity: str,
+    success: bool,
+    skipped: bool = False,
+    skip_reason: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Best-effort log row for one push attempt/skip -- see
+    app.models.push_subscription.PushDeliveryAttempt for why this
+    exists. Never allowed to break the actual send: a logging failure
+    here is swallowed, same "notifications must never break the caller"
+    contract as the rest of this module.
+    """
+    from app.models.push_subscription import PushDeliveryAttempt
+
+    # Strip the "NetGuard — " prefix send_push's callers always add to
+    # `title` (see notification_service._fan_out_push) so the log shows
+    # the same short event label the webhook delivery log does, e.g.
+    # "Interface Down" rather than "NetGuard — Interface Down".
+    event = event_title.split("—", 1)[-1].strip() if "—" in event_title else event_title
+    try:
+        db.add(
+            PushDeliveryAttempt(
+                push_subscription_id=sub.id,
+                event=event,
+                severity=severity,
+                provider=sub.provider.value if hasattr(sub.provider, "value") else str(sub.provider),
+                success=success,
+                skipped=skipped,
+                skip_reason=skip_reason,
+                error=error,
+            )
+        )
+    except Exception:
+        logger.warning("Failed to record push delivery attempt for subscription %s", sub.id, exc_info=True)
+
+
 def send_push(
     db: Session,
     *,
@@ -225,6 +267,11 @@ def send_push(
     to build the acknowledge/escalate/run-runbook action buttons (ntfy
     only, see _ntfy_actions_header) so they deep-link to that alert.
 
+    Every subscription considered gets a PushDeliveryAttempt row --
+    sent, provider-failed, or skipped by the severity filter -- so "why
+    didn't my phone buzz" is always answerable from
+    GET /push-subscriptions/deliveries instead of grepping server logs.
+
     Returns the number of subscriptions successfully pushed to.
     """
     query = db.query(PushSubscription).filter(PushSubscription.enabled == True)  # noqa: E712
@@ -236,14 +283,24 @@ def send_push(
     now = datetime.now(timezone.utc)
     for sub in subs:
         if severity != "critical" and not sub.include_non_critical:
+            _record_attempt(
+                db, sub, event_title=title, severity=severity, success=False,
+                skipped=True, skip_reason="severity_below_threshold",
+            )
             continue
-        if _send_one(sub, title, message, severity, url, alert_id=alert_id):
+        try:
+            ok = _send_one(sub, title, message, severity, url, alert_id=alert_id)
+        except Exception as exc:  # noqa: BLE001 - a provider bug must not skip logging or the next subscription
+            logger.warning("Push send raised for subscription %s", sub.id, exc_info=True)
+            _record_attempt(db, sub, event_title=title, severity=severity, success=False, error=str(exc))
+            continue
+        _record_attempt(db, sub, event_title=title, severity=severity, success=ok, error=None if ok else "provider rejected the push")
+        if ok:
             sub.last_pushed_at = now
             db.add(sub)
             sent += 1
 
-    if sent:
-        db.commit()
+    db.commit()
     return sent
 
 

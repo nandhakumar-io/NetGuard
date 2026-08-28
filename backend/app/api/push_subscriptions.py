@@ -5,7 +5,7 @@ manages another user's. See app.services.push_service for delivery.
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -13,9 +13,14 @@ from app.api.webhooks import _validate_outbound_url
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.models.push_subscription import PushProvider, PushSubscription
+from app.models.push_subscription import (
+    PushDeliveryAttempt,
+    PushProvider,
+    PushSubscription,
+)
 from app.models.user import User
 from app.schemas.push_subscription import (
+    PushDeliveryRead,
     PushSubscriptionCreate,
     PushSubscriptionRead,
     PushSubscriptionUpdate,
@@ -25,6 +30,22 @@ from app.schemas.push_subscription import (
 from app.services import push_service
 
 router = APIRouter(prefix="/push-subscriptions", tags=["push-subscriptions"])
+
+
+def _delivery_to_read(row: PushDeliveryAttempt, subscription_label: str | None = None) -> PushDeliveryRead:
+    return PushDeliveryRead(
+        id=row.id,
+        push_subscription_id=row.push_subscription_id,
+        subscription_label=subscription_label or (row.push_subscription.label if row.push_subscription else None),
+        event=row.event,
+        severity=row.severity,
+        provider=row.provider,
+        success=row.success,
+        skipped=row.skipped,
+        skip_reason=row.skip_reason,
+        error=row.error,
+        attempted_at=row.attempted_at,
+    )
 
 
 def _sub_to_read(sub: PushSubscription) -> PushSubscriptionRead:
@@ -225,3 +246,53 @@ def test_subscription(
         sent=sent,
         message="Test push sent — check your device." if sent else "Failed to send. Check the target/token and try again.",
     )
+
+
+@router.get("/deliveries", response_model=list[PushDeliveryRead])
+def list_all_deliveries(
+    limit: int = Query(100, ge=1, le=500),
+    success: bool | None = Query(None, description="Filter to only successful (true) or only failed/skipped (false) attempts."),
+    skipped: bool | None = Query(None, description="Filter to only filtered-out attempts (true) or only ones that actually reached the provider (false)."),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recent push delivery attempts across every subscription belonging
+    to the current user, newest first -- self-scoped like the rest of
+    this router (see module docstring): each user sees only their own
+    devices' delivery history, the mobile-push counterpart to
+    GET /webhooks/deliveries. Surfaces the "was this skipped by the
+    severity filter, did the provider reject it, or did it actually
+    send" distinction that was previously only visible in server logs.
+    """
+    q = (
+        db.query(PushDeliveryAttempt)
+        .join(PushSubscription, PushDeliveryAttempt.push_subscription_id == PushSubscription.id)
+        .filter(PushSubscription.user_id == current_user.id)
+        .order_by(PushDeliveryAttempt.attempted_at.desc())
+    )
+    if success is not None:
+        q = q.filter(PushDeliveryAttempt.success == success)
+    if skipped is not None:
+        q = q.filter(PushDeliveryAttempt.skipped == skipped)
+    rows = q.limit(limit).all()
+    return [_delivery_to_read(r) for r in rows]
+
+
+@router.get("/{subscription_id}/deliveries", response_model=list[PushDeliveryRead])
+def list_subscription_deliveries(
+    subscription_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    subscription = db.get(PushSubscription, subscription_id)
+    if not subscription or subscription.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Push subscription not found")
+    rows = (
+        db.query(PushDeliveryAttempt)
+        .filter(PushDeliveryAttempt.push_subscription_id == subscription_id)
+        .order_by(PushDeliveryAttempt.attempted_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_delivery_to_read(r, subscription_label=subscription.label) for r in rows]

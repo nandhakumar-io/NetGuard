@@ -98,7 +98,11 @@ from app.models.path_trace import (  # noqa: F401
     PathTraceStatus,
 )
 from app.models.protocol_operation import ProtocolName, ProtocolOperation  # noqa: F401
-from app.models.push_subscription import PushProvider, PushSubscription  # noqa: F401
+from app.models.push_subscription import (  # noqa: F401
+    PushDeliveryAttempt,
+    PushProvider,
+    PushSubscription,
+)
 from app.models.recurring_maintenance_schedule import (  # noqa: F401
     RecurringMaintenanceSchedule,
 )

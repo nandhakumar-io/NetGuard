@@ -45,6 +45,22 @@ class PushSubscriptionRead(BaseModel):
     last_pushed_at: datetime.datetime | None = None
 
 
+class PushDeliveryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    push_subscription_id: uuid.UUID
+    subscription_label: str | None = None
+    event: str
+    severity: str | None = None
+    provider: str | None = None
+    success: bool
+    skipped: bool
+    skip_reason: str | None = None
+    error: str | None = None
+    attempted_at: datetime.datetime | None = None
+
+
 class PushTestResult(BaseModel):
     sent: bool
     message: str

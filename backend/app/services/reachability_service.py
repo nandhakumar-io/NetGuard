@@ -187,11 +187,20 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
                     severity="critical",
                 )
         elif was_offline:
-            alert_service.auto_resolve(
+            resolved_alert = alert_service.auto_resolve(
                 db,
                 device_id=device.id,
                 category="Device Unreachable",
                 note=f"{device.hostname} ({device.ip_address}) is responding again",
             )
+            if resolved_alert is not None:
+                notification_service.notify(
+                    event="Device Recovered",
+                    message=f"{device.hostname} ({device.ip_address}) is back online",
+                    severity="resolved",
+                    device_hostname=device.hostname,
+                    alert_id=resolved_alert.id,
+                    tenant_id=device.tenant_id,
+                )
 
     return new_status

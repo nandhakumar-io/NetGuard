@@ -340,12 +340,32 @@ def record_interface_transition(
                     tenant_id=device.tenant_id,
                 )
     elif latest is not None:
-        alert_service.auto_resolve(
+        uplink_tag = " [WAN/UPLINK]" if device.is_uplink else ""
+        resolved_alert = alert_service.auto_resolve(
             db,
             device_id=device.id,
             category=category,
-            note=f"{device.hostname}: interface {if_descr} is back up",
+            note=f"{device.hostname}: interface {if_descr} is back up{uplink_tag}",
         )
+        # auto_resolve only flips the Alert row -- it never told anyone.
+        # A down interface coming back up is exactly as actionable as it
+        # going down in the first place (an engineer paged at 2am wants
+        # to know the outage cleared, not just that the DB no longer
+        # thinks it's ongoing), so fan it out the same way, just with
+        # severity="resolved" (green check / low-priority push instead
+        # of the "critical"/red treatment for the down event). Only
+        # fires when there was actually a standing alert to clear --
+        # alerts_enabled=False devices never raised one, so there's
+        # nothing to announce recovering either.
+        if resolved_alert is not None and alerts_enabled:
+            notification_service.notify(
+                event="Interface Recovered",
+                message=f"{device.hostname}: interface {if_descr} is back up{uplink_tag}",
+                severity="resolved",
+                device_hostname=device.hostname,
+                alert_id=resolved_alert.id,
+                tenant_id=device.tenant_id,
+            )
     return True
 
 

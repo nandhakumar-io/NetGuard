@@ -539,12 +539,18 @@ class Settings(BaseSettings):
     # How often the in-process loop in app.main captures a
     # TopologySnapshot for historical "what changed in the network graph
     # since <period>" diffing (app.services.topology_service.
-    # diff_snapshots). Independent of SNMP_POLL_INTERVAL_SECONDS since a
-    # topology snapshot is cheap and doesn't need poll-frequency
-    # granularity -- default once/day is enough to answer "since last
-    # week" without ballooning topology_snapshots row count.
+    # diff_snapshots), AND raises the topology-change alert (device/link
+    # appeared or disappeared) by diffing against the previous snapshot.
+    # Used to default to once/day (86400s), which is fine for the
+    # historical "since last week" diff view but meant a link/device
+    # drop could sit undetected on the Topology page -- and unalerted --
+    # for up to 24h, the opposite of "topology should update immediately"
+    # (SRS: near-real-time topology change alerting). 30s keeps the graph
+    # and its alert current without materially growing
+    # topology_snapshots row count (device/link-count rows, not raw
+    # metrics).
     TOPOLOGY_SNAPSHOT_ENABLED: bool = True
-    TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS: int = 86400
+    TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS: int = 30
 
     # Configuration Snapshot retention (Self-Healing Rollback Engine /
     # SRS 10 git-style version control). Snapshots are taken automatically
