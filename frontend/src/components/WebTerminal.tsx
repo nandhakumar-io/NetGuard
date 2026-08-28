@@ -7,12 +7,22 @@ import { useAuth } from '../lib/auth';
 
 interface WebTerminalProps {
   deviceId: string;
+  // Whether this terminal's tab is the currently visible one. Only
+  // matters when several WebTerminals stay mounted at once (see
+  // TerminalWindowManager) with inactive ones hidden via display:none --
+  // xterm's FitAddon can't measure a zero-size hidden container, so a
+  // terminal that was resized (window resize, or the floating window's
+  // own drag-resize handle) while its tab was in the background comes
+  // back undersized/misaligned until re-fit. Standalone callers (a single
+  // WebTerminal, always visible) can ignore this -- it defaults to true.
+  active?: boolean;
 }
 
-export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
+export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId, active = true }) => {
   const terminalRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const { user } = useAuth();
+  const fitAddonRef = useRef<FitAddon | null>(null);
 
   // Security PIN step-up (see backend app.core.deps.check_pin_step_up_ws).
   // Only relevant when the current user has both set a PIN and turned on
@@ -58,6 +68,7 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
     });
 
     const fitAddon = new FitAddon();
+    fitAddonRef.current = fitAddon;
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
     
@@ -142,8 +153,19 @@ export const WebTerminal: React.FC<WebTerminalProps> = ({ deviceId }) => {
       window.removeEventListener('resize', handleResize);
       ws.close();
       term.dispose();
+      fitAddonRef.current = null;
     };
   }, [deviceId, needsPinPrompt, pinToken]);
+
+  // Re-fit whenever this tab becomes the visible one -- a hidden
+  // (display:none) container reports zero size, so any resize that
+  // happened while this tab was in the background needs to be re-applied
+  // once it's actually on screen again.
+  useEffect(() => {
+    if (!active) return;
+    const id = requestAnimationFrame(() => fitAddonRef.current?.fit());
+    return () => cancelAnimationFrame(id);
+  }, [active]);
 
   if (needsPinPrompt) {
     return (

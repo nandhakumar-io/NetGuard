@@ -4,7 +4,8 @@ app.api.terminal.device_terminal. See app.models.terminal_session_
 recording and app.services.session_recording_service for what's
 actually captured and why.
 
-Restricted to SECURITY and NETWORK_ADMIN: a transcript can contain
+Restricted to SECURITY and NETWORK_ADMIN, plus MSP staff of any
+functional role: a transcript can contain
 `show running-config` output, live troubleshooting of production gear,
 and (best-effort redaction notwithstanding, see `redacted` on the
 serialized row) potentially sensitive command output -- the same
@@ -21,21 +22,41 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_roles
+from app.core.deps import get_current_user, require_roles
 from app.models.terminal_session_recording import TerminalSessionRecording
 from app.models.user import User, UserRole
 from app.services import audit_service, session_recording_service
 
 router = APIRouter(prefix="/terminal-recordings", tags=["terminal-recordings"])
 
-_reviewer_only = require_roles(UserRole.SECURITY, UserRole.NETWORK_ADMIN)
+_role_reviewer_check = require_roles(UserRole.SECURITY, UserRole.NETWORK_ADMIN)
+
+
+def _reviewer_only(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    # MSP staff also get view access (any functional role) -- see
+    # _deleter_only below, which now also lets MSP staff delete: delete
+    # access with no way to list/view what you're deleting isn't
+    # usable, so the two gates stay in lockstep.
+    if user.is_msp_staff:
+        return user
+    return _role_reviewer_check(user=user, db=db)
 # Deletion is destructive to what is, functionally, an audit artifact
-# (PCI DSS 10.2 / SOC 2 CC6.1 evidence) -- narrower than the SECURITY +
-# NETWORK_ADMIN bar that can merely *view* recordings, same posture as
-# audit_service's own retention controls: a Network Administrator can
-# review every session but shouldn't unilaterally be able to erase the
-# evidence trail. SECURITY only.
-_deleter_only = require_roles(UserRole.SECURITY)
+# (PCI DSS 10.2 / SOC 2 CC6.1 evidence) -- narrower than the
+# SECURITY + NETWORK_ADMIN bar that can merely *view* recordings.
+# Delete access is limited to exactly two groups: (a) MSP staff,
+# regardless of functional role -- an account-level "acts across every
+# tenant" property (see require_msp_staff), not a permission level, so
+# an MSP's NOC engineer doing cross-tenant retention cleanup needs this
+# the same as their admin; and (b) NETWORK_ADMIN outright. SECURITY can
+# view/review every recording but cannot delete -- that gate is
+# NETWORK_ADMIN/MSP-staff only, by design.
+_role_deleter_check = require_roles(UserRole.NETWORK_ADMIN)
+
+
+def _deleter_only(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    if user.is_msp_staff:
+        return user
+    return _role_deleter_check(user=user, db=db)
 
 
 class BulkDeleteRequest(BaseModel):

@@ -34,7 +34,7 @@ import { useToast, errorMessage } from "../lib/toast";
 import { useConfirm } from "../lib/confirm";
 import ConfigDiff from "../components/ConfigDiff";
 import ConfigViewer from "../components/ConfigViewer";
-import { WebTerminal } from "../components/WebTerminal";
+import { useTerminalSessions } from "../lib/terminalSessions";
 import SnmpCredentialsModal from "../components/SnmpCredentialsModal";
 import SshCredentialsModal from "../components/SshCredentialsModal";
 import BulkRotateCredentialsModal from "../components/BulkRotateCredentialModal";
@@ -2023,7 +2023,7 @@ export default function Devices() {
   const [showForm, setShowForm] = useState(false);
   const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
-  const [activeTerminalDevice, setActiveTerminalDevice] = useState<string | null>(null);
+  const { openTerminal } = useTerminalSessions();
 
   const [rollbackTarget, setRollbackTarget] = useState<{ device: Device; snapshot: Snapshot } | null>(null);
   const [rollbackReason, setRollbackReason] = useState("");
@@ -3475,7 +3475,7 @@ export default function Devices() {
                       <button
                         onClick={(e) => {
                             e.stopPropagation();
-                            setActiveTerminalDevice(d.id);
+                            openTerminal(d.id, d.hostname);
                         }}
                         className="text-[11px] uppercase tracking-wider text-slate-100 border border-slate-700 bg-slate-800 px-2 py-1 rounded shadow-sm hover:bg-slate-700 font-bold"
                       >
@@ -3714,29 +3714,9 @@ export default function Devices() {
         </div>
       )}
 
-        {/* Web Terminal Modal Overlay */}
-        {activeTerminalDevice && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/80 backdrop-blur-sm">
-            <div className="bg-slate-900 w-full max-w-6xl h-[80vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-slate-700">
-              <div className="flex items-center justify-between px-4 py-3 bg-slate-800 border-b border-slate-700">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-slate-200 font-bold tracking-wide text-sm font-mono uppercase">
-                    Terminal Session: {devices.find(d => d.id === activeTerminalDevice)?.hostname}
-                  </h3>
-                </div>
-                <button
-                  onClick={() => setActiveTerminalDevice(null)}
-                  className="text-slate-400 dark:text-slate-500 hover:text-white font-bold text-sm bg-transparent border-0"
-                >
-                  Close [ X ]
-                </button>
-              </div>
-              <div className="flex-grow p-1 overflow-hidden">
-                <WebTerminal deviceId={activeTerminalDevice} />
-              </div>
-            </div>
-          </div>
-        )}
+      {/* Terminal sessions now render in the shared floating/draggable
+          TerminalWindowManager (mounted once in App.tsx) instead of a
+          per-page modal -- openTerminal() above adds a tab there. */}
 
         {showBulkRotateModal && (
           <BulkRotateCredentialsModal

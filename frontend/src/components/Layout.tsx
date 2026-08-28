@@ -46,6 +46,11 @@ const ADMIN_ONLY_PAGES = new Set(["/tenants"]);
 function canSeePage(user: CurrentUser | null, to: string): boolean {
   if (MSP_STAFF_ONLY_PAGES.has(to)) return !!user?.is_msp_staff;
   if (ADMIN_ONLY_PAGES.has(to)) return isAdmin(user) || !!user?.is_msp_staff;
+  // MSP staff can now also view/delete terminal session recordings
+  // (any functional role -- see backend app.api.terminal_recordings.
+  // _reviewer_only/_deleter_only), same as the ADMIN_ONLY_PAGES bypass
+  // above, without needing a per-page permission grant.
+  if (to === "/terminal-recordings" && user?.is_msp_staff) return true;
   const permKey = RESTRICTED_PAGE_PERMISSIONS[to];
   if (!permKey) return true; // not a restricted page -- unchanged, open to every authenticated role
   if (isAdmin(user)) return true;

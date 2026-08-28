@@ -265,11 +265,14 @@ function PlaybackModal({ recording, onClose }: { recording: TerminalSessionRecor
 
 export default function TerminalRecordings() {
   const { user } = useAuth();
-  const canView = user?.role === "network_admin" || user?.role === "security";
+  const canView = user?.is_msp_staff || user?.role === "network_admin" || user?.role === "security";
   // Deletion is destructive to what's functionally a compliance artifact
-  // (PCI DSS 10.2 / SOC 2 CC6.1 evidence) -- narrower than view access,
-  // matching the backend's SECURITY-only delete endpoints.
-  const canDelete = user?.role === "security";
+  // (PCI DSS 10.2 / SOC 2 CC6.1 evidence) -- narrower than view access.
+  // Matches the backend gate (app.api.terminal_recordings._deleter_only):
+  // MSP staff (any role -- is_msp_staff is an account-level "acts across
+  // every tenant" property, not a permission level) or a Network Admin.
+  // Security can view/review every recording but cannot delete.
+  const canDelete = user?.is_msp_staff || user?.role === "network_admin";
 
   const [recordings, setRecordings] = useState<TerminalSessionRecording[]>([]);
   const [loading, setLoading] = useState(true);

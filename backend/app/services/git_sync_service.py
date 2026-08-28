@@ -143,7 +143,23 @@ def _ensure_clone(repo: GitRepoConfig) -> Path:
 
     if (work_dir / ".git").exists():
         _run_git(["remote", "set-url", "origin", remote], cwd=work_dir)
-        _run_git(["fetch", "--depth", "1", "origin", repo.branch], cwd=work_dir)
+        # Explicit refspec, not just the branch name -- `clone --single-branch`
+        # locks remote.origin.fetch to whichever branch was checked out
+        # *first*. If repo.branch is later edited (or this working copy was
+        # cloned before a branch rename), `git fetch origin <branch>` still
+        # succeeds -- it pulls the commit into FETCH_HEAD -- but silently
+        # does NOT update refs/remotes/origin/<branch>, because that ref
+        # falls outside the locked-in refspec. The `reset --hard
+        # origin/<branch>` right after then fails with "unknown revision"
+        # since that ref was never created, and every sync for this repo
+        # fails until someone manually clears WORKDIR_ROOT. Passing the
+        # refspec explicitly here forces the ref to be created/updated
+        # regardless of what the clone was originally restricted to.
+        _run_git(
+            ["fetch", "--depth", "1", "origin", f"+refs/heads/{repo.branch}:refs/remotes/origin/{repo.branch}"],
+            cwd=work_dir,
+        )
+        _run_git(["checkout", "-B", repo.branch, f"origin/{repo.branch}"], cwd=work_dir)
         _run_git(["reset", "--hard", f"origin/{repo.branch}"], cwd=work_dir)
     else:
         work_dir.parent.mkdir(parents=True, exist_ok=True)
