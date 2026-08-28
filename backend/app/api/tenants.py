@@ -1,10 +1,10 @@
 """Tenant management API -- create/list/edit/deactivate managed tenants.
 
-Restricted to MSP staff (require_msp_staff) -- a customer-side user has
-no business managing *other* tenants, and the cross-tenant board
-(app.api.tenant_board) already shows them read-only. Regular users can
-GET /tenants/public-list (name + id only) to populate the registration
-form's tenant dropdown without exposing operational details.
+Gated on NETWORK_ADMIN role (and above -- MSP staff who hold that same role
+function are included). Customer-side users with lesser roles don't manage
+tenants. Regular users can GET /tenants/public-list (name + id only) to
+populate the registration form's tenant dropdown without exposing operational
+details.
 """
 import re
 import uuid
@@ -14,10 +14,17 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_msp_staff
+from app.core.deps import require_roles
 from app.models.device import Device
 from app.models.tenant import Tenant
-from app.models.user import User
+from app.models.user import User, UserRole
+
+# Network admins manage tenants just like MSP staff do -- they're the
+# operators who provision new customer environments and manage which users
+# belong to which tenant. require_roles(NETWORK_ADMIN) already includes
+# MSP staff who hold that role; keep require_msp_staff available for
+# any other staff-only surface that needs it.
+_ADMIN_GATE = require_roles(UserRole.NETWORK_ADMIN)
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -129,9 +136,9 @@ def list_tenants_public(
 @router.get("", response_model=list[TenantRead])
 def list_tenants(
     db: Session = Depends(get_db),
-    _: User = Depends(require_msp_staff),
+    _: User = Depends(_ADMIN_GATE),
 ) -> list[TenantRead]:
-    """Full tenant list with device/user counts. MSP staff only."""
+    """Full tenant list with device/user counts. Requires Network Admin role."""
     tenants = db.query(Tenant).order_by(Tenant.name).all()
     return [_tenant_read(db, t) for t in tenants]
 
@@ -140,9 +147,9 @@ def list_tenants(
 def create_tenant(
     payload: TenantCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_msp_staff),
+    _: User = Depends(_ADMIN_GATE),
 ) -> TenantRead:
-    """Create a new managed tenant. MSP staff only."""
+    """Create a new managed tenant. Requires Network Admin role."""
     existing = db.query(Tenant).filter(Tenant.slug == payload.slug).first()
     if existing:
         raise HTTPException(status_code=409, detail=f"A tenant with slug '{payload.slug}' already exists")
@@ -159,9 +166,9 @@ def update_tenant(
     tenant_id: uuid.UUID,
     payload: TenantUpdate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_msp_staff),
+    _: User = Depends(_ADMIN_GATE),
 ) -> TenantRead:
-    """Rename a tenant or toggle its active status. MSP staff only."""
+    """Rename a tenant or toggle its active status. Requires Network Admin role."""
     tenant = db.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -180,11 +187,11 @@ def update_tenant(
 def delete_tenant(
     tenant_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_msp_staff),
+    _: User = Depends(_ADMIN_GATE),
 ) -> None:
     """Hard-delete a tenant. Guarded: refuses if the tenant still has
     devices or users assigned (deactivate instead if you want a soft remove).
-    MSP staff only.
+    Requires Network Admin role.
     """
     tenant = db.get(Tenant, tenant_id)
     if not tenant:

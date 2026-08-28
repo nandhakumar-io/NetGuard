@@ -29,7 +29,7 @@ export default function Tenants() {
       setTenants(res.data);
     } catch (err: any) {
       if (err.response?.status === 403) {
-        setError("You do not have permission to view this page. MSP staff only.");
+        setError("You do not have permission to view this page. Network Admin or MSP staff access required.");
       } else {
         setError("Failed to load tenants.");
       }
@@ -120,7 +120,7 @@ export default function Tenants() {
         <div>
           <h1 className="text-2xl font-semibold text-slate-900 dark:text-white">Tenants</h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Manage customer environments (MSP staff only).
+          Manage customer environments. Accessible to Network Admins and MSP staff.
           </p>
         </div>
         <button

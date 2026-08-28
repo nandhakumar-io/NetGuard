@@ -35,16 +35,17 @@ const ROLE_DEFAULT_ACCESS: Record<string, string[]> = {
   "/rbac-audit": ["auditor"],
 };
 
-// Tenancy-scope gate, deliberately separate from RESTRICTED_PAGE_PERMISSIONS
-// above: is_msp_staff is not a grantable permission (see backend
-// app.core.deps.require_msp_staff) -- an admin can't unlock this for
-// themselves the way they can page:backups etc., since a non-MSP-staff
-// account has no cross-tenant data for the page to show even if it were
-// visible.
-const MSP_STAFF_ONLY_PAGES = new Set(["/tenant-board", "/tenants"]);
+// /tenant-board is cross-tenant NOC data -- MSP staff only (they need
+// is_msp_staff, not just network_admin). /tenants (CRUD) is now open
+// to network_admin too, since they're the operators who manage customer
+// environments. Kept as a separate Set so the comment stays clear.
+const MSP_STAFF_ONLY_PAGES = new Set(["/tenant-board"]);
+// Pages that network_admin can see via isAdmin(), without a named permission.
+const ADMIN_ONLY_PAGES = new Set(["/tenants"]);
 
 function canSeePage(user: CurrentUser | null, to: string): boolean {
   if (MSP_STAFF_ONLY_PAGES.has(to)) return !!user?.is_msp_staff;
+  if (ADMIN_ONLY_PAGES.has(to)) return isAdmin(user) || !!user?.is_msp_staff;
   const permKey = RESTRICTED_PAGE_PERMISSIONS[to];
   if (!permKey) return true; // not a restricted page -- unchanged, open to every authenticated role
   if (isAdmin(user)) return true;
