@@ -37,6 +37,27 @@ class DiscoveredNeighbor(Base):
     neighbor_port = Column(String(255), nullable=True)  # lldpRemPortId / cdpCacheDevicePort
     neighbor_platform = Column(String(255), nullable=True)  # cdpCachePlatform (LLDP has no direct analog used here)
 
+    # Raw lldpRemChassisId, kept verbatim alongside the human-rendered
+    # neighbor_name above. For the very common chassis-id subtype
+    # macAddress(4) (practically every AP -- Ruckus, TP-Link/Omada,
+    # Ubiquiti, Aruba IAP, Cisco -- and most switches use this subtype),
+    # this *is* the neighbor's MAC address, which is what
+    # wireless_service.correlate_ap_switchports joins against
+    # WirelessAP.mac_address to answer "which switchport is this AP
+    # plugged into" on the Wireless page. Null for CDP rows (CDP has no
+    # chassis-id equivalent captured here) and for neighbors that sent a
+    # non-MAC chassis-id subtype (networkAddress, ifName, ...).
+    neighbor_chassis_id = Column(String(64), nullable=True, index=True)
+    # Raw lldpRemSysDesc -- the neighbor's advertised system description.
+    # Not used for anything on the switch/router Topology view (that's
+    # what neighbor_platform/CDP already covers), but it's the only
+    # generic, vendor-agnostic signal available for spotting "this looks
+    # like an access point" on a switchport with no corresponding
+    # WirelessAP row -- see wireless_service.find_unregistered_aps,
+    # which pattern-matches known AP vendor strings (Ruckus, TP-Link/
+    # EAP/Omada, Ubiquiti, Aruba, Cisco Aironet, ...) against this field.
+    neighbor_sys_desc = Column(Text, nullable=True)
+
     # Best-effort link back to a managed device, resolved by hostname/IP
     # match against the neighbor_name at write time. Null = unmanaged/
     # unrecognized neighbor.

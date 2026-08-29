@@ -161,7 +161,37 @@ def get_junos_interface_information(
     request_xml = "<get-interface-information/>"
     try:
         with _connect(ip_address, port, username, password, vendor="juniper") as conn:
-            reply = conn.get_interface_information()
+            try:
+                reply = conn.get_interface_information()
+            except Exception as exc:  # noqa: BLE001
+                # Full <get-interface-information/> asks Junos to render
+                # every physical+logical interface's complete detail
+                # block (queue stats, media diagnostics, per-VLAN
+                # logical-interface data, ...). On a densely-populated
+                # many-port switch -- EX3400 in the field is the
+                # recurring case -- that response can still blow the RPC
+                # budget (or, on some EX3400 firmware, trip an internal
+                # mgd rendering limit and reset the NETCONF session
+                # outright) even with the widened
+                # NETCONF_OPERATION_TIMEOUT_SECONDS above, while the same
+                # box answers <get-config> for the Configuration tab just
+                # fine because that RPC only ever reads the (much
+                # smaller) provisioned config, not per-interface
+                # operational detail for every port. This app only ever
+                # parses name/admin-status/oper-status/speed/mac out of
+                # the reply (see config_format_service's junos-opstate
+                # parser) -- exactly what Junos's lighter `terse` detail
+                # level already contains -- so retry once with
+                # <terse/> before giving up. terse is a small fraction of
+                # the size/render cost of the full reply and is the
+                # standard "just tell me up/down" mode operators already
+                # reach for by hand on a big switch (`show interfaces
+                # terse`).
+                logger.info(
+                    "Full get-interface-information failed for %s, retrying with terse: %s",
+                    ip_address, exc,
+                )
+                reply = conn.get_interface_information(terse=True)
             elapsed = (time.perf_counter() - start) * 1000
             content = strip_rpc_envelope(str(reply)) or str(reply)
             return NetconfResult(True, request_xml, _pretty_xml(content), elapsed)

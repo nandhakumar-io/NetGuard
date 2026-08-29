@@ -200,3 +200,99 @@ def evaluate_rules(db: Session, device: Device, metrics: SnmpMetrics) -> None:
             # Never let one malformed/legacy rule take down evaluation of
             # every other rule, or the poll itself.
             continue
+
+
+def evaluate_ap_rules(db: Session, controller_device: Device) -> None:
+    """Runs enabled AlertRules using the AP_CHANNEL_UTIL_PCT / AP_NOISE_DBM
+    metrics against every WirelessAP under `controller_device`, right
+    after a wireless poll. Deliberately separate from evaluate_rules()
+    above: those metrics come off a Device's own SnmpMetrics, one sample
+    per device per poll, while these come off a *per-AP* row -- a WLC
+    with 40 APs needs up to 40 independent evaluations per poll, one per
+    AP, each with its own alert category so a degraded AP doesn't get
+    lost inside (or falsely clear) a WLC-wide alert.
+
+    Only fires on rules scoped for this: scope_vendor/scope_site match
+    against the AP itself (site) and its vendor string, not the
+    controller Device, since a single WLC can front APs from more than
+    one vendor/site in practice (manually-added APs aside from the
+    polled ones, or a multi-site AireOS deployment). scope_device_role
+    has no AP equivalent and is ignored for these two metrics.
+    """
+    from app.models.wireless import WirelessAP
+
+    candidate_rules = (
+        db.query(AlertRule)
+        .filter(
+            (AlertRule.tenant_id == controller_device.tenant_id) | (AlertRule.tenant_id.is_(None)),
+            AlertRule.metric.in_(["ap_channel_util_pct", "ap_noise_dbm"]),
+        )
+        .all()
+    )
+    if not candidate_rules:
+        return
+
+    overridden_ids = {
+        rule.parent_rule_id
+        for rule in candidate_rules
+        if rule.tenant_id is not None and rule.parent_rule_id is not None
+    }
+    rules = [rule for rule in candidate_rules if rule.enabled and rule.id not in overridden_ids]
+    if not rules:
+        return
+
+    aps = db.query(WirelessAP).filter(WirelessAP.controller_device_id == controller_device.id).all()
+    if not aps:
+        return
+
+    now = datetime.now(timezone.utc)
+    for ap in aps:
+        for rule in rules:
+            try:
+                if rule.scope_vendor and rule.scope_vendor.lower() != (ap.vendor or "").lower():
+                    continue
+                if rule.scope_site and (ap.site is None or rule.scope_site.lower() != ap.site.lower()):
+                    continue
+
+                metric = rule.metric.value if hasattr(rule.metric, "value") else rule.metric
+                if metric == "ap_channel_util_pct":
+                    readings = [v for v in (ap.channel_util_2g, ap.channel_util_5g) if v is not None]
+                else:  # ap_noise_dbm -- noise is dBm, "worse" means higher/less-negative
+                    readings = [v for v in (ap.noise_2g, ap.noise_5g) if v is not None]
+                if not readings:
+                    continue
+                value = float(max(readings))
+
+                op_fn = _OPERATORS.get(rule.operator.value if hasattr(rule.operator, "value") else rule.operator)
+                if op_fn is None:
+                    continue
+
+                ap_label = ap.ap_name or ap.ap_index or str(ap.id)
+                category = f"{CUSTOM_RULE_CATEGORY_PREFIX}{rule.name} ({ap_label})"
+                breached = op_fn(value, rule.threshold)
+
+                if breached:
+                    if _in_cooldown(db, controller_device.id, category, rule.cooldown_seconds, now):
+                        continue
+                    severity = rule.severity.value if hasattr(rule.severity, "value") else rule.severity
+                    alert_service.raise_alert(
+                        db,
+                        device_id=controller_device.id,
+                        severity=severity,
+                        source=AlertSource.HEALTH_POLL,
+                        category=category,
+                        message=(
+                            f"{controller_device.hostname}: AP {ap_label} -- {rule.name} "
+                            f"({metric} {rule.operator.value if hasattr(rule.operator, 'value') else rule.operator} "
+                            f"{rule.threshold}, observed {value})"
+                        ),
+                    )
+                else:
+                    alert_service.auto_resolve(
+                        db,
+                        device_id=controller_device.id,
+                        category=category,
+                        note=f"AP {ap_label}: {rule.name} no longer breached",
+                    )
+            except Exception:
+                continue

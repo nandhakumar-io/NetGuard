@@ -52,16 +52,21 @@ services:
       context: ../backend
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Single all-in-one worker for local/dev use -- the production
-    # docker-compose.yaml at the repo root splits this into dedicated
-    # `poller`/`deployer`/`firmware`/`discovery`/`notifications`/`worker`
-    # services, each consuming its own queue (see that file and
-    # app/celery_app.py's task_routes) so heavy traffic on one never
-    # delays another. Here, one worker explicitly consumes every queue
-    # (including the default "celery" queue, via the bare `-Q celery`)
-    # so nothing enqueued in dev silently sits unconsumed. `--concurrency`
-    # controls how many tasks run in parallel per worker process (SRS
-    # 6.6); scale by running multiple `worker` replicas for more.
+    # Runs the deployment pipeline tasks enqueued by POST
+    # /change-requests/{id}/approve (see app/tasks.py). `--concurrency`
+    # controls how many devices can deploy in parallel per worker process
+    # (SRS 6.6); scale by running multiple `worker` replicas for more.
+    #
+    # MUST list every queue app/celery_app.py's task_routes sends work to
+    # (celery,polling,deploy,firmware,discovery,notifications). Celery
+    # workers only consume the bare "celery" queue by default when no -Q
+    # is given -- this compose file was missing it (root docker-compose.yaml
+    # already had it right), so anything routed to a dedicated queue,
+    # including every Network Discovery scan (app.tasks.run_network_discovery_scan_task
+    # -> "discovery" queue), was enqueued in Redis but never consumed:
+    # the task just sat there until the 5-minute scan timeout fired and
+    # the UI reported "Scan did not complete in time (worker likely never
+    # picked it)" -- which is exactly what was happening, on every scan.
     command: celery -A app.celery_app.celery_app worker -Q celery,polling,deploy,firmware,discovery,notifications --loglevel=info --concurrency=4
     env_file:
       - ../.env

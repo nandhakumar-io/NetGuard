@@ -1151,17 +1151,23 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
     # discover_inventory() pool overlapping all 7 jobs, this one job alone
     # could take 5-6x a single walk's time run serially, making it the
     # long pole the whole request waited on. Overlap them here too.
-    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="discover-lldp") as pool:
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="discover-lldp") as pool:
         f_sys_names = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemSysName"], timeout)
         f_port_ids = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemPortId"], timeout)
         f_port_id_subtypes = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemPortIdSubtype"], timeout)
         f_chassis_id_subtypes = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemChassisIdSubtype"], timeout)
         f_local_port_names = pool.submit(_resolve_lldp_local_port_names, ip_address, auth, timeout)
+        # lldpRemSysDesc was already defined in LLDP_OIDS but never
+        # actually walked -- added so wireless_service.find_unregistered_aps
+        # has something vendor-agnostic to pattern-match "this neighbor
+        # looks like an AP" against (see DiscoveredNeighbor.neighbor_sys_desc).
+        f_sys_descs = pool.submit(_walk, ip_address, auth, LLDP_OIDS["lldpRemSysDesc"], timeout)
         sys_names = f_sys_names.result()
         port_ids = f_port_ids.result()
         port_id_subtypes = f_port_id_subtypes.result()
         chassis_id_subtypes = f_chassis_id_subtypes.result()
         local_port_names = f_local_port_names.result()
+        sys_descs = f_sys_descs.result()
 
     rows = []
     for index, chassis_id in list(chassis_ids.items())[:MAX_DISCOVERY_ROWS]:
@@ -1191,6 +1197,7 @@ def _discover_lldp_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: f
             "neighbor_port": raw_neighbor_port,
             "neighbor_port_is_ifindex": neighbor_port_is_ifindex,
             "neighbor_chassis_id": chassis_id,
+            "neighbor_sys_desc": sys_descs.get(index),
         })
     return rows
 

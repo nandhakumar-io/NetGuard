@@ -78,6 +78,22 @@ class WirelessAP(Base):
     band_2g_clients = Column(Integer, nullable=True)  # per-radio breakdown, best-effort
     band_5g_clients = Column(Integer, nullable=True)
 
+    # Extra troubleshooting telemetry, all best-effort/nullable -- a
+    # controller or firmware that doesn't expose one of these just leaves
+    # it None rather than failing the rest of the poll (see
+    # wireless_service.poll_wireless_controller).
+    ap_up_time = Column(String, nullable=True)      # bsnAPUpTime, TimeTicks rendered as-reported (mixed formats across firmware, so kept as text rather than parsed into a duration)
+    ap_software_version = Column(String, nullable=True)  # bsnAPSoftwareVersion -- lets Ops spot an AP running a stale image at a glance
+    ap_serial_number = Column(String, nullable=True)     # bsnAPDot3MacAddress-adjacent bsnAPSerialNumber, for warranty/RMA lookups without a site visit
+    channel_2g = Column(Integer, nullable=True)     # bsnAPIfPhyChannelNumber, 802.11b/g/n radio
+    channel_5g = Column(Integer, nullable=True)     # bsnAPIfPhyChannelNumber, 802.11a/n/ac radio
+    tx_power_2g = Column(Integer, nullable=True)    # bsnAPIfPhyTxPowerLevel (controller power index, not dBm)
+    tx_power_5g = Column(Integer, nullable=True)
+    noise_2g = Column(Integer, nullable=True)       # bsnAPIfNoiseNow, dBm -- helps distinguish "no clients" from "RF is unusable here"
+    noise_5g = Column(Integer, nullable=True)
+    channel_util_2g = Column(Integer, nullable=True)  # bsnAPIfLoadChannelUtilization, percent
+    channel_util_5g = Column(Integer, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     polled_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -96,6 +112,46 @@ class WirelessAP(Base):
         return {1: "associated", 2: "disassociating", 3: "downloading"}.get(
             self.oper_status, "unknown"
         )
+
+
+class WirelessClientSession(Base):
+    """Tracks which AP each wireless client is currently associated to,
+    upserted on every poll from bsnMobileStationAPMacAddr (the same walk
+    wireless_service.poll_wireless_controller already does for the
+    per-band client split). One row per (controller, client MAC);
+    ap_index/ap_mac_address get overwritten in place when a client
+    roams, and first_seen_on_ap resets to the current poll time when
+    that happens -- so "how long has this client been stuck on its
+    current AP" is a single column read, not a scan of poll history.
+
+    Purely a "most-recent state" table like WirelessAP itself -- no
+    intent to keep roam history beyond what's needed to compute current
+    dwell time; a client that stops appearing in a poll (walked out of
+    range, powered off) just stops being refreshed rather than being
+    explicitly deleted, and ages out of relevance on its own.
+    """
+
+    __tablename__ = "wireless_client_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    controller_device_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("devices.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    client_mac = Column(String, nullable=False)
+    ap_index = Column(String, nullable=True)   # current AP's bsnAPTable index, for joining to WirelessAP
+    ap_mac_address = Column(String, nullable=True)
+    band = Column(String, nullable=True)  # "2g" | "5g"
+
+    first_seen_on_ap = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("controller_device_id", "client_mac", name="uq_client_session_controller_mac"),
+    )
 
 
 class WirelessSSID(Base):

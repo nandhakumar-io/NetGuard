@@ -74,22 +74,40 @@ def _ntfy_actions_header(include_actions: str | None, alert_id: str | None) -> s
 
 def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, url: str | None, alert_id: str | None = None) -> bool:
     _NTFY_TAGS = {"critical": "rotating_light", "resolved": "white_check_mark"}
+    # httpx (like every HTTP client) encodes str header values as
+    # ASCII/latin-1 by default and raises UnicodeEncodeError for anything
+    # outside that range when the request is built. `title` here is
+    # always "NetGuard — <event>" (see notification_service._fan_out_push
+    # / _record_attempt above) -- the em dash is U+2014, which is outside
+    # latin-1, so *every* ntfy push raised inside httpx.post before a
+    # request was ever sent, silently swallowed by the except below and
+    # logged as a generic "ntfy push failed". Slack (JSON body) and
+    # browser push (JSON payload, not raw headers) were never affected,
+    # since JSON is UTF-8 natively -- only ntfy puts the title in an HTTP
+    # header. Passing header values as UTF-8-encoded bytes instead of str
+    # sidesteps httpx's str-header ascii/latin-1 encoding entirely (per
+    # ntfy's own recommendation for non-ASCII header values), fixing this
+    # for any title/tag/url containing an em dash, accented character, or
+    # emoji -- not just this specific prefix.
+    def _hval(v: str) -> bytes:
+        return v.encode("utf-8")
+
     headers = {
-        "Title": title,
-        "Priority": _NTFY_PRIORITY.get(severity, "default"),
-        "Tags": _NTFY_TAGS.get(severity, "warning"),
+        "Title": _hval(title),
+        "Priority": _hval(_NTFY_PRIORITY.get(severity, "default")),
+        "Tags": _hval(_NTFY_TAGS.get(severity, "warning")),
     }
     if url:
-        headers["Click"] = url
+        headers["Click"] = _hval(url)
     actions_header = _ntfy_actions_header(getattr(sub, "include_actions", None), alert_id)
     if actions_header:
-        headers["Actions"] = actions_header
+        headers["Actions"] = _hval(actions_header)
     if severity == "critical":
         # Emergency-priority ntfy pushes retry/repeat client-side until
         # acknowledged in the app, same intent as Pushover priority 2
         # below -- a P1 shouldn't be silently missed because one push
         # arrived while the phone was locked in a pocket.
-        headers["Priority"] = "urgent"
+        headers["Priority"] = _hval("urgent")
     try:
         resp = httpx.post(sub.target, content=message.encode("utf-8"), headers=headers, timeout=TIMEOUT_SECONDS)
         return resp.status_code < 300

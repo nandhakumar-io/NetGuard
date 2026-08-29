@@ -209,6 +209,8 @@ def _persist_discovered_neighbors(db: Session, device_id: uuid.UUID, discovery_r
                 neighbor_name=name or lldp.get("neighbor_chassis_id"),
                 neighbor_port=neighbor_port,
                 neighbor_device_id=neighbor_device_id,
+                neighbor_chassis_id=lldp.get("neighbor_chassis_id"),
+                neighbor_sys_desc=lldp.get("neighbor_sys_desc"),
             )
         )
 

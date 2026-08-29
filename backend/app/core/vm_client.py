@@ -59,7 +59,27 @@ DEVICE_INFO_FIELDS = {
     "health_color": "netguard_device_health_color",
 }
 
-# --- Per-interface gauges ------------------------------------------------
+# --- Per-AP wireless gauges ----------------------------------------------
+# Written by wireless_service.poll_wireless_controller right after each
+# WLC poll, same "one row -> one sample per field, all sharing the poll's
+# timestamp" shape as DEVICE_METRIC_FIELDS above. Historical trending was
+# deliberately left out of the wireless_aps table itself (see the
+# module docstring on app.models.wireless -- it's a most-recent-snapshot
+# table by design), so this is the only place "was this AP degraded at
+# 2pm yesterday" can be answered from.
+AP_METRIC_FIELDS = (
+    "client_count",
+    "band_2g_clients",
+    "band_5g_clients",
+    "channel_util_2g",
+    "channel_util_5g",
+    "noise_2g",
+    "noise_5g",
+    "tx_power_2g",
+    "tx_power_5g",
+)
+_AP_METRIC_NAME = "netguard_ap_{field}".format
+
 INTERFACE_METRIC_FIELDS = (
     "octets_total",
     "speed_bps",
@@ -174,6 +194,29 @@ def write_interface_polls(
             value = entry.get(field)
             if value is not None:
                 samples.append((_INTERFACE_METRIC_NAME(field=field), labels, float(value), timestamp))
+    _write_samples(samples)
+
+
+def write_ap_polls(
+    controller_device_id: uuid.UUID, controller_hostname: str, timestamp: datetime.datetime, entries: list[dict]
+) -> None:
+    """Batched write of one wireless poll's worth of AP gauges -- one HTTP
+    round trip for every AP under a controller, mirroring
+    write_interface_polls. Each entry needs ap_id, ap_name, and whichever
+    AP_METRIC_FIELDS it has (all best-effort/nullable, same as the
+    wireless_aps columns they're read from)."""
+    samples = []
+    for entry in entries:
+        labels = {
+            "controller_device_id": str(controller_device_id),
+            "controller_hostname": controller_hostname,
+            "ap_id": entry["ap_id"],
+            "ap_name": entry.get("ap_name") or entry["ap_id"],
+        }
+        for field in AP_METRIC_FIELDS:
+            value = entry.get(field)
+            if value is not None:
+                samples.append((_AP_METRIC_NAME(field=field), labels, float(value), timestamp))
     _write_samples(samples)
 
 
@@ -447,6 +490,31 @@ def device_metric_history(
         # though a VM sample has no row identity of its own.
         row["id"] = uuid.uuid5(uuid.NAMESPACE_URL, f"netguard-metric:{device_id}:{ts_ms}")
         _cast_int_fields(row, DEVICE_INT_FIELDS)
+        rows.append(row)
+    return rows
+
+
+def ap_metric_history(
+    ap_id: uuid.UUID, start: datetime.datetime, end: datetime.datetime, step_seconds: int
+) -> list[dict]:
+    """Same format as device_metric_history/interface_metric_history but
+    scoped to a single WirelessAP -- "was this AP degraded at 2pm
+    yesterday" answered from here instead of wireless_aps, which only
+    ever holds the latest snapshot."""
+    rows_by_ts: dict[int, dict] = {}
+    for field in AP_METRIC_FIELDS:
+        promql = f'{_AP_METRIC_NAME(field=field)}{{ap_id="{_label_escape(str(ap_id))}"}}'
+        for series in _range_query(promql, start, end, step_seconds):
+            for ts, value_str in series.get("values", []):
+                ts_ms = int(float(ts) * 1000)
+                row = rows_by_ts.setdefault(ts_ms, {"ap_id": ap_id, "polled_at": _from_ms(ts_ms)})
+                row[field] = float(value_str)
+
+    ordered_ts = sorted(rows_by_ts)
+    rows = []
+    for ts_ms in ordered_ts:
+        row = rows_by_ts[ts_ms]
+        row["id"] = uuid.uuid5(uuid.NAMESPACE_URL, f"netguard-ap-metric:{ap_id}:{ts_ms}")
         rows.append(row)
     return rows
 

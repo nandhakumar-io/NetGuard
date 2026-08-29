@@ -39,8 +39,34 @@ interface WirelessAP {
   client_count: number | null;
   band_2g_clients: number | null;
   band_5g_clients: number | null;
+  ap_up_time: string | null;
+  ap_software_version: string | null;
+  ap_serial_number: string | null;
+  channel_2g: number | null;
+  channel_5g: number | null;
+  tx_power_2g: number | null;
+  tx_power_5g: number | null;
+  noise_2g: number | null;
+  noise_5g: number | null;
+  channel_util_2g: number | null;
+  channel_util_5g: number | null;
   created_at: string;
   polled_at: string;
+  switch_device_id: string | null;
+  switch_hostname: string | null;
+  switch_port: string | null;
+  matched_device_id: string | null;
+  matched_device_hostname: string | null;
+}
+
+interface UnregisteredAp {
+  neighbor_name: string | null;
+  mac_address: string | null;
+  sys_desc: string | null;
+  switch_device_id: string;
+  switch_hostname: string | null;
+  port: string | null;
+  discovered_at: string;
 }
 
 interface WirelessSSID {
@@ -98,6 +124,45 @@ const VENDOR_LABELS: Record<ApVendor, string> = {
   other: "Other",
 };
 
+// -- Troubleshooting quick-links -------------------------------------
+// Best-effort helpers for the "jump straight to this AP" actions on
+// each card: most AP web UIs are plain HTTP, and SSH is the universal
+// fallback for anything CLI-capable, so these just open/copy rather
+// than trying to detect the AP's actual management protocol.
+function apManagementIp(ap: WirelessAP): string | null {
+  return ap.management_ip || ap.ap_ip_address || null;
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Channel utilization / noise floor thresholds are rules of thumb, not
+// vendor-published cutoffs -- good enough to flag "worth a look" on the
+// card without claiming precision the underlying SNMP counters don't have.
+function utilSeverity(pct: number | null): "ok" | "warn" | "crit" | null {
+  if (pct == null) return null;
+  if (pct >= 80) return "crit";
+  if (pct >= 50) return "warn";
+  return "ok";
+}
+function noiseSeverity(dbm: number | null): "ok" | "warn" | "crit" | null {
+  if (dbm == null) return null;
+  if (dbm >= -75) return "crit";
+  if (dbm >= -85) return "warn";
+  return "ok";
+}
+const SEVERITY_COLOR: Record<string, string> = {
+  ok: "text-risklow",
+  warn: "text-riskmed",
+  crit: "text-riskcrit",
+};
+
 const VENDOR_ORDER: ApVendor[] = ["cisco", "aruba", "ruckus", "tplink", "ubiquiti", "mikrotik", "other"];
 
 const emptyApForm = {
@@ -137,7 +202,33 @@ export default function WirelessPage() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [checkingId, setCheckingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const copySshCommand = useCallback((ap: WirelessAP) => {
+    const ip = apManagementIp(ap);
+    if (!ip) return;
+    copyText(`ssh admin@${ip}`).then((ok) => {
+      if (ok) {
+        setCopiedId(ap.id);
+        window.setTimeout(() => setCopiedId((cur) => (cur === ap.id ? null : cur)), 1500);
+      }
+    });
+  }, []);
   const [vendorFilter, setVendorFilter] = useState<"all" | ApVendor>("all");
+  const [unregisteredAps, setUnregisteredAps] = useState<UnregisteredAp[]>([]);
+  const [unregisteredLoading, setUnregisteredLoading] = useState(false);
+
+  const fetchUnregisteredAps = useCallback(() => {
+    setUnregisteredLoading(true);
+    api.get<UnregisteredAp[]>("/wireless/unregistered-aps")
+      .then((res) => setUnregisteredAps(res.data))
+      .catch(() => {})
+      .finally(() => setUnregisteredLoading(false));
+  }, []);
+
+  useEffect(() => {
+    fetchUnregisteredAps();
+  }, [fetchUnregisteredAps]);
 
   // Fetch available controllers on mount.
   useEffect(() => {
@@ -553,6 +644,11 @@ export default function WirelessPage() {
                           {ap.site && (
                             <p className="text-[11px] text-slate-400 dark:text-slate-500">{ap.site}</p>
                           )}
+                          {ap.switch_hostname && (
+                            <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate" title="Where this AP is physically plugged in, via LLDP">
+                              📍 {ap.switch_hostname}{ap.switch_port ? ` · ${ap.switch_port}` : ""}
+                            </p>
+                          )}
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
                           <span className={`flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide ${cfg.color}`}>
@@ -570,6 +666,82 @@ export default function WirelessPage() {
                         <div className="flex gap-3 mt-2 pt-2 border-t border-black/5 dark:border-white/5 text-[10px] text-slate-500 dark:text-slate-400">
                           {ap.band_2g_clients != null && <span>2.4 GHz: <b className="text-slate-600 dark:text-slate-300">{ap.band_2g_clients}</b></span>}
                           {ap.band_5g_clients != null && <span>5 GHz: <b className="text-slate-600 dark:text-slate-300">{ap.band_5g_clients}</b></span>}
+                        </div>
+                      )}
+                      {(ap.channel_2g != null || ap.channel_5g != null || ap.noise_2g != null || ap.noise_5g != null || ap.channel_util_2g != null || ap.channel_util_5g != null) && (
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 pt-2 border-t border-black/5 dark:border-white/5 text-[10px] text-slate-500 dark:text-slate-400">
+                          {(["2g", "5g"] as const).map((band) => {
+                            const channel = band === "2g" ? ap.channel_2g : ap.channel_5g;
+                            const power = band === "2g" ? ap.tx_power_2g : ap.tx_power_5g;
+                            const noise = band === "2g" ? ap.noise_2g : ap.noise_5g;
+                            const util = band === "2g" ? ap.channel_util_2g : ap.channel_util_5g;
+                            if (channel == null && noise == null && util == null) return null;
+                            return (
+                              <div key={band}>
+                                <span className="font-semibold text-slate-400 dark:text-slate-500">{band === "2g" ? "2.4GHz" : "5GHz"}</span>
+                                {channel != null && <span> ch{channel}</span>}
+                                {power != null && <span>, pwr {power}</span>}
+                                {noise != null && (
+                                  <span className={noiseSeverity(noise) ? ` ${SEVERITY_COLOR[noiseSeverity(noise)!]}` : ""}> {noise}dBm noise</span>
+                                )}
+                                {util != null && (
+                                  <span className={utilSeverity(util) ? ` ${SEVERITY_COLOR[utilSeverity(util)!]}` : ""}> · {util}% busy</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {(ap.ap_software_version || ap.ap_up_time || ap.ap_serial_number) && (
+                        <div className="mt-2 pt-2 border-t border-black/5 dark:border-white/5 text-[10px] text-slate-400 dark:text-slate-500 space-y-0.5">
+                          {ap.ap_software_version && <p>SW: <span className="font-mono">{ap.ap_software_version}</span></p>}
+                          {ap.ap_up_time && <p>Uptime: {ap.ap_up_time}</p>}
+                          {ap.ap_serial_number && <p>S/N: <span className="font-mono">{ap.ap_serial_number}</span></p>}
+                        </div>
+                      )}
+                      {apManagementIp(ap) && (
+                        <div className="flex items-center gap-2 mt-3 pt-3 border-t border-black/5 dark:border-white/5">
+                          <a
+                            href={`http://${apManagementIp(ap)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] font-semibold text-brandblue hover:text-navy dark:hover:text-white"
+                            title="Open this AP's web management UI in a new tab"
+                          >
+                            Web UI ↗
+                          </a>
+                          <span className="text-slate-300 dark:text-slate-600">·</span>
+                          <button
+                            onClick={() => copySshCommand(ap)}
+                            className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-navy dark:hover:text-white"
+                            title="Copy an SSH command for this AP to the clipboard"
+                          >
+                            {copiedId === ap.id ? "Copied!" : "Copy SSH"}
+                          </button>
+                          {ap.matched_device_id && (
+                            <>
+                              <span className="text-slate-300 dark:text-slate-600">·</span>
+                              <a
+                                href={`/devices/config?device=${ap.matched_device_id}`}
+                                className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-navy dark:hover:text-white"
+                                title="This AP is also in inventory as a managed device -- view its config backups / drift"
+                              >
+                                Config backup
+                              </a>
+                            </>
+                          )}
+                          {ap.switch_device_id && (
+                            <>
+                              <span className="text-slate-300 dark:text-slate-600">·</span>
+                              <a
+                                href={`/devices/${ap.switch_device_id}`}
+                                className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-navy dark:hover:text-white"
+                                title="Open the switch this AP is plugged into"
+                              >
+                                View switch
+                              </a>
+                            </>
+                          )}
                         </div>
                       )}
                       {ap.source === "manual" && (

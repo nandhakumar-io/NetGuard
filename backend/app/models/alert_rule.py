@@ -54,6 +54,18 @@ class AlertRuleMetric(str, enum.Enum):
     ROUTE_UNREACHABLE = "route_unreachable"  # 1 if the device's default route is missing from its routing table
     PING_PACKET_LOSS_PCT = "ping_packet_loss_pct"  # % of ICMP probes lost over a short burst (reachability sweep)
 
+    # Wireless AP radio-health metrics, evaluated per-AP (not per-device)
+    # against WirelessAP rows collected by wireless_service.poll_wireless_controller
+    # right after each WLC poll -- see alert_rule_engine.evaluate_ap_rules.
+    # An AP can be oper_status "associated" (up, badge green) while still
+    # being functionally useless to clients sitting on a saturated or
+    # noisy channel, which none of the metrics above can see since they
+    # only ever look at the controller Device's own SnmpMetrics, never at
+    # the APs it manages. Evaluated as the worse of the 2.4GHz/5GHz radio
+    # reading on each AP.
+    AP_CHANNEL_UTIL_PCT = "ap_channel_util_pct"  # worst-radio bsnAPIfLoadChannelUtilization, percent
+    AP_NOISE_DBM = "ap_noise_dbm"  # worst-radio bsnAPIfNoiseNow, dBm (higher/less-negative = noisier)
+
 
 class AlertRuleOperator(str, enum.Enum):
     GT = "gt"

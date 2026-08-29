@@ -27,8 +27,43 @@ class WirelessAPRead(BaseModel):
     client_count: int | None
     band_2g_clients: int | None
     band_5g_clients: int | None
+    ap_up_time: str | None
+    ap_software_version: str | None
+    ap_serial_number: str | None
+    channel_2g: int | None
+    channel_5g: int | None
+    tx_power_2g: int | None
+    tx_power_5g: int | None
+    noise_2g: int | None
+    noise_5g: int | None
+    channel_util_2g: int | None
+    channel_util_5g: int | None
     created_at: datetime.datetime
     polled_at: datetime.datetime
+
+    # Derived, not stored on the row -- computed per-request by
+    # app.api.wireless from LLDP neighbor / Device-inventory correlation
+    # (see wireless_service.find_switchports_for_aps /
+    # find_matching_device_for_ap). None when no correlation was found.
+    switch_device_id: str | None = None
+    switch_hostname: str | None = None
+    switch_port: str | None = None
+    matched_device_id: str | None = None
+    matched_device_hostname: str | None = None
+
+
+class UnregisteredApRead(BaseModel):
+    """One switchport whose LLDP neighbor looks like an access point but
+    doesn't match any AP already tracked on the Wireless page -- see
+    wireless_service.find_unregistered_aps."""
+
+    neighbor_name: str | None
+    mac_address: str | None
+    sys_desc: str | None
+    switch_device_id: str
+    switch_hostname: str | None
+    port: str | None
+    discovered_at: datetime.datetime
 
 
 class WirelessAPCreate(BaseModel):
