@@ -303,10 +303,51 @@ def list_ssids(controller_id: str | None = None, db: Session = Depends(get_db)):
             "admin_status": s.admin_status,
             "enabled": s.admin_status == 1,
             "mobile_station_count": s.mobile_station_count,
+            "security_mode": s.security_mode,
+            "is_weak_security": s.is_weak_security,
             "polled_at": s.polled_at,
         }
         result.append(WirelessSSIDRead(**d))
     return result
+
+
+@router.get(
+    "/ssids/weak-security",
+    response_model=list[WirelessSSIDRead],
+    summary="SSIDs running Open/WEP/WPA1-TKIP security",
+)
+def list_weak_security_ssids(db: Session = Depends(get_db)):
+    """Backs the Wireless page's "Weak SSID Security" panel (paired with
+    the existing rogue-AP panel) -- every currently-enabled SSID whose
+    last poll classified it as Open, WEP, or WPA1/TKIP. See
+    wireless_service._classify_ssid_security for how that's derived;
+    "Unknown" (controller doesn't expose the security OIDs at the
+    indices this app polls) is deliberately excluded here rather than
+    reported as weak, since that would be reporting a finding this app
+    can't actually confirm.
+    """
+    from app.models.wireless import WirelessSSID
+    ssids = (
+        db.query(WirelessSSID)
+        .filter(WirelessSSID.is_weak_security.is_(True))
+        .order_by(WirelessSSID.ssid_name)
+        .all()
+    )
+    return [
+        WirelessSSIDRead(
+            id=str(s.id),
+            controller_device_id=str(s.controller_device_id),
+            ssid_index=s.ssid_index,
+            ssid_name=s.ssid_name,
+            admin_status=s.admin_status,
+            enabled=s.admin_status == 1,
+            mobile_station_count=s.mobile_station_count,
+            security_mode=s.security_mode,
+            is_weak_security=s.is_weak_security,
+            polled_at=s.polled_at,
+        )
+        for s in ssids
+    ]
 
 
 @router.get(

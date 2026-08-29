@@ -98,34 +98,75 @@ def _connect(
     vendor: str | None = None,
 ):
     from ncclient import manager
+    from ncclient.transport.errors import SSHError
 
     from app.core.config import settings
 
-    conn = manager.connect(
-        host=ip_address,
-        port=port or 830,
-        username=username,
-        password=password,
-        hostkey_verify=False,
-        device_params=device_params or _device_params_for_vendor(vendor),
-        # Was a hardcoded 30s -- see NETCONF_CONNECT_TIMEOUT_SECONDS in
-        # app.core.config for why that's too slow for a page-load-time
-        # fetch across a fleet with more than a couple of NETCONF
-        # devices.
-        timeout=settings.NETCONF_CONNECT_TIMEOUT_SECONDS,
-    )
-    # ncclient reuses the `timeout` kwarg above as the default reply
-    # timeout for every RPC on this session too, not just the SSH
-    # handshake (ncclient.manager.Manager.timeout). Once the session is
-    # actually up, widen that to NETCONF_OPERATION_TIMEOUT_SECONDS so a
-    # legitimately slow-but-healthy RPC (e.g. Junos
-    # <get-interface-information> on a many-port EX3400) has room to
-    # finish instead of being cut off at the same 10s budget meant for
-    # detecting an unreachable device. A still-unreachable device fails at
-    # connect() above, before this line ever runs, so this can't make an
-    # actually-down device hang longer.
-    conn.timeout = settings.NETCONF_OPERATION_TIMEOUT_SECONDS
-    return conn
+    resolved_device_params = device_params or _device_params_for_vendor(vendor)
+    attempts = max(1, settings.NETCONF_CONNECT_RETRIES + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            conn = manager.connect(
+                host=ip_address,
+                port=port or 830,
+                username=username,
+                password=password,
+                hostkey_verify=False,
+                device_params=resolved_device_params,
+                # Was a hardcoded 30s -- see NETCONF_CONNECT_TIMEOUT_SECONDS in
+                # app.core.config for why that's too slow for a page-load-time
+                # fetch across a fleet with more than a couple of NETCONF
+                # devices.
+                timeout=settings.NETCONF_CONNECT_TIMEOUT_SECONDS,
+            )
+            # ncclient reuses the `timeout` kwarg above as the default reply
+            # timeout for every RPC on this session too, not just the SSH
+            # handshake (ncclient.manager.Manager.timeout). Once the session is
+            # actually up, widen that to NETCONF_OPERATION_TIMEOUT_SECONDS so a
+            # legitimately slow-but-healthy RPC (e.g. Junos
+            # <get-interface-information> on a many-port EX3400) has room to
+            # finish instead of being cut off at the same 10s budget meant for
+            # detecting an unreachable device. A still-unreachable device fails at
+            # connect() above, before this line ever runs, so this can't make an
+            # actually-down device hang longer.
+            conn.timeout = settings.NETCONF_OPERATION_TIMEOUT_SECONDS
+            return conn
+        except (SSHError, OSError, TimeoutError) as exc:
+            last_exc = exc
+            is_last_attempt = attempt == attempts - 1
+            # Only retry the specific "never got a TCP/SSH handshake at
+            # all" failure modes (raw socket connect timeout/refused, or
+            # ncclient's own "Could not open socket" -- see
+            # ncclient.transport.ssh.SSHSession.connect) -- an auth
+            # failure or a malformed-response error is a real,
+            # non-transient problem that retrying won't fix, so those
+            # still raise on the first attempt.
+            if is_last_attempt:
+                if isinstance(exc, SSHError) and "could not open socket" in str(exc).lower():
+                    raise SSHError(
+                        f"{exc} -- device did not accept a NETCONF/SSH session on port "
+                        f"{port or 830} after {attempts} attempt(s). If NETCONF is "
+                        "already enabled (`set system services netconf ssh`), check "
+                        "for a loopback (lo0) firewall filter blocking this host, or "
+                        "that the switch's management plane isn't overloaded."
+                    ) from exc
+                raise
+            # Exponential backoff (delay * 2**attempt: 2s, 4s, 8s, ...)
+            # instead of a fixed interval, so a switch that's still busy
+            # after the first retry gets progressively more room instead
+            # of being polled again at the same fixed cadence it just
+            # missed.
+            backoff = settings.NETCONF_CONNECT_RETRY_DELAY_SECONDS * (2 ** attempt)
+            logger.info(
+                "NETCONF connect to %s:%s failed on attempt %d/%d (%s), retrying in %.1fs",
+                ip_address, port or 830, attempt + 1, attempts, exc, backoff,
+            )
+            time.sleep(backoff)
+    # Unreachable in practice (the loop always returns or raises), but
+    # keeps type-checkers happy and fails loudly instead of returning
+    # None if the retry-count math above is ever changed incorrectly.
+    raise last_exc or RuntimeError("NETCONF connect failed with no recorded exception")
 
 
 def get_junos_interface_information(

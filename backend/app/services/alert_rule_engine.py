@@ -81,6 +81,24 @@ def _metric_value(rule: AlertRule, metrics: SnmpMetrics) -> float | None:
         return 1.0 if metrics.fan_status == "failed" else 0.0
     if metric == "power_supply_failure":
         return 1.0 if metrics.power_supply_status == "failed" else 0.0
+    if metric == "trunk_port_down":
+        return float(metrics.trunk_ports_down) if metrics.trunk_ports_down is not None else None
+    if metric == "sfp_port_down":
+        return float(metrics.sfp_ports_down) if metrics.sfp_ports_down is not None else None
+    if metric == "route_unreachable":
+        return None if metrics.route_unreachable is None else (1.0 if metrics.route_unreachable else 0.0)
+    if metric == "ping_packet_loss_pct":
+        return metrics.ping_packet_loss_pct
+    # Routing-protocol adjacency and LACP bundling -- see
+    # snmp_service.walk_ospf_neighbors/walk_bgp_peers/walk_lacp_aggregates
+    # and metrics_service._populate_link_metrics for how/when these get
+    # collected.
+    if metric == "ospf_neighbor_down":
+        return float(metrics.ospf_neighbors_down) if metrics.ospf_neighbors_down is not None else None
+    if metric == "bgp_session_down":
+        return float(metrics.bgp_sessions_down) if metrics.bgp_sessions_down is not None else None
+    if metric == "lacp_member_down":
+        return float(metrics.lacp_degraded_channels) if metrics.lacp_degraded_channels is not None else None
     return None
 
 

@@ -1418,6 +1418,8 @@ export default function Topology() {
                                         : ""
                                     }${member.traffic_state ? ` \u2014 ${member.traffic_state}` : ""}${
                                       member.duplex_mismatch ? ` \u2014 \u26a0 duplex mismatch (${member.local_duplex} \u2194 ${member.neighbor_duplex})` : ""
+                                    }${
+                                      member.vlan_mismatch ? ` \u2014 \u26a0 VLAN trunk mismatch (vlan ${(member.vlan_mismatch_vlans || []).join(", ")})` : ""
                                     }`}
                                   </title>
                                 </line>
@@ -1786,6 +1788,11 @@ export default function Topology() {
                     {e.duplex_mismatch && (
                       <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-600" title="One end is set to half duplex, the other full — classic silent cause of packet loss/retransmits on this link.">
                         duplex mismatch
+                      </span>
+                    )}
+                    {e.vlan_mismatch && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-600" title="A VLAN is trunked on one end of this link but missing from the other end's trunk allowed-list — a common cause of silent, self-inflicted VLAN outages.">
+                        vlan mismatch
                       </span>
                     )}
                   </div>
@@ -2330,6 +2337,14 @@ export default function Topology() {
                                       title="Half/full duplex mismatch between the two ends of this cable."
                                     >
                                       ⚠ duplex mismatch ({m.local_duplex} ↔ {m.neighbor_duplex})
+                                    </span>
+                                  )}
+                                  {m.vlan_mismatch && (
+                                    <span
+                                      className="flex items-center gap-1 mt-0.5 text-[10px] font-bold text-red-600"
+                                      title="VLAN trunked on one end but missing from the other end's trunk allowed-list."
+                                    >
+                                      ⚠ vlan mismatch ({(m.vlan_mismatch_vlans || []).join(", ")})
                                     </span>
                                   )}
                                 </span>

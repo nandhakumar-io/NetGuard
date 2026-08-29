@@ -57,6 +57,7 @@ const METRIC_LABELS: Record<string, string> = {
   cpu: "CPU %", memory: "Memory %", bandwidth: "Bandwidth %", temperature: "Temp °C", uptime: "Uptime (s)",
   interface_errors: "Interface Errors", interface_down_count: "Interfaces Down", fan_failure: "Fan Failure", power_supply_failure: "PSU Failure",
   trunk_port_down: "Trunk Ports Down", sfp_port_down: "SFP Ports Down", route_unreachable: "Default Route Missing", ping_packet_loss_pct: "Ping Loss %",
+  ospf_neighbor_down: "OSPF Neighbors Down", bgp_session_down: "BGP Sessions Down", lacp_member_down: "LACP Channels Degraded",
 };
 
 type Tab = "alerts" | "rules" | "escalations" | "webhooks" | "push";
@@ -545,6 +546,9 @@ export default function AlertCenter() {
     sfp_down: { name: "SFP/Optic Port Down", description: "Fires when a likely SFP/optic-speed (1G+) port goes down.", metric: "sfp_port_down", operator: "gte", threshold: "1", severity: "warning" },
     route_unreachable: { name: "Default Route Missing", description: "Fires when the device's routing table has no default route.", metric: "route_unreachable", operator: "eq", threshold: "1", severity: "critical" },
     ping_drop: { name: "Sustained Ping Loss", description: "Fires when a 5-probe ping burst loses 20% or more.", metric: "ping_packet_loss_pct", operator: "gte", threshold: "20", severity: "warning" },
+    ospf_down: { name: "OSPF Neighbor Down", description: "Fires when any OSPF neighbor drops out of the Full state.", metric: "ospf_neighbor_down", operator: "gte", threshold: "1", severity: "critical" },
+    bgp_down: { name: "BGP Session Down", description: "Fires when any BGP peer drops out of the Established state.", metric: "bgp_session_down", operator: "gte", threshold: "1", severity: "critical" },
+    lacp_degraded: { name: "LACP Channel Degraded", description: "Fires when a port-channel has fewer bundled members than configured.", metric: "lacp_member_down", operator: "gte", threshold: "1", severity: "warning" },
   };
   const applyRulePreset = (key: string) => {
     const preset = RULE_PRESETS[key];
@@ -1649,6 +1653,9 @@ export default function AlertCenter() {
               { key: "sfp_down", label: "📡 SFP Port Down" },
               { key: "route_unreachable", label: "🧭 Route Unreachable" },
               { key: "ping_drop", label: "📶 Ping Drop" },
+              { key: "ospf_down", label: "🔁 OSPF Neighbor Down" },
+              { key: "bgp_down", label: "🌐 BGP Session Down" },
+              { key: "lacp_degraded", label: "🔗 LACP Channel Degraded" },
             ].map((p) => (
               <button
                 key={p.key}
@@ -1687,6 +1694,11 @@ export default function AlertCenter() {
                     <option value="sfp_port_down">SFP/Optic Ports Down (count)</option>
                     <option value="route_unreachable">Default Route Missing (1 = missing)</option>
                     <option value="ping_packet_loss_pct">Ping Packet Loss (%)</option>
+                  </optgroup>
+                  <optgroup label="Routing &amp; LACP Health">
+                    <option value="ospf_neighbor_down">OSPF Neighbors Down (count)</option>
+                    <option value="bgp_session_down">BGP Sessions Down (count)</option>
+                    <option value="lacp_member_down">LACP Channels Degraded (count)</option>
                   </optgroup>
                 </select>
                 <select value={ruleForm.operator} onChange={(e) => setRuleForm({ ...ruleForm, operator: e.target.value })} className="text-sm border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-900">

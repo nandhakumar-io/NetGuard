@@ -1092,6 +1092,12 @@ export interface TopologyEdge {
   // LinkMember.duplex_mismatch) -- rolled up here so the map can badge
   // the link itself without walking every member.
   duplex_mismatch?: boolean;
+  // True when any physical member of this link has a confirmed VLAN
+  // trunk allowed-list mismatch between its two ends (see
+  // LinkMember.vlan_mismatch) -- rolled up here the same way
+  // duplex_mismatch is, so the map can badge the link itself without
+  // walking every member.
+  vlan_mismatch?: boolean;
   // Physical members of this logical link. >1 means this line represents
   // a real multi-cable trunk (e.g. LACP port-channel) -- every LLDP/CDP-
   // confirmed port pair between the same two devices, previously
@@ -1133,6 +1139,16 @@ export interface LinkMember {
   local_duplex?: "half" | "full" | "unknown" | null;
   neighbor_duplex?: "half" | "full" | "unknown" | null;
   duplex_mismatch?: boolean;
+  // True when both ends of this member are confirmed trunk ports but
+  // their allowed/trunk VLAN sets don't match -- e.g. a VLAN trunked on
+  // this side is missing from the neighbor's trunk allowed-list on the
+  // same cable. A common self-inflicted outage cause on stacked/
+  // redundant switch pairs: the link stays up throughout. Only ever
+  // true when both sides resolved to a real trunk VLAN list.
+  vlan_mismatch?: boolean;
+  // The VLAN IDs responsible for the mismatch (symmetric difference of
+  // the two ends' trunk_vlans). Null whenever vlan_mismatch is false.
+  vlan_mismatch_vlans?: string[] | null;
 }
 
 export interface TopologyResponse {

@@ -216,11 +216,13 @@ def view_interfaces(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depen
 
     if not result.success:
         # SNMP fallback for the Interfaces tab specifically. Some
-        # NETCONF-capable devices (EX3400 in particular -- its NETCONF
-        # server responds to <get-config> fine but has been observed
-        # timing out or resetting the session on the operational
-        # <get-interface-information> RPC this tab needs, see
-        # netconf_service.get_junos_interface_information) leave
+        # NETCONF-capable devices (EX3400/EX2300 in particular -- low-end
+        # switches whose NETCONF server responds to <get-config> fine but
+        # has been observed timing out, resetting the session, or (on
+        # EX2300) simply being slow to accept a brand-new SSH/NETCONF
+        # session under load -- see the retry in netconf_service._connect
+        # -- on the operational <get-interface-information> RPC this tab
+        # needs, see netconf_service.get_junos_interface_information) leave
         # get_interfaces() failing even though the device is otherwise
         # reachable and NETCONF-managed for everything else (config
         # view/push, drift, snapshots). Previously that meant this tab

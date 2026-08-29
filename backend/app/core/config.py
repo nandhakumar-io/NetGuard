@@ -204,6 +204,30 @@ class Settings(BaseSettings):
     # of the connect one.
     NETCONF_OPERATION_TIMEOUT_SECONDS: float = 45.0
 
+    # A device whose SSH/NETCONF daemon is momentarily slow to accept a
+    # new session (seen in the field on EX2300 in particular -- a
+    # fanless, low-CPU switch that can take a beat to accept a new SSH
+    # session under any load) can miss the connect-timeout window above
+    # on a first attempt and still be perfectly reachable a moment
+    # later. Previously a single missed handshake fell straight through
+    # to the Interfaces tab's SNMP fallback (or a hard failure for
+    # config push/backup/drift) even though the device was fine --
+    # retrying, after a short pause, absorbs that without paying
+    # the cost of a much longer single timeout for every device on
+    # every call. Set to 0 to disable and preserve the old
+    # single-attempt behavior.
+    #
+    # Bumped 1 -> 2 retries (3 attempts total) after field reports of
+    # EX2300s that still missed a *second* back-to-back attempt under
+    # sustained management-plane load (e.g. a bulk SNMP poll landing in
+    # the same window as a NETCONF fetch). The delay between attempts
+    # now also backs off (delay * 2**attempt: 2s, then 4s) instead of
+    # retrying at a fixed interval, so a genuinely busy switch gets more
+    # room on the later attempts instead of being hit again immediately.
+    # See _connect() in netconf_service.py.
+    NETCONF_CONNECT_RETRIES: int = 2
+    NETCONF_CONNECT_RETRY_DELAY_SECONDS: float = 2.0
+
     # Email notifications (FR-11): sent via SMTP using these settings. Email
     # sending is skipped (not an error) whenever SMTP_HOST or
     # NOTIFY_EMAIL_RECIPIENTS is unset, same "optional channel" behavior as

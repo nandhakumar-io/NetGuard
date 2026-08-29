@@ -323,6 +323,17 @@ class SnmpMetrics:
     sfp_ports_down: int | None = None  # down ports on likely SFP/optic-speed interfaces
     route_unreachable: bool | None = None  # True if the default route is missing from the routing table
     ping_packet_loss_pct: float | None = None  # set by reachability_service, not the SNMP poll path
+    # Routing-protocol adjacency and LAG/port-channel health -- same
+    # opt-in-only posture as trunk_ports_down/route_unreachable above:
+    # each needs an extra SNMP walk beyond the base health poll, so
+    # metrics_service only fills these in when at least one enabled
+    # AlertRule actually references the metric (see
+    # metrics_service._populate_link_metrics). None means "not computed
+    # this poll" (feature unused or device unreachable), not "zero
+    # neighbors/all healthy" -- never fabricated.
+    ospf_neighbors_down: int | None = None  # count of ospfNbrTable entries not in the "full" state
+    bgp_sessions_down: int | None = None  # count of bgpPeerTable entries not in the "established" state
+    lacp_degraded_channels: int | None = None  # count of LACP aggregators with fewer bundled members than configured
 
 
 _AUTH_PROTOCOL_NAMES = {
@@ -1036,6 +1047,147 @@ def _discover_routing_table_fallback(ip_address: str, auth: "SnmpAuthConfig", ti
             "if_index": ifidx,
         })
     return rows
+
+
+_OSPF_NBR_STATE = {
+    "1": "down", "2": "attempt", "3": "init", "4": "two_way",
+    "5": "exchange_start", "6": "exchange", "7": "loading", "8": "full",
+}
+
+
+def walk_ospf_neighbors(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> list[dict]:
+    """Best-effort OSPF adjacency state via the standard OSPF-MIB's
+    ospfNbrTable (ospfNbrState, 1.3.6.1.2.1.14.10.1.6) -- this is the
+    actual root cause behind a lot of what NetGuard would otherwise only
+    ever see as "device unreachable" further downstream: a WAN edge
+    router that's still answering SNMP just fine but has quietly lost
+    its OSPF adjacency to the next hop looks completely healthy to every
+    resource-utilization metric this module collects.
+
+    ospfNbrTable's index is ``ospfNbrIpAddr.ospfNbrAddressLessIndex`` --
+    the neighbor's own IP address is the first 4 dotted components of
+    the index, not part of the value, same "IP embedded in the index"
+    shape as the ARP/routing table walks above.
+
+    Returns ``[{"neighbor_ip": ..., "state": ...}]`` for every neighbor
+    entry found, state being one of the ospfNbrState names ("full",
+    "two_way", "down", ...) or "unknown" for a value this table isn't
+    documented to return. Any failure, or a platform that simply doesn't
+    run OSPF, both come back as ``[]`` -- there is no vendor-neutral way
+    to tell "no OSPF configured" apart from "walk failed" over SNMP
+    alone, same limitation walk_switchport_vlans/walk_stp_edge_ports
+    already accept for their own tables.
+    """
+    try:
+        state_raw = _walk(ip_address, auth, "1.3.6.1.2.1.14.10.1.6", timeout)
+        if not state_raw:
+            return []
+        neighbors = []
+        for index, raw in state_raw.items():
+            parts = index.split(".")
+            neighbor_ip = ".".join(parts[:4]) if len(parts) >= 4 else index
+            code = str(_parse_snmp_enum_int(raw) if _parse_snmp_enum_int(raw) is not None else raw)
+            neighbors.append({"neighbor_ip": neighbor_ip, "state": _OSPF_NBR_STATE.get(code, "unknown")})
+        return neighbors
+    except Exception:
+        return []
+
+
+_BGP_PEER_STATE = {
+    "1": "idle", "2": "connect", "3": "active", "4": "opensent",
+    "5": "openconfirm", "6": "established",
+}
+
+
+def walk_bgp_peers(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> list[dict]:
+    """Best-effort BGP session state via the standard BGP4-MIB's
+    bgpPeerTable (bgpPeerState, 1.3.6.1.2.1.15.3.1.2) -- the other half
+    of "routing protocol health": a session to the ISP dropping to
+    Idle/Active/Connect is exactly the kind of failure that otherwise
+    only ever surfaces as a downstream ROUTE_UNREACHABLE or a SPOF alert
+    on whatever depends on that edge, with nothing pointing at the real
+    cause.
+
+    bgpPeerTable's index IS the peer's IPv4 address (4 dotted
+    components) -- unlike ospfNbrTable there's no address-less-index
+    suffix to strip off.
+
+    Returns ``[{"peer_ip": ..., "state": ...}]`` for every peer entry
+    found. Same "[] means either no BGP or the walk failed, can't tell
+    which over SNMP alone" caveat as walk_ospf_neighbors -- swallowed
+    rather than raised so one unsupported device never breaks the base
+    health poll.
+    """
+    try:
+        state_raw = _walk(ip_address, auth, "1.3.6.1.2.1.15.3.1.2", timeout)
+        if not state_raw:
+            return []
+        peers = []
+        for index, raw in state_raw.items():
+            code = str(_parse_snmp_enum_int(raw) if _parse_snmp_enum_int(raw) is not None else raw)
+            peers.append({"peer_ip": index, "state": _BGP_PEER_STATE.get(code, "unknown")})
+        return peers
+    except Exception:
+        return []
+
+
+def walk_lacp_aggregates(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
+    """Best-effort LACP port-channel/LAG health via the standard
+    IEEE8023-LAG-MIB: dot3adAggPortListPorts (per-aggregator, the
+    PortList bitmap of every physical port *configured* into that LAG)
+    cross-referenced against dot3adAggPortAttachedAggID (per physical
+    port, which aggregator it's *actually* currently bundled/attached
+    to -- 0 means "not attached to any aggregator right now").
+
+    This is the classic silent-degradation case a plain
+    interface-up/down check can never see: the port-channel's own
+    virtual interface (and every member's physical link) can all show
+    oper-up while LACP has quietly dropped half the members out of the
+    bundle -- cabling/config drift, a duplex/speed mismatch on one
+    member, a partner-side misconfiguration -- so the channel keeps
+    forwarding, just at a fraction of its configured capacity, with
+    nothing in the interface-status metrics ever indicating it.
+
+    Returns ``{aggregator_name: {"configured_count": int,
+    "bundled_count": int, "degraded": bool}}`` keyed by the
+    aggregator's own ifDescr where resolvable (falls back to
+    "ifIndex <n>" otherwise). ``degraded`` is True whenever
+    bundled_count < configured_count for that LAG. A LAG with zero
+    configured members (an unused/disabled port-channel) is skipped
+    entirely rather than reported as 0/0 "degraded". Any failure, or a
+    platform without LACP/this MIB, comes back as ``{}`` -- same
+    best-effort posture as every other walk in this module.
+    """
+    try:
+        if_descr = _walk(ip_address, auth, IFTABLE_OIDS["ifDescr"], timeout)
+        agg_port_lists = _walk(ip_address, auth, "1.2.840.10006.300.43.1.1.1.1.4", timeout)
+        if not agg_port_lists:
+            return {}
+        attached_agg = _walk(ip_address, auth, "1.2.840.10006.300.43.1.2.1.1.13", timeout)
+
+        result: dict[str, dict] = {}
+        for agg_if_index, bitmap in agg_port_lists.items():
+            configured_ports = _bitmap_to_port_list(bitmap)
+            if not configured_ports:
+                continue
+            bundled_count = 0
+            for port in configured_ports:
+                attached_raw = (attached_agg or {}).get(str(port))
+                if attached_raw is None:
+                    continue
+                attached_code = str(_parse_snmp_enum_int(attached_raw) if _parse_snmp_enum_int(attached_raw) is not None else attached_raw)
+                if attached_code == str(agg_if_index):
+                    bundled_count += 1
+            name = (if_descr or {}).get(str(agg_if_index)) or f"ifIndex {agg_if_index}"
+            configured_count = len(configured_ports)
+            result[name.strip() if isinstance(name, str) else name] = {
+                "configured_count": configured_count,
+                "bundled_count": bundled_count,
+                "degraded": bundled_count < configured_count,
+            }
+        return result
+    except Exception:
+        return {}
 
 
 def _format_chassis_id(raw: str | None, subtype: str | None) -> str | None:

@@ -38,6 +38,8 @@ class LinkMemberRead(BaseModel):
     local_duplex: str | None = None  # "half" | "full" | "unknown" | None if unresolved
     neighbor_duplex: str | None = None
     duplex_mismatch: bool = False
+    vlan_mismatch: bool = False
+    vlan_mismatch_vlans: list[str] | None = None
 
 
 class TopologyEdgeRead(BaseModel):
@@ -59,6 +61,11 @@ class TopologyEdgeRead(BaseModel):
     # LinkMemberRead.duplex_mismatch) -- lets the Topology page badge
     # the link itself without walking every member.
     duplex_mismatch: bool = False
+    # True when any physical member of this link has a confirmed VLAN
+    # trunk allowed-list mismatch between its two ends (see
+    # LinkMemberRead.vlan_mismatch) -- e.g. a VLAN trunked on one side
+    # is missing from the other side's allowed-list on the same cable.
+    vlan_mismatch: bool = False
     # Physical members of this logical link (see TopologyEdge.members) --
     # empty for subnet/mgmt_subnet-inferred edges. >1 member means this
     # line on the map represents a real multi-cable trunk (e.g. LACP

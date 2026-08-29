@@ -12,6 +12,7 @@ wanted, should push to VictoriaMetrics instead of growing these tables.
 import uuid
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -178,6 +179,15 @@ class WirelessSSID(Base):
     ssid_name = Column(String, nullable=False)   # bsnDot11EssSsid
     admin_status = Column(Integer, nullable=True)  # 1 = enabled
     mobile_station_count = Column(Integer, nullable=True)  # bsnDot11EssNumberOfMobileStations
+
+    # Derived from bsnDot11EssWepState/WPA1Enable/WPA2Enable -- see
+    # wireless_service._classify_ssid_security. One of "WPA2", "WPA/TKIP",
+    # "WEP", "Open", or "Unknown" (controller didn't expose the OIDs).
+    security_mode = Column(String, nullable=True)
+    # True for "Open"/"WEP"/"WPA/TKIP"; False for "WPA2" or "Unknown"
+    # (an unreadable OID must never itself flip on a weak-security
+    # finding this app can't actually confirm).
+    is_weak_security = Column(Boolean, nullable=True)
 
     polled_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

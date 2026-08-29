@@ -1344,6 +1344,34 @@ def poll_device_metrics(
     return {"status": "success"}
 
 
+@router.get("/{device_id}/fhrp-poe")
+def get_device_fhrp_poe(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+):
+    """On-demand HSRP/VRRP/GLBP failover-group state + PoE PSE budget for
+    a single device (see app.services.fhrp_poe_service). Live SNMP read,
+    same convention as poll_device_metrics above -- not yet persisted to
+    a history table (see fhrp_poe_service.poll_fhrp_and_poe's docstring
+    for the follow-up scope that would add one)."""
+    from app.services.fhrp_poe_service import poll_fhrp_and_poe
+    from app.services.wireless_service import build_snmp_auth
+
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    auth = build_snmp_auth(db, device)
+    if auth is None:
+        raise HTTPException(status_code=400, detail="SNMP monitoring is not enabled for this device")
+
+    try:
+        return poll_fhrp_and_poe(device.ip_address, auth)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"FHRP/PoE check failed: {exc}")
+
+
 @router.post("/{device_id}/snmp-credentials/test", response_model=SnmpTestResult)
 def test_snmp_credentials(
     device_id: uuid.UUID,

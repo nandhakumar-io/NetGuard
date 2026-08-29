@@ -75,6 +75,7 @@ def _build_topology_payload(db: Session, tenant_id: uuid.UUID | None = None) -> 
                 "stale": e.stale,
                 "is_uplink": e.is_uplink,
                 "duplex_mismatch": e.duplex_mismatch,
+                "vlan_mismatch": e.vlan_mismatch,
                 "members": [
                     {
                         "local_port": m.local_port,
@@ -91,6 +92,8 @@ def _build_topology_payload(db: Session, tenant_id: uuid.UUID | None = None) -> 
                         "local_duplex": m.local_duplex,
                         "neighbor_duplex": m.neighbor_duplex,
                         "duplex_mismatch": m.duplex_mismatch,
+                        "vlan_mismatch": m.vlan_mismatch,
+                        "vlan_mismatch_vlans": m.vlan_mismatch_vlans,
                     }
                     for m in e.members
                 ],

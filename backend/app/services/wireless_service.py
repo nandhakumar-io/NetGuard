@@ -93,6 +93,50 @@ _OID_ESS_SSID = "1.3.6.1.4.1.14179.2.1.2.1.1"       # bsnDot11EssSsid
 _OID_ESS_ADMIN = "1.3.6.1.4.1.14179.2.1.2.1.2"      # bsnDot11EssAdminStatus
 _OID_ESS_CLIENTS = "1.3.6.1.4.1.14179.2.1.2.1.38"   # bsnDot11EssNumberOfMobileStations
 
+# Security-mode columns, same table as the SSID name/admin/client columns
+# above -- added so an open/WEP/WPA1-TKIP SSID shows up as a "Weak SSID
+# Security" finding instead of going unnoticed next to the existing
+# rogue-AP detection. Same caveat as the AP uptime/sw-version/serial
+# columns further up: these three column indices are less
+# universally-stable across AireOS/IOS-XE WLC firmware trains than the
+# core name/admin/client columns, so if they come back empty on your
+# controller, `snmpwalk` bsnDot11EssTable and match against
+# AIRESPACE-WIRELESS-MIB for your firmware, then update these three
+# constants -- nothing else in this module needs to change.
+_OID_ESS_WEP_STATE = "1.3.6.1.4.1.14179.2.1.2.1.40"    # bsnDot11EssWepState (1=enabled, 2=disabled)
+_OID_ESS_WPA1_ENABLE = "1.3.6.1.4.1.14179.2.1.2.1.53"  # bsnDot11EssWPA1Enable (1=enabled)
+_OID_ESS_WPA2_ENABLE = "1.3.6.1.4.1.14179.2.1.2.1.60"  # bsnDot11EssWPA2Enable (1=enabled)
+
+_SNMP_TRUE = "1"
+
+
+def _classify_ssid_security(wep: str | None, wpa1: str | None, wpa2: str | None) -> tuple[str, bool]:
+    """Derives a human-readable security_mode label + is_weak_security
+    flag from the three raw bsnDot11Ess* booleans above.
+
+    Priority: WPA2 present -> "WPA2" (not weak, regardless of whether
+    WPA1 is *also* enabled for backwards compatibility -- that's a
+    normal mixed-mode config, not a vulnerability by itself). Otherwise
+    WPA1-only -> "WPA/TKIP" (weak: TKIP is deprecated and WPA1 has no
+    AES requirement). Otherwise WEP -> "WEP" (weak). Otherwise none of
+    the three enabled -> "Open" (weak: unencrypted). Missing/unreadable
+    OIDs (all three None, i.e. this controller's firmware doesn't
+    expose these columns at the indices above) fall through to "Unknown"
+    with is_weak_security=None-equivalent (False, so it doesn't
+    false-positive a finding this app can't actually confirm) --
+    callers should treat "Unknown" as "needs the OID indices checked",
+    not as "this SSID is secure".
+    """
+    if wep is None and wpa1 is None and wpa2 is None:
+        return "Unknown", False
+    if wpa2 == _SNMP_TRUE:
+        return "WPA2", False
+    if wpa1 == _SNMP_TRUE:
+        return "WPA/TKIP", True
+    if wep == _SNMP_TRUE:
+        return "WEP", True
+    return "Open", True
+
 
 def _safe_int(val: str | None) -> int | None:
     """Parse an SNMP integer string tolerantly; return None on failure."""
@@ -563,6 +607,40 @@ def get_co_channel_report(db: Session, controller_device_id=None) -> list[dict]:
     return findings
 
 
+def build_snmp_auth(db: Session, device):
+    """Shared "resolve this device's stored SNMP config into a usable
+    SnmpAuthConfig" helper -- factored out of poll_wireless_controller so
+    fhrp_poe_service's on-demand checks (and any future SNMP-based
+    poller) can reuse it instead of re-deriving the same secrets-lookup
+    logic. Returns None if the device doesn't have SNMP enabled at all.
+    """
+    from app.services.snmp_service import SnmpAuthConfig
+
+    if not device.supports_snmp:
+        return None
+
+    auth = SnmpAuthConfig(
+        version=device.snmp_version or "v2c",
+        community=None,  # populated below for v1/v2c
+        port=device.snmp_port or 161,
+        username=device.snmp_username,
+        security_level=device.snmp_security_level,
+        auth_protocol=device.snmp_auth_protocol,
+        priv_protocol=device.snmp_priv_protocol,
+    )
+    try:
+        from app.services.secrets_service import resolve_secret
+        if device.snmp_version in ("v1", "v2c"):
+            auth.community = resolve_secret(db, device.snmp_community_ref) or "public"
+        if device.snmp_version == "v3":
+            auth.auth_key = resolve_secret(db, device.snmp_auth_credential_ref)
+            auth.priv_key = resolve_secret(db, device.snmp_privacy_credential_ref)
+    except Exception:  # noqa: BLE001
+        if device.snmp_version in ("v1", "v2c"):
+            auth.community = "public"
+    return auth
+
+
 def poll_wireless_controller(db: Session, device) -> dict:
     """Walk a WLC's SNMP tables and upsert wireless_aps / wireless_ssids.
 
@@ -577,35 +655,12 @@ def poll_wireless_controller(db: Session, device) -> dict:
     result propagation.  Both are 0 when the device is not an SNMP WLC.
     """
     from app.models.wireless import WirelessAP, WirelessSSID
-    from app.services.snmp_service import SnmpAuthConfig, _walk
+    from app.services.snmp_service import _walk
 
     # Build SNMP auth from the device's stored config (same as snmp_service).
-    if not device.supports_snmp:
+    auth = build_snmp_auth(db, device)
+    if auth is None:
         return {"ap_count": 0, "ssid_count": 0, "error": "snmp_disabled"}
-
-    auth = SnmpAuthConfig(
-        version=device.snmp_version or "v2c",
-        community=None,  # populated below for v1/v2c
-        port=device.snmp_port or 161,
-        username=device.snmp_username,
-        security_level=device.snmp_security_level,
-        auth_protocol=device.snmp_auth_protocol,
-        priv_protocol=device.snmp_priv_protocol,
-    )
-
-    # Resolve secrets for community string and v3 keys if they exist.
-    # Uses the same lazy-import + try/except pattern as metrics_service to
-    # avoid circular imports.
-    try:
-        from app.services.secrets_service import resolve_secret
-        if device.snmp_version in ("v1", "v2c"):
-            auth.community = resolve_secret(db, device.snmp_community_ref) or "public"
-        if device.snmp_version == "v3":
-            auth.auth_key = resolve_secret(db, device.snmp_auth_credential_ref)
-            auth.priv_key = resolve_secret(db, device.snmp_privacy_credential_ref)
-    except Exception:  # noqa: BLE001
-        if device.snmp_version in ("v1", "v2c"):
-            auth.community = "public"
 
     ip = device.ip_address
     timeout = 5.0
@@ -748,6 +803,9 @@ def poll_wireless_controller(db: Session, device) -> dict:
     ess_ssids = _walk(ip, auth, _OID_ESS_SSID, timeout)
     ess_admin = _walk(ip, auth, _OID_ESS_ADMIN, timeout)
     ess_clients = _walk(ip, auth, _OID_ESS_CLIENTS, timeout)
+    ess_wep = _walk(ip, auth, _OID_ESS_WEP_STATE, timeout)
+    ess_wpa1 = _walk(ip, auth, _OID_ESS_WPA1_ENABLE, timeout)
+    ess_wpa2 = _walk(ip, auth, _OID_ESS_WPA2_ENABLE, timeout)
 
     ssid_count = 0
     for idx, ssid_name in ess_ssids.items():
@@ -768,9 +826,15 @@ def poll_wireless_controller(db: Session, device) -> dict:
             )
             db.add(existing)
 
+        security_mode, is_weak = _classify_ssid_security(
+            ess_wep.get(idx), ess_wpa1.get(idx), ess_wpa2.get(idx)
+        )
+
         existing.ssid_name = ssid_str
         existing.admin_status = _safe_int(ess_admin.get(idx))
         existing.mobile_station_count = _safe_int(ess_clients.get(idx))
+        existing.security_mode = security_mode
+        existing.is_weak_security = is_weak
         existing.polled_at = now
         ssid_count += 1
 

@@ -174,6 +174,12 @@ class TopologyEdge:
     # rolled up here so the Topology page can badge the link itself
     # without a caller having to walk every member.
     duplex_mismatch: bool = False
+    # True when at least one member has a confirmed VLAN trunk
+    # allowed-list mismatch between its two ends (see
+    # LinkMember.vlan_mismatch) -- rolled up here the same way
+    # duplex_mismatch is, so the Topology page can badge the edge
+    # itself without a caller having to walk every member.
+    vlan_mismatch: bool = False
 
 
 @dataclass
@@ -223,6 +229,23 @@ class LinkMember:
     # cause of packet loss/retransmits that never trips an
     # interface-down alert, so it's worth flagging on the link itself.
     duplex_mismatch: bool = False
+    # True when both ends of this member are confirmed trunk ports (see
+    # port_mode above) but their allowed/trunk VLAN sets don't match --
+    # e.g. VLAN 40 is defined and trunked on this side but missing from
+    # the neighbor's trunk allowed-list on the other end of the exact
+    # same cable. A very common self-inflicted outage cause on stacked/
+    # redundant switch pairs: the link stays up, LLDP/CDP still confirms
+    # it, but traffic on the missing VLAN silently black-holes at this
+    # boundary. Never set when either side's mode/trunk_vlans couldn't
+    # be resolved -- same "don't invent data we don't have" posture as
+    # duplex_mismatch above.
+    vlan_mismatch: bool = False
+    # The VLAN IDs actually responsible for the mismatch -- i.e. the
+    # symmetric difference between the two ends' trunk_vlans -- so the
+    # UI/alert message can name the exact VLAN(s) instead of just
+    # flagging "something doesn't match". None whenever vlan_mismatch
+    # is False.
+    vlan_mismatch_vlans: list[str] | None = None
 
 
 @dataclass
@@ -803,6 +826,24 @@ def build_topology(db: Session, tenant_id: uuid.UUID | None = None) -> TopologyG
                 and neighbor_duplex in ("half", "full")
                 and local_duplex != neighbor_duplex
             )
+            # VLAN trunk allowed-list consistency: resolve the *neighbor*
+            # side's switchport info too (the loop above only ever
+            # walked the local side) so both ends of this exact cable
+            # can be compared. Only meaningful when both ends are
+            # confirmed trunk ports with a known VLAN list -- an access
+            # port, a routed port, or a side that couldn't be resolved
+            # at all never gets flagged, same "don't invent data we
+            # don't have" posture as duplex_mismatch above.
+            neighbor_port_mode, _neighbor_vlan, neighbor_trunk_vlans = _member_switchport_info(
+                devices_by_id, switchport_cache, member_neighbor_id, row.neighbor_port
+            )
+            vlan_mismatch = False
+            vlan_mismatch_vlans: list[str] | None = None
+            if port_mode == "trunk" and neighbor_port_mode == "trunk" and trunk_vlans and neighbor_trunk_vlans:
+                diff = set(trunk_vlans) ^ set(neighbor_trunk_vlans)
+                if diff:
+                    vlan_mismatch = True
+                    vlan_mismatch_vlans = sorted(diff, key=lambda v: int(v) if v.isdigit() else 0)
             members.append(
                 LinkMember(
                     local_port=row.local_port,
@@ -819,12 +860,15 @@ def build_topology(db: Session, tenant_id: uuid.UUID | None = None) -> TopologyG
                     local_duplex=local_duplex,
                     neighbor_duplex=neighbor_duplex,
                     duplex_mismatch=duplex_mismatch,
+                    vlan_mismatch=vlan_mismatch,
+                    vlan_mismatch_vlans=vlan_mismatch_vlans,
                 )
             )
         members.sort(key=lambda m: (m.local_port or "", m.neighbor_port or ""))
         newest_confirmed = max((m.last_confirmed_at for m in members if m.last_confirmed_at), default=None)
         all_stale = all(m.stale for m in members) if members else False
         any_duplex_mismatch = any(m.duplex_mismatch for m in members)
+        any_vlan_mismatch = any(m.vlan_mismatch for m in members)
         # Edge-level state rolls up its members: "flowing" if any member
         # is actively passing traffic (the link as a whole is live even
         # if one trunk member is idle), else "down" if every member is
@@ -854,6 +898,7 @@ def build_topology(db: Session, tenant_id: uuid.UUID | None = None) -> TopologyG
                 members=members,
                 traffic_state=edge_traffic_state,
                 duplex_mismatch=any_duplex_mismatch,
+                vlan_mismatch=any_vlan_mismatch,
             )
         )
 
@@ -1087,12 +1132,80 @@ def _gns3_port_label(node_link_entry: dict) -> str | None:
 # framing app.services.drift_service already provides for config content.
 
 
+def raise_vlan_consistency_alerts(db: Session, graph: TopologyGraph) -> None:
+    """Per-link VLAN trunk allowed-list consistency report: raises one
+    device-scoped Alert per confirmed physical link where
+    LinkMember.vlan_mismatch is True (see its docstring) -- e.g. VLAN 40
+    is trunked on this switch's side of a link but missing from the
+    trunk allowed-list on the neighbor's side of the exact same cable.
+    A very common self-inflicted outage cause on stacked/redundant
+    switch pairs that a plain link-up/down check can never see, since
+    the link itself stays up throughout.
+
+    Scoped to (and deduped on) the *local* device + local_port, same as
+    every other per-interface alert in this app (e.g. "Interface Down:
+    <port>") -- a link has two sides, and each side's operator wants to
+    see the mismatch flagged against the box and port they'd actually
+    go fix, not just once against an arbitrary "source" endpoint.
+    Cleared automatically the next time this runs and the mismatch is
+    gone (config fixed, or the link no longer confirmed at all).
+    """
+    from app.services.alert_service import auto_resolve, raise_alert
+
+    mismatched_ports: set[tuple[str, str]] = set()
+    for edge in graph.edges:
+        if not edge.vlan_mismatch:
+            continue
+        for member in edge.members:
+            if not member.vlan_mismatch or not member.local_port:
+                continue
+            vlan_list = ", ".join(member.vlan_mismatch_vlans or [])
+            category = f"VLAN Trunk Mismatch: {member.local_port}"
+            mismatched_ports.add((edge.source, category))
+            raise_alert(
+                db,
+                device_id=uuid.UUID(edge.source),
+                severity=AlertSeverity.WARNING,
+                source=AlertSource.HEALTH_POLL,
+                category=category,
+                message=(
+                    f"Trunk allowed-VLAN mismatch on {member.local_port} "
+                    f"(neighbor port {member.neighbor_port or 'unknown'}): "
+                    f"VLAN(s) {vlan_list} present on one side but not the other."
+                ),
+            )
+
+    # Auto-resolve any previously-raised mismatch alert for a device/port
+    # this pass didn't re-flag -- same "still-active breaches re-fire,
+    # fixed ones clear" contract as every other alert source here.
+    stale_alerts = (
+        db.query(Alert)
+        .filter(Alert.category.like("VLAN Trunk Mismatch:%"), Alert.resolved.is_(False))
+        .all()
+    )
+    for alert in stale_alerts:
+        key = (str(alert.device_id), alert.category)
+        if key not in mismatched_ports:
+            auto_resolve(db, device_id=alert.device_id, category=alert.category, note="VLAN trunk mismatch no longer detected")
+
+
 def capture_snapshot(db: Session) -> TopologySnapshot:
     import json
 
     from app.models.topology_snapshot import TopologySnapshot
 
     graph = build_topology(db)
+
+    # VLAN trunk consistency is evaluated off the same graph build as
+    # every periodic snapshot capture (see app.main._topology_snapshot_loop)
+    # so it's checked on a regular cadence without needing its own
+    # separate poll loop. Best-effort: a failure here should never break
+    # snapshot capture itself.
+    try:
+        raise_vlan_consistency_alerts(db, graph)
+    except Exception:  # noqa: BLE001
+        pass
+
     nodes = [{"id": n.id, "hostname": n.hostname, "ip_address": n.ip_address} for n in graph.nodes]
     edges = [
         {"source": e.source, "target": e.target, "link_source": e.link_source}

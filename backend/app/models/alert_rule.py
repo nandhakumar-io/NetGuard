@@ -54,6 +54,22 @@ class AlertRuleMetric(str, enum.Enum):
     ROUTE_UNREACHABLE = "route_unreachable"  # 1 if the device's default route is missing from its routing table
     PING_PACKET_LOSS_PCT = "ping_packet_loss_pct"  # % of ICMP probes lost over a short burst (reachability sweep)
 
+    # Routing-protocol adjacency and LAG health -- the actual root cause
+    # behind a lot of what the metrics above can only ever see as
+    # "device unreachable" or "some percentage got too high". A WAN
+    # edge whose OSPF/BGP adjacency has dropped, or a port-channel that
+    # quietly lost half its bundled members, both keep answering SNMP
+    # and looking "up" on every resource/interface metric this rule
+    # engine already had -- these two close that gap. See
+    # snmp_service.walk_ospf_neighbors / walk_bgp_peers /
+    # walk_lacp_aggregates for how each is collected, and
+    # metrics_service._populate_link_metrics for the same opt-in-only
+    # gating trunk_port_down/route_unreachable already use (only walked
+    # when an enabled rule actually references the metric).
+    OSPF_NEIGHBOR_DOWN = "ospf_neighbor_down"  # count of OSPF neighbors not in the "full" state
+    BGP_SESSION_DOWN = "bgp_session_down"  # count of BGP peers not in the "established" state
+    LACP_MEMBER_DOWN = "lacp_member_down"  # count of LACP aggregators (port-channels) with fewer bundled members than configured
+
     # Wireless AP radio-health metrics, evaluated per-AP (not per-device)
     # against WirelessAP rows collected by wireless_service.poll_wireless_controller
     # right after each WLC poll -- see alert_rule_engine.evaluate_ap_rules.

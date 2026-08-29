@@ -198,7 +198,13 @@ def _populate_link_metrics(db: Session, device: Device, auth, metrics: SnmpMetri
         for row in db.query(AlertRule.metric)
         .filter(
             AlertRule.enabled == True,
-            AlertRule.metric.in_([AlertRuleMetric.TRUNK_PORT_DOWN, AlertRuleMetric.ROUTE_UNREACHABLE]),
+            AlertRule.metric.in_([
+                AlertRuleMetric.TRUNK_PORT_DOWN,
+                AlertRuleMetric.ROUTE_UNREACHABLE,
+                AlertRuleMetric.OSPF_NEIGHBOR_DOWN,
+                AlertRuleMetric.BGP_SESSION_DOWN,
+                AlertRuleMetric.LACP_MEMBER_DOWN,
+            ]),
         )
         .distinct()
         .all()
@@ -226,6 +232,32 @@ def _populate_link_metrics(db: Session, device: Device, auth, metrics: SnmpMetri
     if "route_unreachable" in needed:
         has_default = snmp_service.has_default_route(device.ip_address, auth)
         metrics.route_unreachable = None if has_default is None else not has_default
+
+    # Routing-protocol adjacency (OSPF/BGP) and LACP bundling health --
+    # same opt-in-only extra-walk gating as the two above. See
+    # SnmpMetrics.ospf_neighbors_down/bgp_sessions_down/
+    # lacp_degraded_channels for why these stay None rather than 0 when
+    # not evaluated this poll.
+    if "ospf_neighbor_down" in needed:
+        try:
+            neighbors = snmp_service.walk_ospf_neighbors(device.ip_address, auth)
+        except Exception:  # noqa: BLE001
+            neighbors = []
+        metrics.ospf_neighbors_down = sum(1 for n in neighbors if n["state"] != "full")
+
+    if "bgp_session_down" in needed:
+        try:
+            peers = snmp_service.walk_bgp_peers(device.ip_address, auth)
+        except Exception:  # noqa: BLE001
+            peers = []
+        metrics.bgp_sessions_down = sum(1 for p in peers if p["state"] != "established")
+
+    if "lacp_member_down" in needed:
+        try:
+            aggregates = snmp_service.walk_lacp_aggregates(device.ip_address, auth)
+        except Exception:  # noqa: BLE001
+            aggregates = {}
+        metrics.lacp_degraded_channels = sum(1 for agg in aggregates.values() if agg.get("degraded"))
 
 
 def _raise_alerts(db: Session, device: Device, metrics: SnmpMetrics) -> None:

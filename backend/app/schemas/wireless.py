@@ -104,6 +104,10 @@ class WirelessSSIDRead(BaseModel):
     # True when admin_status == 1; False otherwise.
     enabled: bool
     mobile_station_count: int | None
+    # "WPA2", "WPA/TKIP", "WEP", "Open", or "Unknown" -- see
+    # wireless_service._classify_ssid_security.
+    security_mode: str | None
+    is_weak_security: bool | None
     polled_at: datetime.datetime
 
 
