@@ -119,6 +119,60 @@ function formatUptime(seconds: number | null): string {
   return `${mins}m`;
 }
 
+// Label a device falls under for the Devices table's "Group by" view --
+// kept as one small function (rather than inlining the switch at every
+// call site) so the sort key in `filtered` and the rollup key in
+// `groupRollups` are guaranteed to agree.
+function groupKeyLabel(d: Device, groupBy: "none" | "site" | "data_center" | "device_type" | "vendor"): string {
+  switch (groupBy) {
+    case "site":
+      return d.site || "Unassigned Site";
+    case "data_center":
+      return d.data_center || "Unassigned Data Center";
+    case "device_type":
+      return DEVICE_TYPE_STYLES[(d.device_type || "").toLowerCase()]?.label || "Unclassified";
+    case "vendor":
+      return d.vendor ? d.vendor.charAt(0).toUpperCase() + d.vendor.slice(1) : "Unknown Vendor";
+    default:
+      return "";
+  }
+}
+
+// Inline health-score dot + open-alert count, shown directly in the
+// collapsed device row so triage ("which of these is unhealthy or has
+// open alerts") never requires clicking into every row -- previously
+// health_score only arrived via DeviceInlineDetails' per-device fetch
+// on expand. health_color drives the dot color the same way
+// HEALTH_COLOR_STYLES already does elsewhere on this page.
+function HealthAlertBadges({ device }: { device: Device }) {
+  const colorStyle = HEALTH_COLOR_STYLES[device.health_color || "unknown"] || HEALTH_COLOR_STYLES.unknown;
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span
+        className={`inline-flex items-center gap-1.5 border px-2 py-1 rounded-full text-[11px] font-bold ${colorStyle.bg} ${colorStyle.text}`}
+        title={device.health_score != null ? `Health score ${device.health_score}/100` : "No SNMP health sample yet"}
+      >
+        <span className={`w-2 h-2 rounded-full ${colorStyle.dot}`} />
+        {device.health_score != null ? `${device.health_score}` : "—"}
+      </span>
+      {(device.open_alert_count || 0) > 0 && (
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-bold border ${
+            (device.critical_alert_count || 0) > 0
+              ? "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-riskcrit"
+              : "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-riskmed"
+          }`}
+          title={`${device.open_alert_count} open alert${device.open_alert_count === 1 ? "" : "s"}${
+            device.critical_alert_count ? ` (${device.critical_alert_count} critical)` : ""
+          }`}
+        >
+          🔔 {device.open_alert_count}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const secs = Math.floor(diff / 1000);
@@ -2076,6 +2130,29 @@ export default function Devices() {
   // alongside the other filters mainly so saved views like "My Core
   // Switches" are actually expressible, not just vendor/DC/rack ones.
   const [roleFilter, setRoleFilter] = useState<string>("all");
+  // Groups the table by Site/Data Center/Type/Vendor with a sticky
+  // section header per group, showing per-group device + alert counts
+  // right in the header row -- so scanning "how's Site B doing" no
+  // longer means clicking into each device one at a time to find out.
+  // "none" preserves the original flat list exactly as before.
+  const [groupBy, setGroupBy] = useState<"none" | "site" | "data_center" | "device_type" | "vendor">(() => {
+    const saved = localStorage.getItem("netguard_devices_group_by");
+    return saved === "site" || saved === "data_center" || saved === "device_type" || saved === "vendor" ? saved : "none";
+  });
+  useEffect(() => {
+    localStorage.setItem("netguard_devices_group_by", groupBy);
+  }, [groupBy]);
+  // Which group labels are collapsed -- groups default OPEN (every
+  // device visible without clicking anything), this is only an escape
+  // hatch for a huge group someone wants to shrink out of the way.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const toggleGroupCollapsed = (key: string) =>
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   // Fleet Health strip -- scoped to whatever vendorFilter is currently
   // selected, so picking "juniper" in the existing vendor dropdown also
   // narrows this to a "Juniper fleet" health view instead of needing a
@@ -2681,7 +2758,7 @@ export default function Devices() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return devices.filter((d) => {
+    const rows = devices.filter((d) => {
       if (vendorFilter !== "all" && d.vendor !== vendorFilter) return false;
       if (dcFilter !== "all" && d.data_center !== dcFilter) return false;
       if (rackFilter !== "all" && d.rack !== rackFilter) return false;
@@ -2696,7 +2773,39 @@ export default function Devices() {
         (d.rack || "").toLowerCase().includes(q)
       );
     });
-  }, [devices, query, vendorFilter, dcFilter, rackFilter, roleFilter, deviceTypeFilter]);
+    if (groupBy === "none") return rows;
+    // Stable sort by group key (then hostname) so every member of a
+    // group is contiguous -- lets the render pass detect group
+    // boundaries with a simple "did the key change since the last row"
+    // check instead of a separate grouping data structure, and keeps
+    // working correctly under virtualization since group boundaries
+    // fall at consistent positions in the sorted array.
+    const keyOf = (d: Device) => groupKeyLabel(d, groupBy);
+    return [...rows].sort((a, b) => {
+      const ka = keyOf(a), kb = keyOf(b);
+      if (ka !== kb) return ka.localeCompare(kb);
+      return (a.hostname || "").localeCompare(b.hostname || "");
+    });
+  }, [devices, query, vendorFilter, dcFilter, rackFilter, roleFilter, deviceTypeFilter, groupBy]);
+
+  // Per-group rollup (device count, open/critical alert totals) shown in
+  // each group's sticky header -- computed over the full filtered set,
+  // not just the currently-virtualized window, so the header count is
+  // always the true group total even for a group that's mostly scrolled
+  // out of view.
+  const groupRollups = useMemo(() => {
+    if (groupBy === "none") return new Map<string, { count: number; openAlerts: number; criticalAlerts: number }>();
+    const m = new Map<string, { count: number; openAlerts: number; criticalAlerts: number }>();
+    for (const d of filtered) {
+      const key = groupKeyLabel(d, groupBy);
+      const cur = m.get(key) || { count: 0, openAlerts: 0, criticalAlerts: 0 };
+      cur.count += 1;
+      cur.openAlerts += d.open_alert_count || 0;
+      cur.criticalAlerts += d.critical_alert_count || 0;
+      m.set(key, cur);
+    }
+    return m;
+  }, [filtered, groupBy]);
 
   // A row is expanded inline (detail panel pushes rows below it down),
   // which breaks the fixed-row-height spacer math. Previously this fell
@@ -3298,6 +3407,18 @@ export default function Devices() {
             ))}
           </select>
         )}
+        <select
+          className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 focus:ring-2 focus:ring-brandblue outline-none"
+          value={groupBy}
+          onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
+          title="Group the table below by Site/Data Center/Type/Vendor with rollup counts per group -- no need to click into each device to see how a group is doing."
+        >
+          <option value="none">No Grouping</option>
+          <option value="site">Group by Site</option>
+          <option value="data_center">Group by Data Center</option>
+          <option value="device_type">Group by Type</option>
+          <option value="vendor">Group by Vendor</option>
+        </select>
         <SavedViews
           storageKey="netguard_saved_views_devices"
           currentFilters={{ query, vendorFilter, dcFilter, rackFilter, roleFilter, deviceTypeFilter }}
@@ -3650,6 +3771,7 @@ export default function Devices() {
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Data Center</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Rack / Pos</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Status</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Health / Alerts</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Details</th>
               {canManage && <th className="text-right px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Actions</th>}
             </tr>
@@ -3657,7 +3779,7 @@ export default function Devices() {
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {initialLoading && (
               <tr>
-                <td colSpan={canManage ? 11 : 9} className="text-center text-slate-500 dark:text-slate-400 py-12">
+                <td colSpan={canManage ? 12 : 10} className="text-center text-slate-500 dark:text-slate-400 py-12">
                    <div className="inline-block w-5 h-5 border-2 border-slate-200 dark:border-slate-700 border-t-brandblue rounded-full animate-spin mb-2" />
                    <p>Loading devices…</p>
                 </td>
@@ -3665,18 +3787,52 @@ export default function Devices() {
             )}
             {!initialLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={canManage ? 11 : 9} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
+                <td colSpan={canManage ? 12 : 10} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
                   {devices.length === 0 ? "No devices yet. Add one above." : "No devices match your search."}
                 </td>
               </tr>
             )}
             {shouldVirtualize && topSpacerPx > 0 && (
               <tr aria-hidden="true" style={{ height: topSpacerPx }}>
-                <td colSpan={canManage ? 11 : 9} className="p-0 border-0" />
+                <td colSpan={canManage ? 12 : 10} className="p-0 border-0" />
               </tr>
             )}
-            {visibleDevices.map((d) => (
+            {visibleDevices.map((d, i) => {
+              const groupKey = groupBy !== "none" ? groupKeyLabel(d, groupBy) : "";
+              const prevKey = groupBy !== "none" && i > 0 ? groupKeyLabel(visibleDevices[i - 1], groupBy) : null;
+              const isNewGroup = groupBy !== "none" && groupKey !== prevKey;
+              const rollup = isNewGroup ? groupRollups.get(groupKey) : null;
+              const isCollapsed = groupBy !== "none" && collapsedGroups.has(groupKey);
+              return (
               <Fragment key={d.id}>
+                {isNewGroup && (
+                  <tr
+                    className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-900 border-y border-slate-200 dark:border-slate-700 cursor-pointer select-none"
+                    onClick={() => toggleGroupCollapsed(groupKey)}
+                  >
+                    <td colSpan={canManage ? 12 : 10} className="px-5 py-2.5">
+                      <div className="flex items-center gap-3">
+                        <span className={`inline-block transition-transform text-slate-400 text-xs ${isCollapsed ? "-rotate-90" : ""}`}>▼</span>
+                        <span className="font-bold text-navy dark:text-white text-sm">{groupKey}</span>
+                        <span className="text-xs text-slate-500 dark:text-slate-400 font-semibold">
+                          {rollup?.count ?? 0} device{rollup?.count === 1 ? "" : "s"}
+                        </span>
+                        {(rollup?.criticalAlerts || 0) > 0 && (
+                          <span className="text-[11px] font-bold text-riskcrit bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 px-2 py-0.5 rounded-full">
+                            {rollup!.criticalAlerts} critical
+                          </span>
+                        )}
+                        {(rollup?.openAlerts || 0) > 0 && (
+                          <span className="text-[11px] font-bold text-riskmed bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-2 py-0.5 rounded-full">
+                            {rollup!.openAlerts} open alert{rollup!.openAlerts === 1 ? "" : "s"}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {!isCollapsed && (
+                <>
                 <tr className={`cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40 border-l-4 ${
                     expandedDeviceId === d.id ? "bg-sky-50/60 dark:bg-slate-900 border-l-accent" : "border-l-transparent bg-white dark:bg-slate-800"
                   }`} 
@@ -3734,6 +3890,9 @@ export default function Devices() {
                   )}
                 </td>
                 <td className="px-5 py-4">
+                  <HealthAlertBadges device={d} />
+                </td>
+                <td className="px-5 py-4">
                   <span className="text-xs text-brandblue font-bold uppercase tracking-wider select-none">
                     {expandedDeviceId === d.id ? "Hide Details" : "View Details"}
                     <span className={`inline-block ml-2 transition-transform ${expandedDeviceId === d.id ? "rotate-180" : "rotate-0"}`}>▼</span>
@@ -3788,7 +3947,7 @@ export default function Devices() {
                 </tr>
                 {expandedDeviceId === d.id && (
                   <tr>
-                    <td colSpan={canManage ? 11 : 9} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
+                    <td colSpan={canManage ? 12 : 10} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
                         <DeviceInlineDetails 
                             device={d} 
                             canManage={canManage}
@@ -3803,11 +3962,14 @@ export default function Devices() {
                     </td>
                   </tr>
                 )}
+                </>
+                )}
               </Fragment>
-            ))}
+              );
+            })}
             {shouldVirtualize && bottomSpacerPx > 0 && (
               <tr aria-hidden="true" style={{ height: bottomSpacerPx }}>
-                <td colSpan={canManage ? 11 : 9} className="p-0 border-0" />
+                <td colSpan={canManage ? 12 : 10} className="p-0 border-0" />
               </tr>
             )}
           </tbody>

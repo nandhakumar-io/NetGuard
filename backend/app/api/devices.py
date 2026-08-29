@@ -249,7 +249,43 @@ def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user), ten
     # see every tenant's devices here; everyone else only sees their own.
     if tenant_id is not None:
         q = q.filter(Device.tenant_id == tenant_id)
-    return [DeviceRead.from_device(d) for d in q.all()]
+    devices = q.all()
+
+    # Bulk-fetch health + open-alert counts for the WHOLE fleet in two
+    # queries total (not one per device) so the list view can show
+    # health/alert state on every row without the per-device API calls
+    # the expand-to-see-it pattern used to require -- see
+    # DeviceRead.health_score's docstring and metrics_service.fleet_health_summary,
+    # which uses the same vm_client.fleet_latest_health() bulk query.
+    from sqlalchemy import func as _func
+
+    from app.core.vm_client import fleet_latest_health
+    from app.models.alert import Alert, AlertSeverity
+
+    health_by_device = fleet_latest_health()
+
+    alert_rows = (
+        db.query(Alert.device_id, Alert.severity, _func.count(Alert.id))
+        .filter(Alert.resolved.is_(False), Alert.device_id.isnot(None))
+        .group_by(Alert.device_id, Alert.severity)
+        .all()
+    )
+    open_counts: dict = {}
+    critical_counts: dict = {}
+    for device_id, severity, count in alert_rows:
+        open_counts[device_id] = open_counts.get(device_id, 0) + count
+        if severity == AlertSeverity.CRITICAL:
+            critical_counts[device_id] = critical_counts.get(device_id, 0) + count
+
+    return [
+        DeviceRead.from_device(
+            d,
+            health=health_by_device.get(d.id),
+            open_alert_count=open_counts.get(d.id, 0),
+            critical_alert_count=critical_counts.get(d.id, 0),
+        )
+        for d in devices
+    ]
 
 
 @router.post("", response_model=DeviceRead, status_code=201)

@@ -57,6 +57,13 @@ export interface Device {
   eos_date?: string | null;
   eol_date?: string | null;
   eol_note?: string | null;
+  // Fleet-list "at a glance" fields -- bulk-computed by GET /devices so
+  // the table can show health/alert state per row without a click. See
+  // backend DeviceRead.health_score's docstring.
+  health_score?: number | null;
+  health_color?: string | null;
+  open_alert_count?: number;
+  critical_alert_count?: number;
 }
 
 export interface HealthCheckCatalogEntry {
@@ -581,6 +588,8 @@ export interface NotificationSummary {
 export interface DashboardSummary {
   devices_online: number;
   devices_total: number;
+  wireless_ap_online: number;
+  wireless_ap_total: number;
   active_deployments: number;
   failed_deployments: number;
   rollbacks: number;

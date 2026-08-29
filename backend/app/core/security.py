@@ -123,6 +123,49 @@ def decode_sso_state_token(token: str) -> dict:
     return payload
 
 
+_PUSH_ACTION_KINDS = {"acknowledge", "escalate", "resolve"}
+
+
+def create_push_action_token(subject: str, alert_id: str, action: str, expires_hours: int = 72) -> str:
+    """Short-lived token that lets a *specific* mobile push action button
+    (ntfy's `http` action, see push_service._ntfy_actions_header) call
+    back into the API directly -- no browser session, no login prompt --
+    while staying tightly scoped: it authorizes exactly one action
+    (`action`) on exactly one alert (`alert_id`), for the user who owned
+    the push subscription it was minted for.
+
+    72h default: a page can sit unacknowledged over a long weekend and
+    the button should still work when the engineer finally looks at
+    their phone, but it's not a standing credential -- once used (or
+    once the alert is already acknowledged/resolved) it has nothing
+    further to authorize, and it can never be replayed as a normal
+    access token or against any other alert/action, unlike a JWT stolen
+    off a lost phone with a real login session.
+    """
+    if action not in _PUSH_ACTION_KINDS:
+        raise ValueError(f"action must be one of {_PUSH_ACTION_KINDS}")
+    return _create_token(
+        subject,
+        token_type="push_action",
+        expires_delta=timedelta(hours=expires_hours),
+        extra_claims={"alert_id": str(alert_id), "action": action},
+    )
+
+
+def decode_push_action_token(token: str, alert_id: str, action: str) -> dict:
+    """Decodes a push-action token and verifies it authorizes exactly this
+    alert_id + action -- a token minted for "acknowledge alert X" must
+    never be usable to escalate alert X, or to acknowledge alert Y."""
+    payload = decode_token(token)
+    if payload.get("type") != "push_action":
+        raise jwt.JWTError("Not a push action token")
+    if payload.get("action") != action:
+        raise jwt.JWTError("Token is not authorized for this action")
+    if payload.get("alert_id") != str(alert_id):
+        raise jwt.JWTError("Token is not authorized for this alert")
+    return payload
+
+
 def decode_token(token: str) -> dict:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
 

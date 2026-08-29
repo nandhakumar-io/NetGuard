@@ -107,6 +107,67 @@ _OID_ESS_WEP_STATE = "1.3.6.1.4.1.14179.2.1.2.1.40"    # bsnDot11EssWepState (1=
 _OID_ESS_WPA1_ENABLE = "1.3.6.1.4.1.14179.2.1.2.1.53"  # bsnDot11EssWPA1Enable (1=enabled)
 _OID_ESS_WPA2_ENABLE = "1.3.6.1.4.1.14179.2.1.2.1.60"  # bsnDot11EssWPA2Enable (1=enabled)
 
+# ---------------------------------------------------------------------------
+# MikroTik RouterOS MIKROTIK-MIB (1.3.6.1.4.1.14988) -- standalone AP client
+# count + SSID, for manually-added APs with no WLC to poll (see
+# poll_standalone_ap below). Verified against MikroTik's own MIB /
+# changelog and community-confirmed snmpwalk output, NOT guessed:
+#   - mtxrWlApClientCount: MikroTik forum "New SNMP MIB file for MikroTik
+#     RouterOS" (the count OID's 2010 rename) + Observium's MIB browser
+#     entry (Indexes: mtxrWlApIndex, Syntax: Counter32).
+#   - mtxrWlApSsid: RouterOS `/interface wireless print oid` output
+#     (community-posted), same table/index as client count.
+# ROS7's newer wifi driver (not wifi-qcom-ac / legacy wireless package)
+# does NOT populate this table on some builds -- confirmed by a MikroTik
+# forum thread showing "No Such Object" on ROS7 for one of three test
+# APs. poll_standalone_ap treats an empty walk as "not supported on this
+# firmware" rather than silently reporting 0, same as the WLC poller
+# already does for a non-WLC device.
+_OID_MTXR_WLAP_SSID = "1.3.6.1.4.1.14988.1.1.1.3.1.4"          # mtxrWlApSsid, indexed by mtxrWlApIndex
+_OID_MTXR_WLAP_CLIENT_COUNT = "1.3.6.1.4.1.14988.1.1.1.3.1.6"  # mtxrWlApClientCount, same index
+
+# ---------------------------------------------------------------------------
+# Ruckus WLAN MIB OIDs (RUCKUS-WLAN-MIB, enterprise 1.3.6.1.4.1.25053)
+#
+# Sourced from RUCKUS-WLAN-MIB published by CommScope (open, downloadable
+# from support.ruckuswireless.com) and confirmed against community snmpwalk
+# output for Unleashed/ZoneDirector. ruckusZDApNumSta returns the current
+# client count indexed by AP MAC as an OID suffix, ruckusZDWlanSsid gives
+# the SSID name indexed by WLAN index. The AP-to-SSID mapping is one-to-
+# many (each AP broadcasts all configured WLANs), so SSID names come from
+# the global WLAN table rather than per-AP rows.
+# NOTE: These OIDs apply to standalone Unleashed APs and Zone Director-
+# managed deployments polled through the ZD. SmartZone uses a different
+# REST API and doesn't expose the same SNMP MIB -- if your AP is only
+# accessible through SmartZone and has no standalone-mode SNMP agent, this
+# poll will return an empty walk (treated as "not supported" same as the
+# MikroTik empty-walk path above).
+_OID_RUCKUS_AP_NUM_STA = "1.3.6.1.4.1.25053.1.2.2.1.1.1.2.1.4"  # ruckusZDApNumSta (client count per AP MAC)
+_OID_RUCKUS_WLAN_SSID = "1.3.6.1.4.1.25053.1.2.2.1.1.3.2.1.2"  # ruckusZDWlanSsid (SSID name, per WLAN index)
+# Fallback: IEEE 802.11 MIB dot11StationCount (vendor-neutral, widely
+# supported including on Ruckus Unleashed firmware; returns total client
+# count for the AP as a single scalar-like table). Used when the
+# Ruckus-enterprise walk returns empty (e.g. older firmware or limited
+# community string access).
+_OID_DOT11_STATION_COUNT = "1.3.6.1.2.1.26.1.1.1.7"  # dot11StationCount, indexed by ifIndex
+
+# ---------------------------------------------------------------------------
+# TP-Link Omada/EAP SNMP OIDs (TPLINK enterprise 1.3.6.1.4.1.11863)
+#
+# TP-Link EAP series (EAP225, EAP245, EAP670, EAP660 HD, etc.) expose
+# per-radio client counts and SSID names under the tplinkAp WLAN MIB when
+# set up in standalone mode or as part of an Omada SDN controller deployment
+# that allows AP-level SNMP queries. OIDs sourced from TP-Link's published
+# TPLINK-WLAN-MIB and field-confirmed snmpwalk output; the controller-level
+# MIB (via the Omada SDN Controller software SNMP interface) uses different
+# subtrees and is NOT covered here -- this is for direct-AP polling only.
+# Per-AP (standalone): tpApStationNumber gives current client count per radio
+# (indexed by radio index), tpApSsid gives the configured SSID name per
+# radio. A single AP with 2 radios returns 2 rows; sum across all rows
+# for the total client count, concatenate distinct SSID names.
+_OID_TPLINK_AP_STATION_NUMBER = "1.3.6.1.4.1.11863.6.4.1.2.1.1.10"  # tpApStationNumber (clients per radio)
+_OID_TPLINK_AP_SSID = "1.3.6.1.4.1.11863.6.4.1.2.1.1.2"           # tpApSsid (SSID name per radio)
+
 _SNMP_TRUE = "1"
 
 
@@ -305,6 +366,221 @@ def find_unregistered_aps(db: Session) -> list[dict]:
             "discovered_at": neighbor.discovered_at,
         })
     return findings
+
+
+def poll_standalone_ap(db: Session, ap) -> dict:
+    """SNMP client-count + SSID refresh for a manually-added AP with no
+    WLC to poll (see WirelessAP.controller_device_id's docstring) --
+    the gap that used to leave manual APs stuck at whatever client_count
+    was typed in at creation time forever, since /aps/{id}/check only
+    ever pinged the AP, never re-read anything from it.
+
+    Requires the AP's IP to match an existing managed Device that has
+    SNMP configured (see find_matching_device_for_ap) -- a standalone AP
+    has no separate credential fields of its own, so it reuses whatever
+    SNMP community/v3 creds are already on file for that Device rather
+    than asking the user to enter the same secret twice.
+
+    Supported vendors: "mikrotik", "ruckus", "tplink". Every other vendor
+    returns an explicit "not yet supported" result instead of a silently-
+    wrong number. Extending this to another vendor means adding a
+    real, source-cited OID block here (see the MikroTik, Ruckus, and
+    TP-Link constant blocks above), not assuming one vendor's table
+    layout applies to another.
+    """
+    from app.models.device import Device
+
+    ip = ap.management_ip or ap.ap_ip_address
+    if not ip:
+        return {"error": "no_ip", "message": "AP has no management IP or AP IP address to poll."}
+
+    device = db.query(Device).filter(Device.ip_address == ip).first()
+    if device is None:
+        return {
+            "error": "no_matching_device",
+            "message": "No managed Device with this IP was found -- add this AP as a Device with SNMP "
+            "credentials configured (same IP) to enable client-count/SSID polling.",
+        }
+    auth = build_snmp_auth(db, device)
+    if auth is None:
+        return {
+            "error": "snmp_not_configured",
+            "message": f"Device {device.hostname} matches this AP's IP but doesn't have SNMP configured/enabled.",
+        }
+
+    vendor = (ap.vendor or "").lower()
+    timeout = 5.0
+
+    if vendor == "mikrotik":
+        return _poll_standalone_mikrotik(db, ap, device, auth, timeout)
+    if vendor == "ruckus":
+        return _poll_standalone_ruckus(db, ap, device, auth, timeout)
+    if vendor == "tplink":
+        return _poll_standalone_tplink(db, ap, device, auth, timeout)
+
+    return {
+        "error": "vendor_not_supported",
+        "message": f"Standalone SNMP polling isn't implemented yet for vendor '{vendor}' -- "
+        "supported vendors: mikrotik, ruckus, tplink. Tell NetGuard's maintainer which vendor this AP "
+        "actually is and its client-count/SSID OIDs can be added the same way these were.",
+    }
+
+
+def _upsert_ssids_for_standalone(
+    db,
+    device,
+    ap,
+    ssids: dict[str, str],
+    client_counts: dict[str, int | None],
+    now,
+) -> int:
+    """Shared SSID upsert logic for all standalone AP vendor paths.
+    `ssids` maps index -> ssid_name; `client_counts` maps the same
+    index -> client count (or None if count unavailable for that slot).
+    Returns the count of SSID rows actually upserted.
+    """
+    from app.models.wireless import WirelessSSID
+
+    ssid_count = 0
+    for idx, ssid_name in ssids.items():
+        if not ssid_name:
+            continue
+        existing = (
+            db.query(WirelessSSID)
+            .filter(WirelessSSID.controller_device_id == device.id, WirelessSSID.ssid_index == idx)
+            .first()
+        )
+        if existing is None:
+            existing = WirelessSSID(controller_device_id=device.id, ssid_index=idx, ssid_name=ssid_name)
+            db.add(existing)
+        existing.ssid_name = ssid_name
+        existing.mobile_station_count = client_counts.get(idx)
+        existing.admin_status = 1  # an entry in the walk table is active by definition
+        existing.polled_at = now
+        ssid_count += 1
+    return ssid_count
+
+
+def _poll_standalone_mikrotik(db, ap, device, auth, timeout: float) -> dict:
+    """MikroTik RouterOS WLAN client-count + SSID poll using MIKROTIK-MIB.
+    See the _OID_MTXR_* constant block above for OID sources.
+    """
+    from app.services.snmp_service import _walk
+
+    ip = device.ip_address
+    client_counts = _walk(ip, auth, _OID_MTXR_WLAP_CLIENT_COUNT, timeout)
+    ssids = _walk(ip, auth, _OID_MTXR_WLAP_SSID, timeout)
+    if not client_counts and not ssids:
+        return {
+            "error": "empty_walk",
+            "message": "AP answered SNMP but returned no wireless-interface table rows -- either it's "
+            "running RouterOS 7's newer wifi driver (which doesn't expose this table on some builds) "
+            "or SNMP is reachable but the wireless package isn't active on this device.",
+        }
+
+    total_clients = sum(_safe_int(v) or 0 for v in client_counts.values())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ap.client_count = total_clients
+    ap.polled_at = now
+
+    count_by_idx = {idx: _safe_int(v) for idx, v in client_counts.items()}
+    ssid_count = _upsert_ssids_for_standalone(db, device, ap, ssids, count_by_idx, now)
+    db.commit()
+    db.refresh(ap)
+    return {"client_count": total_clients, "ssid_count": ssid_count}
+
+
+def _poll_standalone_ruckus(db, ap, device, auth, timeout: float) -> dict:
+    """Ruckus Unleashed / ZoneDirector client-count + SSID poll using
+    RUCKUS-WLAN-MIB. See the _OID_RUCKUS_* constant block above for OID
+    sources and caveats (SmartZone-only deployments won't populate this).
+    """
+    from app.services.snmp_service import _walk
+
+    ip = device.ip_address
+    # Primary: Ruckus enterprise MIB -- ruckusZDApNumSta gives client count
+    # per AP MAC, ruckusZDWlanSsid gives SSID names per WLAN index.
+    sta_rows = _walk(ip, auth, _OID_RUCKUS_AP_NUM_STA, timeout)
+    ssid_rows = _walk(ip, auth, _OID_RUCKUS_WLAN_SSID, timeout)
+
+    # Fallback: IEEE 802.11 MIB dot11StationCount if Ruckus enterprise
+    # returned nothing (older firmware, limited SNMP community access, or
+    # SmartZone-managed AP with no local SNMP agent).
+    if not sta_rows:
+        dot11_rows = _walk(ip, auth, _OID_DOT11_STATION_COUNT, timeout)
+        if dot11_rows:
+            total_clients = sum(_safe_int(v) or 0 for v in dot11_rows.values())
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ap.client_count = total_clients
+            ap.polled_at = now
+            db.commit()
+            db.refresh(ap)
+            return {"client_count": total_clients, "ssid_count": 0, "note": "client count via IEEE 802.11 MIB fallback"}
+        return {
+            "error": "empty_walk",
+            "message": "Ruckus AP answered SNMP but returned no wireless-client rows (tried Ruckus "
+            "WLAN MIB ruckusZDApNumSta and IEEE 802.11 dot11StationCount). This AP may be "
+            "SmartZone-managed (SmartZone-only deployments don't expose this MIB locally) "
+            "or may require a different SNMP community for the wireless subtree.",
+        }
+
+    total_clients = sum(_safe_int(v) or 0 for v in sta_rows.values())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ap.client_count = total_clients
+    ap.polled_at = now
+
+    # ruckusZDWlanSsid gives global SSID names -- no per-SSID client count
+    # in this table, so all client counts are None for the SSID rows.
+    ssid_count = _upsert_ssids_for_standalone(db, device, ap, ssid_rows, {}, now)
+    db.commit()
+    db.refresh(ap)
+    return {"client_count": total_clients, "ssid_count": ssid_count}
+
+
+def _poll_standalone_tplink(db, ap, device, auth, timeout: float) -> dict:
+    """TP-Link EAP/Omada standalone AP client-count + SSID poll using
+    TPLINK WLAN MIB. See the _OID_TPLINK_* constant block above for OID
+    sources. Each radio is one table row; sums across all radios for the
+    total client count, deduplicates SSID names (dual-band APs broadcast
+    the same SSID on both radios).
+    """
+    from app.services.snmp_service import _walk
+
+    ip = device.ip_address
+    # Primary: TP-Link enterprise MIB -- tpApStationNumber (clients per
+    # radio) and tpApSsid (SSID name per radio).
+    client_rows = _walk(ip, auth, _OID_TPLINK_AP_STATION_NUMBER, timeout)
+    ssid_rows = _walk(ip, auth, _OID_TPLINK_AP_SSID, timeout)
+
+    # Fallback: IEEE 802.11 MIB dot11StationCount (works on many TP-Link
+    # EAP models even when the enterprise MIB isn't enabled).
+    if not client_rows and not ssid_rows:
+        dot11_rows = _walk(ip, auth, _OID_DOT11_STATION_COUNT, timeout)
+        if dot11_rows:
+            total_clients = sum(_safe_int(v) or 0 for v in dot11_rows.values())
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ap.client_count = total_clients
+            ap.polled_at = now
+            db.commit()
+            db.refresh(ap)
+            return {"client_count": total_clients, "ssid_count": 0, "note": "client count via IEEE 802.11 MIB fallback"}
+        return {
+            "error": "empty_walk",
+            "message": "TP-Link AP answered SNMP but returned no wireless rows (tried TP-Link WLAN "
+            "MIB tpApStationNumber and IEEE 802.11 dot11StationCount). Ensure SNMP is enabled "
+            "on the EAP and the community string gives access to the 1.3.6.1.4.1.11863 subtree.",
+        }
+
+    total_clients = sum(_safe_int(v) or 0 for v in client_rows.values())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ap.client_count = total_clients
+    ap.polled_at = now
+
+    count_by_idx = {idx: _safe_int(v) for idx, v in client_rows.items()}
+    ssid_count = _upsert_ssids_for_standalone(db, device, ap, ssid_rows, count_by_idx, now)
+    db.commit()
+    db.refresh(ap)
+    return {"client_count": total_clients, "ssid_count": ssid_count}
 
 
 def find_matching_device_for_ap(db: Session, aps: list) -> dict[str, dict]:

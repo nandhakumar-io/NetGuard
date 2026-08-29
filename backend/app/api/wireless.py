@@ -415,8 +415,13 @@ def get_ap_history(ap_id: str, hours: int = 24, limit: int = 500, db: Session = 
 def check_ap_reachability(ap_id: str, db: Session = Depends(get_db)):
     """For manually-added APs (no SNMP controller polling them), ping the
     management/AP IP so the UI can show a live up/down status instead of
-    a permanently-empty oper_status."""
+    a permanently-empty oper_status -- and, where supported (see
+    wireless_service.poll_standalone_ap), also refresh client_count and
+    SSID details straight from the AP's own SNMP agent instead of
+    leaving client_count frozen at whatever was typed in when the AP was
+    first added."""
     from app.models.wireless import WirelessAP
+    from app.services import wireless_service
     from app.services.reachability_service import is_reachable
 
     try:
@@ -435,8 +440,15 @@ def check_ap_reachability(ap_id: str, db: Session = Depends(get_db)):
     ap.oper_status = 1 if reachable else 0
     ap.polled_at = _datetime.datetime.now(_datetime.timezone.utc)
     db.commit()
+
+    snmp_result = None
+    if reachable and ap.source == "manual":
+        snmp_result = wireless_service.poll_standalone_ap(db, ap)
+
     db.refresh(ap)
-    return _ap_to_read(ap)
+    out = _ap_to_read(ap).model_dump()
+    out["snmp_poll"] = snmp_result
+    return out
 
 
 # ---------------------------------------------------------------------------

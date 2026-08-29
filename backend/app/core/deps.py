@@ -6,7 +6,7 @@ from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, decode_push_action_token
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
 
@@ -54,6 +54,37 @@ def get_current_user(
         if session is None or session.revoked:
             raise credentials_exception
 
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+def get_push_action_user(alert_id: uuid.UUID, action: str, token: str, db: Session) -> User:
+    """Resolves the user for a mobile-push action button call (ntfy's
+    `http` action hitting the API directly with a push_action bearer
+    token, see security.create_push_action_token) -- deliberately
+    separate from get_current_user: this never accepts a normal login
+    access token, and a normal login access token never satisfies this,
+    so a push_action token leaked from a notification can't be replayed
+    as a real session and a stolen session token can't be used to mint
+    or bypass action-button scoping.
+
+    Raises 401 on any mismatch (wrong action, wrong alert, expired,
+    tampered) or if the token's user no longer exists.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired action token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = decode_push_action_token(token, alert_id=str(alert_id), action=action)
+    except JWTError:
+        raise credentials_exception
+    email = payload.get("sub")
+    if not email:
+        raise credentials_exception
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception

@@ -19,6 +19,7 @@ import uuid
 from fastapi import (
     APIRouter,
     Depends,
+    Header,
     HTTPException,
     Query,
     WebSocket,
@@ -28,7 +29,12 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, get_db
-from app.core.deps import get_current_user, get_current_user_ws, get_tenant_scope
+from app.core.deps import (
+    get_current_user,
+    get_current_user_ws,
+    get_push_action_user,
+    get_tenant_scope,
+)
 from app.models.alert import Alert, AlertSeverity, AlertSource
 from app.models.device import Device
 from app.models.tenant import Tenant
@@ -203,6 +209,42 @@ def escalate(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = De
 @router.patch("/{alert_id}/resolve", response_model=AlertRead)
 def resolve(alert_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
+        return alert_service.resolve_alert(db, alert_id, user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/{alert_id}/actions/{action}", response_model=AlertRead, summary="Execute an alert action via a scoped push-notification token")
+def execute_push_action(
+    alert_id: uuid.UUID,
+    action: str,
+    authorization: str | None = Header(None),
+    db: Session = Depends(get_db),
+):
+    """Called directly by a tap on a mobile push notification's action
+    button (ntfy `http` action, see push_service._ntfy_actions_header) --
+    NOT by the web UI, which keeps using the authenticated
+    /acknowledge, /escalate, /resolve endpoints above via a real login
+    session.
+
+    Auth here is a short-lived push_action bearer token minted per
+    button per alert (see security.create_push_action_token), not a
+    normal login token -- so tapping "Acknowledge" on a phone's lock
+    screen resolves and applies the action in one HTTP call with no
+    app to open and no session to hold, while the token itself can
+    never do anything beyond that one action on that one alert.
+    """
+    if action not in ("acknowledge", "escalate", "resolve"):
+        raise HTTPException(status_code=404, detail="Unknown action")
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token", headers={"WWW-Authenticate": "Bearer"})
+    token = authorization.split(" ", 1)[1].strip()
+    user = get_push_action_user(alert_id, action, token, db)
+    try:
+        if action == "acknowledge":
+            return alert_service.acknowledge_alert(db, alert_id, user.email)
+        if action == "escalate":
+            return alert_service.escalate_alert(db, alert_id)
         return alert_service.resolve_alert(db, alert_id, user.email)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

@@ -167,6 +167,7 @@ const STAT_ICONS: Record<string, { bg: string; fg: string; icon: React.ReactNode
   // the trend, just not fighting for attention at the very top.
   downports: { bg: "bg-orange-50", fg: "text-orange-500", icon: <path d="M4 12h16M4 12l4-4M4 12l4 4M20 6v12" strokeLinecap="round" strokeLinejoin="round" /> },
   flapping: { bg: "bg-pink-50", fg: "text-pink-500", icon: <path d="M3 12h4l2-7 4 14 2-7h6" strokeLinecap="round" strokeLinejoin="round" /> },
+  wireless: { bg: "bg-blue-50", fg: "text-blue-500", icon: <path d="M12 20h.01M8.5 16.429a5 5 0 017 0M5 12.857a10 10 0 0114 0M1.5 9.286a15 15 0 0121 0" strokeLinecap="round" strokeLinejoin="round" /> },
 };
 
 function StatCard({
@@ -426,7 +427,7 @@ export default function Dashboard() {
       )}
 
       {/* ---- Stat card row ---------------------------------------------- */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-7 gap-4 mb-6">
         <StatCard iconKey="devices" value={total} label="Devices" sublabel={`${totalGroups} groups`} />
         <StatCard
           iconKey="online"
@@ -436,6 +437,19 @@ export default function Dashboard() {
           sublabel={`${online}/${total} online${breakdown?.degraded ? ` · ${breakdown.degraded} flaky` : ""}`}
         />
         <StatCard iconKey="offline" value={offline} label="Offline" valueClass={offline > 0 ? "text-red-600" : "text-slate-800"} sublabel={`${summary?.critical_alerts ?? 0} critical`} />
+        <Link to="/wireless" className="block">
+          <StatCard
+            iconKey="wireless"
+            value={summary?.wireless_ap_total ?? 0}
+            label="Wireless APs"
+            valueClass={((summary?.wireless_ap_total ?? 0) > 0 && (summary?.wireless_ap_online ?? 0) < (summary?.wireless_ap_total ?? 0)) ? "text-amber-600" : "text-slate-800"}
+            sublabel={
+              (summary?.wireless_ap_total ?? 0) === 0 
+                ? "no APs managed" 
+                : `${summary?.wireless_ap_online ?? 0} online`
+            }
+          />
+        </Link>
         <Link to="/devices" className="block">
           <StatCard
             iconKey="downports"

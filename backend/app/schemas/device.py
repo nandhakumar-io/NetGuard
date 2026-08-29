@@ -209,9 +209,21 @@ class DeviceRead(DeviceBase):
     # build. None means no target has been curated for this platform.
     recommended_target_version: str | None = None
     needs_upgrade: bool = False
+    # Fleet-list "at a glance" fields -- lets the Devices table show
+    # health and open-alert state inline without the user clicking into
+    # each row individually. Sourced from a single bulk VictoriaMetrics
+    # query + a single grouped alert count query in list_devices (not a
+    # per-device call), same cost-avoidance pattern as
+    # metrics_service.fleet_health_summary. None means "no SNMP health
+    # sample yet" (matches DeviceHealthSummary's per-device shape), not
+    # "confirmed healthy".
+    health_score: int | None = None
+    health_color: str | None = None
+    open_alert_count: int = 0
+    critical_alert_count: int = 0
 
     @classmethod
-    def from_device(cls, device) -> "DeviceRead":
+    def from_device(cls, device, *, health: dict | None = None, open_alert_count: int = 0, critical_alert_count: int = 0) -> "DeviceRead":
         import json as _json
 
         # enabled_health_checks is stored as a JSON-encoded string
@@ -281,6 +293,11 @@ class DeviceRead(DeviceBase):
         obj.eol_note = eol.note
         obj.recommended_target_version = eol.recommended_target_version
         obj.needs_upgrade = eol.needs_upgrade
+
+        obj.health_score = int(health["health_score"]) if health and health.get("health_score") is not None else None
+        obj.health_color = health.get("health_color") if health else None
+        obj.open_alert_count = open_alert_count
+        obj.critical_alert_count = critical_alert_count
         return obj
 
 

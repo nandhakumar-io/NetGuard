@@ -331,6 +331,18 @@ class Settings(BaseSettings):
     # in app.main for the startup warning that catches this.
     FRONTEND_URL: str = "http://localhost:5173"
 
+    # Public/LAN-reachable base URL of the *backend* API -- distinct from
+    # FRONTEND_URL because ntfy's http action buttons (see
+    # push_service._ntfy_actions_header) POST straight to the API, not
+    # the frontend, and the two are commonly on different hosts/ports
+    # (e.g. api.netguard.example.com vs netguard.example.com, or the
+    # frontend behind Traefik on :80 while the API stays on :8000).
+    # Falls back to FRONTEND_URL's host with the typical dev API port
+    # only for local development; MUST be overridden in any real
+    # deployment or every "Acknowledge" button ntfy sends will try to
+    # reach the phone's own localhost and silently fail.
+    API_BASE_URL: str = "http://localhost:8000"
+
     # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
     # configurable" -- these two knobs are that configuration. After a
     # deploy, the health suite is polled every POLL_INTERVAL_SECONDS for up

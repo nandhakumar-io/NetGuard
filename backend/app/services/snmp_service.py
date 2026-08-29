@@ -251,6 +251,24 @@ JUNIPER_BOX_OIDS = {
     "jnxBoxSerialNo": "1.3.6.1.4.1.2636.3.1.3.0",
 }
 
+# TP-Link Switch SNMP OIDs (TPLINK-SWITCH-MIB, enterprise 1.3.6.1.4.1.11863)
+#
+# Sourced from TP-Link's published TPLINK-SWITCH-MIB (downloadable from
+# www.tp-link.com/en/support/download/ for each TL-SG/TL-SL series switch)
+# and verified against community snmpwalk output for TL-SG108E / TL-SG3428.
+# tpSysCpuUsage: overall CPU utilization percentage (0-100) for the whole
+# device. On multi-CPU or stacked devices an additional per-slot table
+# exists (tpSysCpuUsageTable) but single-chassis TL-SG switches only ever
+# have this one scalar -- treat the single scalar as the authoritative value
+# rather than walking a table that may or may not be populated.
+# tpSysMemUsage: percentage of RAM currently in use (0-100), same scalar.
+# Both are direct percentages, same as Juniper's jnxOperatingBuffer, so
+# no used/free math is needed (unlike CISCO-PROCESS-MIB's pool pair).
+TPLINK_OIDS = {
+    "cpu": "1.3.6.1.4.1.11863.6.88.1.0",  # tpSysCpuUsage (scalar, % CPU)
+    "mem": "1.3.6.1.4.1.11863.6.88.2.0",  # tpSysMemUsage (scalar, % memory)
+}
+
 # Threshold defaults for turning raw readings into alerts (SNMP Health
 # Dashboard traffic-light + Alert Engine "High CPU" / "Temperature
 # Critical" style events).
@@ -1708,6 +1726,7 @@ def poll_health(
     # _get_first_table_value (walk + take whichever row index the agent
     # actually has), not a hardcoded ".1" GET. See OIDS dict comment.
     is_juniper = (vendor or "").lower() == "juniper"
+    is_tplink = (vendor or "").lower() in ("tplink", "tp-link")
 
     if is_juniper:
         # jnxOperatingTable (JUNIPER-MIB) holds ONE ROW PER HARDWARE
@@ -1756,6 +1775,20 @@ def poll_health(
             ip_address, auth, JUNIPER_OIDS["descr"], JUNIPER_OIDS["state"],
             ["Power Supply", "PEM", "PSU"], timeout,
         )
+    elif is_tplink:
+        # TP-Link TL-SG/TL-SL switches expose CPU and memory as direct
+        # percentage scalars (not tables) via TPLINK-SWITCH-MIB.
+        # No fan/temperature/power-supply OIDs in this MIB -- those fields
+        # stay as the snmp_service defaults ("unknown" / None) rather than
+        # being fabricated. If TP-Link publishes envmon OIDs for a future
+        # model they can be added here the same way the cisco/juniper ones
+        # were, without touching the rest of the poll path.
+        cpu_raw = _get_via_pysnmp(ip_address, auth, TPLINK_OIDS["cpu"], timeout)
+        mem_used_raw = _get_via_pysnmp(ip_address, auth, TPLINK_OIDS["mem"], timeout)
+        mem_free_raw = None  # tpSysMemUsage is already a % -- computed as mem_pct below
+        temp_raw = None
+        fan_state_raw = None
+        power_state_raw = None
     else:
         # cpu_5min/mem_used/mem_free/temperature/fan_state/power_supply_state
         # are all table columns, not scalars -- resolved via
@@ -1798,8 +1831,10 @@ def poll_health(
     interface_stats = walk_interface_stats(ip_address, auth, timeout=max(timeout, 5.0))
 
     mem_pct = None
-    if is_juniper:
-        mem_pct = _safe_float(mem_used_raw)  # jnxOperatingBuffer is already a percentage
+    if is_juniper or is_tplink:
+        # Both Juniper (jnxOperatingBuffer) and TP-Link (tpSysMemUsage)
+        # report memory as a percentage directly -- no used/free math.
+        mem_pct = _safe_float(mem_used_raw)
     elif mem_used_raw is not None and mem_free_raw is not None:
         try:
             used, free = float(mem_used_raw), float(mem_free_raw)

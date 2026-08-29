@@ -141,6 +141,17 @@ async def lifespan(app: FastAPI):
             settings.FRONTEND_URL,
         )
 
+    if settings.API_BASE_URL.startswith("http://localhost"):
+        logger.warning(
+            "API_BASE_URL is still the localhost default (%s) -- every ntfy "
+            "acknowledge/escalate/resolve action button (see "
+            "push_service._ntfy_actions_header) POSTs directly to this URL, so "
+            "on a phone or any machine other than this server the button will "
+            "silently fail to reach the API. Set API_BASE_URL in your .env to "
+            "this backend's actual reachable URL.",
+            settings.API_BASE_URL,
+        )
+
     # Schema is owned by Alembic migrations (see backend/alembic/). The
     # Docker image's entrypoint.sh runs `alembic upgrade head` before
     # starting uvicorn -- but when running locally with `uvicorn

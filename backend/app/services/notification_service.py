@@ -562,7 +562,25 @@ def _fan_out_push(event: str, message: str, severity: str, alert_id: str | None 
 
     db = SessionLocal()
     try:
-        push_service.send_push(db, title=f"NetGuard — {event}", message=message, severity=severity, alert_id=alert_id)
+        # When this push is about a specific alert, build a deep-link so
+        # tapping the notification body (the ntfy `Click` header / Pushover
+        # `url` field) jumps straight to that alert in the UI rather than
+        # landing on the generic /alerts list. The action buttons
+        # (Acknowledge, Escalate -- see push_service._ntfy_actions_header)
+        # already call the API directly via ntfy's `http` action type; this
+        # URL is only for the body-tap, which opens a browser/app session.
+        click_url = None
+        if alert_id:
+            from app.core.config import settings as _settings
+            click_url = f"{_settings.FRONTEND_URL.rstrip('/')}/alerts?alert={alert_id}"
+        push_service.send_push(
+            db,
+            title=f"NetGuard — {event}",
+            message=message,
+            severity=severity,
+            url=click_url,
+            alert_id=alert_id,
+        )
     except Exception:
         logger.warning("Failed to fan out push notifications", exc_info=True)
     finally:

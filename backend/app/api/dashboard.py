@@ -24,6 +24,7 @@ from app.models.snapshot import ConfigSnapshot
 from app.models.subnet import Subnet, SubnetScannedHost
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.wireless import WirelessAP
 from app.schemas.dashboard_preference import (
     DashboardLayoutEntry,
     DashboardPreferenceRead,
@@ -215,6 +216,15 @@ def _ipam_overview(db: Session) -> dict:
 def _compute_summary(db: Session) -> dict:
     devices_online = db.query(Device).filter(Device.status == DeviceStatus.ONLINE).count()
     devices_total = db.query(Device).count()
+
+    # Wireless AP counts: total APs ever added (polled + manual) and those
+    # currently reporting oper_status == 1 ("associated" / up). Manual APs
+    # that have never been checked have oper_status == None, so they are
+    # counted in total_aps but not in aps_online -- same semantics as
+    # device online/total above.
+    wireless_ap_total = db.query(WirelessAP).count()
+    wireless_ap_online = db.query(WirelessAP).filter(WirelessAP.oper_status == 1).count()
+
     active_deployments = db.query(Deployment).filter(
         Deployment.status.in_([DeploymentStatus.QUEUED, DeploymentStatus.IN_PROGRESS])
     ).count()
@@ -588,6 +598,8 @@ def _compute_summary(db: Session) -> dict:
     return {
         "devices_online": devices_online,
         "offline_devices": offline_devices,
+        "wireless_ap_total": wireless_ap_total,
+        "wireless_ap_online": wireless_ap_online,
         "top_error_devices": top_error_devices,
         "flapping_interfaces": flapping_interfaces,
         "devices_total": devices_total,

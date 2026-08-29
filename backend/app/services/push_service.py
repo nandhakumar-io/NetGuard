@@ -20,6 +20,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.security import create_push_action_token
 from app.models.push_subscription import PushSubscription
 
 logger = logging.getLogger(__name__)
@@ -35,24 +36,40 @@ _PUSHOVER_PRIORITY = {"critical": 2, "warning": 1, "info": 0, "resolved": 0}  # 
 _ACTION_LABELS = {"acknowledge": "Acknowledge", "escalate": "Escalate", "run_runbook": "Run Runbook"}
 
 
-def _action_deep_link(action: str, alert_id: str | None) -> str:
-    """Same deep-link scheme as notification_service._action_url -- these
-    always open the NetGuard UI (which requires a real session) rather
-    than firing a bare unauthenticated action, so a lost/shared phone
-    notification can't be used to ack or escalate anything on its own.
+def _action_deep_link(action: str) -> str:
+    """Fallback deep link used only when an action can't be made into a
+    direct API call (no alert_id to scope it to, e.g. "run_runbook",
+    which isn't about one specific alert) -- opens the NetGuard UI,
+    which requires a real session.
     """
     base = settings.FRONTEND_URL.rstrip("/")
     if action == "run_runbook":
         return f"{base}/alert-runbooks"
     if action == "escalate":
-        return f"{base}/alerts?alert={alert_id}&action=escalate" if alert_id else f"{base}/escalation-policies"
-    return f"{base}/alerts?alert={alert_id}&action=acknowledge" if alert_id else f"{base}/alerts"
+        return f"{base}/escalation-policies"
+    return f"{base}/alerts"
 
 
-def _ntfy_actions_header(include_actions: str | None, alert_id: str | None) -> str | None:
-    """Builds the value of ntfy's `Actions` header: a comma-separated list
-    of `view, Label, url` triples, which ntfy renders as up to three tap
+# ntfy action kinds this module can turn into a direct, one-tap API call
+# (see app.api.alerts.execute_push_action) rather than a deep link that
+# just opens the site. "run_runbook" stays a deep link: it isn't scoped
+# to a single alert, so there's no one endpoint for a token to authorize.
+_DIRECT_ACTION_KINDS = {"acknowledge", "escalate", "resolve"}
+
+
+def _ntfy_actions_header(sub: PushSubscription, include_actions: str | None, alert_id: str | None) -> str | None:
+    """Builds the value of ntfy's `Actions` header: a semicolon-separated
+    list of action definitions, which ntfy renders as up to three tap
     targets under the notification. See https://ntfy.sh/docs/publish/#action-buttons
+
+    For acknowledge/escalate/resolve on a specific alert, this renders an
+    `http` action that POSTs straight to the API with a scoped, short-lived
+    bearer token in a custom header (ntfy supports arbitrary `headers.*`
+    action params) -- tapping the button performs the action immediately,
+    no app/browser session required. `clear=true` dismisses the
+    notification on tap so it can't be tapped twice. Anything that can't
+    be scoped to one alert (no alert_id, or "run_runbook") falls back to
+    a `view` deep link into the NetGuard UI instead.
     """
     if not include_actions:
         return None
@@ -67,8 +84,15 @@ def _ntfy_actions_header(include_actions: str | None, alert_id: str | None) -> s
         label = _ACTION_LABELS.get(action)
         if not label:
             continue
-        url = _action_deep_link(action, alert_id)
-        parts.append(f"view, {label}, {url}")
+        if action in _DIRECT_ACTION_KINDS and alert_id:
+            token = create_push_action_token(subject=str(sub.user_id), alert_id=alert_id, action=action)
+            url = f"{settings.API_BASE_URL.rstrip('/')}{settings.API_V1_PREFIX}/alerts/{alert_id}/actions/{action}"
+            parts.append(
+                f"http, {label}, {url}, method=POST, "
+                f'headers.Authorization="Bearer {token}", clear=true'
+            )
+        else:
+            parts.append(f"view, {label}, {_action_deep_link(action)}")
     return "; ".join(parts) if parts else None
 
 
@@ -99,7 +123,7 @@ def _send_ntfy(sub: PushSubscription, title: str, message: str, severity: str, u
     }
     if url:
         headers["Click"] = _hval(url)
-    actions_header = _ntfy_actions_header(getattr(sub, "include_actions", None), alert_id)
+    actions_header = _ntfy_actions_header(sub, getattr(sub, "include_actions", None), alert_id)
     if actions_header:
         headers["Actions"] = _hval(actions_header)
     if severity == "critical":

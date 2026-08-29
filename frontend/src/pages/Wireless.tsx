@@ -368,8 +368,21 @@ export default function WirelessPage() {
   const checkAp = async (ap: WirelessAP) => {
     setCheckingId(ap.id);
     try {
-      const res = await api.post<WirelessAP>(`/wireless/aps/${ap.id}/check`);
+      const res = await api.post<WirelessAP & { snmp_poll?: { error?: string; message?: string; client_count?: number; ssid_count?: number } }>(
+        `/wireless/aps/${ap.id}/check`
+      );
       setAllAps((prev) => prev.map((a) => (a.id === ap.id ? res.data : a)));
+      const poll = res.data.snmp_poll;
+      if (poll?.error) {
+        // Not a failure of the reachability check itself (that already
+        // succeeded and updated oper_status/client_count as far as it
+        // could) -- just tell the user why client_count/SSIDs weren't
+        // refreshed this time, e.g. no matching Device with SNMP
+        // configured, or a vendor without OID support yet.
+        setError(poll.message || "SNMP client-count/SSID refresh did not complete for this AP.");
+      } else if (poll && (poll.client_count != null || poll.ssid_count != null)) {
+        setError(null);
+      }
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Reachability check failed.");
     } finally {
