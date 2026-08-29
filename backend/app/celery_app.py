@@ -103,6 +103,35 @@ celery_app.conf.update(
         # giving them their own queue keeps a firmware backlog from
         # delaying in-flight change requests.
         "app.tasks.run_firmware_upgrade_task": {"queue": "firmware"},
+        # Alert notification delivery: dispatch_alert_notification_task is
+        # what actually sends SMTP, remote syslog, Slack/Teams, DB
+        # webhooks, and ntfy/Pushover/Web Push for every alert -- the one
+        # task on the "how fast does a human find out" critical path.
+        # Left unrouted it shares the default `celery` queue (and its
+        # single-replica, concurrency=4 `worker`) with every beat sweep
+        # above: drift, anomaly, reachability, compliance/uptime reports,
+        # tenant digests, snapshot retention, recurring-window generation,
+        # IPAM rescans, discovery sweeps, GitOps sync. In a real outage --
+        # a core switch dropping and fanning out dozens of downstream
+        # device-down alerts in the same tick a scheduled sweep also
+        # landed -- those queue behind each other, and "notify the NOC
+        # immediately" stops being true exactly when it matters most.
+        # Giving it (and the two other genuinely alert-adjacent sweeps
+        # below) their own queue, consumed only by the dedicated
+        # `notifier` worker (see docker-compose.yaml), means a busy
+        # reporting/sweep queue can never delay a live alert notification.
+        "app.tasks.dispatch_alert_notification_task": {"queue": "notify"},
+        # Escalation sweep pages secondary/on-call contacts for anything
+        # past its unack_minutes threshold -- exactly the kind of "someone
+        # needs to know right now" work that shouldn't be stuck behind a
+        # weekly compliance report on the shared queue.
+        "app.tasks.run_escalation_sweep_task": {"queue": "notify"},
+        # IPAM conflict alerts and JIT expiry notices also call
+        # notification_service.notify() directly for time-sensitive
+        # conditions (duplicate IP in use, an access grant about to
+        # lapse) -- same reasoning as above.
+        "app.tasks.run_ipam_conflict_alert_sweep_task": {"queue": "notify"},
+        "app.tasks.run_jit_expiry_notify_sweep_task": {"queue": "notify"},
     },
     beat_schedule={
         # Nightly configuration drift sweep (SRS: automated drift detection).

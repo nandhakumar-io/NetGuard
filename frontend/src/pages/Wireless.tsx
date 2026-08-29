@@ -654,7 +654,7 @@ export default function WirelessPage() {
         </div>
       )}
 
-      {noData && (
+      {noData && controllers.length > 0 && (
         <div className="mt-10 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-12 text-center shadow-sm">
           <div className="text-4xl mb-3">📡</div>
           <h3 className="text-base font-semibold text-navy dark:text-white">No access points</h3>

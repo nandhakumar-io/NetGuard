@@ -52,7 +52,6 @@ const AuditorExport = lazy(() => import("./pages/AuditorExport"));
 const TenantBoard = lazy(() => import("./pages/TenantBoard"));
 const Tenants = lazy(() => import("./pages/Tenants"));
 const Reports = lazy(() => import("./pages/Reports"));
-const WirelessPage = lazy(() => import("./pages/Wireless"));
 
 function RouteFallback() {
   return (
@@ -120,7 +119,6 @@ export default function App() {
           <Route path="/tenant-board" element={withSuspense(<TenantBoard />)} />
           <Route path="/tenants" element={withSuspense(<Tenants />)} />
           <Route path="/reports" element={withSuspense(<Reports />)} />
-          <Route path="/wireless" element={withSuspense(<WirelessPage />)} />
         </Route>
       </Route>
       </Routes>

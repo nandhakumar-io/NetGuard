@@ -765,6 +765,82 @@ services:
       victoriametrics:
         condition: service_healthy
 
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+
+    networks:
+      - netguard-internal
+
+
+  # ============================================================
+  # CELERY NOTIFIER (dedicated queue for live alert delivery)
+  # ============================================================
+
+  notifier:
+    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
+    restart: unless-stopped
+
+    # Consumes ONLY the `notify` queue -- dispatch_alert_notification_task
+    # (SMTP/syslog/Slack/Teams/webhooks/push for every alert),
+    # run_escalation_sweep_task, run_ipam_conflict_alert_sweep_task, and
+    # run_jit_expiry_notify_sweep_task (see app/celery_app.py's
+    # task_routes). Split out from the general `worker` so a backlog on
+    # the shared `celery` queue (drift sweep, compliance/uptime reports,
+    # tenant digests, snapshot retention, IPAM rescans, discovery sweeps,
+    # GitOps sync) can never delay live alert notifications -- this is
+    # the "no delay between alert and notification" path for a production
+    # NOC. Concurrency is deliberately higher than the general worker:
+    # each unit of work here is a handful of short blocking network calls
+    # (SMTP, syslog socket, webhook POSTs, push sends), not CPU-bound, and
+    # a real outage can fan out dozens of these at once.
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app.celery_app",
+        "worker",
+        "-Q",
+        "notify",
+        "--loglevel=info",
+        "--concurrency=16",
+        "--hostname=notifier@%h"
+      ]
+
+    env_file:
+      - .env
+
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
+
+      REDIS_URL: redis://redis:6379/0
+
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+      NATS_URL: nats://nats:4222
+      VICTORIAMETRICS_URL: http://victoriametrics:8428
+
+      SKIP_MIGRATIONS: "true"
+
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+      pgbouncer:
+        condition: service_started
+
+      redis:
+        condition: service_healthy
+
+      nats:
+        condition: service_healthy
+
+      victoriametrics:
+        condition: service_healthy
+
+    deploy:
+      replicas: ${NOTIFIER_REPLICAS:-2}
+
     networks:
       - netguard-internal
 

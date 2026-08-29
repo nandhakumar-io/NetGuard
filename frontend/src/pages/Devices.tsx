@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import SavedViews from "../components/SavedViews";
+import WirelessPage from "./Wireless";
 import {
   Device,
   Snapshot,
@@ -2053,6 +2054,14 @@ export default function Devices() {
   const [query, setQuery] = useState(searchParams.get("q") || "");
   const [vendorFilter, setVendorFilter] = useState<string>("all");
   const [deviceTypeFilter, setDeviceTypeFilter] = useState<string>("all");
+  // Classification block strip above the toolbar (see CLASSIFICATION_BLOCKS
+  // below): clicking a block either narrows the existing device list to
+  // that device_type (setting deviceTypeFilter + this) or, for "ap",
+  // swaps the whole list out for the embedded Wireless AP panel -- APs
+  // have enough vendor-specific fields (SSIDs, client counts, controller
+  // polling) that they don't fit the generic device table/form at all.
+  // null means "showing every device type", same as deviceTypeFilter="all".
+  const [classificationView, setClassificationView] = useState<string | null>(null);
   const [dcFilter, setDcFilter] = useState<string>("all");
   const [rackFilter, setRackFilter] = useState<string>("all");
   // "core" | "distribution" | "access" | ... (free-text, org-defined) --
@@ -2613,6 +2622,15 @@ export default function Devices() {
   const racks = useMemo(() => Array.from(new Set(devices.map((d) => d.rack).filter(Boolean))), [devices]);
   const roles = useMemo(() => Array.from(new Set(devices.map((d) => d.device_role).filter(Boolean))), [devices]);
   const deviceTypes = useMemo(() => Array.from(new Set(devices.map((d) => (d.device_type || "").toLowerCase()).filter(Boolean))), [devices]);
+  // Counts backing the classification block strip -- every DEVICE_TYPE_OPTIONS
+  // key (including "" for Unclassified) against the full unfiltered device
+  // list, so the blocks always reflect the whole fleet regardless of
+  // whatever filter/search is currently narrowing the table below.
+  const classificationCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const d of devices) counts[(d.device_type || "").toLowerCase()] = (counts[(d.device_type || "").toLowerCase()] || 0) + 1;
+    return counts;
+  }, [devices]);
 
   // --- Row virtualization ---------------------------------------------
   // NOC fleets can run into the thousands of devices; rendering every
@@ -3056,6 +3074,81 @@ export default function Devices() {
             ✕
           </button>
         </p>
+      )}
+
+      {/* Classification blocks -- one per DEVICE_TYPE_OPTIONS bucket
+          (Router/Switch/AP/NVR/Firewall/Server/Other/Unclassified) with a
+          live count off the full fleet. Clicking a block narrows straight
+          into that classification: for "ap" the whole section below swaps
+          out for the dedicated Wireless AP panel (SSIDs, client counts,
+          WLC polling -- fields that don't belong in the generic device
+          table/form), for everything else it sets deviceTypeFilter and
+          shows a focused header with a way back to the full fleet. */}
+      {!classificationView && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+          {DEVICE_TYPE_OPTIONS.filter((opt) => opt.value !== "").map((opt) => {
+            const style = DEVICE_TYPE_STYLES[opt.value] || DEVICE_TYPE_STYLES.other;
+            const count = classificationCounts[opt.value] || 0;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => {
+                  setClassificationView(opt.value);
+                  if (opt.value !== "ap") setDeviceTypeFilter(opt.value);
+                }}
+                className={`flex flex-col items-center justify-center gap-1 rounded-xl border p-4 text-center shadow-sm transition-transform hover:-translate-y-0.5 hover:shadow-md ${style.bg} ${style.text} border-slate-200 dark:border-slate-700`}
+              >
+                <span className="text-2xl" aria-hidden="true">{style.icon}</span>
+                <span className="text-2xl font-bold">{count}</span>
+                <span className="text-xs font-semibold uppercase tracking-wide">{opt.label}</span>
+              </button>
+            );
+          })}
+          {classificationCounts[""] > 0 && (
+            <button
+              type="button"
+              onClick={() => { setClassificationView(""); setDeviceTypeFilter(""); }}
+              className="flex flex-col items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-4 text-center shadow-sm transition-transform hover:-translate-y-0.5 hover:shadow-md text-slate-500 dark:text-slate-400"
+            >
+              <span className="text-2xl" aria-hidden="true">❓</span>
+              <span className="text-2xl font-bold">{classificationCounts[""]}</span>
+              <span className="text-xs font-semibold uppercase tracking-wide">Unclassified</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {classificationView === "ap" ? (
+        <div>
+          <button
+            type="button"
+            onClick={() => setClassificationView(null)}
+            className="mb-4 flex items-center gap-1.5 text-sm font-semibold text-brandblue hover:text-navy dark:hover:text-white"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><path d="M15 18l-6-6 6-6" /></svg>
+            Back to all devices
+          </button>
+          <WirelessPage />
+        </div>
+      ) : (
+      <>
+      {classificationView !== null && (
+        <div className="flex items-center gap-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5">
+          <button
+            type="button"
+            onClick={() => { setClassificationView(null); setDeviceTypeFilter("all"); }}
+            className="flex items-center gap-1.5 text-sm font-semibold text-brandblue hover:text-navy dark:hover:text-white"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><path d="M15 18l-6-6 6-6" /></svg>
+            Back to all devices
+          </button>
+          <span className="text-sm text-slate-500 dark:text-slate-400">
+            Viewing <span className="font-semibold text-navy dark:text-white">
+              {classificationView === "" ? "Unclassified" : (DEVICE_TYPE_STYLES[classificationView]?.label || classificationView)}
+            </span> only
+          </span>
+        </div>
       )}
 
       <div className="flex flex-wrap gap-2 items-center">
@@ -3851,6 +3944,8 @@ export default function Devices() {
             }}
           />
         )}
+      </>
+      )}
     </div>
   );
 }
