@@ -36,19 +36,30 @@ def _dispatch_notification(alert: Alert) -> None:
     critical alert that re-escalated from warning on a standing row,
     never published anywhere except the in-app Alert Center.
 
-    Deliberately imported locally (not at module level) to avoid a
-    notification_service <-> alert_service import cycle -- notification_service
-    doesn't import alert_service, but several of *its* callers do.
+    Enqueues app.tasks.dispatch_alert_notification_task rather than
+    calling notification_service.notify() in-line -- notify() makes
+    several sequential blocking HTTP calls (Slack, Teams, SMTP,
+    Telegram, every webhook, every push subscription, every syslog
+    destination), and running that inline here meant a single slow or
+    unreachable endpoint delayed every channel behind it *and* blocked
+    whatever poll/request loop raised the alert from moving on to the
+    next device -- so "immediately after the alert" could in practice
+    be many seconds later. Enqueuing fires delivery the instant the
+    alert is committed, off that call stack entirely.
+
+    Deliberately imported locally (not at module level) to avoid an
+    alert_service <-> tasks import cycle -- tasks.py already imports
+    from app.services (which alert_service is part of).
     """
-    from app.services import notification_service
+    from app.tasks import dispatch_alert_notification_task
 
     try:
-        notification_service.notify(
+        dispatch_alert_notification_task.delay(
             event=alert.category,
             message=alert.message,
             severity=alert.severity.value if hasattr(alert.severity, "value") else alert.severity,
             device_hostname=alert.device.hostname if alert.device_id and alert.device else None,
-            tenant_id=alert.device.tenant_id if alert.device_id and alert.device else None,
+            tenant_id=str(alert.device.tenant_id) if alert.device_id and alert.device and alert.device.tenant_id else None,
             alert_id=str(alert.id),
         )
     except Exception:  # noqa: BLE001 -- notification delivery must never break alert creation

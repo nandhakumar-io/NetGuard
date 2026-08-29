@@ -128,8 +128,12 @@ def poll_wireless_controller(db: Session, device) -> dict:
                 id=uuid.uuid4(),
                 controller_device_id=device.id,
                 ap_index=idx,
+                source="polled",
+                vendor="cisco",
             )
             db.add(existing)
+
+        existing.source = "polled"
 
         existing.ap_name = str(name).strip() or None
         existing.ap_model = ap_model.get(idx)

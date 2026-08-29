@@ -39,6 +39,51 @@ from app.services import (
 logger = logging.getLogger(__name__)
 
 
+@celery_app.task(
+    name="app.tasks.dispatch_alert_notification_task",
+    bind=True,
+    # Notifications must reach Slack/Teams/push/webhooks as close to
+    # "the moment the alert fired" as the queue can manage -- previously
+    # alert_service._dispatch_notification called notification_service.notify()
+    # in-line, inside the same synchronous call stack as the SNMP poll
+    # that raised the alert. notify() makes ~5-10 sequential blocking
+    # HTTP calls (Slack, Teams, SMTP, Telegram, every enabled webhook,
+    # every push subscription, every syslog destination), each with its
+    # own multi-second timeout -- one slow/unreachable endpoint serially
+    # delayed everything behind it *and* blocked the poll task from
+    # moving on to the next device, so "immediately after the alert"
+    # could actually be tens of seconds later, worse under load.
+    # Enqueuing this as its own task fires it the instant the alert is
+    # committed, off the polling/request path entirely, and retries
+    # transient failures (a Redis hiccup fetching subscriptions, a DB
+    # blip persisting delivery-attempt rows) instead of silently
+    # swallowing them the way the inline call's bare try/except did.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+    acks_late=True,
+)
+def dispatch_alert_notification_task(
+    self,
+    *,
+    event: str,
+    message: str,
+    severity: str,
+    device_hostname: str | None,
+    tenant_id: str | None,
+    alert_id: str | None,
+) -> str:
+    notification_service.notify(
+        event=event,
+        message=message,
+        severity=severity,
+        device_hostname=device_hostname,
+        tenant_id=uuid.UUID(tenant_id) if tenant_id else None,
+        alert_id=alert_id,
+    )
+    return "dispatched"
+
+
 def _seconds_since(past: datetime | None, now: datetime) -> float | None:
     """(now - past) in seconds, or None if `past` is None (never polled).
     Treats a naive `past` as UTC -- Device's poll-timestamp columns are

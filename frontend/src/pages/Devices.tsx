@@ -58,6 +58,49 @@ const ALERT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: st
   info: { text: "text-brandblue", bg: "bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800", icon: "ℹ️" },
 };
 
+// Device classification -- the coarse "what kind of box is this" bucket
+// shown as a badge in the Devices table/filters, distinct from
+// device_role (e.g. "core switch" vs "access switch") and vendor.
+// Keyed by the free-text `device_type` value stored on the device;
+// anything not in this map (or unset) falls back to DEVICE_TYPE_OTHER.
+const DEVICE_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Unclassified" },
+  { value: "router", label: "Router" },
+  { value: "switch", label: "Switch" },
+  { value: "ap", label: "Wireless AP" },
+  { value: "nvr", label: "NVR" },
+  { value: "firewall", label: "Firewall" },
+  { value: "server", label: "Server" },
+  { value: "other", label: "Other" },
+];
+
+const DEVICE_TYPE_STYLES: Record<string, { label: string; icon: string; bg: string; text: string }> = {
+  router: { label: "Router", icon: "🌐", bg: "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800", text: "text-indigo-600 dark:text-indigo-400" },
+  switch: { label: "Switch", icon: "🔀", bg: "bg-teal-50 dark:bg-teal-950/40 border-teal-200 dark:border-teal-800", text: "text-teal-600 dark:text-teal-400" },
+  ap: { label: "Wireless AP", icon: "📶", bg: "bg-sky-50 dark:bg-sky-950/40 border-sky-200 dark:border-sky-800", text: "text-sky-600 dark:text-sky-400" },
+  nvr: { label: "NVR", icon: "🎥", bg: "bg-purple-50 dark:bg-purple-950/40 border-purple-200 dark:border-purple-800", text: "text-purple-600 dark:text-purple-400" },
+  firewall: { label: "Firewall", icon: "🛡️", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", text: "text-red-600 dark:text-red-400" },
+  server: { label: "Server", icon: "🖥️", bg: "bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-600", text: "text-slate-600 dark:text-slate-300" },
+  other: { label: "Other", icon: "❔", bg: "bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-600", text: "text-slate-500 dark:text-slate-400" },
+};
+
+function DeviceTypeBadge({ deviceType }: { deviceType?: string | null }) {
+  const key = (deviceType || "").toLowerCase().trim();
+  if (!key) {
+    return <span className="text-slate-400 dark:text-slate-500 text-xs italic">Unclassified</span>;
+  }
+  const style = DEVICE_TYPE_STYLES[key] || { ...DEVICE_TYPE_STYLES.other, label: deviceType || "Other" };
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs font-semibold whitespace-nowrap ${style.bg} ${style.text}`}
+      title={style.label}
+    >
+      <span aria-hidden="true">{style.icon}</span>
+      {style.label}
+    </span>
+  );
+}
+
 const DRIFT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: string }> = {
   critical: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🚨" },
   high: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🔴" },
@@ -97,6 +140,7 @@ const emptyForm = {
   hostname: "",
   ip_address: "",
   vendor: "cisco",
+  device_type: "",
   site: "",
   device_role: "",
   data_center: "",
@@ -2008,6 +2052,7 @@ export default function Devices() {
   const [searchParams] = useSearchParams();
   const [query, setQuery] = useState(searchParams.get("q") || "");
   const [vendorFilter, setVendorFilter] = useState<string>("all");
+  const [deviceTypeFilter, setDeviceTypeFilter] = useState<string>("all");
   const [dcFilter, setDcFilter] = useState<string>("all");
   const [rackFilter, setRackFilter] = useState<string>("all");
   // "core" | "distribution" | "access" | ... (free-text, org-defined) --
@@ -2121,6 +2166,7 @@ export default function Devices() {
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
   const [bulkSiteValue, setBulkSiteValue] = useState("");
   const [bulkVendorValue, setBulkVendorValue] = useState("cisco");
+  const [bulkDeviceTypeValue, setBulkDeviceTypeValue] = useState("switch");
   const [bulkDcValue, setBulkDcValue] = useState("");
   const [bulkRackValue, setBulkRackValue] = useState("");
   const [bulkRoleValue, setBulkRoleValue] = useState("");
@@ -2192,6 +2238,12 @@ export default function Devices() {
     bulkPatch({ supports_snmp: enabled }, `SNMP monitoring ${enabled ? "enabled" : "disabled"}`);
 
   const bulkTagVendor = () => bulkPatch({ vendor: bulkVendorValue }, `Vendor "${bulkVendorValue}"`);
+
+  const bulkTagDeviceType = () =>
+    bulkPatch(
+      { device_type: bulkDeviceTypeValue },
+      `Type "${DEVICE_TYPE_STYLES[bulkDeviceTypeValue]?.label || bulkDeviceTypeValue}"`
+    );
 
   const bulkSetUplink = (enabled: boolean) =>
     bulkPatch({ is_uplink: enabled }, `WAN/uplink monitoring ${enabled ? "enabled" : "disabled"}`);
@@ -2483,6 +2535,7 @@ export default function Devices() {
       hostname: d.hostname || "",
       ip_address: d.ip_address || "",
       vendor: d.vendor || "cisco",
+      device_type: d.device_type || "",
       site: d.site || "",
       device_role: d.device_role || "",
       data_center: d.data_center || "",
@@ -2559,6 +2612,7 @@ export default function Devices() {
   const dataCenters = useMemo(() => Array.from(new Set(devices.map((d) => d.data_center).filter(Boolean))), [devices]);
   const racks = useMemo(() => Array.from(new Set(devices.map((d) => d.rack).filter(Boolean))), [devices]);
   const roles = useMemo(() => Array.from(new Set(devices.map((d) => d.device_role).filter(Boolean))), [devices]);
+  const deviceTypes = useMemo(() => Array.from(new Set(devices.map((d) => (d.device_type || "").toLowerCase()).filter(Boolean))), [devices]);
 
   // --- Row virtualization ---------------------------------------------
   // NOC fleets can run into the thousands of devices; rendering every
@@ -2583,6 +2637,7 @@ export default function Devices() {
       if (dcFilter !== "all" && d.data_center !== dcFilter) return false;
       if (rackFilter !== "all" && d.rack !== rackFilter) return false;
       if (roleFilter !== "all" && d.device_role !== roleFilter) return false;
+      if (deviceTypeFilter !== "all" && (d.device_type || "").toLowerCase() !== deviceTypeFilter) return false;
       if (!q) return true;
       return (
         (d.hostname || "").toLowerCase().includes(q) ||
@@ -2592,7 +2647,7 @@ export default function Devices() {
         (d.rack || "").toLowerCase().includes(q)
       );
     });
-  }, [devices, query, vendorFilter, dcFilter, rackFilter, roleFilter]);
+  }, [devices, query, vendorFilter, dcFilter, rackFilter, roleFilter, deviceTypeFilter]);
 
   // A row is expanded inline (detail panel pushes rows below it down),
   // which breaks the fixed-row-height spacer math. Previously this fell
@@ -2766,6 +2821,18 @@ export default function Devices() {
               <option value="juniper">Juniper</option>
               <option value="arista">Arista</option>
               <option value="linux">Linux</option>
+            </select>
+            <select
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
+              value={form.device_type}
+              title="Classification shown as a badge in the device list and usable as a filter (switch, router, wireless AP, NVR, etc.)"
+              onChange={(e) => setForm({ ...form, device_type: e.target.value })}
+            >
+              {DEVICE_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value || "unclassified"} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
             </select>
             <input
               className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
@@ -3046,16 +3113,31 @@ export default function Devices() {
             ))}
           </select>
         )}
+        {deviceTypes.length > 0 && (
+          <select
+            className="border border-slate-300 dark:border-slate-600 shadow-sm rounded-full px-4 py-1.5 text-sm text-slate-600 dark:text-slate-300 focus:ring-2 focus:ring-brandblue outline-none"
+            value={deviceTypeFilter}
+            onChange={(e) => setDeviceTypeFilter(e.target.value)}
+          >
+            <option value="all">All Types</option>
+            {deviceTypes.map((t) => (
+              <option key={t} value={t}>
+                {DEVICE_TYPE_STYLES[t]?.label || t}
+              </option>
+            ))}
+          </select>
+        )}
         <SavedViews
           storageKey="netguard_saved_views_devices"
-          currentFilters={{ query, vendorFilter, dcFilter, rackFilter, roleFilter }}
-          isDefault={(f) => !f.query && f.vendorFilter === "all" && f.dcFilter === "all" && f.rackFilter === "all" && f.roleFilter === "all"}
+          currentFilters={{ query, vendorFilter, dcFilter, rackFilter, roleFilter, deviceTypeFilter }}
+          isDefault={(f) => !f.query && f.vendorFilter === "all" && f.dcFilter === "all" && f.rackFilter === "all" && f.roleFilter === "all" && (f.deviceTypeFilter ?? "all") === "all"}
           onApply={(f) => {
             setQuery(f.query);
             setVendorFilter(f.vendorFilter);
             setDcFilter(f.dcFilter);
             setRackFilter(f.rackFilter);
             setRoleFilter(f.roleFilter);
+            setDeviceTypeFilter(f.deviceTypeFilter ?? "all");
           }}
         />
       </div>
@@ -3165,6 +3247,28 @@ export default function Devices() {
               className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40"
             >
               Tag vendor
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <select
+              className="border border-white/20 bg-white/10 rounded-full px-3 py-1.5 text-xs text-white focus:ring-2 focus:ring-accent outline-none"
+              value={bulkDeviceTypeValue}
+              onChange={(e) => setBulkDeviceTypeValue(e.target.value)}
+              disabled={bulkBusy}
+            >
+              {DEVICE_TYPE_OPTIONS.filter((o) => o.value).map((opt) => (
+                <option key={opt.value} value={opt.value} className="text-navy">
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={bulkTagDeviceType}
+              disabled={bulkBusy}
+              className="text-xs font-semibold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full disabled:opacity-40 whitespace-nowrap"
+            >
+              Tag type
             </button>
           </div>
 
@@ -3370,6 +3474,7 @@ export default function Devices() {
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Hostname</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">IP Address</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Vendor</th>
+              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Type</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Site</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Data Center</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Rack / Pos</th>
@@ -3381,7 +3486,7 @@ export default function Devices() {
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {initialLoading && (
               <tr>
-                <td colSpan={canManage ? 10 : 8} className="text-center text-slate-500 dark:text-slate-400 py-12">
+                <td colSpan={canManage ? 11 : 9} className="text-center text-slate-500 dark:text-slate-400 py-12">
                    <div className="inline-block w-5 h-5 border-2 border-slate-200 dark:border-slate-700 border-t-brandblue rounded-full animate-spin mb-2" />
                    <p>Loading devices…</p>
                 </td>
@@ -3389,14 +3494,14 @@ export default function Devices() {
             )}
             {!initialLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={canManage ? 10 : 8} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
+                <td colSpan={canManage ? 11 : 9} className="text-center text-slate-400 dark:text-slate-500 py-10 font-medium">
                   {devices.length === 0 ? "No devices yet. Add one above." : "No devices match your search."}
                 </td>
               </tr>
             )}
             {shouldVirtualize && topSpacerPx > 0 && (
               <tr aria-hidden="true" style={{ height: topSpacerPx }}>
-                <td colSpan={canManage ? 10 : 8} className="p-0 border-0" />
+                <td colSpan={canManage ? 11 : 9} className="p-0 border-0" />
               </tr>
             )}
             {visibleDevices.map((d) => (
@@ -3430,6 +3535,9 @@ export default function Devices() {
                 </td>
                 <td className="px-5 py-4 text-slate-500 dark:text-slate-400 font-mono text-xs font-semibold">{d.ip_address}</td>
                 <td className="px-5 py-4 text-slate-600 dark:text-slate-300 capitalize font-medium">{d.vendor}</td>
+                <td className="px-5 py-4">
+                  <DeviceTypeBadge deviceType={d.device_type} />
+                </td>
                 <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">
                   {d.site || "—"}
                 </td>
@@ -3509,7 +3617,7 @@ export default function Devices() {
                 </tr>
                 {expandedDeviceId === d.id && (
                   <tr>
-                    <td colSpan={canManage ? 10 : 8} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
+                    <td colSpan={canManage ? 11 : 9} className="p-0 border-b-4 border-slate-200 dark:border-slate-700">
                         <DeviceInlineDetails 
                             device={d} 
                             canManage={canManage}
@@ -3528,7 +3636,7 @@ export default function Devices() {
             ))}
             {shouldVirtualize && bottomSpacerPx > 0 && (
               <tr aria-hidden="true" style={{ height: bottomSpacerPx }}>
-                <td colSpan={canManage ? 10 : 8} className="p-0 border-0" />
+                <td colSpan={canManage ? 11 : 9} className="p-0 border-0" />
               </tr>
             )}
           </tbody>

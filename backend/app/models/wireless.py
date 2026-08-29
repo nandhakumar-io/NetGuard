@@ -44,32 +44,55 @@ class WirelessAP(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    # The WLC (or other SNMP controller) that reported this AP.
+    # The WLC (or other SNMP controller) that reported this AP. Null for
+    # manually-added APs (source="manual") that have no controller.
     controller_device_id = Column(
         UUID(as_uuid=True),
         ForeignKey("devices.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
-    # SNMP table index for this AP within the WLC's bsnAPTable.
-    ap_index = Column(String, nullable=False)
+    # SNMP table index for this AP within the WLC's bsnAPTable. Null for
+    # manually-added APs.
+    ap_index = Column(String, nullable=True)
 
     ap_name = Column(String, nullable=True)   # bsnAPName
     ap_model = Column(String, nullable=True)  # bsnAPModel
     ap_ip_address = Column(String, nullable=True)  # bsnApIpAddress
+
+    # "cisco" | "aruba" | "ruckus" | "tplink" | "ubiquiti" | "mikrotik" | "other"
+    vendor = Column(String, nullable=False, default="cisco")
+    mac_address = Column(String, nullable=True)
+    # Management address for a manually-added AP; distinct from
+    # ap_ip_address (which is populated from SNMP polling).
+    management_ip = Column(String, nullable=True)
+    site = Column(String, nullable=True)
+    notes = Column(String, nullable=True)
+    # "polled" (came from poll_wireless_controller) or "manual" (added
+    # through the CRUD API). Polled rows get overwritten on every poll
+    # cycle; manual rows never are.
+    source = Column(String, nullable=False, default="polled")
 
     oper_status = Column(Integer, nullable=True)   # bsnAPOperationStatus
     client_count = Column(Integer, nullable=True)  # bsnApNumOfUsers (all radios)
     band_2g_clients = Column(Integer, nullable=True)  # per-radio breakdown, best-effort
     band_5g_clients = Column(Integer, nullable=True)
 
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     polled_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
         UniqueConstraint("controller_device_id", "ap_index", name="uq_wireless_ap_controller_index"),
     )
 
+    WIRELESS_AP_VENDORS = ["cisco", "aruba", "ruckus", "tplink", "ubiquiti", "mikrotik", "other"]
+
     def oper_status_label(self) -> str:
+        if self.source == "manual" and self.oper_status is None:
+            # Manually-added APs aren't SNMP-polled by default, so there's
+            # no bsnAPOperationStatus to report -- show them as "managed"
+            # rather than the misleading "unknown" a polled AP would get.
+            return "managed"
         return {1: "associated", 2: "disassociating", 3: "downloading"}.get(
             self.oper_status, "unknown"
         )
