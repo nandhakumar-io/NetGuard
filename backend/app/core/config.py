@@ -403,6 +403,17 @@ class Settings(BaseSettings):
     # to someone who happens to open the IPAM page.
     IPAM_CONFLICT_ALERT_SWEEP_INTERVAL_SECONDS: int = 300
 
+    # Flow-based traffic alerting (app.services.flow_service.evaluate_flow_alert_rules,
+    # AlertRuleMetric.FLOW_TOP_TALKER_BYTES / FLOW_NEW_TALKER): how often
+    # app.tasks.run_flow_alert_sweep_task ticks, and the size of the
+    # rolling window each tick evaluates rules against. Kept as global
+    # settings rather than a per-AlertRule field so the existing Alert
+    # Rules schema/UI didn't need a new column just for these two metrics
+    # -- every flow rule shares one window, same as every device-poll
+    # rule shares one poll cadence.
+    FLOW_ALERT_SWEEP_INTERVAL_SECONDS: int = 300
+    FLOW_ALERT_WINDOW_MINUTES: int = 60
+
     # Discovery at Scale: rather than firing every due device's poll task
     # at the exact same instant every sweep tick (fine for a handful of
     # devices, a thundering herd of simultaneous SNMP walks / ICMP bursts

@@ -841,6 +841,25 @@ def run_ipam_conflict_alert_sweep_task() -> int:
         db.close()
 
 
+@celery_app.task(name="app.tasks.run_flow_alert_sweep_task")
+def run_flow_alert_sweep_task() -> int:
+    """Celery beat entry point (see celery_app "flow-alert-sweep"): runs
+    app.services.flow_service.evaluate_flow_alert_rules against the
+    latest rolling window of FlowRecord data, turning Traffic Analysis'
+    Top Talkers from a pull-only page into a real alert -- same
+    "close the loop from report to alert" pattern as
+    run_ipam_conflict_alert_sweep_task above. Returns the number of new
+    alerts raised this tick.
+    """
+    from app.services import flow_service
+
+    db = SessionLocal()
+    try:
+        return flow_service.evaluate_flow_alert_rules(db)
+    finally:
+        db.close()
+
+
 # --- GitOps sync ---------------------------------------------------------
 
 

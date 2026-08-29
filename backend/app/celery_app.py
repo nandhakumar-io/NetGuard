@@ -284,6 +284,14 @@ celery_app.conf.update(
             "task": "app.tasks.run_ipam_conflict_alert_sweep_task",
             "schedule": float(settings.IPAM_CONFLICT_ALERT_SWEEP_INTERVAL_SECONDS),
         },
+        # Flow-based traffic alerting: turns flow_service's Top Talkers /
+        # New Talker detection from a pull-only Traffic Analysis page
+        # view into a real alert, same shape as ipam-conflict-alert-sweep
+        # above. See app.tasks.run_flow_alert_sweep_task.
+        "flow-alert-sweep": {
+            "task": "app.tasks.run_flow_alert_sweep_task",
+            "schedule": float(settings.FLOW_ALERT_SWEEP_INTERVAL_SECONDS),
+        },
         # Weekly/Monthly Uptime Reports: generates and emails uptime
         # stats for every active tenant.
         "weekly-uptime-report": {

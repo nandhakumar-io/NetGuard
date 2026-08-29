@@ -597,6 +597,143 @@ async def start_sflow_listener(host: str = "0.0.0.0", port: int | None = None) -
         return None
 
 
+def _host_bytes_by_window(db: Session, start: datetime.datetime, end: datetime.datetime) -> dict[str, int]:
+    """Total bytes per host (src or dst) in [start, end) -- the same
+    src+dst rollup top_talkers() does, generalized to an arbitrary window
+    instead of "last N minutes", so evaluate_flow_alert_rules can compare
+    a current window against the immediately-preceding window of the
+    same length (see FLOW_NEW_TALKER)."""
+    totals: dict[str, int] = defaultdict(int)
+    src_rows = (
+        db.query(FlowRecord.src_ip.label("ip"), func.sum(FlowRecord.bytes).label("b"))
+        .filter(FlowRecord.received_at >= start, FlowRecord.received_at < end)
+        .group_by(FlowRecord.src_ip)
+        .all()
+    )
+    dst_rows = (
+        db.query(FlowRecord.dst_ip.label("ip"), func.sum(FlowRecord.bytes).label("b"))
+        .filter(FlowRecord.received_at >= start, FlowRecord.received_at < end)
+        .group_by(FlowRecord.dst_ip)
+        .all()
+    )
+    for row in src_rows:
+        totals[row.ip] += int(row.b or 0)
+    for row in dst_rows:
+        totals[row.ip] += int(row.b or 0)
+    return dict(totals)
+
+
+def evaluate_flow_alert_rules(db: Session) -> int:
+    """Runs enabled AlertRules using the FLOW_TOP_TALKER_BYTES /
+    FLOW_NEW_TALKER metrics against a rolling window of FlowRecord data,
+    turning what's otherwise a pull-only Traffic Analysis page view into
+    a real alert -- same "close the loop from report to alert" pattern
+    as app.tasks.run_ipam_conflict_alert_sweep_task for
+    ipam_service.fleet_conflicts. Meant to be called from
+    app.tasks.run_flow_alert_sweep_task on a schedule (see
+    settings.FLOW_ALERT_SWEEP_INTERVAL_SECONDS), not per-poll -- flow
+    rules aren't tied to any one device's poll cycle.
+
+    Global (tenant_id IS NULL) rules only: FlowRecord has no tenant
+    column (flows are ingested from whichever exporters send to
+    NetGuard's listener, independent of tenant scoping elsewhere), so
+    per-tenant flow rules aren't meaningful yet -- unlike evaluate_rules/
+    evaluate_ap_rules above, this intentionally does not merge in
+    tenant-scoped rows.
+
+    A host is attributed to a managed Device when its IP matches one
+    (device_id=<that device>); otherwise the alert is fleet-wide
+    (device_id=None), same as an IPAM conflict alert for an
+    address NetGuard doesn't have a Device for.
+
+    Returns the number of alerts raised (not including auto-resolves)
+    this tick, for logging/task-result purposes.
+    """
+    from app.models.alert import AlertSource
+    from app.models.alert_rule import AlertRule
+    from app.services import alert_service
+    from app.services.alert_rule_engine import _OPERATORS as _OPERATORS_FOR_FLOW
+    from app.services.alert_rule_engine import CUSTOM_RULE_CATEGORY_PREFIX, _in_cooldown
+
+    rules = (
+        db.query(AlertRule)
+        .filter(
+            AlertRule.tenant_id.is_(None),
+            AlertRule.enabled == True,  # noqa: E712
+            AlertRule.metric.in_(["flow_top_talker_bytes", "flow_new_talker"]),
+        )
+        .all()
+    )
+    if not rules:
+        return 0
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window = datetime.timedelta(minutes=settings.FLOW_ALERT_WINDOW_MINUTES)
+    current_start = now - window
+    current_totals: dict[str, int] | None = None
+    prior_totals: dict[str, int] | None = None
+
+    raised = 0
+    for rule in rules:
+        try:
+            metric = rule.metric.value if hasattr(rule.metric, "value") else rule.metric
+            op_fn = _OPERATORS_FOR_FLOW.get(rule.operator.value if hasattr(rule.operator, "value") else rule.operator)
+            if op_fn is None:
+                continue
+
+            if current_totals is None:
+                current_totals = _host_bytes_by_window(db, current_start, now)
+
+            if metric == "flow_top_talker_bytes":
+                breaches = {ip: b for ip, b in current_totals.items() if op_fn(float(b), rule.threshold)}
+            else:  # flow_new_talker
+                if prior_totals is None:
+                    prior_totals = _host_bytes_by_window(db, current_start - window, current_start)
+                breaches = {
+                    ip: b
+                    for ip, b in current_totals.items()
+                    if b >= rule.threshold and prior_totals.get(ip, 0) == 0
+                }
+
+            active_ips = set()
+            for ip, value in breaches.items():
+                active_ips.add(ip)
+                category = f"{CUSTOM_RULE_CATEGORY_PREFIX}{rule.name} ({ip})"
+                if _in_cooldown(db, None, category, rule.cooldown_seconds, now):
+                    continue
+                device = db.query(Device).filter(Device.ip_address == ip).first()
+                severity = rule.severity.value if hasattr(rule.severity, "value") else rule.severity
+                alert, is_new = alert_service.raise_alert(
+                    db,
+                    device_id=device.id if device else None,
+                    severity=severity,
+                    source=AlertSource.HEALTH_POLL,
+                    category=category,
+                    message=(
+                        f"{ip}: {rule.name} ({metric} "
+                        f"{rule.operator.value if hasattr(rule.operator, 'value') else rule.operator} "
+                        f"{rule.threshold}, observed {value} bytes over {settings.FLOW_ALERT_WINDOW_MINUTES}m)"
+                    ),
+                )
+                if is_new:
+                    raised += 1
+
+            # Clear standing alerts for hosts that no longer breach --
+            # mirrors evaluate_rules'/evaluate_ap_rules' else-branch, just
+            # keyed by IP instead of device_id since a flow-alert category
+            # is per-host, not per-device.
+            for ip in current_totals:
+                if ip in active_ips:
+                    continue
+                category = f"{CUSTOM_RULE_CATEGORY_PREFIX}{rule.name} ({ip})"
+                alert_service.auto_resolve(db, device_id=None, category=category, note=f"{ip}: {rule.name} no longer breached")
+        except Exception:  # noqa: BLE001
+            logger.exception("flow_service: alert-rule evaluation failed for rule %s", getattr(rule, "id", None))
+            continue
+
+    return raised
+
+
 # --- Query helpers (Traffic Analysis page) --------------------------------
 
 

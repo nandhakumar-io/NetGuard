@@ -66,6 +66,19 @@ class AlertRuleMetric(str, enum.Enum):
     AP_CHANNEL_UTIL_PCT = "ap_channel_util_pct"  # worst-radio bsnAPIfLoadChannelUtilization, percent
     AP_NOISE_DBM = "ap_noise_dbm"  # worst-radio bsnAPIfNoiseNow, dBm (higher/less-negative = noisier)
 
+    # Flow-based traffic metrics, evaluated per-host (src or dst IP) on a
+    # schedule against a rolling window of FlowRecord data rather than
+    # per-SNMP-poll SnmpMetrics -- see app.services.flow_service's
+    # evaluate_flow_alert_rules and app.tasks.run_flow_alert_sweep_task.
+    # SNMP interface counters only ever see aggregate octets in/out; these
+    # answer "who" and "since when", which is the actual exfil/compromised
+    # -host signal a NOC watches Top Talkers for by hand today. Both are
+    # evaluated over a fixed window (settings.FLOW_ALERT_WINDOW_MINUTES,
+    # not a per-rule field -- keeps the schema/UI unchanged) rather than a
+    # per-poll sample.
+    FLOW_TOP_TALKER_BYTES = "flow_top_talker_bytes"  # a host's total bytes (src+dst) over the window
+    FLOW_NEW_TALKER = "flow_new_talker"  # 1 if a host crossed rule.threshold bytes this window with ~none in the prior window of equal length, else 0
+
 
 class AlertRuleOperator(str, enum.Enum):
     GT = "gt"
