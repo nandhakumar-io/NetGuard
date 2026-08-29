@@ -2740,10 +2740,13 @@ export default function Devices() {
 
   return (
     <div className="pb-16 flex flex-col gap-6 md:p-2">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-3xl font-bold text-navy dark:text-white">Device Inventory</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Centralized inventory of managed network devices.</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap pb-5 border-b border-slate-200 dark:border-slate-700">
+        <div className="flex items-start gap-3">
+          <span className="mt-1 w-1.5 h-9 rounded-full bg-gradient-to-b from-brandblue to-accent" />
+          <div>
+            <h1 className="text-3xl font-bold text-navy dark:text-white tracking-tight">Device Inventory</h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Centralized inventory of managed network devices.</p>
+          </div>
         </div>
         <div className="flex items-center gap-3">
             <button
@@ -2813,20 +2816,33 @@ export default function Devices() {
       )}
 
       <div className="flex flex-wrap gap-3">
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400">
-          Total <span className="text-navy dark:text-white font-bold ml-1">{devices.length}</span>
+        <div className="flex items-center gap-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-xl pl-4 pr-5 py-2.5 min-w-[110px]">
+          <span className="w-1 self-stretch rounded-full bg-navy/70 dark:bg-white/30" />
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Total</p>
+            <p className="text-xl font-extrabold text-navy dark:text-white leading-tight">{devices.length}</p>
+          </div>
         </div>
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-risklow shadow-sm" /> Online
-          <span className="text-navy dark:text-white font-bold ml-1">{counts.online}</span>
+        <div className="flex items-center gap-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-xl pl-4 pr-5 py-2.5 min-w-[110px]">
+          <span className="w-1 self-stretch rounded-full bg-risklow" />
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Online</p>
+            <p className="text-xl font-extrabold text-navy dark:text-white leading-tight">{counts.online}</p>
+          </div>
         </div>
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-riskmed shadow-sm" /> Degraded
-          <span className="text-navy dark:text-white font-bold ml-1">{counts.degraded}</span>
+        <div className="flex items-center gap-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-xl pl-4 pr-5 py-2.5 min-w-[110px]">
+          <span className="w-1 self-stretch rounded-full bg-riskmed" />
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Degraded</p>
+            <p className="text-xl font-extrabold text-navy dark:text-white leading-tight">{counts.degraded}</p>
+          </div>
         </div>
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg px-4 py-2 text-[13px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shadow-sm" /> Offline
-          <span className="text-navy dark:text-white font-bold ml-1">{counts.offline}</span>
+        <div className="flex items-center gap-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm rounded-xl pl-4 pr-5 py-2.5 min-w-[110px]">
+          <span className="w-1 self-stretch rounded-full bg-slate-300 dark:bg-slate-600" />
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Offline</p>
+            <p className="text-xl font-extrabold text-navy dark:text-white leading-tight">{counts.offline}</p>
+          </div>
         </div>
       </div>
 
@@ -3586,7 +3602,7 @@ export default function Devices() {
         </div>
       )}
 
-      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
+      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm ring-1 ring-black/[0.02]">
         {shouldVirtualize && (
           <p className="px-5 py-1.5 text-[11px] text-slate-400 bg-slate-50 dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800">
             Showing {filtered.length.toLocaleString()} devices in a scrollable, virtualized view for performance.
@@ -3598,7 +3614,7 @@ export default function Devices() {
           onScroll={shouldVirtualize ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
         >
         <table className="w-full text-sm">
-          <thead className="bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-700 sticky top-0 z-10">
+          <thead className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-700 sticky top-0 z-10">
             <tr>
               {canManage && (
                 <th className="w-10 px-4 py-3.5">
@@ -3661,8 +3677,8 @@ export default function Devices() {
             )}
             {visibleDevices.map((d) => (
               <Fragment key={d.id}>
-                <tr className={`cursor-pointer transition-colors hover:bg-slate-50/70 border-l-4 ${
-                    expandedDeviceId === d.id ? "bg-slate-50 dark:bg-slate-900 border-l-navy" : "border-l-transparent bg-white dark:bg-slate-800"
+                <tr className={`cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40 border-l-4 ${
+                    expandedDeviceId === d.id ? "bg-sky-50/60 dark:bg-slate-900 border-l-accent" : "border-l-transparent bg-white dark:bg-slate-800"
                   }`} 
                   onClick={() => setExpandedDeviceId(expandedDeviceId === d.id ? null : d.id)}
                 >

@@ -387,17 +387,33 @@ def _build_webhook_payload(
             payload["reply_markup"] = {"inline_keyboard": [[{"text": b["label"], "url": b["url"]}] for b in buttons]}
         return payload
     if wh_type == "slack":
-        payload = {"text": f"{emoji} *NetGuard — {event}*\n{message}"}
+        # NOTE: this used to build a legacy attachments[].actions[] block
+        # (Slack's old "interactive message buttons" format). Plain
+        # Incoming Webhooks never render that -- interactive-message
+        # buttons require a Slack app with Interactivity enabled and a
+        # request URL, which an Incoming Webhook doesn't have, so the
+        # "actions" array was silently dropped and only the bare text
+        # ever showed up (no buttons at all). Block Kit's `actions`
+        # block with `url`-only button elements is the fix: those are
+        # plain link buttons, need no interactivity setup, and work with
+        # any Incoming Webhook. https://api.slack.com/reference/block-kit/blocks#actions
+        payload = {
+            "text": f"{emoji} *NetGuard — {event}*\n{message}",  # fallback text (notifications, unfurl previews)
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"{emoji} *NetGuard — {event}*\n{message}"}}],
+        }
         if buttons:
-            payload["attachments"] = [
-                {
-                    "color": {"critical": "#dc2626", "warning": "#d97706"}.get(severity, "#0284c7"),
-                    "actions": [
-                        {"type": "button", "text": b["label"], "url": b["url"], "style": "danger" if b["action"] == "escalate" else "default"}
-                        for b in buttons
-                    ],
-                }
-            ]
+            payload["blocks"].append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": b["label"]},
+                        "url": b["url"],
+                        "style": "danger" if b["action"] == "escalate" else "primary",
+                    }
+                    for b in buttons
+                ],
+            })
         return payload
     if wh_type == "teams":
         payload = {"text": f"{emoji} **NetGuard — {event}**\n{message}"}

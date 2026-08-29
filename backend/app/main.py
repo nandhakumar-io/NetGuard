@@ -122,6 +122,25 @@ async def lifespan(app: FastAPI):
     # still on insecure dev defaults -- see Settings.validate_production_secrets.
     settings.validate_production_secrets()
 
+    # ntfy is per-user (subscriptions stored in the DB, not a global
+    # setting), so it can't be checked here the way Slack/Teams can --
+    # but the same FRONTEND_URL problem applies to it too (see
+    # push_service._action_deep_link), so it's flagged in the warning
+    # text below whenever any Slack/Teams webhook is configured, and the
+    # README/.env.example call it out unconditionally for ntfy users.
+    if settings.FRONTEND_URL.startswith("http://localhost") and (
+        settings.SLACK_WEBHOOK_URL or settings.TEAMS_WEBHOOK_URL
+    ):
+        logger.warning(
+            "FRONTEND_URL is still the localhost default (%s) but Slack/Teams "
+            "notifications are configured -- every alert action button (acknowledge/"
+            "escalate/run runbook), and every ntfy push action button if any user has "
+            "an ntfy subscription set up, will link to localhost and fail for anyone "
+            "opening it on a phone or from outside this machine. Set FRONTEND_URL in "
+            "your .env to this app's actual reachable URL.",
+            settings.FRONTEND_URL,
+        )
+
     # Schema is owned by Alembic migrations (see backend/alembic/). The
     # Docker image's entrypoint.sh runs `alembic upgrade head` before
     # starting uvicorn -- but when running locally with `uvicorn

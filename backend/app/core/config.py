@@ -316,9 +316,19 @@ class Settings(BaseSettings):
     # concrete MaintenanceWindow rows for the coming horizon.
     RECURRING_WINDOW_GENERATION_HOUR_UTC: int = 1
 
-    # Base URL of the frontend, used to build deep links in Slack/Teams
-    # messages (approval SLA reminders, war-room links, ...) back to the
-    # in-app view of whatever the message is about.
+    # Base URL of the frontend, used to build deep links in Slack/Teams/
+    # ntfy messages (approval SLA reminders, war-room links, alert
+    # acknowledge/escalate buttons, ...) back to the in-app view of
+    # whatever the message is about.
+    #
+    # MUST be overridden via the FRONTEND_URL env var to your actual
+    # public/LAN-reachable frontend URL in any real deployment -- the
+    # localhost default below only resolves on the machine running the
+    # backend itself. Left as-is, every action-button link sent to ntfy
+    # (opened on a phone, on a different network) or Slack/Teams (opened
+    # by whoever's reading the channel, not the server) will point at
+    # *their* localhost and fail to load. See validate_notification_urls()
+    # in app.main for the startup warning that catches this.
     FRONTEND_URL: str = "http://localhost:5173"
 
     # Real-Time Health Monitoring (FR-9 / SRS 6.7): "Monitoring window is
