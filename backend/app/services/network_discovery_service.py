@@ -6,10 +6,14 @@ run_discovery_schedule_sweep_task) to read back.
 Three pieces:
   parse_and_validate_cidr -- validates/caps a requested range before it
     is ever handed to Celery (see MAX_SCAN_HOSTS).
-  run_scan                -- the actual sweep: TCP-connect probe every
-    host in the range, best-effort reverse DNS + SNMP identification on
-    anything that answers, then writes one DiscoveredHost per responsive
-    IP and updates the DiscoveryScan's summary counters.
+  run_scan                -- the actual sweep: a single `nmap -sn` host
+    discovery pass over the whole CIDR (same proven approach as
+    app.services.ipam_service.scan_subnet -- ICMP echo, ARP for
+    on-link ranges, and a TCP SYN/ACK fallback for hosts that block
+    ping, all in one process rather than one Python thread per host),
+    then best-effort reverse DNS + SNMP identification only on the
+    hosts nmap actually found alive, then writes one DiscoveredHost per
+    responsive IP and updates the DiscoveryScan's summary counters.
   _guess_vendor / _classify_ipam_status -- per-host enrichment helpers
     used while writing rows.
 
@@ -23,7 +27,10 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
+import shutil
 import socket
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -55,19 +62,28 @@ TCP_PROBE_TIMEOUT_SECONDS = 0.75
 SNMP_TIMEOUT_SECONDS = 1.5
 MAX_WORKERS = 64
 
-# How often (in completed probes) run_scan re-checks the DB for a
-# CANCELLED status -- see run_scan's docstring. Small enough that a
-# cancel takes effect within a couple seconds even on a full 1024-host
-# sweep, large enough not to hammer the DB with a refresh per probe.
-CANCEL_CHECK_INTERVAL = 16
+# `nmap -sn` over a full /22 (1024 addresses) at -T4 comfortably finishes
+# well inside this even on a loaded worker; a scan that hasn't returned
+# by then is treated the same as a missing/dead nmap binary -- see
+# run_scan.
+NMAP_SCAN_TIMEOUT_SECONDS = 180
 
-# A scan stuck on PENDING/RUNNING this long (worker crashed, the "poller"
-# queue has no consumer, redis lost the task, ...) is treated as failed --
-# same reconciliation pattern as app.services.backup_service.
-# _reconcile_stuck_jobs. Generous relative to MAX_SCAN_HOSTS's "reasonable
-# window" above: a full 1024-host sweep at MAX_WORKERS=64 concurrency
-# with a 0.75s probe timeout should finish in well under a minute, so 10
-# minutes stuck is unambiguously "never going to finish", not just slow.
+# How often (in seconds, while the nmap host-discovery subprocess is
+# running) and in completed enrichment probes (during the per-host
+# SNMP/reverse-DNS pass) run_scan re-checks the DB for a CANCELLED
+# status -- see run_scan's docstring. Small enough that a cancel takes
+# effect within a few seconds even on a full 1024-host sweep, large
+# enough not to hammer the DB with a refresh per probe.
+CANCEL_CHECK_INTERVAL = 16
+CANCEL_POLL_SECONDS = 2.0
+
+# A scan stuck on PENDING/RUNNING this long (worker crashed, the
+# "discovery" queue has no consumer, redis lost the task, ...) is
+# treated as failed -- same reconciliation pattern as
+# app.services.backup_service._reconcile_stuck_jobs. Generous relative
+# to nmap's own timeout above: a full 1024-host sweep should finish in
+# a couple of minutes at most, so 10 minutes stuck is unambiguously
+# "never going to finish", not just slow.
 STUCK_SCAN_TIMEOUT_MINUTES = 10
 
 
@@ -108,6 +124,97 @@ def _tcp_probe(ip_address: str, ports: list[int]) -> tuple[list[int], float | No
         except OSError:
             continue
     return [], None
+
+
+def _nmap_discover(db: Session, scan: DiscoveryScan, network: ipaddress.IPv4Network) -> dict[str, dict] | None:
+    """Runs `nmap -sn` over the whole CIDR in one subprocess call --
+    same proven host-discovery approach as
+    app.services.ipam_service.scan_subnet, and a large accuracy/speed
+    upgrade over probing every address with a Python TCP-connect
+    thread: nmap's ping sweep tries ICMP echo, ARP (for on-link
+    ranges, which also yields the MAC address for free), and a TCP
+    SYN/ACK fallback for hosts that block ping, in one efficient async
+    pass instead of up to MAX_SCAN_HOSTS blocking sockets.
+
+    Returns {ip: {"hostname": str|None, "mac_address": str|None}} for
+    every host nmap found alive, or None if the scan was cancelled
+    while nmap was still running. Raises RuntimeError if the nmap
+    binary isn't installed, or if the scan doesn't finish inside
+    NMAP_SCAN_TIMEOUT_SECONDS -- a scan that didn't actually run must
+    never be confused with one that ran and found nothing.
+
+    Uses Popen + a poll loop (rather than subprocess.run's blocking
+    wait) so a cancel request lands within CANCEL_POLL_SECONDS instead
+    of only being noticed after nmap's own timeout -- previously the
+    whole discovery step was one call to _tcp_probe per host inside a
+    cancel-checked ThreadPoolExecutor loop; a single nmap subprocess
+    call needs its own equivalent to keep that same cancel behavior.
+    """
+    nmap_path = shutil.which("nmap")
+    if not nmap_path:
+        raise RuntimeError(
+            "nmap is not installed in this environment. Install the `nmap` package on the "
+            "NetGuard backend host to enable network discovery scans."
+        )
+
+    proc = subprocess.Popen(
+        [nmap_path, "-sn", "-n", "-T4", str(network)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    elapsed = 0.0
+    try:
+        while True:
+            try:
+                stdout, _ = proc.communicate(timeout=CANCEL_POLL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed += CANCEL_POLL_SECONDS
+                if elapsed >= NMAP_SCAN_TIMEOUT_SECONDS:
+                    proc.kill()
+                    proc.communicate()
+                    raise RuntimeError(
+                        f"nmap discovery of {network} timed out after {NMAP_SCAN_TIMEOUT_SECONDS}s "
+                        "-- try a narrower CIDR."
+                    )
+                db.refresh(scan, attribute_names=["status"])
+                if scan.status == DiscoveryScanStatus.CANCELLED:
+                    proc.kill()
+                    proc.communicate()
+                    return None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    # Parse nmap's plain-text `-sn` output. Each discovered host is a
+    # block starting with either:
+    #   "Nmap scan report for 10.0.0.5"                (no rDNS)
+    #   "Nmap scan report for host.example.com (10.0.0.5)"  (rDNS resolved)
+    # optionally followed by a "MAC Address: AA:BB:.. (Vendor)" line
+    # when nmap could ARP for it (on-link ranges, run with raw-socket
+    # privileges -- see app.services.ipam_service.fingerprint_subnet's
+    # docstring on the capabilities this needs in an unprivileged
+    # container).
+    hosts: dict[str, dict] = {}
+    current_ip: str | None = None
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        m = re.match(r"^Nmap scan report for (?:(\S+) )?\(?([\d.]+)\)?\s*$", line)
+        if m:
+            name, ip = m.group(1), m.group(2)
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                current_ip = None
+                continue
+            current_ip = ip
+            hosts[ip] = {"hostname": name if name and name != ip else None, "mac_address": None}
+            continue
+        mac_m = re.match(r"^MAC Address:\s*([0-9A-Fa-f:]{17})", line)
+        if mac_m and current_ip:
+            hosts[current_ip]["mac_address"] = mac_m.group(1).upper()
+    return hosts
 
 
 def _reverse_dns(ip_address: str) -> str | None:
@@ -232,17 +339,18 @@ def _ignore_rule_for(db: Session, schedule_id, ip_address: str, vendor_guess: st
     )
 
 
-def _probe_host(ip_address: str, ports: list[int], community: str | None) -> dict | None:
-    """Runs on a worker thread for one host. Returns None for a
-    non-responsive host (nothing is written for it -- DiscoveredHost
-    only tracks hosts that actually answered), or a dict of raw findings
-    for a responsive one.
+def _enrich_host(ip_address: str, ports: list[int], community: str | None, nmap_hostname: str | None) -> dict:
+    """Runs on a worker thread for one host nmap already confirmed is
+    alive. Unlike the old per-host liveness probe, this never returns
+    None -- the host is already known responsive (that's how it got
+    here), so this only fills in the extra detail: which management
+    port answered (best-effort; a host can be alive to nmap's ping
+    sweep yet have none of `ports` open, e.g. ICMP-only), reverse DNS
+    (skipped if nmap's own `-sn` output already resolved a name), and
+    SNMP sysName/sysDescr identification.
     """
     open_ports, response_time_ms = _tcp_probe(ip_address, ports)
-    if not open_ports:
-        return None
-
-    hostname = _reverse_dns(ip_address)
+    hostname = nmap_hostname or _reverse_dns(ip_address)
     sys_name, sys_descr = _snmp_identify(ip_address, community)
     return {
         "ip_address": ip_address,
@@ -267,18 +375,27 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
     never re-read from the DB here so this function has no crypto
     dependency of its own beyond what's already resolved for it.
 
-    Re-checks scan.status against the DB every CANCEL_CHECK_INTERVAL
-    completed probes so POST /discovery/scans/{id}/cancel (which flips
-    the row to CANCELLED) actually stops an in-progress sweep instead of
-    only being noticed after every one of up to MAX_SCAN_HOSTS probes has
-    already finished -- previously a cancel request during a running scan
-    had no effect at all until the whole sweep completed on its own.
+    Two phases, each independently cancel-aware so POST
+    /discovery/scans/{id}/cancel (which flips the row to CANCELLED)
+    actually stops an in-progress sweep promptly instead of only being
+    noticed after the whole thing completes on its own:
+      1. `nmap -sn` host discovery over the entire CIDR in one process
+         (see _nmap_discover) -- polled every CANCEL_POLL_SECONDS.
+      2. Best-effort enrichment (management port, reverse DNS, SNMP
+         sysName/sysDescr) of just the hosts nmap found alive, fanned
+         out over a small thread pool -- re-checks scan.status every
+         CANCEL_CHECK_INTERVAL completed probes, same as before.
     """
     network = parse_and_validate_cidr(scan.cidr)
     ports = [int(p) for p in scan.ports.split(",")] if scan.ports else DEFAULT_PORTS
 
-    hosts = [str(ip) for ip in network.hosts()] or [str(network.network_address)]
-    scan.total_hosts = len(hosts)
+    all_hosts = [str(ip) for ip in network.hosts()] or [str(network.network_address)]
+    scan.total_hosts = len(all_hosts)
+    db.commit()
+
+    alive = _nmap_discover(db, scan, network)
+    if alive is None:  # cancelled while nmap was still running
+        return
 
     existing_devices = {d.ip_address: d.id for d in db.query(Device.id, Device.ip_address).all() if d.ip_address}
 
@@ -286,8 +403,11 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
     new_count = 0
     completed_probes = 0
 
-    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(hosts)))) as pool:
-        futures = {pool.submit(_probe_host, ip, ports, community): ip for ip in hosts}
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(alive)))) as pool:
+        futures = {
+            pool.submit(_enrich_host, ip, ports, community, info["hostname"]): (ip, info)
+            for ip, info in alive.items()
+        }
         for future in as_completed(futures):
             completed_probes += 1
             if completed_probes % CANCEL_CHECK_INTERVAL == 0:
@@ -297,17 +417,16 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
                         f.cancel()  # only affects probes not yet started
                     break
 
-            ip_address = futures[future]
+            ip_address, nmap_info = futures[future]
             try:
                 result = future.result()
             except Exception:  # noqa: BLE001 -- one host's probe thread blowing up shouldn't fail the sweep
                 logger.warning("Discovery probe failed for %s", ip_address, exc_info=True)
                 continue
-            if result is None:
-                continue
 
             responsive_count += 1
-            vendor_guess = _guess_vendor(result["snmp_sys_descr"], None)
+            mac_address = nmap_info["mac_address"]
+            vendor_guess = _guess_vendor(result["snmp_sys_descr"], mac_address)
             matched_device_id = existing_devices.get(ip_address)
             ipam_status, ipam_note = _classify_ipam_status(db, ip_address)
             if matched_device_id:
@@ -318,7 +437,7 @@ def run_scan(db: Session, scan: DiscoveryScan, community: str | None = None) -> 
                 ip_address=ip_address,
                 ip_sort_key=".".join(octet.zfill(3) for octet in ip_address.split(".")),
                 hostname=result["hostname"],
-                mac_address=None,
+                mac_address=mac_address,
                 open_ports=",".join(str(p) for p in result["open_ports"]),
                 snmp_sys_name=result["snmp_sys_name"],
                 snmp_sys_descr=result["snmp_sys_descr"],
@@ -349,11 +468,16 @@ def reconcile_stuck_scans(db: Session) -> None:
     """Marks any DiscoveryScan still PENDING/RUNNING long after it should
     have finished (STUCK_SCAN_TIMEOUT_MINUTES) as FAILED -- covers the
     case that made a scan look like it "runs forever": the Celery task
-    was never actually picked up (no worker consuming the "polling"
-    queue -- see celery_app.py's task_routes and the `poller` service in
-    docker-compose.yaml) or the worker process died mid-sweep, either of
-    which leaves the row on PENDING/RUNNING indefinitely with nothing
-    left to ever flip it. Same fail-safe pattern as
+    was never actually picked up (no worker consuming the "discovery"
+    queue -- see celery_app.py's task_routes and the `discovery` service
+    in docker-compose.yaml) or the worker process died mid-sweep, either
+    of which leaves the row on PENDING/RUNNING indefinitely with nothing
+    left to ever flip it. Routed to its own "discovery" queue (split out
+    from "polling") specifically so a one-off scan can never sit stuck
+    behind a continuous stream of recurring SNMP/reachability poll
+    tasks on a busy fleet -- that contention was the actual cause of
+    "worker never picked it up" in practice, not a missing worker.
+    Same fail-safe pattern as
     app.services.backup_service._reconcile_stuck_jobs. Cheap (indexed
     status filter) so it's safe to call on every GET /discovery/scans
     rather than needing a separate sweep task.
@@ -375,7 +499,7 @@ def reconcile_stuck_scans(db: Session) -> None:
             scan.status = DiscoveryScanStatus.FAILED
             scan.error = (
                 "Scan did not complete in time (worker likely never picked it up, or crashed mid-run). "
-                "Check that a Celery worker is consuming the 'polling' queue."
+                "Check that a Celery worker is consuming the 'discovery' queue."
             )
             scan.completed_at = datetime.now(timezone.utc)
             changed = True

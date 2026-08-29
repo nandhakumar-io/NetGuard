@@ -29,6 +29,7 @@ class Vendor(str, enum.Enum):
     CISCO_NXOS = "cisco_nxos"
     JUNIPER_JUNOS = "juniper_junos"
     ARISTA_EOS = "arista_eos"
+    LINUX = "linux"
 
 
 # Device.vendor ("cisco" / "juniper" / "arista" / "linux") doesn't
@@ -40,6 +41,7 @@ DEVICE_MODEL_VENDOR_DEFAULT = {
     "cisco": Vendor.CISCO_IOS,
     "juniper": Vendor.JUNIPER_JUNOS,
     "arista": Vendor.ARISTA_EOS,
+    "linux": Vendor.LINUX,
 }
 
 
@@ -50,6 +52,17 @@ class IntentKind(str, enum.Enum):
     SET_INTERFACE_ADMIN_STATE = "set_interface_admin_state"
     ADD_STATIC_ROUTE = "add_static_route"
     SET_NTP_SERVER = "set_ntp_server"
+    # Exec-mode operational commands (not config-mode changes) -- still
+    # rendered per-vendor the same way, and still just text pushed via
+    # ProtocolManager.deploy_config, so they fit this module rather than
+    # warranting a separate one. Added for
+    # app.services.runbook_execution_service / alert_runbook_seed's
+    # generic "clear ARP cache" / "clear MAC table" default runbooks,
+    # which previously hardcoded Cisco IOS syntax (`clear arp-cache`,
+    # `clear mac address-table dynamic`) and would have failed outright
+    # against a Juniper/Arista/Linux device.
+    CLEAR_ARP_CACHE = "clear_arp_cache"
+    CLEAR_MAC_TABLE = "clear_mac_table"
 
 
 @dataclasses.dataclass
@@ -183,6 +196,46 @@ def _render_set_ntp_server(vendor: Vendor, p: dict) -> str:
     raise UnsupportedIntentError(f"set_ntp_server is not supported for {vendor.value}")
 
 
+# --- clear_arp_cache ---------------------------------------------------
+# No params -- an unconditional "flush everything and let it relearn"
+# operational command, not a targeted config change.
+
+def _render_clear_arp_cache(vendor: Vendor, p: dict) -> str:
+    if vendor in (Vendor.CISCO_IOS, Vendor.CISCO_NXOS):
+        return "clear arp-cache"
+    if vendor == Vendor.ARISTA_EOS:
+        return "clear arp"
+    if vendor == Vendor.JUNIPER_JUNOS:
+        # Operational (not `set`) command -- netconf_service's Junos
+        # `set`-mode push path only applies to configuration changes;
+        # this and clear_mac_table are meant for the CLI/exec deploy
+        # path the same way a hand-run operational command would be.
+        return "clear arp"
+    if vendor == Vendor.LINUX:
+        return "ip neigh flush all"
+    raise UnsupportedIntentError(f"clear_arp_cache is not supported for {vendor.value}")
+
+
+# --- clear_mac_table -----------------------------------------------------
+# No params. Clears only dynamically-learned entries -- never static/
+# sticky ones -- on every vendor this supports.
+
+def _render_clear_mac_table(vendor: Vendor, p: dict) -> str:
+    if vendor in (Vendor.CISCO_IOS, Vendor.CISCO_NXOS):
+        return "clear mac address-table dynamic"
+    if vendor == Vendor.ARISTA_EOS:
+        return "clear mac address-table dynamic"
+    if vendor == Vendor.JUNIPER_JUNOS:
+        return "clear ethernet-switching table"
+    # Linux has no MAC/CAM table in the switch-ASIC sense -- the closest
+    # analog (a Linux bridge's forwarding database) needs a specific
+    # bridge interface name to flush, which isn't safe to guess
+    # generically the same reason Interface Down's remediation is
+    # doc-only. Surfaced as an explicit unsupported gap rather than
+    # silently no-op'ing or guessing a bridge name.
+    raise UnsupportedIntentError(f"clear_mac_table is not supported for {vendor.value}")
+
+
 _RENDERERS = {
     IntentKind.ADD_VLAN: _render_add_vlan,
     IntentKind.ADD_ACL_RULE: _render_add_acl_rule,
@@ -190,6 +243,8 @@ _RENDERERS = {
     IntentKind.SET_INTERFACE_ADMIN_STATE: _render_set_interface_admin_state,
     IntentKind.ADD_STATIC_ROUTE: _render_add_static_route,
     IntentKind.SET_NTP_SERVER: _render_set_ntp_server,
+    IntentKind.CLEAR_ARP_CACHE: _render_clear_arp_cache,
+    IntentKind.CLEAR_MAC_TABLE: _render_clear_mac_table,
 }
 
 
@@ -231,6 +286,7 @@ _COMMENT_PREFIX = {
     Vendor.CISCO_NXOS: "!",
     Vendor.ARISTA_EOS: "!",
     Vendor.JUNIPER_JUNOS: "#",
+    Vendor.LINUX: "#",
 }
 
 

@@ -35,6 +35,7 @@ from app.models.interface_status import InterfaceStatus
 from app.models.maintenance_window import MaintenanceWindow
 from app.models.network_discovery import DiscoveredHost
 from app.models.path_trace import PathHop, PathTrace
+from app.models.physical_location import PhysicalLocation
 from app.models.protocol_operation import ProtocolOperation
 from app.models.recurring_maintenance_schedule import RecurringMaintenanceSchedule
 from app.models.snapshot import ConfigSnapshot
@@ -56,6 +57,12 @@ from app.schemas.device import (
     SshTestResult,
 )
 from app.schemas.interface_status import InterfaceCurrentStatus, InterfaceStatusRead
+from app.schemas.physical_location import (
+    PhysicalLocationBlockCreate,
+    PhysicalLocationDataCenterCreate,
+    PhysicalLocationRackCreate,
+    PhysicalLocationRename,
+)
 from app.schemas.rollback import (
     PartialRollbackPreviewResponse,
     PartialRollbackRequest,
@@ -1653,13 +1660,36 @@ def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)
     devices = db.query(Device).order_by(Device.hostname).all()
 
     blocks_top: dict[str, dict] = {}
+
+    def _ensure_block(name: str) -> dict:
+        return blocks_top.setdefault(name, {"name": name, "data_centers": {}, "device_count": 0})
+
+    def _ensure_dc(block: dict, name: str) -> dict:
+        return block["data_centers"].setdefault(name, {"name": name, "racks": {}, "device_count": 0})
+
+    def _ensure_rack(dc: dict, name: str) -> dict:
+        return dc["racks"].setdefault(name, {"name": name, "devices": []})
+
+    # Empty placeholders created via POST /groups/blocks|data-centers|racks
+    # (see app.models.physical_location.PhysicalLocation) get merged in
+    # first, so a block/DC/rack with zero devices still shows up here --
+    # previously this tree was built entirely from live devices below, so
+    # a tier had to have at least one device before it could exist at all.
+    for loc in db.query(PhysicalLocation).all():
+        block = _ensure_block(loc.block)
+        if loc.data_center is None:
+            continue
+        dc = _ensure_dc(block, loc.data_center)
+        if loc.rack is not None:
+            _ensure_rack(dc, loc.rack)
+
     for d in devices:
         block_name = d.block or "Unassigned"
         dc_name = d.data_center or "Unassigned"
         rack_name = d.rack or "Unassigned"
-        block = blocks_top.setdefault(block_name, {"name": block_name, "data_centers": {}, "device_count": 0})
-        dc = block["data_centers"].setdefault(dc_name, {"name": dc_name, "racks": {}, "device_count": 0})
-        rack = dc["racks"].setdefault(rack_name, {"name": rack_name, "devices": []})
+        block = _ensure_block(block_name)
+        dc = _ensure_dc(block, dc_name)
+        rack = _ensure_rack(dc, rack_name)
         rack["devices"].append(
             {
                 "id": str(d.id),
@@ -1690,6 +1720,213 @@ def get_device_groups(db: Session = Depends(get_db), _=Depends(get_current_user)
 
     result.sort(key=lambda b: b["name"])
     return result
+
+
+def _devices_for_tier(db: Session, *, block: str, data_center: str | None = None, rack: str | None = None) -> list[Device]:
+    """Every Device currently tagged with this block (and, if given,
+    this data_center / rack) -- shared by the rename/delete endpoints
+    below so a rename/delete on a populated tier updates every device
+    in it, not just the placeholder row.
+    """
+    q = db.query(Device).filter(Device.block == block)
+    if data_center is not None:
+        q = q.filter(Device.data_center == data_center)
+    if rack is not None:
+        q = q.filter(Device.rack == rack)
+    return q.all()
+
+
+def _reject_unassigned(name: str) -> None:
+    if name.strip().lower() == "unassigned":
+        raise HTTPException(status_code=422, detail="'Unassigned' is a reserved name.")
+
+
+@router.post("/groups/blocks", status_code=201)
+def create_block(payload: PhysicalLocationBlockCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    """Creates an empty block placeholder -- lets an admin set up the
+    top level of the physical-placement hierarchy (a campus/region/
+    business unit) before any data center, rack, or device exists
+    under it yet. See app.models.physical_location.PhysicalLocation.
+    """
+    name = payload.name.strip()
+    _reject_unassigned(name)
+    if db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == name, PhysicalLocation.data_center.is_(None)
+    ).first():
+        raise HTTPException(status_code=409, detail=f"Block '{name}' already exists.")
+    db.add(PhysicalLocation(block=name))
+    db.commit()
+    return {"name": name}
+
+
+@router.post("/groups/data-centers", status_code=201)
+def create_data_center(payload: PhysicalLocationDataCenterCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    """Creates an empty data-center placeholder under an existing (or
+    not-yet-existing) block -- the block itself is implicitly
+    materialized too if it doesn't already have a placeholder row, same
+    as how a device with a block+data_center set but no prior block
+    placeholder already "creates" the block in the summary tree.
+    """
+    block = payload.block.strip()
+    name = payload.name.strip()
+    _reject_unassigned(block)
+    _reject_unassigned(name)
+    if not db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center.is_(None)
+    ).first():
+        db.add(PhysicalLocation(block=block))
+    if db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center == name, PhysicalLocation.rack.is_(None)
+    ).first():
+        raise HTTPException(status_code=409, detail=f"Data center '{name}' already exists in block '{block}'.")
+    db.add(PhysicalLocation(block=block, data_center=name))
+    db.commit()
+    return {"block": block, "name": name}
+
+
+@router.post("/groups/racks", status_code=201)
+def create_rack(payload: PhysicalLocationRackCreate, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    """Creates an empty rack placeholder under an existing (or
+    not-yet-existing) block/data-center pair, materializing either
+    ancestor that doesn't already have a placeholder row -- same
+    reasoning as create_data_center above.
+    """
+    block = payload.block.strip()
+    data_center = payload.data_center.strip()
+    name = payload.name.strip()
+    _reject_unassigned(block)
+    _reject_unassigned(data_center)
+    _reject_unassigned(name)
+    if not db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center.is_(None)
+    ).first():
+        db.add(PhysicalLocation(block=block))
+    if not db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center == data_center, PhysicalLocation.rack.is_(None)
+    ).first():
+        db.add(PhysicalLocation(block=block, data_center=data_center))
+    if db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center == data_center, PhysicalLocation.rack == name
+    ).first():
+        raise HTTPException(status_code=409, detail=f"Rack '{name}' already exists in '{block} / {data_center}'.")
+    db.add(PhysicalLocation(block=block, data_center=data_center, rack=name))
+    db.commit()
+    return {"block": block, "data_center": data_center, "name": name}
+
+
+@router.patch("/groups/blocks/{block}")
+def rename_block(block: str, payload: PhysicalLocationRename, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    """Renames a block: every device tagged with it, and every
+    placeholder row hanging off it (the block's own row plus every
+    descendant data-center/rack placeholder, since block is
+    denormalized onto all three tiers -- see PhysicalLocation), move to
+    the new name in one call. Unifies what the Groups page previously
+    had to do as N separate device PATCH calls with no placeholder
+    counterpart at all.
+    """
+    new_name = payload.name.strip()
+    _reject_unassigned(new_name)
+    if new_name == block:
+        return {"name": new_name}
+    for d in _devices_for_tier(db, block=block):
+        d.block = new_name
+    db.query(PhysicalLocation).filter(PhysicalLocation.block == block).update(
+        {PhysicalLocation.block: new_name}, synchronize_session=False
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Block '{new_name}' already exists.")
+    return {"name": new_name}
+
+
+@router.patch("/groups/blocks/{block}/data-centers/{data_center}")
+def rename_data_center(
+    block: str, data_center: str, payload: PhysicalLocationRename, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)
+):
+    new_name = payload.name.strip()
+    _reject_unassigned(new_name)
+    if new_name == data_center:
+        return {"name": new_name}
+    for d in _devices_for_tier(db, block=block, data_center=data_center):
+        d.data_center = new_name
+    db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center == data_center
+    ).update({PhysicalLocation.data_center: new_name}, synchronize_session=False)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Data center '{new_name}' already exists in block '{block}'.")
+    return {"name": new_name}
+
+
+@router.patch("/groups/blocks/{block}/data-centers/{data_center}/racks/{rack}")
+def rename_rack(
+    block: str,
+    data_center: str,
+    rack: str,
+    payload: PhysicalLocationRename,
+    db: Session = Depends(get_db),
+    _=Depends(INVENTORY_MANAGER_ROLES),
+):
+    new_name = payload.name.strip()
+    _reject_unassigned(new_name)
+    if new_name == rack:
+        return {"name": new_name}
+    for d in _devices_for_tier(db, block=block, data_center=data_center, rack=rack):
+        d.rack = new_name
+    db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block,
+        PhysicalLocation.data_center == data_center,
+        PhysicalLocation.rack == rack,
+    ).update({PhysicalLocation.rack: new_name}, synchronize_session=False)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Rack '{new_name}' already exists in '{block} / {data_center}'.")
+    return {"name": new_name}
+
+
+@router.delete("/groups/blocks/{block}", status_code=204)
+def delete_block(block: str, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    """Deletes a block's placeholder row(s). Devices still tagged with
+    this block are unassigned (block set to NULL) rather than left
+    dangling or blocking the delete -- same "member devices become
+    ungrouped" behavior the Groups page already uses for named
+    DeviceGroups.
+    """
+    for d in _devices_for_tier(db, block=block):
+        d.block = None
+        d.data_center = None
+        d.rack = None
+    db.query(PhysicalLocation).filter(PhysicalLocation.block == block).delete(synchronize_session=False)
+    db.commit()
+
+
+@router.delete("/groups/blocks/{block}/data-centers/{data_center}", status_code=204)
+def delete_data_center(block: str, data_center: str, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    for d in _devices_for_tier(db, block=block, data_center=data_center):
+        d.data_center = None
+        d.rack = None
+    db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block, PhysicalLocation.data_center == data_center
+    ).delete(synchronize_session=False)
+    db.commit()
+
+
+@router.delete("/groups/blocks/{block}/data-centers/{data_center}/racks/{rack}", status_code=204)
+def delete_rack(block: str, data_center: str, rack: str, db: Session = Depends(get_db), _=Depends(INVENTORY_MANAGER_ROLES)):
+    for d in _devices_for_tier(db, block=block, data_center=data_center, rack=rack):
+        d.rack = None
+    db.query(PhysicalLocation).filter(
+        PhysicalLocation.block == block,
+        PhysicalLocation.data_center == data_center,
+        PhysicalLocation.rack == rack,
+    ).delete(synchronize_session=False)
+    db.commit()
 
 
 @router.get("/{device_id}/interfaces", response_model=list[InterfaceCurrentStatus])

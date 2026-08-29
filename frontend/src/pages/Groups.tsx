@@ -234,6 +234,7 @@ function DataCenterCard({
   onAddDevice,
   onRename,
   onDelete,
+  onCreateRack,
   selected,
   onToggleSelect,
   onDeviceAction,
@@ -245,6 +246,7 @@ function DataCenterCard({
   onAddDevice: (block: string, dc: string, rack: string) => void;
   onRename: (oldName: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
   onDelete: (name: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
+  onCreateRack: (blockName: string, dcName: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
   onDeviceAction: (action: "edit" | "remove" | "replace", device: GroupDevice, dcName: string, blockName: string, rackName: string) => void;
@@ -301,6 +303,12 @@ function DataCenterCard({
               className="text-[11px] text-slate-400 hover:text-red-500 shrink-0" title="Delete">✕</button>
           </>
         )}
+        {canManage && !isUnassigned && (
+          <button onClick={() => onCreateRack(blockName, dataCenter.name)}
+            className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-700 rounded px-1.5 py-0.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors shrink-0">
+            + New rack
+          </button>
+        )}
         {canManage && (
           <button onClick={() => onAddDevice(blockName, dataCenter.name, "")}
             className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-700 rounded px-1.5 py-0.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors shrink-0">
@@ -317,7 +325,7 @@ function DataCenterCard({
                 <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M8 9h8M8 13h4"/>
               </svg>
               <p className="text-xs text-slate-400 italic">
-                {canManage ? "No racks yet — use + Add above to create one" : "No racks in this data center."}
+                {canManage ? "No racks yet — use + New rack or + Add above" : "No racks in this data center."}
               </p>
             </div>
           ) : (
@@ -355,6 +363,8 @@ function BlockCard({
   onAddDevice,
   onRename,
   onDelete,
+  onCreateDataCenter,
+  onCreateRack,
   selected,
   onToggleSelect,
   onDeviceAction,
@@ -365,6 +375,8 @@ function BlockCard({
   onAddDevice: (block: string, dc: string, rack: string) => void;
   onRename: (oldName: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
   onDelete: (name: string, type: "block" | "data_center" | "rack", blockName: string, dcName?: string) => void;
+  onCreateDataCenter: (blockName: string) => void;
+  onCreateRack: (blockName: string, dcName: string) => void;
   selected: Set<string>;
   onToggleSelect: (deviceId: string) => void;
   onDeviceAction: (action: "edit" | "remove" | "replace", device: GroupDevice, dcName: string, blockName: string, rackName: string) => void;
@@ -432,6 +444,12 @@ function BlockCard({
               className="text-blue-200 hover:text-red-300 shrink-0 text-sm leading-none">✕</button>
           </>
         )}
+        {canManage && !isUnassigned && (
+          <button onClick={() => onCreateDataCenter(block.name)}
+            className="text-[11px] font-bold shrink-0 border border-white/40 text-white hover:bg-white/20 rounded-full px-2.5 py-1 transition-colors">
+            + New DC
+          </button>
+        )}
         {canManage && (
           <button onClick={() => onAddDevice(block.name, "", "")}
             className={`text-[11px] font-bold shrink-0 border rounded-full px-2.5 py-1 transition-colors ${
@@ -452,6 +470,10 @@ function BlockCard({
                 <rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20M2 15h20"/>
               </svg>
               <p className="text-sm text-slate-400 italic">No data centers in this block yet.</p>
+              {canManage && !isUnassigned && (
+                <button onClick={() => onCreateDataCenter(block.name)}
+                  className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline">+ New data center</button>
+              )}
               {canManage && <button onClick={() => onAddDevice(block.name, "", "")}
                 className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline">+ Add first device</button>}
             </div>
@@ -466,6 +488,7 @@ function BlockCard({
                 onAddDevice={onAddDevice}
                 onRename={onRename}
                 onDelete={onDelete}
+                onCreateRack={onCreateRack}
                 selected={selected}
                 onToggleSelect={onToggleSelect}
                 onDeviceAction={onDeviceAction}
@@ -1310,39 +1333,39 @@ export default function Groups() {
     }
   };
 
+  // Backend path segment (see app.api.devices' /groups/blocks,
+  // /groups/blocks/{block}/data-centers/{dc}, .../racks/{rack}) for a
+  // given tier -- shared by rename/delete below.
+  const tierPath = (type: "block" | "data_center" | "rack", blockName: string, dcName?: string, name?: string) => {
+    const base = `/devices/groups/blocks/${encodeURIComponent(blockName)}`;
+    if (type === "block") return base;
+    if (type === "data_center") return `${base}/data-centers/${encodeURIComponent(name || "")}`;
+    return `${base}/data-centers/${encodeURIComponent(dcName || "")}/racks/${encodeURIComponent(name || "")}`;
+  };
+
+  // Renames a block/data-center/rack via the PhysicalLocation-backed
+  // endpoints (see app.api.devices) instead of bulk-patching every
+  // member device by hand -- one call now covers both an empty
+  // placeholder tier (nothing to patch device-side at all, so the old
+  // device-only approach silently no-op'd) and a populated one (the
+  // backend moves every device in it, same net effect the old
+  // Promise.all did).
   const handleRenameGroup = async (
     oldName: string,
     type: "block" | "data_center" | "rack",
     blockName: string,
     dcName?: string
   ) => {
-    let devicesToUpdate: string[] = [];
-    const block = groups.find((g) => g.name === blockName);
-    if (!block) return;
-
-    if (type === "block") {
-      devicesToUpdate = block.data_centers.flatMap((dc) => dc.racks.flatMap((r) => r.devices.map((d) => d.id)));
-    } else if (type === "data_center") {
-      const dc = block.data_centers.find((dc) => dc.name === oldName);
-      if (dc) devicesToUpdate = dc.racks.flatMap((r) => r.devices.map((d) => d.id));
-    } else if (type === "rack") {
-      const dc = block.data_centers.find((dc) => dc.name === dcName);
-      const r = dc?.racks.find((r) => r.name === oldName);
-      if (r) devicesToUpdate = r.devices.map((d) => d.id);
-    }
-
-    if (devicesToUpdate.length === 0) return;
-
     const newName = window.prompt(`Rename ${type.replace("_", " ")} "${oldName}" to:`, oldName);
     if (!newName || newName.trim() === oldName || newName.trim() === "") return;
 
     setLoading(true);
     try {
-      await Promise.all(devicesToUpdate.map((id) => api.patch(`/devices/${id}`, { [type]: newName.trim() })));
+      await api.patch(tierPath(type, type === "block" ? oldName : blockName, dcName, type === "block" ? undefined : oldName));
       setMoveNotice(`${type.replace("_", " ")} renamed successfully`);
       load();
-    } catch {
-      setError("Failed to rename devices.");
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || `Failed to rename ${type.replace("_", " ")}.`);
       setLoading(false);
     }
   };
@@ -1353,38 +1376,74 @@ export default function Groups() {
     blockName: string,
     dcName?: string
   ) => {
-    let devicesToUpdate: string[] = [];
+    let deviceCount = 0;
     const block = groups.find((g) => g.name === blockName);
-    if (!block) return;
-
-    if (type === "block") {
-      devicesToUpdate = block.data_centers.flatMap((dc) => dc.racks.flatMap((r) => r.devices.map((d) => d.id)));
-    } else if (type === "data_center") {
-      const dc = block.data_centers.find((dc) => dc.name === name);
-      if (dc) devicesToUpdate = dc.racks.flatMap((r) => r.devices.map((d) => d.id));
-    } else if (type === "rack") {
-      const dc = block.data_centers.find((dc) => dc.name === dcName);
-      const r = dc?.racks.find((r) => r.name === name);
-      if (r) devicesToUpdate = r.devices.map((d) => d.id);
+    if (block) {
+      if (type === "block") {
+        deviceCount = block.device_count;
+      } else if (type === "data_center") {
+        deviceCount = block.data_centers.find((dc) => dc.name === name)?.device_count || 0;
+      } else {
+        const dc = block.data_centers.find((dc) => dc.name === dcName);
+        deviceCount = dc?.racks.find((r) => r.name === name)?.devices.length || 0;
+      }
     }
 
-    if (devicesToUpdate.length === 0) {
-      setError("Can't delete this via devices (it has 0 devices).");
-      return;
-    }
-
-    if (!(await confirm(`Delete ${type.replace("_", " ")} "${name}"? This will move ${devicesToUpdate.length} devices to Unassigned.`))) {
-      return;
-    }
+    const confirmMsg =
+      deviceCount > 0
+        ? `Delete ${type.replace("_", " ")} "${name}"? This will move ${deviceCount} device${deviceCount === 1 ? "" : "s"} to Unassigned.`
+        : `Delete ${type.replace("_", " ")} "${name}"?`;
+    if (!(await confirm(confirmMsg))) return;
 
     setLoading(true);
     try {
-      await Promise.all(devicesToUpdate.map((id) => api.patch(`/devices/${id}`, { [type]: null })));
+      await api.delete(tierPath(type, type === "block" ? name : blockName, dcName, type === "block" ? undefined : name));
       setMoveNotice(`${type.replace("_", " ")} deleted successfully`);
       load();
-    } catch {
-      setError("Failed to delete devices.");
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || `Failed to delete ${type.replace("_", " ")}.`);
       setLoading(false);
+    }
+  };
+
+  // Create-empty flows -- POST to the same PhysicalLocation-backed
+  // endpoints, so a block/DC/rack can be set up ahead of any device
+  // being placed in it (previously the only way a tier came into
+  // existence at all was the "+ Add device" modal below implicitly
+  // creating it).
+  const handleCreateBlock = async () => {
+    const name = window.prompt("New block name:");
+    if (!name || !name.trim()) return;
+    try {
+      await api.post("/devices/groups/blocks", { name: name.trim() });
+      setMoveNotice(`Block "${name.trim()}" created.`);
+      load();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to create block.");
+    }
+  };
+
+  const handleCreateDataCenter = async (blockName: string) => {
+    const name = window.prompt(`New data center in "${blockName}":`);
+    if (!name || !name.trim()) return;
+    try {
+      await api.post("/devices/groups/data-centers", { block: blockName, name: name.trim() });
+      setMoveNotice(`Data center "${name.trim()}" created.`);
+      load();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to create data center.");
+    }
+  };
+
+  const handleCreateRack = async (blockName: string, dcName: string) => {
+    const name = window.prompt(`New rack in "${blockName} / ${dcName}":`);
+    if (!name || !name.trim()) return;
+    try {
+      await api.post("/devices/groups/racks", { block: blockName, data_center: dcName, name: name.trim() });
+      setMoveNotice(`Rack "${name.trim()}" created.`);
+      load();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to create rack.");
     }
   };
 
@@ -1564,6 +1623,12 @@ export default function Groups() {
                 </p>
               </div>
               <HealthBadge devices={filteredGroups.flatMap(b => b.data_centers.flatMap(dc => dc.racks.flatMap(r => r.devices)))} />
+              {canManage && (
+                <button onClick={handleCreateBlock}
+                  className="text-[11px] font-bold shrink-0 border border-white/30 text-white hover:bg-white/10 rounded-full px-2.5 py-1 transition-colors">
+                  + New block
+                </button>
+              )}
             </div>
             <div className="p-4 bg-slate-50 dark:bg-slate-900/50 flex flex-col gap-4">
               {filteredGroups.map((block) => (
@@ -1575,6 +1640,8 @@ export default function Groups() {
                   onAddDevice={openAddDevice}
                   onRename={handleRenameGroup}
                   onDelete={handleDeleteGroup}
+                  onCreateDataCenter={handleCreateDataCenter}
+                  onCreateRack={handleCreateRack}
                   selected={selected}
                   onToggleSelect={toggleSelect}
                   onDeviceAction={handleDeviceAction}

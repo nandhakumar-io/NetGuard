@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useRef, useState, useCallback } from "react";
+import { Fragment, useEffect, useRef, useState, useCallback, FormEvent } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { Alert, AlertSummary, AlertRule, AlertRunbook, WebhookEndpoint, WebhookTestResult, WebhookDeliveryAttempt, AlertSnooze, EscalationPolicy, EscalatedAlertEntry, PushSubscription } from "../lib/types";
 import { useToast, errorMessage } from "../lib/toast";
 import { useConfirm } from "../lib/confirm";
@@ -72,11 +73,37 @@ export default function AlertCenter() {
   }, [density]);
   const toast = useToast();
   const confirm = useConfirm();
+  const { user } = useAuth();
   const [runningRunbookAlertId, setRunningRunbookAlertId] = useState<string | null>(null);
 
-  const runRunbookRemediation = async (alert: Alert, runbook?: AlertRunbook) => {
+  // Security PIN step-up before a runbook remediation actually pushes
+  // anything to a device -- same opt-in gate as device delete/rollback
+  // (see backend app.core.deps.require_pin_step_up). Only relevant when
+  // the current user has both set a PIN and turned on enforcement; for
+  // everyone else `pinToken` just never gets asked for and the header
+  // below is omitted, which the backend treats as a no-op check.
+  // Cached for the rest of this page session once verified (the backend
+  // token is itself short-lived and re-checked server-side every call),
+  // so triaging several alerts in a row doesn't re-prompt for every one.
+  const [pinToken, setPinToken] = useState<string | null>(null);
+  const [pinPending, setPinPending] = useState<{ alert: Alert; runbook: AlertRunbook } | null>(null);
+  const [pinInput, setPinInput] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  const runRunbookRemediation = async (alert: Alert, runbook?: AlertRunbook, providedPinToken?: string) => {
     const rb = runbook || alert.runbook;
     if (!rb || !alert.device_id) return;
+    if (user?.pin_required && !(providedPinToken || pinToken)) {
+      // Don't ask "run it?" before the PIN step-up -- confirming twice
+      // (once here, once implicitly by entering the PIN) is redundant;
+      // the PIN prompt itself is the confirmation gate.
+      setPinError(null);
+      setPinInput("");
+      setPinPending({ alert, runbook: rb });
+      setPlaybookMenuAlertId(null);
+      return;
+    }
     const ok = await confirm(
       `This pushes "${rb.remediation_label || rb.title}" to the device for this alert. Continue?`,
       { title: "Run playbook now?", confirmLabel: "Run", danger: true }
@@ -84,22 +111,51 @@ export default function AlertCenter() {
     if (!ok) return;
     setRunningRunbookAlertId(alert.id);
     try {
-      const res = await api.post(`/alert-runbooks/${rb.id}/execute`, {
-        device_id: alert.device_id,
-        alert_id: alert.id,
-      });
+      const res = await api.post(
+        `/alert-runbooks/${rb.id}/execute`,
+        { device_id: alert.device_id, alert_id: alert.id },
+        (providedPinToken || pinToken) ? { headers: { "X-Pin-Token": providedPinToken || pinToken } } : undefined
+      );
       if (res.data.status === "success") {
         toast.success("Remediation ran successfully");
       } else {
         toast.error(res.data.error || "Remediation failed — check runbook execution history.");
       }
-    } catch (err) {
-      toast.error(errorMessage(err, "Failed to run remediation."));
+    } catch (err: any) {
+      if (err?.response?.status === 401 && (providedPinToken || pinToken)) {
+        // Cached token expired/was rejected -- drop it and re-prompt
+        // instead of surfacing a confusing raw 401.
+        setPinToken(null);
+        setPinPending({ alert, runbook: rb });
+      } else {
+        toast.error(errorMessage(err, "Failed to run remediation."));
+      }
     } finally {
       setRunningRunbookAlertId(null);
       setPlaybookMenuAlertId(null);
     }
   };
+
+  const verifyPinAndRun = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pinPending) return;
+    setPinError(null);
+    setPinBusy(true);
+    try {
+      const res = await api.post("/auth/security-pin/verify", { pin: pinInput });
+      const token = res.data.pin_token;
+      setPinToken(token);
+      setPinInput("");
+      const { alert, runbook } = pinPending;
+      setPinPending(null);
+      await runRunbookRemediation(alert, runbook, token);
+    } catch (err: any) {
+      setPinError(err?.response?.data?.detail || "Incorrect PIN.");
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
   // Menu of applicable playbooks for one alert row -- lets an operator
   // run any remediation-enabled runbook against this alert's device
   // (previously only the exact category/source match auto-attached to
@@ -313,11 +369,15 @@ export default function AlertCenter() {
 
   // Deep-link handling for notification action buttons (ntfy/browser push/
   // webhook payloads all point back to
-  // /alerts?alert={id}&action=acknowledge|escalate -- see
+  // /alerts?alert={id}&action=acknowledge|escalate|run_runbook -- see
   // push_service._action_deep_link and notification_service._action_url).
   // Before this, tapping "Escalate" or "Acknowledge" on a phone
   // notification just opened the plain alert list with no effect: nothing
-  // here ever read the query string.
+  // here ever read the query string. run_runbook opens the same
+  // "list applicable playbooks" menu the 🛠️ Playbooks button opens
+  // in-page (see playbookMenuAlertId below) rather than firing a
+  // remediation blind off a notification tap -- picking the runbook and
+  // clearing the PIN step-up both still happen explicitly in the UI.
   const [highlightedAlertId, setHighlightedAlertId] = useState<string | null>(null);
   const deepLinkHandledRef = useRef(false);
   useEffect(() => {
@@ -331,6 +391,7 @@ export default function AlertCenter() {
     setHighlightedAlertId(alertId);
     if (action === "acknowledge") handleAcknowledge(alertId);
     else if (action === "escalate") handleEscalate(alertId);
+    else if (action === "run_runbook") setPlaybookMenuAlertId(alertId);
     // Strip the query string so a page refresh doesn't re-fire the action.
     window.history.replaceState({}, "", window.location.pathname);
   }, []);
@@ -2150,6 +2211,46 @@ export default function AlertCenter() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {pinPending && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+          <form onSubmit={verifyPinAndRun} className="bg-white dark:bg-slate-800 rounded-lg p-6 w-full max-w-sm space-y-4">
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Security PIN required</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Confirm your PIN to run "{pinPending.runbook.remediation_label || pinPending.runbook.title}" against
+              the device for this alert.
+            </p>
+            {pinError && (
+              <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{pinError}</p>
+            )}
+            <input
+              autoFocus
+              type="password"
+              inputMode="numeric"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm tracking-widest text-center"
+              placeholder="••••"
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => { setPinPending(null); setPinInput(""); setPinError(null); }}
+                className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={pinBusy || !pinInput}
+                className="px-4 py-2 text-sm font-semibold text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50"
+              >
+                {pinBusy ? "Verifying…" : "Verify & Run"}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

@@ -37,9 +37,23 @@ from app.models.alert_runbook import (
 )
 from app.models.device import Device
 from app.models.user import User
-from app.services import audit_service, jit_service
+from app.services import audit_service, config_intent_service, jit_service
 
 logger = logging.getLogger(__name__)
+
+# Prefix marking a remediation_command as a vendor-agnostic config intent
+# (see app.services.config_intent_service) rather than literal CLI text.
+# A runbook authored this way renders to the right syntax for whatever
+# vendor the target device actually is at execution time, instead of the
+# fixed string every other runbook's remediation_command is -- e.g.
+# "clear arp-cache" is valid Cisco IOS but would fail outright pushed
+# verbatim to a Juniper or Linux device. Used by alert_runbook_seed's
+# default "clear ARP cache" / "clear MAC table" runbooks; an admin
+# hand-authoring a runbook still just types literal CLI text as before,
+# since most runbooks are legitimately single-vendor (a specific
+# interface bounce, a specific service restart) and don't benefit from
+# this at all.
+INTENT_COMMAND_PREFIX = "__config_intent__:"
 
 
 class RemediationNotConfiguredError(Exception):
@@ -59,6 +73,48 @@ def _user_satisfies_required_role(db: Session, user: User, required_role) -> boo
     if required_role.value in jit_service.active_roles_for_user(db, user.id):
         return True
     return False
+
+
+def _resolve_command(runbook: AlertRunbook, device: Device) -> str:
+    """Returns the literal command text to push for this runbook against
+    this device -- either runbook.remediation_command verbatim (the
+    common case), or, for an INTENT_COMMAND_PREFIX-marked runbook, that
+    intent rendered for the device's actual vendor.
+
+    Raises RemediationNotConfiguredError (same error a caller already
+    handles for "no remediation configured at all") if the device's
+    vendor has no mapping to a config_intent_service.Vendor, or if this
+    particular intent has no renderer for that vendor -- e.g. a Linux
+    device has no MAC-table-clear equivalent, so a runbook whose command
+    is `__config_intent__:clear_mac_table` is simply not runnable
+    against one, the same "doc-only" outcome as if remediation had never
+    been configured for that device at all.
+    """
+    command = runbook.remediation_command or ""
+    if not command.startswith(INTENT_COMMAND_PREFIX):
+        return command
+
+    kind_value = command[len(INTENT_COMMAND_PREFIX):]
+    try:
+        intent_kind = config_intent_service.IntentKind(kind_value)
+    except ValueError:
+        raise RemediationNotConfiguredError(
+            f"Runbook '{runbook.title}' references an unknown config intent '{kind_value}'"
+        )
+
+    model_vendor = device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor)
+    vendor = config_intent_service.DEVICE_MODEL_VENDOR_DEFAULT.get(model_vendor)
+    if vendor is None:
+        raise RemediationNotConfiguredError(
+            f"Runbook '{runbook.title}' has no command mapping for device vendor '{model_vendor}'"
+        )
+
+    try:
+        return config_intent_service.render_intent(
+            config_intent_service.ConfigIntent(kind=intent_kind, params={}), vendor
+        )
+    except config_intent_service.UnsupportedIntentError as exc:
+        raise RemediationNotConfiguredError(str(exc))
 
 
 def trigger_remediation(
@@ -85,6 +141,13 @@ def trigger_remediation(
             f"This remediation requires the '{runbook.remediation_required_role.value}' role"
         )
 
+    # Resolved (and, for an intent-marked runbook, vendor-rendered) up
+    # front and before any RunbookExecution row is written -- a runbook
+    # with no valid command for this device's vendor should show up as
+    # "never actually ran" in the execution history, not as a phantom
+    # failed attempt with a device write nothing actually issued.
+    command = _resolve_command(runbook, device)
+
     execution = RunbookExecution(
         runbook_id=runbook.id,
         alert_id=alert_id,
@@ -108,7 +171,7 @@ def trigger_remediation(
 
     try:
         manager = ProtocolManager(db, device, operator=user.email)
-        result = manager.deploy_config(runbook.remediation_command)
+        result = manager.deploy_config(command)
 
         execution.status = RunbookExecutionStatus.SUCCESS if result.success else RunbookExecutionStatus.FAILED
         execution.output = result.output

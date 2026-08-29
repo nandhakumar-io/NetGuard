@@ -2062,6 +2062,13 @@ export default function Devices() {
   // polling) that they don't fit the generic device table/form at all.
   // null means "showing every device type", same as deviceTypeFilter="all".
   const [classificationView, setClassificationView] = useState<string | null>(null);
+  // "Assign existing device" quick-picker shown in the classification
+  // banner -- lets you move an already-inventoried device into the
+  // classification you're viewing (e.g. pick a device out of
+  // Unclassified and drop it straight into Switches) without opening the
+  // full edit form. Single-device PATCH, same endpoint the edit form uses.
+  const [assignDeviceId, setAssignDeviceId] = useState<string>("");
+  const [assigningDevice, setAssigningDevice] = useState(false);
   const [dcFilter, setDcFilter] = useState<string>("all");
   const [rackFilter, setRackFilter] = useState<string>("all");
   // "core" | "distribution" | "access" | ... (free-text, org-defined) --
@@ -2631,6 +2638,30 @@ export default function Devices() {
     for (const d of devices) counts[(d.device_type || "").toLowerCase()] = (counts[(d.device_type || "").toLowerCase()] || 0) + 1;
     return counts;
   }, [devices]);
+  // Candidates for the "assign existing device" picker -- every device
+  // NOT already in the classification currently being viewed, sorted so
+  // the picker is actually usable on a fleet with hundreds of devices.
+  const assignableDevices = useMemo(() => {
+    if (classificationView === null || classificationView === "ap") return [];
+    return devices
+      .filter((d) => (d.device_type || "").toLowerCase() !== classificationView)
+      .sort((a, b) => a.hostname.localeCompare(b.hostname));
+  }, [devices, classificationView]);
+
+  const handleAssignToClassification = async () => {
+    if (!assignDeviceId || classificationView === null || classificationView === "ap") return;
+    setAssigningDevice(true);
+    try {
+      const res = await api.patch<Device>(`/devices/${assignDeviceId}`, { device_type: classificationView || null });
+      setDevices((prev) => prev.map((d) => (d.id === assignDeviceId ? res.data : d)));
+      setAssignDeviceId("");
+    } catch {
+      /* best effort -- the row's own edit form remains the fallback */
+    } finally {
+      setAssigningDevice(false);
+    }
+  };
+
 
   // --- Row virtualization ---------------------------------------------
   // NOC fleets can run into the thousands of devices; rendering every
@@ -3085,37 +3116,45 @@ export default function Devices() {
           table/form), for everything else it sets deviceTypeFilter and
           shows a focused header with a way back to the full fleet. */}
       {!classificationView && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-          {DEVICE_TYPE_OPTIONS.filter((opt) => opt.value !== "").map((opt) => {
-            const style = DEVICE_TYPE_STYLES[opt.value] || DEVICE_TYPE_STYLES.other;
-            const count = classificationCounts[opt.value] || 0;
-            return (
+        <div>
+          <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2">Classifications</p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+            {DEVICE_TYPE_OPTIONS.filter((opt) => opt.value !== "").map((opt) => {
+              const style = DEVICE_TYPE_STYLES[opt.value] || DEVICE_TYPE_STYLES.other;
+              const count = classificationCounts[opt.value] || 0;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    setClassificationView(opt.value);
+                    if (opt.value !== "ap") setDeviceTypeFilter(opt.value);
+                  }}
+                  className={`group relative flex flex-col items-center justify-center gap-1.5 rounded-2xl border p-5 text-center bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg hover:border-transparent overflow-hidden`}
+                >
+                  <span className={`absolute inset-x-0 top-0 h-1 ${style.bg}`} />
+                  <span className={`w-11 h-11 rounded-full flex items-center justify-center text-xl ${style.bg} ${style.text} border ${style.text.replace("text-", "border-")}/20`}>
+                    {style.icon}
+                  </span>
+                  <span className="text-2xl font-extrabold text-navy dark:text-white">{count}</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{opt.label}</span>
+                  <span className="absolute bottom-1.5 text-[10px] font-medium text-brandblue opacity-0 group-hover:opacity-100 transition-opacity">Manage →</span>
+                </button>
+              );
+            })}
+            {classificationCounts[""] > 0 && (
               <button
-                key={opt.value}
                 type="button"
-                onClick={() => {
-                  setClassificationView(opt.value);
-                  if (opt.value !== "ap") setDeviceTypeFilter(opt.value);
-                }}
-                className={`flex flex-col items-center justify-center gap-1 rounded-xl border p-4 text-center shadow-sm transition-transform hover:-translate-y-0.5 hover:shadow-md ${style.bg} ${style.text} border-slate-200 dark:border-slate-700`}
+                onClick={() => { setClassificationView(""); setDeviceTypeFilter(""); }}
+                className="group relative flex flex-col items-center justify-center gap-1.5 rounded-2xl border border-dashed border-slate-300 dark:border-slate-600 p-5 text-center bg-slate-50 dark:bg-slate-800/60 shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg"
               >
-                <span className="text-2xl" aria-hidden="true">{style.icon}</span>
-                <span className="text-2xl font-bold">{count}</span>
-                <span className="text-xs font-semibold uppercase tracking-wide">{opt.label}</span>
+                <span className="w-11 h-11 rounded-full flex items-center justify-center text-xl bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 border border-slate-300/40">❓</span>
+                <span className="text-2xl font-extrabold text-navy dark:text-white">{classificationCounts[""]}</span>
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Unclassified</span>
+                <span className="absolute bottom-1.5 text-[10px] font-medium text-brandblue opacity-0 group-hover:opacity-100 transition-opacity">Manage →</span>
               </button>
-            );
-          })}
-          {classificationCounts[""] > 0 && (
-            <button
-              type="button"
-              onClick={() => { setClassificationView(""); setDeviceTypeFilter(""); }}
-              className="flex flex-col items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-4 text-center shadow-sm transition-transform hover:-translate-y-0.5 hover:shadow-md text-slate-500 dark:text-slate-400"
-            >
-              <span className="text-2xl" aria-hidden="true">❓</span>
-              <span className="text-2xl font-bold">{classificationCounts[""]}</span>
-              <span className="text-xs font-semibold uppercase tracking-wide">Unclassified</span>
-            </button>
-          )}
+            )}
+          </div>
         </div>
       )}
 
@@ -3134,20 +3173,43 @@ export default function Devices() {
       ) : (
       <>
       {classificationView !== null && (
-        <div className="flex items-center gap-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-3">
           <button
             type="button"
-            onClick={() => { setClassificationView(null); setDeviceTypeFilter("all"); }}
-            className="flex items-center gap-1.5 text-sm font-semibold text-brandblue hover:text-navy dark:hover:text-white"
+            onClick={() => { setClassificationView(null); setDeviceTypeFilter("all"); setAssignDeviceId(""); }}
+            className="flex items-center gap-1.5 text-sm font-semibold text-brandblue hover:text-navy dark:hover:text-white shrink-0"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><path d="M15 18l-6-6 6-6" /></svg>
-            Back to all devices
+            All devices
           </button>
-          <span className="text-sm text-slate-500 dark:text-slate-400">
+          <span className="text-sm text-slate-500 dark:text-slate-400 shrink-0">
             Viewing <span className="font-semibold text-navy dark:text-white">
               {classificationView === "" ? "Unclassified" : (DEVICE_TYPE_STYLES[classificationView]?.label || classificationView)}
             </span> only
           </span>
+          <div className="flex-1" />
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={assignDeviceId}
+              onChange={(e) => setAssignDeviceId(e.target.value)}
+              className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 text-sm bg-white dark:bg-slate-900 focus:ring-2 focus:ring-brandblue outline-none max-w-[240px]"
+            >
+              <option value="">Assign existing device…</option>
+              {assignableDevices.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.hostname} — {d.ip_address}{d.device_type ? ` (${DEVICE_TYPE_STYLES[(d.device_type || "").toLowerCase()]?.label || d.device_type})` : " (Unclassified)"}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleAssignToClassification}
+              disabled={!assignDeviceId || assigningDevice}
+              className="bg-brandblue hover:bg-navy text-white text-sm font-semibold px-3 py-1.5 rounded-lg shadow-sm disabled:opacity-50 transition-colors shrink-0"
+            >
+              {assigningDevice ? "Adding…" : "+ Add to this block"}
+            </button>
+          </div>
         </div>
       )}
 

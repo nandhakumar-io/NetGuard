@@ -150,6 +150,23 @@ async def lifespan(app: FastAPI):
                 "and restart."
             )
 
+    # Seed the small set of common default alert runbooks (clear ARP
+    # cache, clear MAC table, etc.) on first startup -- see
+    # app.services.alert_runbook_seed. Idempotent and best-effort, same
+    # as everything else in this function; run after migrations so the
+    # alert_runbooks table is guaranteed to exist.
+    try:
+        from app.core.database import SessionLocal
+        from app.services.alert_runbook_seed import seed_default_runbooks
+
+        seed_db = SessionLocal()
+        try:
+            await asyncio.to_thread(seed_default_runbooks, seed_db)
+        finally:
+            seed_db.close()
+    except Exception:
+        logger.exception("Default alert runbook seeding failed (non-fatal)")
+
     global _snmp_poll_loop_task
     if settings.SNMP_INPROCESS_POLLING_ENABLED and _snmp_poll_loop_task is None:
         _snmp_poll_loop_task = asyncio.create_task(_snmp_inprocess_poll_loop())

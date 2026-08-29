@@ -615,28 +615,22 @@ def notify(
     emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨", "resolved": "🟢"}.get(severity, "ℹ️")
     text = f"{emoji} *NetGuard — {event}*\n{message}"
 
-    _post_webhook(settings.SLACK_WEBHOOK_URL, {"text": text})
-    _post_webhook(settings.TEAMS_WEBHOOK_URL, {"text": text})
-
     event_type = _resolve_event_type(event, severity)
-
-    if not _email_suppressed_by_tenant_digest(tenant_id, severity):
-        _send_email(event_type, event, message)
-
-    # Telegram (global env-var-based)
-    _post_telegram(event, message, severity)
-
     alert_id_str = str(alert_id) if alert_id else None
 
-    # User-configured webhooks (DB-based)
-    _fan_out_user_webhooks(event, message, severity, event_type, alert_id=alert_id_str, tenant_id=tenant_id)
-
-    # Mobile/browser push (ntfy, Pushover, Web Push)
-    _fan_out_push(event, message, severity, alert_id=alert_id_str)
-
-    # Remote syslog collectors (Splunk, Graylog, rsyslog, SIEM, ...)
-    _fan_out_syslog(event, message, severity)
-
+    # In-app Notification Center goes FIRST, before any outbound network
+    # call. This is a local DB insert + Redis pub/sub publish -- normally
+    # single-digit milliseconds -- so it used to be effectively free to
+    # put last. But every leg below it (Slack/Teams webhook POSTs, SMTP,
+    # Telegram, N user-configured webhooks, ntfy/Pushover/Web Push, remote
+    # syslog) is a blocking network call with its own timeout, and they
+    # ran sequentially before this ever fired. A slow/unreachable SMTP
+    # server or webhook endpoint could hold up the in-app bell -- the one
+    # channel that's supposed to be instant -- by several seconds per
+    # call. Doing this first means a user watching the Notification
+    # Center (or /notifications/ws) sees the alert the moment it's
+    # created, regardless of how long ntfy/webpush/webhook delivery below
+    # takes or whether any of them are even reachable right now.
     _persist_and_broadcast(
         event_type=event_type,
         # NotificationSeverity (the in-app model's DB enum) only has
@@ -647,7 +641,7 @@ def notify(
         # more interesting than routine info but not a warning) rather
         # than let the raw string hit the enum column and get this whole
         # in-app leg silently swallowed by the except below. Slack/
-        # Teams/ntfy/webhooks above already got the real "resolved"
+        # Teams/ntfy/webhooks below still get the real "resolved"
         # severity (green icon/tag), which is what actually matters for
         # "is this a recovery or a new problem" at a glance.
         severity="info" if severity == "resolved" else severity,
@@ -657,3 +651,24 @@ def notify(
         change_request_id=change_request_id,
         deployment_id=deployment_id,
     )
+
+    # Everything below is best-effort outbound delivery -- slower, and
+    # each already swallows its own errors/timeouts, so ordering among
+    # them doesn't matter the way going after the in-app leg did.
+    _post_webhook(settings.SLACK_WEBHOOK_URL, {"text": text})
+    _post_webhook(settings.TEAMS_WEBHOOK_URL, {"text": text})
+
+    if not _email_suppressed_by_tenant_digest(tenant_id, severity):
+        _send_email(event_type, event, message)
+
+    # Telegram (global env-var-based)
+    _post_telegram(event, message, severity)
+
+    # User-configured webhooks (DB-based)
+    _fan_out_user_webhooks(event, message, severity, event_type, alert_id=alert_id_str, tenant_id=tenant_id)
+
+    # Mobile/browser push (ntfy, Pushover, Web Push)
+    _fan_out_push(event, message, severity, alert_id=alert_id_str)
+
+    # Remote syslog collectors (Splunk, Graylog, rsyslog, SIEM, ...)
+    _fan_out_syslog(event, message, severity)

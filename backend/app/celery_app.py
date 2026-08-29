@@ -74,7 +74,42 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.snmp_poll_task": {"queue": "polling"},
         "app.tasks.reachability_task": {"queue": "polling"},
-        "app.tasks.run_network_discovery_scan_task": {"queue": "polling"},
+        # Network Discovery / IPAM scanning: split off the continuous
+        # "polling" queue into its own "discovery" queue, consumed by
+        # its own `discovery` service (see docker-compose.yaml). These
+        # are one-off/scheduled sweeps, not the steady stream of
+        # per-device snmp_poll_task/reachability_task work that
+        # "polling" exists to isolate -- sharing a queue with that
+        # constant traffic meant a one-off discovery scan could sit
+        # queued behind hundreds of recurring poll tasks on a busy
+        # fleet and never get picked up before its own stuck-scan
+        # timeout, which is exactly the "worker never picked it up"
+        # failure app.services.network_discovery_service.
+        # reconcile_stuck_scans was seeing in practice. Giving
+        # discovery scans a dedicated queue/worker means fleet polling
+        # volume can never starve them.
+        "app.tasks.run_network_discovery_scan_task": {"queue": "discovery"},
+        "app.tasks.run_discovery_schedule_sweep_task": {"queue": "discovery"},
+        "app.tasks.run_subnet_rescan_sweep_task": {"queue": "discovery"},
+        # Alert Notification Fan-Out: Slack/Teams/email/webhooks/push/
+        # in-app all hang off this one task (see
+        # app.services.alert_service._dispatch_notification's
+        # docstring for why it's a task at all rather than an inline
+        # call). Previously unrouted, so it landed on the shared
+        # "celery" queue behind whatever else was already running
+        # there -- a multi-minute weekly/monthly compliance report,
+        # uptime report, or change-request digest task could delay a
+        # P1's Slack ping and phone push by however long that report
+        # took to finish, exactly backwards for "immediate
+        # notification is core to this app". Escalation/JIT-expiry/
+        # approval-SLA reminders are the same "must reach a human
+        # fast" shape and get the same treatment. Routed to its own
+        # "notifications" queue/worker (see docker-compose.yaml) so
+        # none of them ever queue behind a slow report task again.
+        "app.tasks.dispatch_alert_notification_task": {"queue": "notifications"},
+        "app.tasks.run_escalation_sweep_task": {"queue": "notifications"},
+        "app.tasks.run_jit_expiry_notify_sweep_task": {"queue": "notifications"},
+        "app.tasks.run_approval_sla_notify_sweep_task": {"queue": "notifications"},
         # Deployment Pipeline (Approved -> Snapshot -> Deploy -> Health
         # Monitor -> Success | Rollback -> Notify), SRS 6.6/6.8. This is
         # every task actually dispatched by POST /change-requests/{id}/approve
@@ -103,35 +138,6 @@ celery_app.conf.update(
         # giving them their own queue keeps a firmware backlog from
         # delaying in-flight change requests.
         "app.tasks.run_firmware_upgrade_task": {"queue": "firmware"},
-        # Alert notification delivery: dispatch_alert_notification_task is
-        # what actually sends SMTP, remote syslog, Slack/Teams, DB
-        # webhooks, and ntfy/Pushover/Web Push for every alert -- the one
-        # task on the "how fast does a human find out" critical path.
-        # Left unrouted it shares the default `celery` queue (and its
-        # single-replica, concurrency=4 `worker`) with every beat sweep
-        # above: drift, anomaly, reachability, compliance/uptime reports,
-        # tenant digests, snapshot retention, recurring-window generation,
-        # IPAM rescans, discovery sweeps, GitOps sync. In a real outage --
-        # a core switch dropping and fanning out dozens of downstream
-        # device-down alerts in the same tick a scheduled sweep also
-        # landed -- those queue behind each other, and "notify the NOC
-        # immediately" stops being true exactly when it matters most.
-        # Giving it (and the two other genuinely alert-adjacent sweeps
-        # below) their own queue, consumed only by the dedicated
-        # `notifier` worker (see docker-compose.yaml), means a busy
-        # reporting/sweep queue can never delay a live alert notification.
-        "app.tasks.dispatch_alert_notification_task": {"queue": "notify"},
-        # Escalation sweep pages secondary/on-call contacts for anything
-        # past its unack_minutes threshold -- exactly the kind of "someone
-        # needs to know right now" work that shouldn't be stuck behind a
-        # weekly compliance report on the shared queue.
-        "app.tasks.run_escalation_sweep_task": {"queue": "notify"},
-        # IPAM conflict alerts and JIT expiry notices also call
-        # notification_service.notify() directly for time-sensitive
-        # conditions (duplicate IP in use, an access grant about to
-        # lapse) -- same reasoning as above.
-        "app.tasks.run_ipam_conflict_alert_sweep_task": {"queue": "notify"},
-        "app.tasks.run_jit_expiry_notify_sweep_task": {"queue": "notify"},
     },
     beat_schedule={
         # Nightly configuration drift sweep (SRS: automated drift detection).

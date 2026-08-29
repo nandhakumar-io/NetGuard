@@ -97,6 +97,7 @@ from app.models.path_trace import (  # noqa: F401
     PathTrace,
     PathTraceStatus,
 )
+from app.models.physical_location import PhysicalLocation  # noqa: F401
 from app.models.protocol_operation import ProtocolName, ProtocolOperation  # noqa: F401
 from app.models.push_subscription import (  # noqa: F401
     PushDeliveryAttempt,

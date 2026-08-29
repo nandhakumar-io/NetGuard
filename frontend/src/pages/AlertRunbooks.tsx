@@ -462,7 +462,9 @@ export default function AlertRunbooks() {
               Run remediation: {runTarget.remediation_label || runTarget.title}
             </h2>
             <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 font-mono whitespace-pre-wrap">
-              {runTarget.remediation_command}
+              {runTarget.remediation_command?.startsWith("__config_intent__:")
+                ? `Vendor-specific command — auto-resolved for the target device's vendor at run time (${runTarget.remediation_command.slice("__config_intent__:".length).replace(/_/g, " ")}).`
+                : runTarget.remediation_command}
             </p>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Target device</label>

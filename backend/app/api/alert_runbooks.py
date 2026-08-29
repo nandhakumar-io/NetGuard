@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, require_pin_step_up, require_roles
 from app.models.alert_runbook import AlertRunbook, RemediationActionType
 from app.models.device import Device
 from app.models.user import User, UserRole
@@ -146,6 +146,11 @@ def execute_runbook_remediation(
     # runbook_execution_service adds an optional second, stricter role
     # check on top via AlertRunbook.remediation_required_role.
     user: User = Depends(require_roles(UserRole.NETWORK_ADMIN)),
+    # A runbook remediation pushes a live command/config to a device --
+    # same blast radius as config rollback / device delete, so it gets
+    # the same opt-in step-up check (no-op for users who haven't set/
+    # required a PIN). See app.core.deps.require_pin_step_up.
+    _pin: User = Depends(require_pin_step_up),
 ):
     mapping = db.get(AlertRunbook, runbook_id)
     if not mapping:

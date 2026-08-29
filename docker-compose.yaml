@@ -1,918 +1,97 @@
 services:
-
-  # ============================================================
-  # DATABASE
-  # ============================================================
-
   db:
     image: postgres:16-alpine
     restart: unless-stopped
-
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-netguard}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netguard}
       POSTGRES_DB: ${POSTGRES_DB:-netguard}
-
+    ports:
+      - "5432:5432"
     volumes:
       - netguard_pgdata:/var/lib/postgresql/data
-
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-netguard} -d ${POSTGRES_DB:-netguard}"
-        ]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netguard}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # PGBOUNCER
-  # ============================================================
-
-  pgbouncer:
-    image: edoburu/pgbouncer:v1.25.2-p0
-    restart: unless-stopped
-
-    environment:
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_USER: ${POSTGRES_USER:-netguard}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-netguard}
-      DB_NAME: ${POSTGRES_DB:-netguard}
-
-      POOL_MODE: transaction
-      MAX_CLIENT_CONN: "500"
-      DEFAULT_POOL_SIZE: "25"
-
-      AUTH_TYPE: scram-sha-256
-      LISTEN_PORT: "6432"
-
-    depends_on:
-      db:
-        condition: service_healthy
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # REDIS
-  # ============================================================
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # NATS
-  # ============================================================
-
-  nats:
-    image: nats:2.10-alpine
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
     restart: unless-stopped
-
-    command:
-      - "-js"
-      - "-sd"
-      - "/data"
-      - "-m"
-      - "8222"
-
-    volumes:
-      - netguard_natsdata:/data
-
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "-qO-",
-          "http://localhost:8222/healthz"
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # VICTORIA METRICS
-  # ============================================================
-
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.102.0
-    restart: unless-stopped
-
-    command:
-      - "--storageDataPath=/storage"
-      - "--retentionPeriod=90d"
-      - "--httpListenAddr=:8428"
-
-    volumes:
-      - netguard_vmdata:/storage
-
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "-qO-",
-          "http://127.0.0.1:8428/health"
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # GRAFANA
-  # ============================================================
-
-  grafana:
-    image: grafana/grafana:11.1.0
-    restart: unless-stopped
-
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-
-    volumes:
-      - netguard_grafanadata:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-
-    depends_on:
-      victoriametrics:
-        condition: service_healthy
-
-    networks:
-      - proxy
-      - netguard-internal
-
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-
-      - "traefik.http.routers.netguard-grafana.rule=Host(`netguard.notoriousdev.in`) && PathPrefix(`/grafana`)"
-      - "traefik.http.routers.netguard-grafana.priority=10"
-      - "traefik.http.services.netguard-grafana.loadbalancer.server.port=3000"
-
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\"ok\"'"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-
-  # ============================================================
-  # DATABASE MIGRATIONS
-  # ============================================================
-
-  migrate:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-
     env_file:
-      - .env
-
+      - ../.env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
-
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
-
-    command:
-      [
-        "alembic",
-        "upgrade",
-        "head"
-      ]
-
-    restart: "no"
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # API
-  # ============================================================
-
-  api:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-
-      NATS_URL: nats://nats:4222
-
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-      AUTO_MIGRATE_ON_STARTUP: "false"
-
-      SNMP_INPROCESS_POLLING_ENABLED: "false"
-      SYSLOG_LISTENER_ENABLED: "false"
-      NETFLOW_LISTENER_ENABLED: "false"
-      SFLOW_LISTENER_ENABLED: "false"
-      TOPOLOGY_SNAPSHOT_ENABLED: "false"
-
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
     volumes:
-      # BACKUP_STORAGE_DIR and TERMINAL_RECORDING_DIR both default to
-      # ./data/... under the image's /app workdir, which -- unlike the dev
-      # compose file -- has nothing backing it here at all: no bind mount,
-      # no named volume. Every container recreation (redeploy, restart
-      # policy kicking in after a crash, `docker compose up -d` picking up
-      # a new BACKEND_TAG) wipes it, while the BackupJob/
-      # TerminalSessionRecording rows survive in Postgres. That's exactly
-      # what produced the two "server likely restarted mid-run" failed
-      # backups and the empty-terminal/failed-download symptoms: the DB
-      # says completed, the file is gone. All 3 `api` replicas share the
-      # same local-driver named volume on this host, so a download served
-      # by replica B works fine for a file replica A wrote.
-      - netguard_backups:/app/data/backups
-      - netguard_recordings:/app/data/terminal-recordings
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${API_REPLICAS:-3}
-
-    networks:
-      - proxy
-      - netguard-internal
-
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-      - "traefik.http.routers.netguard-api.rule=Host(`netguard-api.notoriousdev.in`)"
-      - "traefik.http.services.netguard-api.loadbalancer.server.port=8000"
-
-
-  # ============================================================
-  # TOPOLOGY COLLECTOR
-  # ============================================================
-
-  collector:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-      AUTO_MIGRATE_ON_STARTUP: "false"
-
-      SNMP_INPROCESS_POLLING_ENABLED: "false"
-      SYSLOG_LISTENER_ENABLED: "false"
-      NETFLOW_LISTENER_ENABLED: "false"
-      SFLOW_LISTENER_ENABLED: "false"
-
-      TOPOLOGY_SNAPSHOT_ENABLED: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: 1
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # SYSLOG COLLECTOR
-  # ============================================================
-
-  syslog-collector:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    command:
-      [
-        "uvicorn",
-        "app.collectors.syslog_collector:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-    deploy:
-      replicas: 1
-
-    ports:
-      - "1514:1514/udp"
-
-    networks:
-      - netguard-internal
-
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python3",
-          "-c",
-          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-
-  # ============================================================
-  # FLOW COLLECTOR
-  # ============================================================
-
-  flow-collector:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    command:
-      [
-        "uvicorn",
-        "app.collectors.flow_collector:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-    deploy:
-      replicas: 1
-
-    ports:
-      - "2055:2055/udp"
-      - "6343:6343/udp"
-
-    networks:
-      - netguard-internal
-
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python3",
-          "-c",
-          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-
-  # ============================================================
-  # CELERY BEAT
-  # ============================================================
-
-  beat:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "beat",
-        "-S",
-        "redbeat.RedBeatScheduler",
-        "--loglevel=info"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${BEAT_REPLICAS:-2}
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY POLLER
-  # ============================================================
-
-  poller:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "polling",
-        "--loglevel=info",
-        "--concurrency=8",
-        "--hostname=poller@%h"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${POLLER_REPLICAS:-1}
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY DEPLOYER
-  # ============================================================
-
-  deployer:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "deploy",
-        "--loglevel=info",
-        "--concurrency=4",
-        "--hostname=deployer@%h"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${DEPLOYER_REPLICAS:-2}
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY FIRMWARE
-  # ============================================================
-
-  firmware:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "firmware",
-        "--loglevel=info",
-        "--concurrency=2",
-        "--hostname=firmware@%h"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${FIRMWARE_REPLICAS:-1}
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # DEFAULT CELERY WORKER
-  # ============================================================
+      - ../backend:/app
 
   worker:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
     restart: unless-stopped
-
-    command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "celery",
-        "--loglevel=info",
-        "--concurrency=4",
-        "--hostname=worker@%h"
-      ]
-
+    # Single all-in-one worker for local/dev use -- the production
+    # docker-compose.yaml at the repo root splits this into dedicated
+    # `poller`/`deployer`/`firmware`/`discovery`/`notifications`/`worker`
+    # services, each consuming its own queue (see that file and
+    # app/celery_app.py's task_routes) so heavy traffic on one never
+    # delays another. Here, one worker explicitly consumes every queue
+    # (including the default "celery" queue, via the bare `-Q celery`)
+    # so nothing enqueued in dev silently sits unconsumed. `--concurrency`
+    # controls how many tasks run in parallel per worker process (SRS
+    # 6.6); scale by running multiple `worker` replicas for more.
+    command: celery -A app.celery_app.celery_app worker -Q celery,polling,deploy,firmware,discovery,notifications --loglevel=info --concurrency=4
     env_file:
-      - .env
-
+      - ../.env
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@db:5432/${POSTGRES_DB:-netguard}
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
     depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
+      db:
+        condition: service_healthy
       redis:
         condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${WORKER_REPLICAS:-1}
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY NOTIFIER (dedicated queue for live alert delivery)
-  # ============================================================
-
-  notifier:
-    image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-    restart: unless-stopped
-
-    # Consumes ONLY the `notify` queue -- dispatch_alert_notification_task
-    # (SMTP/syslog/Slack/Teams/webhooks/push for every alert),
-    # run_escalation_sweep_task, run_ipam_conflict_alert_sweep_task, and
-    # run_jit_expiry_notify_sweep_task (see app/celery_app.py's
-    # task_routes). Split out from the general `worker` so a backlog on
-    # the shared `celery` queue (drift sweep, compliance/uptime reports,
-    # tenant digests, snapshot retention, IPAM rescans, discovery sweeps,
-    # GitOps sync) can never delay live alert notifications -- this is
-    # the "no delay between alert and notification" path for a production
-    # NOC. Concurrency is deliberately higher than the general worker:
-    # each unit of work here is a handful of short blocking network calls
-    # (SMTP, syslog socket, webhook POSTs, push sends), not CPU-bound, and
-    # a real outage can fan out dozens of these at once.
-    command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "notify",
-        "--loglevel=info",
-        "--concurrency=16",
-        "--hostname=notifier@%h"
-      ]
-
-    env_file:
-      - .env
-
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD:-netguard}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
-      REDIS_URL: redis://redis:6379/0
-
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
-
-      NATS_URL: nats://nats:4222
-      VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-      pgbouncer:
-        condition: service_started
-
-      redis:
-        condition: service_healthy
-
-      nats:
-        condition: service_healthy
-
-      victoriametrics:
-        condition: service_healthy
-
-    deploy:
-      replicas: ${NOTIFIER_REPLICAS:-2}
-
-    networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # FRONTEND
-  # ============================================================
+    volumes:
+      - ../backend:/app
 
   frontend:
-    image: ghcr.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
     restart: unless-stopped
-
     environment:
-      VITE_API_BASE_URL: https://netguard-api.notoriousdev.in/api/v1
-
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
     depends_on:
-      - api
-
-    networks:
-      - proxy
-
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-      - "traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)"
-      - "traefik.http.routers.netguard-frontend.priority=1"
-      - "traefik.http.services.netguard-frontend.loadbalancer.server.port=6001"
-
-
-# ================================================================
-# VOLUMES
-# ================================================================
+      - backend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
 
 volumes:
   netguard_pgdata:
-  netguard_natsdata:
-  netguard_vmdata:
-  netguard_grafanadata:
-  netguard_backups:
-  netguard_recordings:
-
-
-# ================================================================
-# NETWORKS
-# ================================================================
-
-networks:
-
-  # Shared with Traefik and cloudflared.
-  #
-  # Traefik:
-  #   cloudflared -> traefik:80
-  #
-  # NetGuard:
-  #   traefik -> frontend
-  #   traefik -> api
-  #   traefik -> grafana
-  #
-  proxy:
-    external: true
-
-  # Private application network.
-  #
-  # PostgreSQL
-  # PgBouncer
-  # Redis
-  # NATS
-  # VictoriaMetrics
-  # API
-  # Workers
-  # Collectors
-  #
-  # are isolated here from the public/proxy network.
-  netguard-internal:
-    driver: bridge
