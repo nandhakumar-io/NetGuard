@@ -2789,27 +2789,49 @@ export default function Devices() {
   const coreRoles = ["core", "distribution", "firewall", "router"];
   // Quick-access shortlist so an admin doesn't have to scan/scroll the
   // whole fleet table to find the handful of devices that actually
-  // matter most right now -- same "core/distribution/firewall/router
-  // role or flagged uplink" signal the delete-danger heuristic below
-  // already uses (kept as a substring match here since device_role is
-  // free text like "Core Switch", not a fixed enum), unioned with
-  // anything currently unhealthy (red health or open critical alerts)
-  // since an admin also needs fast access to whatever's actively
-  // broken, core or not. Sorted worst-first so the most urgent thing is
-  // always the first card.
+  // matter most right now. Membership is manual only (is_pinned_critical,
+  // via the "Pin a device" picker below) -- it used to also auto-include
+  // anything currently unhealthy, which meant the list wasn't really "the
+  // devices you picked" anymore on a bad day. Sorted worst-first among
+  // the picks so the most urgent pinned device is always first.
   const coreAndCriticalDevices = useMemo(() => {
-    const isCore = (d: Device) =>
-      !!d.is_uplink || coreRoles.some((r) => (d.device_role || "").toLowerCase().includes(r));
-    const isCritical = (d: Device) => d.health_color === "red" || (d.critical_alert_count || 0) > 0;
+    // Purely the admin's own picks -- NOT auto-populated from role or
+    // health. Auto-including every red/alerting device here defeated the
+    // point of a hand-picked shortlist (it just became "most of the
+    // fleet" on a bad day). Unhealthy pinned devices still sort to the
+    // top so the shortlist surfaces what's on fire among what you
+    // actually chose to watch.
+    const isUnhealthy = (d: Device) => d.health_color === "red" || (d.critical_alert_count || 0) > 0;
     return devices
-      .filter((d) => isCore(d) || isCritical(d))
+      .filter((d) => d.is_pinned_critical)
       .sort((a, b) => {
-        const score = (d: Device) => (isCritical(d) ? 0 : 1) - (d.status === "offline" ? 1 : 0);
+        const score = (d: Device) => (isUnhealthy(d) ? 0 : 1) - (d.status === "offline" ? 1 : 0);
         const diff = score(a) - score(b);
         if (diff !== 0) return diff;
         return (a.hostname || "").localeCompare(b.hostname || "");
       });
   }, [devices]);
+
+  // Picker for adding a device to the pinned shortlist -- every device
+  // not already pinned, sorted for a usable dropdown on a large fleet.
+  const [pinPickerId, setPinPickerId] = useState<string>("");
+  const [pinning, setPinning] = useState(false);
+  const pinnableDevices = useMemo(
+    () => devices.filter((d) => !d.is_pinned_critical).sort((a, b) => a.hostname.localeCompare(b.hostname)),
+    [devices]
+  );
+  const togglePinned = async (device: Device) => {
+    setPinning(true);
+    try {
+      const res = await api.patch<Device>(`/devices/${device.id}`, { is_pinned_critical: !device.is_pinned_critical });
+      setDevices((prev) => prev.map((d) => (d.id === device.id ? res.data : d)));
+      if (pinPickerId === device.id) setPinPickerId("");
+    } catch {
+      setError("Failed to update the Core & Critical shortlist.");
+    } finally {
+      setPinning(false);
+    }
+  };
 
   const classificationCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -3156,6 +3178,24 @@ export default function Devices() {
             />
           </div>
 
+          {form.device_type === "ap" && (
+            <div className="mt-3 flex items-start gap-2 bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800 rounded-lg px-3 py-2.5 text-xs text-sky-700 dark:text-sky-300">
+              <span className="text-base leading-none">📶</span>
+              <span>
+                This form only sets inventory basics (hostname, IP, site/rack) for an AP tracked as a Device.
+                SSID, channel, client counts and WLC polling live on the dedicated{" "}
+                <button
+                  type="button"
+                  onClick={() => { setClassificationView("ap"); setApSubView("wireless"); }}
+                  className="font-semibold underline underline-offset-2 hover:text-sky-900 dark:hover:text-sky-100"
+                >
+                  Wireless AP panel
+                </button>{" "}
+                — the SSH/SNMP/NETCONF/RESTCONF fields below are for switches/routers and can be left off for most APs.
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
             <input
               className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
@@ -3350,73 +3390,6 @@ export default function Devices() {
         </p>
       )}
 
-      {/* Core & critical devices -- quick access to the handful of boxes
-          an admin actually needs to jump to fast (core/distribution/
-          firewall/router role, flagged uplinks, or anything currently
-          red/critical), instead of hunting for them in a fleet table
-          sorted alphabetically with no priority signal. Clicking a card
-          filters the table below straight to that hostname; the
-          Terminal button skips the filter and opens a session directly.
-          Hidden during a classification drill-down (redundant with that
-          focused view) and when there's nothing worth calling out. */}
-      {!classificationView && coreAndCriticalDevices.length > 0 && (
-        <div>
-          <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2">
-            Core &amp; Critical Devices
-          </p>
-          <div className="flex gap-3 overflow-x-auto pb-1">
-            {coreAndCriticalDevices.map((d) => {
-              const isCritical = d.health_color === "red" || (d.critical_alert_count || 0) > 0;
-              return (
-                <button
-                  key={d.id}
-                  type="button"
-                  onClick={() => setQuery(d.hostname)}
-                  className={`group shrink-0 flex items-center gap-3 rounded-xl border p-3 pr-4 text-left bg-white dark:bg-slate-800 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md min-w-[220px] ${
-                    isCritical
-                      ? "border-red-200 dark:border-red-800"
-                      : "border-slate-200 dark:border-slate-700"
-                  }`}
-                >
-                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusColor[d.status]} ${isCritical ? "animate-pulse" : ""}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-sm text-navy dark:text-white truncate">{d.hostname}</span>
-                      {d.is_uplink && (
-                        <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-full">
-                          Uplink
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
-                      {d.device_role || DEVICE_TYPE_STYLES[(d.device_type || "").toLowerCase()]?.label || d.ip_address}
-                    </p>
-                  </div>
-                  {(d.critical_alert_count || 0) > 0 && (
-                    <span className="shrink-0 text-[11px] font-bold text-riskcrit bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 rounded-full">
-                      {d.critical_alert_count}
-                    </span>
-                  )}
-                  {canManage && (
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openTerminal(d.id, d.hostname);
-                      }}
-                      title="Open terminal"
-                      className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-navy dark:hover:text-white text-sm"
-                    >
-                      ⌨
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Classification blocks -- one per DEVICE_TYPE_OPTIONS bucket
           (Router/Switch/AP/NVR/Firewall/Server/Other/Unclassified) with a
@@ -3671,6 +3644,116 @@ export default function Devices() {
       )}
       {fleetHealthLoading && !fleetHealth && (
         <p className="text-xs text-slate-400">Loading fleet health…</p>
+      )}
+
+      {/* Core & Critical Devices -- an explicitly curated shortlist
+          (Device.is_pinned_critical), not a role-keyword/uplink guess:
+          on a small fleet where most devices happen to be flagged
+          uplink or briefly degraded, that heuristic just became "every
+          device", which defeated the point of a shortlist. Pin/unpin
+          right from this row view -- anything currently red/critical
+          still surfaces here too even if unpinned, since an admin
+          needs fast access to whatever's actively broken regardless of
+          curation. Row view (not cards) so Terminal/Edit/Remove are the
+          same actions as the main table below, not a separate UI. */}
+      {!classificationView && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+              My Critical Devices
+            </p>
+            {canManage && (
+              <div className="flex items-center gap-2">
+                <select
+                  value={pinPickerId}
+                  onChange={(e) => setPinPickerId(e.target.value)}
+                  className="border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-1 text-xs bg-white dark:bg-slate-900 focus:ring-2 focus:ring-brandblue outline-none max-w-[220px]"
+                >
+                  <option value="">Pin a device…</option>
+                  {pinnableDevices.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.hostname} — {d.ip_address}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={!pinPickerId || pinning}
+                  onClick={() => {
+                    const device = devices.find((d) => d.id === pinPickerId);
+                    if (device) togglePinned(device);
+                  }}
+                  className="bg-brandblue hover:bg-navy text-white text-xs font-semibold px-2.5 py-1 rounded-lg shadow-sm disabled:opacity-50"
+                >
+                  + Pin
+                </button>
+              </div>
+            )}
+          </div>
+
+          {coreAndCriticalDevices.length === 0 ? (
+            <p className="text-xs text-slate-400 dark:text-slate-500 italic bg-white dark:bg-slate-800 border border-dashed border-slate-200 dark:border-slate-700 rounded-lg px-4 py-3">
+              Nothing pinned yet — use "Pin a device" above to choose the devices you consider most critical.
+            </p>
+          ) : (
+            <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl divide-y divide-slate-100 dark:divide-slate-700 overflow-hidden">
+              {coreAndCriticalDevices.map((d) => {
+                const isCritical = d.health_color === "red" || (d.critical_alert_count || 0) > 0; // for the pulse/badge only, not for inclusion
+                return (
+                  <div key={d.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-700/40">
+                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusColor[d.status]} ${isCritical ? "animate-pulse" : ""}`} />
+                    <button
+                      type="button"
+                      onClick={() => setQuery(d.hostname)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span className="font-bold text-sm text-navy dark:text-white truncate mr-2">{d.hostname}</span>
+                      <span className="text-xs text-slate-400 dark:text-slate-500 font-mono">{d.ip_address}</span>
+                      {d.is_uplink && (
+                        <span className="ml-2 text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-full">
+                          Uplink
+                        </span>
+                      )}
+                    </button>
+                    <span className="hidden sm:inline text-xs text-slate-400 dark:text-slate-500 truncate">
+                      {d.device_role || DEVICE_TYPE_STYLES[(d.device_type || "").toLowerCase()]?.label || ""}
+                    </span>
+                    {(d.critical_alert_count || 0) > 0 && (
+                      <span className="shrink-0 text-[11px] font-bold text-riskcrit bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 rounded-full">
+                        {d.critical_alert_count}
+                      </span>
+                    )}
+                    {canManage && (
+                      <>
+                        <button
+                          onClick={() => openTerminal(d.id, d.hostname)}
+                          title="Open terminal"
+                          className="text-[11px] uppercase tracking-wider text-white bg-navy dark:bg-slate-950 px-2 py-1 rounded shadow-sm hover:opacity-90 font-bold shrink-0"
+                        >
+                          Terminal
+                        </button>
+                        <button
+                          onClick={() => startEdit(d)}
+                          className="text-[11px] uppercase tracking-wider text-brandblue border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded shadow-sm hover:bg-blue-100 font-bold shrink-0"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => togglePinned(d)}
+                          disabled={pinning}
+                          title={d.is_pinned_critical ? "Unpin from this shortlist" : "Pin to this shortlist"}
+                          className="text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-600 px-2 py-1 rounded shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 font-bold shrink-0 disabled:opacity-50"
+                        >
+                          {d.is_pinned_critical ? "Unpin" : "Pin"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {bulkNotice && (

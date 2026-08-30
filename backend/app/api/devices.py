@@ -1543,6 +1543,49 @@ def test_and_fix_connection(
     )
 
 
+@router.post("/discover-topology-all")
+def discover_topology_all(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Kicks off app.tasks.run_bulk_topology_discovery_task -- runs LLDP/CDP
+    discovery across every SNMP-configured device in the fleet, so the
+    Topology page's confirmed (real, non-guessed) links get populated in
+    one click instead of opening each device's Discovery tab individually.
+    Returns the Celery task id; poll GET /devices/discover-topology-all/{task_id}
+    for progress/result.
+    """
+    from app.tasks import run_bulk_topology_discovery_task
+
+    snmp_device_count = (
+        db.query(Device)
+        .filter(Device.supports_snmp.is_(True), Device.snmp_version.isnot(None))
+        .count()
+    )
+    if snmp_device_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No devices have SNMP configured yet -- LLDP/CDP discovery needs SNMP to read neighbor tables. Set up SNMP credentials on at least one device first.",
+        )
+    async_result = run_bulk_topology_discovery_task.delay()
+    return {"task_id": async_result.id, "snmp_device_count": snmp_device_count}
+
+
+@router.get("/discover-topology-all/{task_id}")
+def discover_topology_all_status(task_id: str, _: User = Depends(get_current_user)):
+    """Polls the Celery task started by POST /discover-topology-all."""
+    from app.tasks import celery_app
+
+    async_result = celery_app.AsyncResult(task_id)
+    if async_result.state == "PENDING":
+        return {"state": "pending"}
+    if async_result.state == "SUCCESS":
+        return {"state": "success", "result": async_result.result}
+    if async_result.state == "FAILURE":
+        return {"state": "failure", "error": str(async_result.result)}
+    return {"state": async_result.state.lower()}
+
+
 @router.get("/{device_id}/discovery", response_model=DeviceDiscoveryResult)
 def discover_device(
     device_id: uuid.UUID,

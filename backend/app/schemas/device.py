@@ -37,6 +37,9 @@ class DeviceBase(BaseModel):
     # uplink without needing to know (or fit into) the role-keyword
     # convention the dashboard widget used to rely on exclusively.
     is_uplink: bool = False
+    # Explicit "on the Core & Critical Devices shortlist" pin -- see
+    # Device.is_pinned_critical's docstring.
+    is_pinned_critical: bool = False
     # Physical placement (Groups page: Data Center -> Rack -> device).
     # Free-text on purpose -- see Device.data_center/rack in
     # app/models/device.py. rack_position is a cosmetic 1-based U slot,
@@ -113,6 +116,7 @@ class DeviceUpdate(BaseModel):
     device_type: str | None = None
     device_role: str | None = None
     is_uplink: bool | None = None
+    is_pinned_critical: bool | None = None
     data_center: str | None = None
     rack: str | None = None
     rack_position: int | None = None

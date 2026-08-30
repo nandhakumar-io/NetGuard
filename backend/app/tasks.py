@@ -1070,6 +1070,63 @@ def run_network_discovery_scan_task(self, scan_id: str, community: str | None = 
         db.close()
 
 
+@celery_app.task(name="app.tasks.run_bulk_topology_discovery_task")
+def run_bulk_topology_discovery_task() -> dict:
+    """Entry point for POST /devices/discover-topology-all (the Topology
+    page's "Run discovery on all devices" button). Runs the same LLDP/CDP
+    SNMP discovery + neighbor-persist as GET /devices/{id}/discovery, but
+    across every SNMP-configured device in the fleet in one shot, so
+    real confirmed links (topology_service.build_topology's LLDP/CDP edge
+    source) get populated without clicking into each device's Discovery
+    tab individually. Runs off the request thread since a full-fleet
+    sweep can take a while. Best-effort per device: one device's SNMP
+    timeout/credential problem is logged and skipped, not fatal to the
+    rest of the sweep.
+    """
+    from app.api.devices import _persist_discovered_neighbors
+    from app.core.config import settings
+    from app.services import credential_service, metrics_service, snmp_service
+
+    db = SessionLocal()
+    try:
+        devices = (
+            db.query(Device)
+            .filter(Device.supports_snmp.is_(True), Device.snmp_version.isnot(None))
+            .all()
+        )
+        succeeded = 0
+        failed = 0
+        skipped_no_creds = 0
+        for device in devices:
+            try:
+                auth = metrics_service.build_snmp_auth(device)
+            except credential_service.CredentialNotFoundError:
+                skipped_no_creds += 1
+                continue
+            try:
+                result = snmp_service.discover_inventory(
+                    device.ip_address,
+                    auth,
+                    timeout=settings.SNMP_TIMEOUT_SECONDS,
+                    vendor=device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor),
+                )
+                _persist_discovered_neighbors(db, device.id, result)
+                db.commit()
+                succeeded += 1
+            except Exception:
+                db.rollback()
+                failed += 1
+                logger.exception("Bulk topology discovery failed for device %s", device.hostname)
+        return {
+            "total_snmp_devices": len(devices),
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped_no_credentials": skipped_no_creds,
+        }
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.run_discovery_schedule_sweep_task")
 def run_discovery_schedule_sweep_task() -> dict:
     """Celery beat entry point (see celery_app "discovery-schedule-sweep"):

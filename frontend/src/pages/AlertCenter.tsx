@@ -87,13 +87,18 @@ export default function AlertCenter() {
   // token is itself short-lived and re-checked server-side every call),
   // so triaging several alerts in a row doesn't re-prompt for every one.
   const [pinToken, setPinToken] = useState<string | null>(null);
-  const [pinPending, setPinPending] = useState<{ alert: Alert; runbook: AlertRunbook } | null>(null);
+  // Menu entries and alert.runbook come from two different shapes (full
+  // AlertRunbook catalog rows vs the lightweight RunbookRef embedded on
+  // an Alert) -- this only ever needs id/title/remediation_label, so it
+  // takes either rather than forcing a cast at every call site.
+  type RunbookLike = { id: string; title: string; remediation_label?: string | null };
+  const [pinPending, setPinPending] = useState<{ alert: Alert; runbook: RunbookLike } | null>(null);
   const [pinInput, setPinInput] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
 
-  const runRunbookRemediation = async (alert: Alert, runbook?: AlertRunbook, providedPinToken?: string) => {
-    const rb = runbook || alert.runbook;
+  const runRunbookRemediation = async (alert: Alert, runbook?: RunbookLike, providedPinToken?: string) => {
+    const rb = runbook || (alert.runbook as RunbookLike | null | undefined);
     if (!rb || !alert.device_id) return;
     if (user?.pin_required && !(providedPinToken || pinToken)) {
       // Don't ask "run it?" before the PIN step-up -- confirming twice
@@ -361,7 +366,7 @@ export default function AlertCenter() {
   const handleEscalate = (id: string) => {
     api.patch(`/alerts/${id}/escalate`)
       .then(() => { toast.success("Alert escalated"); fetchAlerts(); fetchSummary(); })
-      .catch((err) => toast.error(errorMessage(err)));
+      .catch((err) => toast.error(errorMessage(err, "Failed to escalate alert")));
   };
 
   const handleResolve = (id: string) => {

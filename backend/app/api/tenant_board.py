@@ -125,6 +125,14 @@ def get_tenant_board(
     # built from.
     incident_rows = (
         db.query(Device.tenant_id, func.count(Incident.id))
+        # Explicit select_from(Incident) is required here: with columns
+        # pulled from both Device and Incident, SQLAlchemy otherwise
+        # guesses Device as the FROM table (from the first column) and
+        # then chokes joining Device to itself when it hits
+        # `.join(Device, ...)` below -- this was throwing a 500 on every
+        # request (surfaced to the user as "Network Error" since the
+        # unhandled exception's response has no CORS headers).
+        .select_from(Incident)
         .join(Alert, Alert.id == Incident.root_cause_alert_id)
         .join(Device, Device.id == Alert.device_id)
         .filter(Incident.status != IncidentStatus.CLOSED)

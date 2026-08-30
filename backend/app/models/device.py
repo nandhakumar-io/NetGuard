@@ -124,6 +124,20 @@ class Device(Base):
     # uplink interface drops at a higher severity than an ordinary
     # access-port flap.
     is_uplink = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Explicit "show this on the Core & Critical Devices shortlist"
+    # flag -- that shortlist used to be entirely heuristic (is_uplink OR
+    # device_role containing a core-ish keyword OR currently unhealthy),
+    # which meant an operator had no way to actually curate it: on a
+    # small fleet where most devices happen to be flagged uplink or are
+    # briefly degraded, the "shortlist" was just the whole inventory.
+    # This lets someone explicitly pin the handful of devices they
+    # personally consider most critical, independent of role text or
+    # momentary health. The shortlist still ALSO includes unhealthy
+    # devices even when unpinned (see Devices.tsx coreAndCriticalDevices)
+    # -- pinning controls the *default*/at-rest membership, not whether
+    # something actively broken can surface.
+    is_pinned_critical = Column(Boolean, nullable=False, default=False, server_default="false")
     status = Column(Enum(DeviceStatus), nullable=False, default=DeviceStatus.UNKNOWN)
 
     # Lifecycle state (staging -> production -> decommissioned), separate

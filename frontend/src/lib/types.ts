@@ -42,6 +42,9 @@ export interface Device {
   // Independent of device_role; drives the Dashboard's "Uplinks & WAN
   // Links" widget and elevates link-down / topology-change alerts.
   is_uplink?: boolean;
+  // Explicit "on the Core & Critical Devices shortlist" pin -- see
+  // backend Device.is_pinned_critical docstring.
+  is_pinned_critical?: boolean;
   lifecycle_state?: DeviceLifecycleState;
   tags?: string[];
   custom_fields?: Record<string, string>;

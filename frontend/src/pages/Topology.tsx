@@ -350,6 +350,58 @@ export default function Topology() {
   const [pathTraceError, setPathTraceError] = useState<string | null>(null);
   const [pathTraceResult, setPathTraceResult] = useState<{ hops: { device_id: string | null; hostname: string | null; ip_address: string | null; status: string }[]; reached_target: boolean; hop_source: string } | null>(null);
 
+  // "Run discovery on all devices" -- see backend POST /devices/discover-topology-all.
+  // Real (LLDP/CDP-confirmed) links only ever appear here after discovery has
+  // been run on the devices involved; a fleet with no discovery runs yet
+  // and no matching interface subnets will legitimately show nodes with no
+  // lines between them, which reads as "topology is broken" rather than
+  // "nothing's been discovered yet". This surfaces that distinction and
+  // fixes it in one click instead of requiring a visit to every device's
+  // Discovery tab.
+  const [bulkDiscoveryState, setBulkDiscoveryState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [bulkDiscoveryMessage, setBulkDiscoveryMessage] = useState<string | null>(null);
+
+  const runBulkDiscovery = () => {
+    setBulkDiscoveryState("running");
+    setBulkDiscoveryMessage(null);
+    api
+      .post<{ task_id: string; snmp_device_count: number }>("/devices/discover-topology-all")
+      .then((res) => {
+        const { task_id, snmp_device_count } = res.data;
+        setBulkDiscoveryMessage(`Discovering neighbors on ${snmp_device_count} SNMP device(s)…`);
+        const poll = () => {
+          api
+            .get<{ state: string; result?: any; error?: string }>(`/devices/discover-topology-all/${task_id}`)
+            .then((statusRes) => {
+              const { state, result, error: taskError } = statusRes.data;
+              if (state === "success") {
+                setBulkDiscoveryState("done");
+                setBulkDiscoveryMessage(
+                  `Discovery complete: ${result?.succeeded ?? 0} device(s) succeeded, ${result?.failed ?? 0} failed` +
+                    (result?.skipped_no_credentials ? `, ${result.skipped_no_credentials} skipped (no SNMP credentials)` : "") +
+                    ". Refreshing…"
+                );
+                loadGraph();
+              } else if (state === "failure") {
+                setBulkDiscoveryState("error");
+                setBulkDiscoveryMessage(taskError || "Bulk discovery failed.");
+              } else {
+                setTimeout(poll, 2000);
+              }
+            })
+            .catch(() => {
+              setBulkDiscoveryState("error");
+              setBulkDiscoveryMessage("Lost track of the discovery task's progress.");
+            });
+        };
+        setTimeout(poll, 2000);
+      })
+      .catch((err: any) => {
+        setBulkDiscoveryState("error");
+        setBulkDiscoveryMessage(err?.response?.data?.detail || "Failed to start bulk discovery.");
+      });
+  };
+
   const togglePathMode = () => {
     setPathMode((v) => !v);
     setPathSourceId(null);
@@ -562,7 +614,7 @@ export default function Topology() {
   const zoomBy = (factor: number) =>
     setView((v) => ({ ...v, scale: Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * factor)) }));
 
-  useEffect(() => {
+  const loadGraph = () => {
     setLoading(true);
     setError(null);
     api
@@ -570,7 +622,9 @@ export default function Topology() {
       .then((res) => setGraph(res.data))
       .catch((err) => setError(err?.response?.data?.detail || "Failed to load topology."))
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(loadGraph, []);
 
   // Live push feed. Reconnects with backoff on drop (network blip, API
   // restart) rather than giving up silently -- a wall display left
@@ -1223,6 +1277,33 @@ export default function Topology() {
       {!loading && !error && graph && graph.nodes.length === 0 && (
         <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-slate-400">
           No devices in inventory yet.
+        </div>
+      )}
+
+      {!loading && !error && graph && graph.nodes.length > 0 && graph.edges.length === 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-wrap items-center gap-3 text-sm text-amber-800">
+          <span className="font-semibold">No real links yet — this isn't a bug.</span>
+          <span className="flex-1 min-w-[240px]">
+            Lines only appear once a device confirms an LLDP/CDP neighbor (or two devices share a config'd
+            subnet). With none discovered yet, every device shows as an isolated dot.
+          </span>
+          <button
+            type="button"
+            onClick={runBulkDiscovery}
+            disabled={bulkDiscoveryState === "running"}
+            className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-sm disabled:opacity-50 whitespace-nowrap"
+          >
+            {bulkDiscoveryState === "running" ? "Discovering…" : "Run discovery on all devices"}
+          </button>
+        </div>
+      )}
+      {bulkDiscoveryMessage && graph && graph.nodes.length > 0 && (
+        <div className={`text-xs rounded-lg px-3 py-2 border ${
+          bulkDiscoveryState === "error"
+            ? "bg-red-50 border-red-200 text-riskcrit"
+            : "bg-blue-50 border-blue-200 text-brandblue"
+        }`}>
+          {bulkDiscoveryMessage}
         </div>
       )}
 
