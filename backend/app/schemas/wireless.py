@@ -41,6 +41,10 @@ class WirelessAPRead(BaseModel):
     created_at: datetime.datetime
     polled_at: datetime.datetime
 
+    # True if this AP has its own usable SNMP creds set (never exposes
+    # the secrets themselves -- see WirelessAPSnmpCredentials).
+    snmp_configured: bool = False
+
     # Derived, not stored on the row -- computed per-request by
     # app.api.wireless from LLDP neighbor / Device-inventory correlation
     # (see wireless_service.find_switchports_for_aps /
@@ -91,6 +95,25 @@ class WirelessAPUpdate(BaseModel):
     site: str | None = None
     notes: str | None = None
     client_count: int | None = None
+
+
+class WirelessAPSnmpCredentials(BaseModel):
+    """Body for PATCH /wireless/aps/{id}/snmp-credentials -- lets a
+    standalone AP carry its own SNMP creds instead of requiring a
+    duplicate Device entry at the same IP (see
+    wireless_service.build_snmp_auth_from_ap). Only fields actually
+    passed are changed; pass an empty string for a secret to clear it.
+    """
+
+    snmp_version: str | None = None  # "v1" | "v2c" | "v3"
+    snmp_port: int | None = None
+    snmp_community: str | None = None       # v1/v2c
+    snmp_username: str | None = None        # v3
+    snmp_security_level: str | None = None  # noAuthNoPriv | authNoPriv | authPriv
+    snmp_auth_protocol: str | None = None
+    snmp_priv_protocol: str | None = None
+    snmp_auth_key: str | None = None
+    snmp_priv_key: str | None = None
 
 
 class WirelessSSIDRead(BaseModel):

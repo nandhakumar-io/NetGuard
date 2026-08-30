@@ -227,7 +227,7 @@ def _resolve_vendor(guess: str | None) -> DeviceVendor:
     """Best-effort mapping of network_discovery_service._guess_vendor's
     free-text guess onto the (deliberately small) DeviceVendor enum.
 
-    NOTE: DeviceVendor only covers cisco/juniper/arista/linux today, but
+    NOTE: DeviceVendor covers cisco/juniper/arista/linux/tplink today, but
     _guess_vendor can identify several others it has no enum slot for
     (Fortinet, Aruba, MikroTik, HP -- see its sysDescr keyword list).
     Those currently fall through to the CISCO default below, which

@@ -670,6 +670,7 @@ def poll_device(db: Session, device: Device) -> dict:
         auth,
         timeout=settings.SNMP_TIMEOUT_SECONDS,
         vendor=device.vendor.value if hasattr(device.vendor, "value") else str(device.vendor),
+        stack_aware=bool(getattr(device, "snmp_stack_aware", False)),
     )
     metrics.interface_utilization_pct = _compute_interface_utilization(metrics, previous, interval_seconds)
 

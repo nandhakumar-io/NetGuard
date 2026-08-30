@@ -487,6 +487,70 @@ def run_reachability_sweep_task() -> int:
     return len(due_ids)
 
 
+@celery_app.task(name="app.tasks.standalone_ap_poll_task")
+def standalone_ap_poll_task(ap_id: str) -> dict:
+    """Per-AP unit of run_standalone_ap_poll_sweep_task below. Own DB
+    session per task, same shape as reachability_task/snmp_poll_task."""
+    from app.models.wireless import WirelessAP
+    from app.services import wireless_service
+
+    db = SessionLocal()
+    try:
+        ap = db.get(WirelessAP, uuid.UUID(ap_id))
+        if ap is None or ap.source != "manual":
+            return {"error": "not_found_or_not_manual"}
+        result = wireless_service.poll_standalone_ap(db, ap)
+        ap.polled_at = datetime.now(timezone.utc)
+        db.commit()
+        return result
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.run_standalone_ap_poll_sweep_task")
+def run_standalone_ap_poll_sweep_task() -> int:
+    """Celery beat entry point: keeps manually-added (source="manual")
+    wireless APs' client_count/SSID data current on their own cadence.
+
+    Before this task existed, standalone APs (Ruckus/TP-Link/MikroTik
+    added by hand -- see WirelessAP.source docstring) only ever got
+    re-polled when someone hit POST /aps/{id}/check from the UI, so
+    client_count sat frozen (often at 0, whatever was typed in at
+    creation) for anyone who didn't know to click that. Controller-
+    managed APs never had this problem because poll_wireless_controller
+    already runs on the snmp-poll-sweep beat entry -- this is the same
+    treatment for the APs that sweep doesn't cover.
+
+    Same due/jitter shape as run_reachability_sweep_task: only APs whose
+    STANDALONE_AP_POLL_INTERVAL_SECONDS has actually elapsed since
+    polled_at get enqueued, staggered with jitter so a large fleet of
+    manual APs doesn't fire simultaneous SNMP GETs every tick.
+    """
+    import random
+
+    from app.core.config import settings
+    from app.models.wireless import WirelessAP
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        due_ids: list[str] = []
+        for ap_id, polled_at in db.query(WirelessAP.id, WirelessAP.polled_at).filter(
+            WirelessAP.source == "manual"
+        ).all():
+            elapsed = _seconds_since(polled_at, now)
+            if elapsed is None or elapsed >= settings.STANDALONE_AP_POLL_INTERVAL_SECONDS:
+                due_ids.append(str(ap_id))
+    finally:
+        db.close()
+
+    jitter_max = max(0, settings.STANDALONE_AP_POLL_JITTER_SECONDS)
+    for ap_id in due_ids:
+        countdown = random.uniform(0, jitter_max) if jitter_max else 0
+        standalone_ap_poll_task.apply_async(args=[ap_id], countdown=countdown)
+    return len(due_ids)
+
+
 @celery_app.task(name="app.tasks.run_snmp_poll_sweep_task")
 def run_snmp_poll_sweep_task() -> int:
     """Celery beat entry point: fans out one snmp_poll_task per

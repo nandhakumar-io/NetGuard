@@ -175,6 +175,16 @@ celery_app.conf.update(
             "task": "app.tasks.run_reachability_sweep_task",
             "schedule": float(settings.REACHABILITY_POLL_INTERVAL_SECONDS),
         },
+        # Standalone (manually-added) wireless AP SNMP poll: the
+        # controller-managed AP fleet gets refreshed by snmp-poll-sweep
+        # above via poll_wireless_controller, but manually-added APs
+        # (source="manual" -- Ruckus/TP-Link/MikroTik with no WLC) were
+        # previously only ever re-polled when someone clicked "Check" in
+        # the UI. See app.tasks.run_standalone_ap_poll_sweep_task.
+        "standalone-ap-poll-sweep": {
+            "task": "app.tasks.run_standalone_ap_poll_sweep_task",
+            "schedule": float(settings.STANDALONE_AP_POLL_INTERVAL_SECONDS),
+        },
         # Compliance report scheduling: turns GET /reports/compliance from
         # something someone has to remember to pull into a recurring
         # artifact emailed to NOTIFY_EMAIL_RECIPIENTS (see

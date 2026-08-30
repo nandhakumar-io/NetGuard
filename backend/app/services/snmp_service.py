@@ -665,6 +665,64 @@ def _get_first_table_value(ip_address: str, auth: "SnmpAuthConfig", base_oid: st
     return row[first_index]
 
 
+def _get_worst_table_value(ip_address: str, auth: "SnmpAuthConfig", base_oid: str, timeout: float) -> str | None:
+    """Same table as _get_first_table_value, but returns the row with the
+    HIGHEST numeric value instead of the lowest index -- for
+    Device.snmp_stack_aware, where each row is a different physical stack
+    member and the worst one (not an arbitrary index) is what should
+    drive alerting. Non-numeric rows are skipped rather than raising, so
+    one malformed row doesn't sink the whole reading.
+    """
+    row = _walk(ip_address, auth, base_oid, timeout)
+    if not row:
+        return None
+    numeric = {}
+    for idx, value in row.items():
+        try:
+            numeric[idx] = float(value)
+        except (TypeError, ValueError):
+            continue
+    if not numeric:
+        # Every row was non-numeric -- fall back to whatever
+        # _get_first_table_value would have picked, rather than
+        # returning nothing.
+        try:
+            first_index = min(row.keys(), key=lambda idx: int(idx))
+        except ValueError:
+            first_index = next(iter(row))
+        return row[first_index]
+    worst_index = max(numeric, key=lambda idx: numeric[idx])
+    return row[worst_index]
+
+
+def _get_worst_mem_pct(ip_address: str, auth: "SnmpAuthConfig", used_oid: str, free_oid: str, timeout: float) -> float | None:
+    """Stack-aware memory %: walks used+free tables and computes the
+    used/(used+free) percentage PER matching row index, then returns the
+    worst (highest) one -- not max(used) and max(free) taken
+    independently, which could pair two different stack members' numbers
+    into a meaningless percentage.
+    """
+    used_row = _walk(ip_address, auth, used_oid, timeout)
+    free_row = _walk(ip_address, auth, free_oid, timeout)
+    if not used_row or not free_row:
+        return None
+    worst_pct = None
+    for idx, used_raw in used_row.items():
+        free_raw = free_row.get(idx)
+        if free_raw is None:
+            continue
+        try:
+            used, free = float(used_raw), float(free_raw)
+        except (TypeError, ValueError):
+            continue
+        if used + free <= 0:
+            continue
+        pct = round((used / (used + free)) * 100, 1)
+        if worst_pct is None or pct > worst_pct:
+            worst_pct = pct
+    return worst_pct
+
+
 def walk_interface_stats(ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0) -> dict:
     """Walks ifTable/ifXTable and rolls every operationally-up interface
     into fleet-level totals: summed error counters (for the Errors panel)
@@ -1709,13 +1767,21 @@ JUNIPER_OIDS = {
 
 
 def poll_health(
-    ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0, vendor: str | None = None
+    ip_address: str, auth: "SnmpAuthConfig", timeout: float = 3.0, vendor: str | None = None,
+    stack_aware: bool = False,
 ) -> SnmpMetrics:
     """Polls the OIDs in OIDS and returns whatever resolved. Individual
     OID failures don't fail the whole poll (see _get_via_pysnmp); a
     completely unreachable device comes back with reachable=False and an
     error message instead of raising, so the Celery poll task can keep
     going through the rest of the fleet.
+
+    stack_aware=True (see Device.snmp_stack_aware) changes the generic/
+    Cisco/Arista CPU+memory table lookup from "lowest row index" to
+    "worst (max) value across every row" -- meaningful only when that
+    table genuinely has multiple rows, i.e. a stacked switch. No effect
+    on Juniper/TP-Link, which never call _get_first_table_value for
+    CPU/memory in the first place.
     """
     uptime_raw = _get_via_pysnmp(ip_address, auth, OIDS["sysUpTime"], timeout)
     if uptime_raw is None:
@@ -1794,7 +1860,14 @@ def poll_health(
         # are all table columns, not scalars -- resolved via
         # _get_first_table_value (walk + take whichever row index the agent
         # actually has), not a hardcoded ".1" GET. See OIDS dict comment.
-        cpu_raw = _get_first_table_value(ip_address, auth, OIDS["cpu_5min"], timeout)
+        # CPU/memory specifically use _get_worst_table_value/_get_worst_mem_pct
+        # instead when stack_aware=True (Device.snmp_stack_aware) -- see
+        # poll_health's docstring. temperature/fan/power stay lowest-index
+        # either way: those are chassis-level environmentals, not
+        # per-stack-member, so "worst across rows" has no clearer meaning
+        # there than "first row" does.
+        cpu_table_getter = _get_worst_table_value if stack_aware else _get_first_table_value
+        cpu_raw = cpu_table_getter(ip_address, auth, OIDS["cpu_5min"], timeout)
         # Fallback: try older/vendor-neutral CPU OIDs if the primary one
         # (CISCO-PROCESS-MIB cpmCPUTotal5minRev) wasn't implemented. These
         # fallbacks are true scalars (OLD-CISCO-CPU-MIB avgBusy5) or already
@@ -1808,12 +1881,18 @@ def poll_health(
                     cpu_raw = _get_via_pysnmp(ip_address, auth, fallback_oid, timeout)
                 else:  # row-indexed table column -- strip the ".1" and walk instead of assuming index 1
                     base = fallback_oid.rsplit(".", 1)[0] if fallback_oid.endswith(".1") else fallback_oid
-                    cpu_raw = _get_first_table_value(ip_address, auth, base, timeout)
+                    cpu_raw = cpu_table_getter(ip_address, auth, base, timeout)
                 if cpu_raw is not None:
                     logger.debug("CPU fallback OID %s returned %s for %s", fallback_oid, cpu_raw, ip_address)
                     break
-        mem_used_raw = _get_first_table_value(ip_address, auth, OIDS["mem_used"], timeout)
-        mem_free_raw = _get_first_table_value(ip_address, auth, OIDS["mem_free"], timeout)
+        if stack_aware:
+            mem_pct_stack_aware = _get_worst_mem_pct(ip_address, auth, OIDS["mem_used"], OIDS["mem_free"], timeout)
+            mem_used_raw = None  # not used below when mem_pct_stack_aware is set
+            mem_free_raw = None
+        else:
+            mem_pct_stack_aware = None
+            mem_used_raw = _get_first_table_value(ip_address, auth, OIDS["mem_used"], timeout)
+            mem_free_raw = _get_first_table_value(ip_address, auth, OIDS["mem_free"], timeout)
         temp_raw = _get_first_table_value(ip_address, auth, OIDS["temperature"], timeout)
         fan_state_raw = _get_first_table_value(ip_address, auth, OIDS["fan_state"], timeout)
         power_state_raw = _get_first_table_value(ip_address, auth, OIDS["power_supply_state"], timeout)
@@ -1835,6 +1914,8 @@ def poll_health(
         # Both Juniper (jnxOperatingBuffer) and TP-Link (tpSysMemUsage)
         # report memory as a percentage directly -- no used/free math.
         mem_pct = _safe_float(mem_used_raw)
+    elif stack_aware:
+        mem_pct = mem_pct_stack_aware
     elif mem_used_raw is not None and mem_free_raw is not None:
         try:
             used, free = float(mem_used_raw), float(mem_free_raw)

@@ -264,6 +264,11 @@ _SYSDESCR_VENDOR_KEYWORDS: list[tuple[str, str]] = [
     ("routeros", "mikrotik"),
     ("hp procurve", "hp"),
     ("hewlett packard", "hp"),
+    ("tp-link", "tplink"),
+    ("tplink", "tplink"),
+    ("tl-sg", "tplink"),   # TP-Link's own SG-series switch model prefix (e.g. TL-SG3428)
+    ("t1600g", "tplink"),  # TP-Link T1600G/T2600G JetStream managed switch families
+    ("t2600g", "tplink"),
     ("linux", "linux"),
     ("ubuntu", "linux"),
 ]

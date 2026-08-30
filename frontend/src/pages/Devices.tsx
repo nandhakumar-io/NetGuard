@@ -102,6 +102,32 @@ function DeviceTypeBadge({ deviceType }: { deviceType?: string | null }) {
   );
 }
 
+// Vendor cell -- was plain capitalized text with no visual weight, easy
+// to lose in a dense table next to all the badges around it. A small
+// color-coded dot (same "colored accent + label" language as the fleet
+// stat cards and DeviceTypeBadge above, not a new pattern) makes vendor
+// scannable at a glance, e.g. picking out every TP-Link box in a mixed
+// Cisco/Juniper/TP-Link fleet without reading each row's text.
+const VENDOR_DOT_STYLES: Record<string, string> = {
+  cisco: "bg-sky-500",
+  juniper: "bg-emerald-500",
+  arista: "bg-violet-500",
+  tplink: "bg-amber-500",
+  linux: "bg-slate-400",
+};
+
+function VendorBadge({ vendor }: { vendor?: string | null }) {
+  const key = (vendor || "").toLowerCase().trim();
+  if (!key) return <span className="text-slate-400 dark:text-slate-500 text-xs italic">—</span>;
+  const label = key === "tplink" ? "TP-Link" : key.charAt(0).toUpperCase() + key.slice(1);
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+      <span className={`w-1.5 h-1.5 rounded-full ${VENDOR_DOT_STYLES[key] || "bg-slate-400"}`} aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
 const DRIFT_SEVERITY_STYLES: Record<string, { text: string; bg: string; icon: string }> = {
   critical: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🚨" },
   high: { text: "text-riskcrit", bg: "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800", icon: "🔴" },
@@ -204,6 +230,7 @@ const emptyForm = {
   ssh_username: "",
   ssh_credential_ref: "",
   supports_snmp: false,
+  snmp_stack_aware: false,
   snmp_version: "v2c",
   snmp_port: "161",
   snmp_community_ref: "",
@@ -2637,6 +2664,7 @@ export default function Devices() {
       ssh_username: d.ssh_username || "",
       ssh_credential_ref: d.ssh_credential_ref || "",
       supports_snmp: !!d.supports_snmp,
+      snmp_stack_aware: !!d.snmp_stack_aware,
       snmp_version: d.snmp_version || "v2c",
       snmp_port: d.snmp_port != null ? String(d.snmp_port) : "161",
       snmp_community_ref: d.snmp_community_ref || "",
@@ -2995,6 +3023,7 @@ export default function Devices() {
               <option value="juniper">Juniper</option>
               <option value="arista">Arista</option>
               <option value="linux">Linux</option>
+              <option value="tplink">TP-Link</option>
             </select>
             <select
               className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
@@ -3164,6 +3193,22 @@ export default function Devices() {
               </>
             )}
           </div>
+
+          {form.supports_snmp && (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-1">
+              <label
+                className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 md:col-span-4"
+                title="For a stacked switch (multiple physical members joined as one logical switch): report the WORST member's CPU/memory instead of an arbitrary one. Leave off for single-chassis devices."
+              >
+                <input
+                  type="checkbox"
+                  checked={!!form.snmp_stack_aware}
+                  onChange={(e) => setForm({ ...form, snmp_stack_aware: e.target.checked })}
+                />
+                Stacked switch (report worst stack member's CPU/memory, not an arbitrary one)
+              </label>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
             <label className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -3532,6 +3577,7 @@ export default function Devices() {
               <option value="juniper" className="text-navy">Juniper</option>
               <option value="arista" className="text-navy">Arista</option>
               <option value="linux" className="text-navy">Linux</option>
+              <option value="tplink" className="text-navy">TP-Link</option>
             </select>
             <button
               onClick={bulkTagVendor}
@@ -3772,7 +3818,7 @@ export default function Devices() {
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Rack / Pos</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Status</th>
               <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Health / Alerts</th>
-              <th className="text-left px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Details</th>
+              <th className="text-center px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider w-10"><span className="sr-only">Expand</span></th>
               {canManage && <th className="text-right px-5 py-3.5 font-bold text-slate-600 dark:text-slate-300 uppercase text-xs tracking-wider">Actions</th>}
             </tr>
           </thead>
@@ -3807,7 +3853,7 @@ export default function Devices() {
               <Fragment key={d.id}>
                 {isNewGroup && (
                   <tr
-                    className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-900 border-y border-slate-200 dark:border-slate-700 cursor-pointer select-none"
+                    className="sticky top-0 z-10 bg-gradient-to-r from-slate-100 to-slate-50 dark:from-slate-900 dark:to-slate-800 border-y border-slate-200 dark:border-slate-700 cursor-pointer select-none hover:from-slate-200 dark:hover:from-slate-800"
                     onClick={() => toggleGroupCollapsed(groupKey)}
                   >
                     <td colSpan={canManage ? 12 : 10} className="px-5 py-2.5">
@@ -3859,9 +3905,57 @@ export default function Devices() {
                       Uplink
                     </span>
                   )}
+                  {/* CPU/mem/uptime shown right in the collapsed row --
+                      same bulk-fetched-on-list data DeviceInlineDetails
+                      already showed on expand, surfaced here too so
+                      "which boxes are under load" is answerable at a
+                      glance across a whole (possibly grouped) fleet
+                      view without clicking into each one. */}
+                  {(d.cpu_utilization_pct != null || d.memory_utilization_pct != null || d.uptime_seconds != null) && (
+                    <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                      {d.cpu_utilization_pct != null && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums border ${
+                            d.cpu_utilization_pct >= 90
+                              ? "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-riskcrit"
+                              : d.cpu_utilization_pct >= 75
+                              ? "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-riskmed"
+                              : "bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500"
+                          }`}
+                          title="CPU utilization"
+                        >
+                          CPU {Math.round(d.cpu_utilization_pct)}%
+                        </span>
+                      )}
+                      {d.memory_utilization_pct != null && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums border ${
+                            d.memory_utilization_pct >= 90
+                              ? "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-riskcrit"
+                              : d.memory_utilization_pct >= 75
+                              ? "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-riskmed"
+                              : "bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500"
+                          }`}
+                          title="Memory utilization"
+                        >
+                          MEM {Math.round(d.memory_utilization_pct)}%
+                        </span>
+                      )}
+                      {d.uptime_seconds != null && (
+                        <span
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums border bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500"
+                          title="Uptime since last reboot"
+                        >
+                          ↑ {formatUptime(d.uptime_seconds)}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td className="px-5 py-4 text-slate-500 dark:text-slate-400 font-mono text-xs font-semibold">{d.ip_address}</td>
-                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 capitalize font-medium">{d.vendor}</td>
+                <td className="px-5 py-4 text-slate-600 dark:text-slate-300 font-medium">
+                  <VendorBadge vendor={d.vendor} />
+                </td>
                 <td className="px-5 py-4">
                   <DeviceTypeBadge deviceType={d.device_type} />
                 </td>
@@ -3893,9 +3987,20 @@ export default function Devices() {
                   <HealthAlertBadges device={d} />
                 </td>
                 <td className="px-5 py-4">
-                  <span className="text-xs text-brandblue font-bold uppercase tracking-wider select-none">
-                    {expandedDeviceId === d.id ? "Hide Details" : "View Details"}
-                    <span className={`inline-block ml-2 transition-transform ${expandedDeviceId === d.id ? "rotate-180" : "rotate-0"}`}>▼</span>
+                  {/* Whole row already toggles on click -- a text column
+                      repeating "View Details ▼" on every single row was
+                      pure repeated noise. A chevron-only affordance says
+                      the same thing without shouting it 50 times down
+                      the table. */}
+                  <span
+                    className={`inline-flex items-center justify-center w-7 h-7 rounded-full border transition-all ${
+                      expandedDeviceId === d.id
+                        ? "bg-brandblue border-brandblue text-white rotate-180"
+                        : "bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500"
+                    }`}
+                    title={expandedDeviceId === d.id ? "Hide details" : "View details"}
+                  >
+                    ▾
                   </span>
                 </td>
                 {canManage && (

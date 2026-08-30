@@ -17,6 +17,7 @@ export interface Device {
   flagged_unstable?: boolean;
   unstable_since?: string | null;
   supports_snmp?: boolean;
+  snmp_stack_aware?: boolean;
   snmp_version?: "v1" | "v2c" | "v3" | null;
   snmp_port?: number | null;
   snmp_community_ref?: string | null;
@@ -64,6 +65,12 @@ export interface Device {
   health_color?: string | null;
   open_alert_count?: number;
   critical_alert_count?: number;
+  // Same bulk-fetch-on-list pattern as health_score/health_color --
+  // see backend DeviceRead.from_device / list_devices.
+  cpu_utilization_pct?: number | null;
+  memory_utilization_pct?: number | null;
+  uptime_seconds?: number | null;
+  last_polled_at?: string | null;
 }
 
 export interface HealthCheckCatalogEntry {

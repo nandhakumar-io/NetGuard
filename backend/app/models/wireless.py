@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -94,6 +95,26 @@ class WirelessAP(Base):
     noise_5g = Column(Integer, nullable=True)
     channel_util_2g = Column(Integer, nullable=True)  # bsnAPIfLoadChannelUtilization, percent
     channel_util_5g = Column(Integer, nullable=True)
+
+    # --- Standalone AP's own SNMP credentials (source="manual" only) ---
+    # A manually-added standalone AP (Ruckus/TP-Link/MikroTik, no WLC)
+    # previously HAD to be re-added as a separate managed Device at the
+    # same IP just to borrow its SNMP credentials for polling -- see
+    # wireless_service.poll_standalone_ap. These columns let the AP carry
+    # its own creds instead, mirroring Device's snmp_* columns
+    # (app.models.device.Device) so credential_service-style encrypt/
+    # decrypt via app.core.crypto applies the same way. All nullable:
+    # an AP with none of these set falls back to the old
+    # matching-Device lookup for backwards compatibility.
+    snmp_version = Column(String, nullable=True)   # "v1" | "v2c" | "v3"
+    snmp_port = Column(Integer, nullable=True, default=161)
+    snmp_username = Column(String, nullable=True)  # v3 (not secret, stored plain like Device.snmp_username)
+    snmp_security_level = Column(String, nullable=True)  # noAuthNoPriv | authNoPriv | authPriv
+    snmp_auth_protocol = Column(String, nullable=True)   # MD5 | SHA | SHA224 | SHA256 | SHA384 | SHA512
+    snmp_priv_protocol = Column(String, nullable=True)   # DES | 3DES | AES128 | AES192 | AES256
+    snmp_community_encrypted = Column(Text, nullable=True)  # v1/v2c community string, Fernet-encrypted
+    snmp_auth_key_encrypted = Column(Text, nullable=True)   # v3 auth passphrase, Fernet-encrypted
+    snmp_priv_key_encrypted = Column(Text, nullable=True)   # v3 priv passphrase, Fernet-encrypted
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     polled_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

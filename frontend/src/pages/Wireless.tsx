@@ -57,6 +57,7 @@ interface WirelessAP {
   switch_port: string | null;
   matched_device_id: string | null;
   matched_device_hostname: string | null;
+  snmp_configured: boolean;
 }
 
 interface UnregisteredAp {
@@ -176,6 +177,18 @@ const emptyApForm = {
   notes: "",
 };
 
+const emptySnmpForm = {
+  snmp_version: "v2c" as "v1" | "v2c" | "v3",
+  snmp_port: 161,
+  snmp_community: "",
+  snmp_username: "",
+  snmp_security_level: "noAuthNoPriv" as "noAuthNoPriv" | "authNoPriv" | "authPriv",
+  snmp_auth_protocol: "SHA",
+  snmp_priv_protocol: "AES128",
+  snmp_auth_key: "",
+  snmp_priv_key: "",
+};
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const secs = Math.floor(diff / 1000);
@@ -203,6 +216,14 @@ export default function WirelessPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Standalone AP's own SNMP credentials (PATCH /wireless/aps/{id}/snmp-credentials) --
+  // lets client_count/SSID polling work without a duplicate Device entry.
+  const [snmpApId, setSnmpApId] = useState<string | null>(null);
+  const [snmpForm, setSnmpForm] = useState(emptySnmpForm);
+  const [snmpSaving, setSnmpSaving] = useState(false);
+  const [snmpError, setSnmpError] = useState<string | null>(null);
+
 
   const copySshCommand = useCallback((ap: WirelessAP) => {
     const ip = apManagementIp(ap);
@@ -387,6 +408,50 @@ export default function WirelessPage() {
       setError(err?.response?.data?.detail || "Reachability check failed.");
     } finally {
       setCheckingId(null);
+    }
+  };
+
+  const openSnmpForm = (ap: WirelessAP) => {
+    setSnmpApId(ap.id);
+    setSnmpForm(emptySnmpForm);
+    setSnmpError(null);
+  };
+
+  const saveSnmpForm = async () => {
+    if (!snmpApId) return;
+    setSnmpSaving(true);
+    setSnmpError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        snmp_version: snmpForm.snmp_version,
+        snmp_port: snmpForm.snmp_port,
+      };
+      if (snmpForm.snmp_version === "v3") {
+        payload.snmp_username = snmpForm.snmp_username;
+        payload.snmp_security_level = snmpForm.snmp_security_level;
+        if (snmpForm.snmp_security_level !== "noAuthNoPriv") {
+          payload.snmp_auth_protocol = snmpForm.snmp_auth_protocol;
+          payload.snmp_auth_key = snmpForm.snmp_auth_key;
+        }
+        if (snmpForm.snmp_security_level === "authPriv") {
+          payload.snmp_priv_protocol = snmpForm.snmp_priv_protocol;
+          payload.snmp_priv_key = snmpForm.snmp_priv_key;
+        }
+      } else {
+        payload.snmp_community = snmpForm.snmp_community;
+      }
+      const res = await api.patch<WirelessAP>(`/wireless/aps/${snmpApId}/snmp-credentials`, payload);
+      setAllAps((prev) => prev.map((a) => (a.id === snmpApId ? res.data : a)));
+      setSnmpApId(null);
+      // Immediately poll with the new creds instead of waiting for the
+      // next standalone-ap-poll-sweep beat tick, so the client_count
+      // updates right away.
+      const ap = allAps.find((a) => a.id === snmpApId);
+      if (ap) void checkAp(ap);
+    } catch (err: any) {
+      setSnmpError(err?.response?.data?.detail || "Failed to save SNMP credentials.");
+    } finally {
+      setSnmpSaving(false);
     }
   };
 
@@ -768,6 +833,22 @@ export default function WirelessPage() {
                           </button>
                           <span className="text-slate-300 dark:text-slate-600">·</span>
                           <button
+                            onClick={() => openSnmpForm(ap)}
+                            className={`text-[11px] font-semibold ${
+                              ap.snmp_configured
+                                ? "text-risklow"
+                                : "text-riskmed"
+                            } hover:text-navy dark:hover:text-white`}
+                            title={
+                              ap.snmp_configured
+                                ? "This AP has its own SNMP credentials set -- client count/SSIDs poll directly from it"
+                                : "No SNMP credentials set -- client count will stay 0 until you add them"
+                            }
+                          >
+                            {ap.snmp_configured ? "SNMP ✓" : "Set SNMP creds"}
+                          </button>
+                          <span className="text-slate-300 dark:text-slate-600">·</span>
+                          <button
                             onClick={() => startEdit(ap)}
                             className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-navy dark:hover:text-white"
                           >
@@ -846,6 +927,115 @@ export default function WirelessPage() {
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Click <b>+ Add AP</b> above, or poll a Cisco AireOS WLC to auto-discover APs.
           </p>
+        </div>
+      )}
+
+      {snmpApId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xl p-5">
+            <h3 className="text-sm font-semibold text-navy dark:text-white mb-1">SNMP credentials for this AP</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+              Stored encrypted, used only to poll this AP's own client count and SSIDs -- no duplicate Device entry needed.
+            </p>
+            {snmpError && (
+              <div className="mb-3 text-xs text-riskcrit bg-red-50 dark:bg-red-950/30 rounded-md px-3 py-2">{snmpError}</div>
+            )}
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">SNMP version</label>
+                <select
+                  value={snmpForm.snmp_version}
+                  onChange={(e) => setSnmpForm({ ...snmpForm, snmp_version: e.target.value as any })}
+                  className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                >
+                  <option value="v1">v1</option>
+                  <option value="v2c">v2c</option>
+                  <option value="v3">v3</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Port</label>
+                <input
+                  type="number"
+                  value={snmpForm.snmp_port}
+                  onChange={(e) => setSnmpForm({ ...snmpForm, snmp_port: Number(e.target.value) || 161 })}
+                  className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                />
+              </div>
+              {snmpForm.snmp_version !== "v3" ? (
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Community string</label>
+                  <input
+                    type="password"
+                    value={snmpForm.snmp_community}
+                    onChange={(e) => setSnmpForm({ ...snmpForm, snmp_community: e.target.value })}
+                    placeholder="e.g. public"
+                    className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                  />
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Username</label>
+                    <input
+                      value={snmpForm.snmp_username}
+                      onChange={(e) => setSnmpForm({ ...snmpForm, snmp_username: e.target.value })}
+                      className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Security level</label>
+                    <select
+                      value={snmpForm.snmp_security_level}
+                      onChange={(e) => setSnmpForm({ ...snmpForm, snmp_security_level: e.target.value as any })}
+                      className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                    >
+                      <option value="noAuthNoPriv">noAuthNoPriv</option>
+                      <option value="authNoPriv">authNoPriv</option>
+                      <option value="authPriv">authPriv</option>
+                    </select>
+                  </div>
+                  {snmpForm.snmp_security_level !== "noAuthNoPriv" && (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Auth key</label>
+                      <input
+                        type="password"
+                        value={snmpForm.snmp_auth_key}
+                        onChange={(e) => setSnmpForm({ ...snmpForm, snmp_auth_key: e.target.value })}
+                        className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                      />
+                    </div>
+                  )}
+                  {snmpForm.snmp_security_level === "authPriv" && (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Priv key</label>
+                      <input
+                        type="password"
+                        value={snmpForm.snmp_priv_key}
+                        onChange={(e) => setSnmpForm({ ...snmpForm, snmp_priv_key: e.target.value })}
+                        className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm px-2 py-1.5"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 mt-5">
+              <button
+                onClick={() => setSnmpApId(null)}
+                className="text-xs font-semibold text-slate-500 dark:text-slate-400 px-3 py-1.5"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveSnmpForm}
+                disabled={snmpSaving}
+                className="text-xs font-semibold bg-brandblue text-white rounded-md px-3 py-1.5 disabled:opacity-50"
+              >
+                {snmpSaving ? "Saving…" : "Save & poll now"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

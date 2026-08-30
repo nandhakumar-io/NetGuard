@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 if TYPE_CHECKING:
     from app.models.wireless import WirelessAP
+    from app.services.snmp_service import SnmpAuthConfig
 
 logger = logging.getLogger("netguard.wireless")
 
@@ -375,11 +376,11 @@ def poll_standalone_ap(db: Session, ap) -> dict:
     was typed in at creation time forever, since /aps/{id}/check only
     ever pinged the AP, never re-read anything from it.
 
-    Requires the AP's IP to match an existing managed Device that has
-    SNMP configured (see find_matching_device_for_ap) -- a standalone AP
-    has no separate credential fields of its own, so it reuses whatever
-    SNMP community/v3 creds are already on file for that Device rather
-    than asking the user to enter the same secret twice.
+    Prefers the AP's own SNMP credentials (WirelessAP.snmp_* columns --
+    see build_snmp_auth_from_ap) when configured. Falls back to reusing
+    an existing managed Device's SNMP config at the same IP for AP rows
+    that predate this (or that were never given their own creds), so
+    nothing that already worked breaks.
 
     Supported vendors: "mikrotik", "ruckus", "tplink". Every other vendor
     returns an explicit "not yet supported" result instead of a silently-
@@ -394,19 +395,23 @@ def poll_standalone_ap(db: Session, ap) -> dict:
     if not ip:
         return {"error": "no_ip", "message": "AP has no management IP or AP IP address to poll."}
 
-    device = db.query(Device).filter(Device.ip_address == ip).first()
-    if device is None:
-        return {
-            "error": "no_matching_device",
-            "message": "No managed Device with this IP was found -- add this AP as a Device with SNMP "
-            "credentials configured (same IP) to enable client-count/SSID polling.",
-        }
-    auth = build_snmp_auth(db, device)
+    auth = build_snmp_auth_from_ap(ap)
+    device = None
     if auth is None:
-        return {
-            "error": "snmp_not_configured",
-            "message": f"Device {device.hostname} matches this AP's IP but doesn't have SNMP configured/enabled.",
-        }
+        device = db.query(Device).filter(Device.ip_address == ip).first()
+        if device is None:
+            return {
+                "error": "no_snmp_credentials",
+                "message": "This AP has no SNMP credentials of its own -- set them via "
+                "PATCH /wireless/aps/{id}/snmp-credentials, or add this IP as a managed "
+                "Device with SNMP configured.",
+            }
+        auth = build_snmp_auth(db, device)
+        if auth is None:
+            return {
+                "error": "snmp_not_configured",
+                "message": f"Device {device.hostname} matches this AP's IP but doesn't have SNMP configured/enabled.",
+            }
 
     vendor = (ap.vendor or "").lower()
     timeout = 5.0
@@ -881,6 +886,56 @@ def get_co_channel_report(db: Session, controller_device_id=None) -> list[dict]:
         })
     findings.sort(key=lambda f: (-len(f["aps"]), f["switch_hostname"]))
     return findings
+
+
+def build_snmp_auth_from_ap(ap) -> "SnmpAuthConfig | None":
+    """Resolve a standalone AP's OWN SNMP credentials (WirelessAP.snmp_*
+    columns) into a usable SnmpAuthConfig, or None if the AP has none set.
+
+    This is what lets poll_standalone_ap work for a manually-added AP
+    with no separately-registered Device at the same IP -- see that
+    function's docstring for the duplicate-entry problem this replaces.
+    Only v1/v2c (community) or v3 combinations that are actually usable
+    are returned; a half-configured v3 AP (username but no auth_key
+    where security_level requires one) returns None so the caller falls
+    back to the legacy matching-Device path rather than attempting SNMP
+    with an incomplete config.
+    """
+    from app.core import crypto
+    from app.services.snmp_service import SnmpAuthConfig
+
+    version = (ap.snmp_version or "").lower()
+    if version not in ("v1", "v2c", "v3"):
+        return None
+
+    if version in ("v1", "v2c"):
+        if not ap.snmp_community_encrypted:
+            return None
+        community = crypto.decrypt(ap.snmp_community_encrypted)
+        if not community:
+            return None
+        return SnmpAuthConfig(version=version, community=community, port=ap.snmp_port or 161)
+
+    # v3
+    if not ap.snmp_username:
+        return None
+    security_level = ap.snmp_security_level or "noAuthNoPriv"
+    auth_key = crypto.decrypt(ap.snmp_auth_key_encrypted) if ap.snmp_auth_key_encrypted else None
+    priv_key = crypto.decrypt(ap.snmp_priv_key_encrypted) if ap.snmp_priv_key_encrypted else None
+    if security_level in ("authNoPriv", "authPriv") and not auth_key:
+        return None
+    if security_level == "authPriv" and not priv_key:
+        return None
+    return SnmpAuthConfig(
+        version="v3",
+        port=ap.snmp_port or 161,
+        username=ap.snmp_username,
+        security_level=security_level,
+        auth_protocol=ap.snmp_auth_protocol,
+        auth_key=auth_key,
+        priv_protocol=ap.snmp_priv_protocol,
+        priv_key=priv_key,
+    )
 
 
 def build_snmp_auth(db: Session, device):

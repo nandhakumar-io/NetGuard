@@ -399,6 +399,12 @@ class Settings(BaseSettings):
     # leaving every manually-added ("non-lab") device stuck at UNKNOWN
     # forever regardless of whether it was actually reachable.
     REACHABILITY_POLL_INTERVAL_SECONDS: int = 60
+    # Standalone (manually-added, source="manual") wireless AP SNMP poll --
+    # see run_standalone_ap_poll_sweep_task / wireless_service.poll_standalone_ap.
+    # These APs have no controller to be swept alongside, so they need
+    # their own cadence or client_count/SSID data just goes stale forever.
+    STANDALONE_AP_POLL_INTERVAL_SECONDS: int = 120
+    STANDALONE_AP_POLL_JITTER_SECONDS: int = 15
 
     # Escalation Policies: how often app.tasks.run_escalation_sweep_task
     # scans unacknowledged alerts and escalates any that have breached an

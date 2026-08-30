@@ -197,3 +197,74 @@ def test_cisco_falls_back_to_vendor_neutral_cpu_oid_when_primary_missing(monkeyp
     result = poll_health("10.0.0.5", _AUTH, vendor="cisco")
 
     assert result.cpu_utilization_pct == 17
+
+
+def test_cisco_stack_default_still_uses_lowest_index(monkeypatch):
+    """stack_aware defaults to False -- a stacked switch's CPU/memory
+    table should still pick the lowest-index row unless the caller (a
+    Device with snmp_stack_aware=True) explicitly opts in. Guards against
+    the new stack_aware branch accidentally becoming the default and
+    silently changing every existing Cisco device's health reading.
+    """
+    agent = _FakeAgent(
+        gets={snmp_service.OIDS["sysUpTime"]: "1000"},
+        walks={
+            snmp_service.OIDS["cpu_5min"]: {"1": "10", "2": "95"},  # member 1 idle, member 2 pegged
+            snmp_service.OIDS["mem_used"]: {"1": "100", "2": "950"},
+            snmp_service.OIDS["mem_free"]: {"1": "900", "2": "50"},
+        },
+    )
+    _patch_agent(monkeypatch, agent)
+
+    result = poll_health("10.0.0.6", _AUTH, vendor="cisco")  # stack_aware not passed -> False
+
+    assert result.cpu_utilization_pct == 10
+    assert result.memory_utilization_pct == 10.0
+
+
+def test_cisco_stack_aware_reports_worst_member_not_lowest_index(monkeypatch):
+    """snmp_stack_aware=True: a stacked switch's per-member CPU/memory
+    table should surface the WORST member, not whichever has the lowest
+    stack-member index -- see Device.snmp_stack_aware docstring. Member 2
+    here is pegged at 95% CPU / 95% memory while member 1 (lowest index)
+    sits idle; the old unconditional lowest-index behavior would report
+    member 1's idle numbers and hide the real problem.
+    """
+    agent = _FakeAgent(
+        gets={snmp_service.OIDS["sysUpTime"]: "1000"},
+        walks={
+            snmp_service.OIDS["cpu_5min"]: {"1": "10", "2": "95"},
+            snmp_service.OIDS["mem_used"]: {"1": "100", "2": "950"},
+            snmp_service.OIDS["mem_free"]: {"1": "900", "2": "50"},
+        },
+    )
+    _patch_agent(monkeypatch, agent)
+
+    result = poll_health("10.0.0.6", _AUTH, vendor="cisco", stack_aware=True)
+
+    assert result.cpu_utilization_pct == 95
+    assert result.memory_utilization_pct == 95.0
+
+
+def test_cisco_stack_aware_pairs_used_free_by_matching_index(monkeypatch):
+    """_get_worst_mem_pct must compute each row's percentage from ITS OWN
+    used+free pair before comparing rows -- not max(used) and max(free)
+    taken independently, which would pair two different stack members'
+    numbers into a meaningless percentage. Here member 1 has the highest
+    raw `used` value but a low percentage (huge pool); member 2 has a
+    smaller pool that's nearly full -- member 2's percentage must win.
+    """
+    agent = _FakeAgent(
+        gets={snmp_service.OIDS["sysUpTime"]: "1000"},
+        walks={
+            snmp_service.OIDS["cpu_5min"]: {"1": "5"},
+            snmp_service.OIDS["mem_used"]: {"1": "5000", "2": "90"},   # member 1: 5000 used
+            snmp_service.OIDS["mem_free"]: {"1": "95000", "2": "10"},  # member 1: 5% used; member 2: 90% used
+        },
+    )
+    _patch_agent(monkeypatch, agent)
+
+    result = poll_health("10.0.0.7", _AUTH, vendor="cisco", stack_aware=True)
+
+    assert result.memory_utilization_pct == 90.0
+    assert result.memory_utilization_pct != 50.0  # would be max(5000,90)/(max+max) style nonsense

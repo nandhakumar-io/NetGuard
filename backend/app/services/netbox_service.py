@@ -51,6 +51,9 @@ _MANUFACTURER_SLUG_MAP = {
     "arista": DeviceVendor.ARISTA,
     "arista-networks": DeviceVendor.ARISTA,
     "linux": DeviceVendor.LINUX,
+    "tp-link": DeviceVendor.TPLINK,
+    "tplink": DeviceVendor.TPLINK,
+    "tp-link-technologies": DeviceVendor.TPLINK,
 }
 
 

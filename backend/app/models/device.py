@@ -22,6 +22,13 @@ class DeviceVendor(str, enum.Enum):
     JUNIPER = "juniper"
     ARISTA = "arista"
     LINUX = "linux"
+    # SNMP-only vendor (Omada/EAP-series switches): no NETCONF/NAPALM
+    # config-management support, same as LINUX -- see
+    # snmp_service.poll_health's is_tplink branch (TPLINK_OIDS) for what
+    # this DOES enable: correct CPU/memory readings via TP-Link's own
+    # MIB instead of the generic (and wrong-for-TP-Link) HOST-RESOURCES
+    # fallback every other vendor value fell back to before this existed.
+    TPLINK = "tplink"
 
 
 class DeviceStatus(str, enum.Enum):
@@ -238,6 +245,20 @@ class Device(Base):
     supports_netconf = Column(Boolean, nullable=False, default=False, server_default="false")
     supports_restconf = Column(Boolean, nullable=False, default=False, server_default="false")
     supports_snmp = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When true, snmp_service.poll_health takes the WORST (max) CPU/memory
+    # value across every row of cpmCPUTotalTable/ciscoMemoryPoolTable
+    # instead of the lowest-index row. Only meaningful for stacked
+    # switches (e.g. Catalyst 9300/2960X stacks), where the table has one
+    # row per physical stack member -- "lowest index" is an arbitrary
+    # member on a stack, not a meaningful choice, so a member silently
+    # pegged at high load can hide behind member 1's idle reading. Off by
+    # default because it's WRONG for the common single-chassis case,
+    # where the table only ever has one real row anyway (see
+    # test_cisco_uses_lowest_table_index_directly) and this flag would be
+    # a no-op there. Only applies to the generic/Cisco/Arista SNMP path;
+    # Juniper and TP-Link already disambiguate via other means (Routing
+    # Engine description matching, direct scalar OIDs).
+    snmp_stack_aware = Column(Boolean, nullable=False, default=False, server_default="false")
     # Set/cleared by every poll attempt (scheduled or on-demand), success
     # or failure -- see metrics_service.poll_device. Lets the UI show
     # *why* a device has no metrics (never polled / unreachable /

@@ -17,6 +17,7 @@ from app.schemas.wireless import (
     UnregisteredApRead,
     WirelessAPCreate,
     WirelessAPRead,
+    WirelessAPSnmpCredentials,
     WirelessAPUpdate,
     WirelessSSIDRead,
     WirelessSummary,
@@ -59,6 +60,10 @@ def _ap_to_read(ap, correlation: dict | None = None, device_match: dict | None =
         channel_util_5g=ap.channel_util_5g,
         created_at=ap.created_at,
         polled_at=ap.polled_at,
+        snmp_configured=bool(
+            (ap.snmp_version in ("v1", "v2c") and ap.snmp_community_encrypted)
+            or (ap.snmp_version == "v3" and ap.snmp_username)
+        ),
         switch_device_id=correlation.get("device_id"),
         switch_hostname=correlation.get("hostname"),
         switch_port=correlation.get("port"),
@@ -250,6 +255,68 @@ def update_ap(ap_id: str, payload: WirelessAPUpdate, db: Session = Depends(get_d
         data["vendor"] = vendor
     for field, value in data.items():
         setattr(ap, field, value)
+    db.commit()
+    db.refresh(ap)
+    return _ap_to_read(ap)
+
+
+@router.patch(
+    "/aps/{ap_id}/snmp-credentials",
+    response_model=WirelessAPRead,
+    summary="Set a standalone AP's own SNMP credentials",
+)
+def set_ap_snmp_credentials(ap_id: str, payload: WirelessAPSnmpCredentials, db: Session = Depends(get_db)):
+    """Lets a manually-added AP (Ruckus/TP-Link/MikroTik, source="manual")
+    carry its own SNMP creds so poll_standalone_ap can poll it without
+    requiring a duplicate Device entry at the same IP -- see
+    wireless_service.build_snmp_auth_from_ap. Secrets are Fernet-
+    encrypted at rest (app.core.crypto), same as Device SNMP creds.
+    Only fields actually present in the request body are changed; pass
+    an empty string for any secret field to clear it.
+    """
+    from app.core import crypto
+    from app.models.wireless import WirelessAP
+
+    try:
+        aid = uuid.UUID(ap_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ap_id must be a valid UUID")
+    ap = db.get(WirelessAP, aid)
+    if ap is None:
+        raise HTTPException(status_code=404, detail="Access point not found")
+    if ap.source != "manual":
+        raise HTTPException(
+            status_code=422,
+            detail="SNMP credentials can only be set on manually-added APs -- "
+            "controller-managed APs are polled via the WLC's own credentials.",
+        )
+
+    data = payload.model_dump(exclude_unset=True)
+    if "snmp_version" in data:
+        version = (data["snmp_version"] or "").lower() or None
+        if version and version not in ("v1", "v2c", "v3"):
+            raise HTTPException(status_code=422, detail="snmp_version must be one of v1, v2c, v3")
+        ap.snmp_version = version
+    if "snmp_port" in data:
+        ap.snmp_port = data["snmp_port"]
+    if "snmp_username" in data:
+        ap.snmp_username = data["snmp_username"]
+    if "snmp_security_level" in data:
+        ap.snmp_security_level = data["snmp_security_level"]
+    if "snmp_auth_protocol" in data:
+        ap.snmp_auth_protocol = data["snmp_auth_protocol"]
+    if "snmp_priv_protocol" in data:
+        ap.snmp_priv_protocol = data["snmp_priv_protocol"]
+    if "snmp_community" in data:
+        community = data["snmp_community"]
+        ap.snmp_community_encrypted = crypto.encrypt(community) if community else None
+    if "snmp_auth_key" in data:
+        auth_key = data["snmp_auth_key"]
+        ap.snmp_auth_key_encrypted = crypto.encrypt(auth_key) if auth_key else None
+    if "snmp_priv_key" in data:
+        priv_key = data["snmp_priv_key"]
+        ap.snmp_priv_key_encrypted = crypto.encrypt(priv_key) if priv_key else None
+
     db.commit()
     db.refresh(ap)
     return _ap_to_read(ap)

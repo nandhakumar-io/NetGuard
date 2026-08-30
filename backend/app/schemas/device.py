@@ -52,6 +52,9 @@ class DeviceBase(BaseModel):
 
     # --- SNMP Monitoring (Health Dashboard) ---
     supports_snmp: bool = False
+    # See Device.snmp_stack_aware docstring -- take the worst stack
+    # member's CPU/memory instead of the lowest table-index row.
+    snmp_stack_aware: bool = False
     snmp_version: SnmpVersion | None = None
     snmp_port: int | None = 161
     snmp_community_ref: str | None = None  # v1/v2c (legacy env-var fallback)
@@ -120,6 +123,7 @@ class DeviceUpdate(BaseModel):
     ssh_username: str | None = None
     ssh_credential_ref: str | None = None
     supports_snmp: bool | None = None
+    snmp_stack_aware: bool | None = None
     snmp_version: SnmpVersion | None = None
     snmp_port: int | None = None
     snmp_community_ref: str | None = None
@@ -221,6 +225,14 @@ class DeviceRead(DeviceBase):
     health_color: str | None = None
     open_alert_count: int = 0
     critical_alert_count: int = 0
+    # Same bulk-fetch pattern as health_score/health_color above (see
+    # list_devices) -- CPU/memory/uptime shown directly in the fleet-list
+    # row so "which of these is under load / how long has it been up"
+    # doesn't require clicking into every device individually either.
+    cpu_utilization_pct: float | None = None
+    memory_utilization_pct: float | None = None
+    uptime_seconds: int | None = None
+    last_polled_at: datetime.datetime | None = None
 
     @classmethod
     def from_device(cls, device, *, health: dict | None = None, open_alert_count: int = 0, critical_alert_count: int = 0) -> "DeviceRead":
@@ -298,6 +310,10 @@ class DeviceRead(DeviceBase):
         obj.health_color = health.get("health_color") if health else None
         obj.open_alert_count = open_alert_count
         obj.critical_alert_count = critical_alert_count
+        obj.cpu_utilization_pct = health.get("cpu_utilization_pct") if health else None
+        obj.memory_utilization_pct = health.get("memory_utilization_pct") if health else None
+        obj.uptime_seconds = int(health["uptime_seconds"]) if health and health.get("uptime_seconds") is not None else None
+        obj.last_polled_at = health.get("polled_at") if health else None
         return obj
 
 
