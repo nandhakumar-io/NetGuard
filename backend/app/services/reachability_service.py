@@ -132,7 +132,33 @@ def check_device(db: Session, device: Device) -> DeviceStatus:
     """
     reachable = is_reachable(device.ip_address, timeout=settings.REACHABILITY_PING_TIMEOUT_SECONDS)
 
-    if not reachable:
+    # TCP/ICMP failing doesn't necessarily mean the device is actually down:
+    # is_reachable() only probes SSH/HTTPS/HTTP/Telnet + ICMP (see its
+    # docstring) -- plenty of switches/APs are locked down to answer *only*
+    # SNMP (161/UDP) from this host, with management ports closed/filtered
+    # and ICMP blocked by ACL. Previously that combination made this sweep
+    # flip the device to OFFLINE ("failed to connect") on every run, even
+    # seconds after metrics_service.poll_device() had just confirmed it
+    # answering SNMP fine -- the two subsystems disagreed and this one won
+    # every time since it runs independently and unconditionally overwrites
+    # Device.status. If SNMP is configured and a poll inside the current
+    # freshness window came back with real data (uptime_seconds present,
+    # no last_snmp_poll_error), treat that as reachability evidence too.
+    snmp_reachable = False
+    if not reachable and device.supports_snmp:
+        freshness_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            seconds=settings.SNMP_POLL_INTERVAL_SECONDS * 2
+        )
+        latest = vm_client.latest_device_metrics(device.id)
+        snmp_reachable = bool(
+            latest is not None
+            and latest.get("polled_at") is not None
+            and latest["polled_at"] >= freshness_cutoff
+            and latest.get("uptime_seconds") is not None
+            and not device.last_snmp_poll_error
+        )
+
+    if not reachable and not snmp_reachable:
         new_status = DeviceStatus.OFFLINE
     else:
         new_status = DeviceStatus.ONLINE

@@ -24,7 +24,7 @@ from app.models.audit_log import AuditLog
 from app.models.change_request import ChangeRequest
 from app.models.config_drift import ConfigDrift
 from app.models.deployment import Deployment, DeploymentLog, HealthCheckResult
-from app.models.device import Device
+from app.models.device import Device, DeviceStatus
 from app.models.device_status_history import DeviceStatusHistory
 from app.models.discovered_neighbor import DiscoveredNeighbor
 from app.models.firmware_upgrade import FirmwareUpgrade
@@ -46,6 +46,8 @@ from app.schemas.device import (
     BulkDeviceAction,
     BulkDeviceActionRequest,
     BulkDeviceActionResult,
+    ConnectionDiagnosticStep,
+    ConnectionTestAndFixResult,
     DeviceCreate,
     DeviceCsvImportResult,
     DeviceDiscoveryResult,
@@ -1436,6 +1438,109 @@ def test_snmp_credentials(
 
     result = snmp_service.test_connection(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
     return SnmpTestResult(**result)
+
+
+@router.post("/{device_id}/connection/test-and-fix", response_model=ConnectionTestAndFixResult)
+def test_and_fix_connection(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Diagnoses the classic "SNMP works but the device still shows
+    offline/failed to connect" complaint and fixes it in one click.
+
+    Root cause (see app.services.reachability_service module docstring):
+    Device.status is driven by an independent TCP/ICMP ping sweep that only
+    probes SSH/HTTPS/HTTP/Telnet + ICMP -- it never touches SNMP at all. A
+    device locked down to answer only 161/UDP (management ports closed,
+    ICMP blocked by ACL) gets flagged OFFLINE by that sweep every cycle
+    even while metrics_service.poll_device() is simultaneously confirming
+    it's fine over SNMP, because the ping sweep runs on its own schedule
+    and unconditionally overwrites status.
+
+    This endpoint: (1) re-resolves credentials and runs a live SNMP test,
+    (2) runs the same TCP/ICMP reachability probe the ping sweep uses, (3)
+    re-runs reachability_service.check_device() -- which now also accepts
+    a fresh, error-free SNMP poll as reachability evidence -- so a device
+    stuck OFFLINE purely because of that mismatch gets its status corrected
+    immediately instead of waiting for the next sweep. No fix is applied
+    (and none is needed) if SNMP itself is genuinely failing.
+    """
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    from app.core.config import settings
+
+    steps: list[ConnectionDiagnosticStep] = []
+    status_before = device.status.value
+
+    # Step 1: credential resolution
+    auth = None
+    if not device.supports_snmp or not device.snmp_version:
+        steps.append(ConnectionDiagnosticStep(
+            name="SNMP configuration",
+            success=False,
+            detail="SNMP monitoring is not enabled for this device (supports_snmp/snmp_version unset).",
+        ))
+    else:
+        try:
+            auth = metrics_service.build_snmp_auth(device)
+            steps.append(ConnectionDiagnosticStep(
+                name="SNMP credentials", success=True, detail=f"Resolved {device.snmp_version.value} credentials.",
+            ))
+        except credential_service.CredentialNotFoundError as exc:
+            steps.append(ConnectionDiagnosticStep(name="SNMP credentials", success=False, detail=str(exc)))
+
+    # Step 2: live SNMP GET
+    snmp_ok = False
+    if auth is not None:
+        snmp_result = snmp_service.test_connection(device.ip_address, auth, timeout=settings.SNMP_TIMEOUT_SECONDS)
+        snmp_ok = snmp_result["success"]
+        steps.append(ConnectionDiagnosticStep(name="Live SNMP GET", success=snmp_ok, detail=snmp_result["message"]))
+
+    # Step 3: same TCP/ICMP probe the ping sweep uses, surfaced explicitly
+    # so it's clear *why* status disagreed with SNMP, rather than the fix
+    # just silently overriding it.
+    tcp_icmp_ok = reachability_service.is_reachable(
+        device.ip_address, timeout=settings.REACHABILITY_PING_TIMEOUT_SECONDS
+    )
+    steps.append(ConnectionDiagnosticStep(
+        name="TCP/ICMP reachability (ping sweep signal)",
+        success=tcp_icmp_ok,
+        detail=(
+            "Reachable on a management port (22/443/80/23) or ICMP."
+            if tcp_icmp_ok
+            else "No response on 22/443/80/23 or ICMP -- expected for devices locked down to SNMP-only."
+        ),
+    ))
+
+    # Step 4: force an immediate re-evaluation using the corrected logic,
+    # instead of waiting for the next scheduled reachability sweep.
+    new_status = reachability_service.check_device(db, device)
+    status_after = new_status.value
+    fix_applied = status_before != status_after
+    fix_detail = None
+    if fix_applied:
+        fix_detail = f"Device status corrected from {status_before} to {status_after} based on the checks above."
+    elif snmp_ok and not tcp_icmp_ok and status_after == DeviceStatus.OFFLINE.value:
+        fix_detail = (
+            "SNMP is answering but status is still OFFLINE -- its last successful poll "
+            "is outside the freshness window. Run a fresh SNMP poll (Poll Now) and retry."
+        )
+
+    steps.append(ConnectionDiagnosticStep(
+        name="Device status", success=(status_after != DeviceStatus.OFFLINE.value), detail=f"Now: {status_after}",
+    ))
+
+    return ConnectionTestAndFixResult(
+        steps=steps,
+        overall_success=snmp_ok or tcp_icmp_ok,
+        status_before=status_before,
+        status_after=status_after,
+        fix_applied=fix_applied,
+        fix_detail=fix_detail,
+    )
 
 
 @router.get("/{device_id}/discovery", response_model=DeviceDiscoveryResult)

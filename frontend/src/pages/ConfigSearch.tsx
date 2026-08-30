@@ -146,7 +146,7 @@ export default function ConfigSearchPage() {
               >
                 <div className="flex items-center justify-between mb-2">
                   <Link
-                    to="/devices"
+                    to={`/devices?device=${r.device_id}`}
                     className="text-sm font-bold text-navy dark:text-white hover:text-brandblue transition-colors"
                   >
                     {r.hostname}{" "}

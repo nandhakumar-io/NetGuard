@@ -868,6 +868,39 @@ def run_subnet_rescan_sweep_task() -> int:
         db.close()
 
 
+@celery_app.task(name="app.tasks.run_initial_subnet_scan_task")
+def run_initial_subnet_scan_task(subnet_id: str) -> bool:
+    """Fired once, right after a subnet is created (see app.api.ipam.create_subnet),
+    so a freshly-added subnet gets its live nmap ping-sweep immediately instead of
+    sitting with "used" only reflecting devices NetGuard already manages until
+    someone remembers to click Scan or the next auto_rescan_enabled cadence fires.
+    Runs off the request thread since scan_subnet's nmap sweep can take a while on
+    larger CIDRs. Best-effort: a failure here (nmap missing, subnet unreachable)
+    just means the subnet falls back to the manual Scan button / periodic sweep,
+    so it's logged and swallowed rather than surfaced anywhere.
+    """
+    import logging
+    import uuid as _uuid
+
+    from app.models import Subnet
+    from app.services import ipam_service
+
+    logger = logging.getLogger("netguard.tasks")
+    db = SessionLocal()
+    try:
+        subnet = db.get(Subnet, _uuid.UUID(subnet_id))
+        if not subnet:
+            return False
+        try:
+            ipam_service.scan_subnet(db, subnet)
+            return True
+        except Exception:
+            logger.exception("Initial scan failed for newly-created subnet %s", subnet.cidr)
+            return False
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.run_ipam_conflict_alert_sweep_task")
 def run_ipam_conflict_alert_sweep_task() -> int:
     """Celery beat entry point (see celery_app "ipam-conflict-alert-sweep"):

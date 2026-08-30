@@ -215,6 +215,15 @@ export default function WirelessPage() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [checkingId, setCheckingId] = useState<string | null>(null);
+  // Per-AP result of the last "Test connection" run -- surfaced as two
+  // separate signals (ping/TCP vs SNMP), not one collapsed pass/fail,
+  // since they can legitimately disagree: a hardened AP with SSH/web
+  // closed can fail every ping/TCP probe while SNMP answers fine. See
+  // api/wireless.py check_ap_reachability's docstring for why this
+  // used to report "down" for APs that were actually fully manageable.
+  const [checkResults, setCheckResults] = useState<
+    Record<string, { pingOrTcp: boolean; snmp: boolean; snmpError?: string | null; snmpMessage?: string | null }>
+  >({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Standalone AP's own SNMP credentials (PATCH /wireless/aps/{id}/snmp-credentials) --
@@ -389,10 +398,25 @@ export default function WirelessPage() {
   const checkAp = async (ap: WirelessAP) => {
     setCheckingId(ap.id);
     try {
-      const res = await api.post<WirelessAP & { snmp_poll?: { error?: string; message?: string; client_count?: number; ssid_count?: number } }>(
-        `/wireless/aps/${ap.id}/check`
-      );
+      const res = await api.post<
+        WirelessAP & {
+          snmp_poll?: { error?: string; message?: string; client_count?: number; ssid_count?: number };
+          diagnostics?: { ping_or_tcp_reachable: boolean; snmp_reachable: boolean; snmp_error?: string | null; snmp_message?: string | null };
+        }
+      >(`/wireless/aps/${ap.id}/check`);
       setAllAps((prev) => prev.map((a) => (a.id === ap.id ? res.data : a)));
+      const diag = res.data.diagnostics;
+      if (diag) {
+        setCheckResults((prev) => ({
+          ...prev,
+          [ap.id]: {
+            pingOrTcp: diag.ping_or_tcp_reachable,
+            snmp: diag.snmp_reachable,
+            snmpError: diag.snmp_error,
+            snmpMessage: diag.snmp_message,
+          },
+        }));
+      }
       const poll = res.data.snmp_poll;
       if (poll?.error) {
         // Not a failure of the reachability check itself (that already

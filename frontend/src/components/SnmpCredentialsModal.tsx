@@ -9,6 +9,21 @@ interface SnmpTestResult {
   sys_uptime_seconds?: number | null;
 }
 
+interface ConnectionDiagnosticStep {
+  name: string;
+  success: boolean;
+  detail: string;
+}
+
+interface ConnectionTestAndFixResult {
+  steps: ConnectionDiagnosticStep[];
+  overall_success: boolean;
+  status_before: string;
+  status_after: string;
+  fix_applied: boolean;
+  fix_detail?: string | null;
+}
+
 function formatUptime(seconds?: number | null): string {
   if (seconds == null) return "";
   const days = Math.floor(seconds / 86400);
@@ -127,6 +142,14 @@ export default function SnmpCredentialsModal({
   const [saved, setSaved] = useState(false);
   const [testResult, setTestResult] = useState<SnmpTestResult | null>(null);
 
+  // "Test & Fix" -- diagnoses the "SNMP works but device still shows
+  // offline" mismatch (see backend POST /connection/test-and-fix
+  // docstring: the independent ping sweep doesn't know about SNMP at
+  // all) and immediately re-syncs Device.status instead of waiting for
+  // the next reachability sweep.
+  const [fixing, setFixing] = useState(false);
+  const [fixResult, setFixResult] = useState<ConnectionTestAndFixResult | null>(null);
+
   const save = async () => {
     setSaving(true);
     setError(null);
@@ -161,6 +184,24 @@ export default function SnmpCredentialsModal({
       setError(err?.response?.data?.detail || "Failed to test SNMP connection.");
     } finally {
       setTesting(false);
+    }
+  };
+
+  const testAndFix = async () => {
+    setFixing(true);
+    setError(null);
+    setFixResult(null);
+    try {
+      const res = await api.post<ConnectionTestAndFixResult>(`/devices/${device.id}/connection/test-and-fix`);
+      setFixResult(res.data);
+      if (res.data.fix_applied) {
+        setLocalDevice((prev) => ({ ...prev, status: res.data.status_after } as Device));
+        onDeviceUpdated({ ...localDevice, status: res.data.status_after } as Device);
+      }
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to run connection diagnostics.");
+    } finally {
+      setFixing(false);
     }
   };
 
@@ -386,7 +427,44 @@ export default function SnmpCredentialsModal({
               </div>
             )}
 
+            {fixResult && (
+              <div
+                className={`text-xs rounded-lg px-3 py-2 border ${
+                  fixResult.overall_success ? "bg-green-50 border-green-200 text-risklow" : "bg-red-50 border-red-200 text-riskcrit"
+                }`}
+              >
+                <p className="font-medium">
+                  {fixResult.fix_applied
+                    ? `✓ Fixed — status corrected from ${fixResult.status_before} to ${fixResult.status_after}`
+                    : fixResult.overall_success
+                    ? `Status is already accurate (${fixResult.status_after}) — no fix needed.`
+                    : `✕ Still unreachable (${fixResult.status_after})`}
+                </p>
+                <ul className="mt-1.5 space-y-0.5">
+                  {fixResult.steps.map((s) => (
+                    <li key={s.name} className="flex items-start gap-1.5">
+                      <span className={s.success ? "text-risklow" : "text-riskcrit"}>{s.success ? "✓" : "✕"}</span>
+                      <span>
+                        <span className="font-medium">{s.name}:</span> {s.detail}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {fixResult.fix_detail && (
+                  <p className="mt-1.5 text-slate-500 dark:text-slate-400 italic">{fixResult.fix_detail}</p>
+                )}
+              </div>
+            )}
+
             <div className="flex gap-2 justify-end pt-2">
+              <button
+                onClick={testAndFix}
+                disabled={fixing}
+                title="Runs a full connection diagnostic (SNMP + TCP/ICMP reachability) and immediately corrects the device's status if it's stuck disagreeing with a working SNMP connection."
+                className="px-3 py-2 text-xs font-semibold text-amber-700 border border-amber-200 bg-amber-50 rounded-lg hover:bg-amber-100 disabled:opacity-50"
+              >
+                {fixing ? "Diagnosing…" : "Test & Fix"}
+              </button>
               <button
                 onClick={test}
                 disabled={testing}

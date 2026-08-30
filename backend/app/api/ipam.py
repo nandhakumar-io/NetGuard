@@ -111,6 +111,22 @@ def create_subnet(payload: SubnetCreate, db: Session = Depends(get_db), _=Depend
     db.add(subnet)
     db.commit()
     db.refresh(subnet)
+
+    # Fire the ping-sweep automatically as soon as the subnet exists, instead
+    # of leaving utilization/"used" state as manage-only until someone clicks
+    # Scan (see app.tasks.run_initial_subnet_scan_task). Best-effort: if the
+    # broker is down this must not fail subnet creation.
+    try:
+        from app.tasks import run_initial_subnet_scan_task
+
+        run_initial_subnet_scan_task.delay(str(subnet.id))
+    except Exception:
+        import logging
+
+        logging.getLogger("netguard.api").exception(
+            "Failed to enqueue initial scan for new subnet %s", subnet.cidr
+        )
+
     return _to_read(db, subnet)
 
 

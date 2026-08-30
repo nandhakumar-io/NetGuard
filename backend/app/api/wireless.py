@@ -480,13 +480,27 @@ def get_ap_history(ap_id: str, hours: int = 24, limit: int = 500, db: Session = 
 
 @router.post("/aps/{ap_id}/check", summary="Check reachability of a manually-added AP")
 def check_ap_reachability(ap_id: str, db: Session = Depends(get_db)):
-    """For manually-added APs (no SNMP controller polling them), ping the
-    management/AP IP so the UI can show a live up/down status instead of
-    a permanently-empty oper_status -- and, where supported (see
-    wireless_service.poll_standalone_ap), also refresh client_count and
+    """For manually-added APs (no SNMP controller polling them), checks
+    the management/AP IP so the UI can show a live up/down status instead
+    of a permanently-empty oper_status -- and, where supported (see
+    wireless_service.poll_standalone_ap), also refreshes client_count and
     SSID details straight from the AP's own SNMP agent instead of
     leaving client_count frozen at whatever was typed in when the AP was
-    first added."""
+    first added.
+
+    Reports TWO independent signals, not one collapsed boolean:
+    is_reachable() (TCP connect to 22/443/80/23, or ICMP ping) and a real
+    SNMP GET. These can legitimately disagree -- a hardened AP with SSH/
+    web management disabled and only SNMP + a controller protocol
+    reachable will fail every TCP probe and often has ICMP filtered too,
+    while answering SNMP perfectly. Previously the SNMP poll only ran
+    `if reachable`, so that AP would show "down"/no client-count refresh
+    forever despite being fully manageable -- the SNMP attempt now always
+    runs (when creds exist) regardless of the ping/TCP result, and
+    oper_status is UP if EITHER signal succeeded, so a real management
+    channel being up is never reported as down just because ping/SSH/web
+    happen to be closed on that box.
+    """
     from app.models.wireless import WirelessAP
     from app.services import wireless_service
     from app.services.reachability_service import is_reachable
@@ -503,18 +517,36 @@ def check_ap_reachability(ap_id: str, db: Session = Depends(get_db)):
     if not ip:
         raise HTTPException(status_code=422, detail="AP has no management IP or AP IP address to check")
 
-    reachable = is_reachable(ip)
-    ap.oper_status = 1 if reachable else 0
-    ap.polled_at = _datetime.datetime.now(_datetime.timezone.utc)
-    db.commit()
+    ping_reachable = is_reachable(ip)
 
     snmp_result = None
-    if reachable and ap.source == "manual":
+    snmp_ok = False
+    if ap.source == "manual":
         snmp_result = wireless_service.poll_standalone_ap(db, ap)
+        # poll_standalone_ap returns a plain dict with no "error" key on
+        # success (see its per-vendor return statements) -- an "error"
+        # key means it never got a usable SNMP response (bad creds, no
+        # matching Device, unsupported vendor, or a genuinely empty/
+        # unreachable agent), not that the poll merely didn't run.
+        snmp_ok = isinstance(snmp_result, dict) and "error" not in snmp_result
 
+    ap.oper_status = 1 if (ping_reachable or snmp_ok) else 0
+    ap.polled_at = _datetime.datetime.now(_datetime.timezone.utc)
+    db.commit()
     db.refresh(ap)
+
     out = _ap_to_read(ap).model_dump()
     out["snmp_poll"] = snmp_result
+    # Explicit diagnostics for the UI -- see docstring above for why
+    # these are surfaced separately instead of only the combined
+    # oper_status, e.g. to show "ping/SSH/web unreachable, but SNMP is
+    # working fine" rather than a flat, misleading "failed to connect".
+    out["diagnostics"] = {
+        "ping_or_tcp_reachable": ping_reachable,
+        "snmp_reachable": snmp_ok,
+        "snmp_error": snmp_result.get("error") if isinstance(snmp_result, dict) else None,
+        "snmp_message": snmp_result.get("message") if isinstance(snmp_result, dict) else None,
+    }
     return out
 
 

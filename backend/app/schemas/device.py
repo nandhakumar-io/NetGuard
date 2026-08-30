@@ -336,6 +336,27 @@ class SnmpTestResult(BaseModel):
     sys_uptime_seconds: int | None = None
 
 
+class ConnectionDiagnosticStep(BaseModel):
+    name: str
+    success: bool
+    detail: str
+
+
+class ConnectionTestAndFixResult(BaseModel):
+    """Response for POST /devices/{id}/connection/test-and-fix -- see that
+    endpoint's docstring for what each step checks and why the fix step
+    exists at all (the classic "SNMP works but the device still shows
+    offline" complaint, caused by the ping/TCP reachability sweep and SNMP
+    polling disagreeing about whether the device is up)."""
+
+    steps: list[ConnectionDiagnosticStep]
+    overall_success: bool
+    status_before: str
+    status_after: str
+    fix_applied: bool
+    fix_detail: str | None = None
+
+
 class SshCredentialsUpdate(BaseModel):
     """Body for POST /devices/{id}/ssh-credentials. Mirrors
     SnmpCredentialsUpdate: only fields actually provided are touched.

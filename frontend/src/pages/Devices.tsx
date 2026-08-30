@@ -2143,6 +2143,16 @@ export default function Devices() {
   // polling) that they don't fit the generic device table/form at all.
   // null means "showing every device type", same as deviceTypeFilter="all".
   const [classificationView, setClassificationView] = useState<string | null>(null);
+  // "ap" used to unconditionally swap the whole page out for the legacy
+  // WirelessPage panel (WLC-polled / manually-added APs, no SNMP/NETCONF
+  // of their own). That hid Device-table entries with device_type="ap"
+  // from ever getting the same Health/Interfaces/Backups/Configuration
+  // tabs a switch or router gets, even though nothing about an AP Device
+  // row is actually SNMP/NETCONF-incapable -- it's just a device_type
+  // string. Default view is now the normal inventory table (full tabs),
+  // with the old WLC/standalone panel one click away for the APs that
+  // genuinely aren't inventoried Devices.
+  const [apSubView, setApSubView] = useState<"inventory" | "wireless">("inventory");
   // "Assign existing device" quick-picker shown in the classification
   // banner -- lets you move an already-inventoried device into the
   // classification you're viewing (e.g. pick a device out of
@@ -2565,6 +2575,44 @@ export default function Devices() {
 
   useEffect(load, []);
 
+  // Deep-link support: ConfigSearch (and anywhere else that links here
+  // with ?device=<id>) expects landing on this page to open straight to
+  // that device's row, expanded, instead of dumping the visitor on the
+  // undifferentiated full device list. Waits for `devices` so the row
+  // actually exists to expand/scroll to, and only auto-expands once per
+  // navigation (deviceIdParam) so manually collapsing it afterwards sticks.
+  const deviceIdParam = searchParams.get("device");
+  const autoExpandedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!deviceIdParam || devices.length === 0) return;
+    if (autoExpandedRef.current === deviceIdParam) return;
+    if (!devices.some((d) => d.id === deviceIdParam)) return;
+    autoExpandedRef.current = deviceIdParam;
+    setExpandedDeviceId(deviceIdParam);
+    // Let the expanded row render before scrolling to it.
+    requestAnimationFrame(() => {
+      document.getElementById(`device-row-${deviceIdParam}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [deviceIdParam, devices]);
+
+  // Wireless APs live in their own table (WirelessAP), not the Device
+  // table -- see wireless_service/models/wireless.py -- so they never
+  // show up in `devices` above and classificationCounts["ap"] (which
+  // only counts Device rows with device_type="ap") always read 0 even
+  // with real APs configured. This is just for the Classifications
+  // tile's displayed count; the tile's click-through already correctly
+  // opens the real <WirelessPage /> panel underneath, which fetches its
+  // own full AP list -- this is a lighter-weight count-only fetch so
+  // the fleet overview doesn't have to mount that whole page just to
+  // show a number.
+  const [wirelessApCount, setWirelessApCount] = useState<number | null>(null);
+  useEffect(() => {
+    api
+      .get<{ id: string }[]>("/wireless/aps")
+      .then((res) => setWirelessApCount(res.data.length))
+      .catch(() => setWirelessApCount(null));
+  }, []);
+
   // --- CSV bulk import/export (for orgs without NetBox) ---
   const [csvBusy, setCsvBusy] = useState(false);
   const [csvImportResult, setCsvImportResult] = useState<DeviceCsvImportResult | null>(null);
@@ -2738,6 +2786,31 @@ export default function Devices() {
   // key (including "" for Unclassified) against the full unfiltered device
   // list, so the blocks always reflect the whole fleet regardless of
   // whatever filter/search is currently narrowing the table below.
+  const coreRoles = ["core", "distribution", "firewall", "router"];
+  // Quick-access shortlist so an admin doesn't have to scan/scroll the
+  // whole fleet table to find the handful of devices that actually
+  // matter most right now -- same "core/distribution/firewall/router
+  // role or flagged uplink" signal the delete-danger heuristic below
+  // already uses (kept as a substring match here since device_role is
+  // free text like "Core Switch", not a fixed enum), unioned with
+  // anything currently unhealthy (red health or open critical alerts)
+  // since an admin also needs fast access to whatever's actively
+  // broken, core or not. Sorted worst-first so the most urgent thing is
+  // always the first card.
+  const coreAndCriticalDevices = useMemo(() => {
+    const isCore = (d: Device) =>
+      !!d.is_uplink || coreRoles.some((r) => (d.device_role || "").toLowerCase().includes(r));
+    const isCritical = (d: Device) => d.health_color === "red" || (d.critical_alert_count || 0) > 0;
+    return devices
+      .filter((d) => isCore(d) || isCritical(d))
+      .sort((a, b) => {
+        const score = (d: Device) => (isCritical(d) ? 0 : 1) - (d.status === "offline" ? 1 : 0);
+        const diff = score(a) - score(b);
+        if (diff !== 0) return diff;
+        return (a.hostname || "").localeCompare(b.hostname || "");
+      });
+  }, [devices]);
+
   const classificationCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const d of devices) counts[(d.device_type || "").toLowerCase()] = (counts[(d.device_type || "").toLowerCase()] || 0) + 1;
@@ -2747,14 +2820,14 @@ export default function Devices() {
   // NOT already in the classification currently being viewed, sorted so
   // the picker is actually usable on a fleet with hundreds of devices.
   const assignableDevices = useMemo(() => {
-    if (classificationView === null || classificationView === "ap") return [];
+    if (classificationView === null) return [];
     return devices
       .filter((d) => (d.device_type || "").toLowerCase() !== classificationView)
       .sort((a, b) => a.hostname.localeCompare(b.hostname));
   }, [devices, classificationView]);
 
   const handleAssignToClassification = async () => {
-    if (!assignDeviceId || classificationView === null || classificationView === "ap") return;
+    if (!assignDeviceId || classificationView === null) return;
     setAssigningDevice(true);
     try {
       const res = await api.patch<Device>(`/devices/${assignDeviceId}`, { device_type: classificationView || null });
@@ -3277,6 +3350,74 @@ export default function Devices() {
         </p>
       )}
 
+      {/* Core & critical devices -- quick access to the handful of boxes
+          an admin actually needs to jump to fast (core/distribution/
+          firewall/router role, flagged uplinks, or anything currently
+          red/critical), instead of hunting for them in a fleet table
+          sorted alphabetically with no priority signal. Clicking a card
+          filters the table below straight to that hostname; the
+          Terminal button skips the filter and opens a session directly.
+          Hidden during a classification drill-down (redundant with that
+          focused view) and when there's nothing worth calling out. */}
+      {!classificationView && coreAndCriticalDevices.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2">
+            Core &amp; Critical Devices
+          </p>
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            {coreAndCriticalDevices.map((d) => {
+              const isCritical = d.health_color === "red" || (d.critical_alert_count || 0) > 0;
+              return (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => setQuery(d.hostname)}
+                  className={`group shrink-0 flex items-center gap-3 rounded-xl border p-3 pr-4 text-left bg-white dark:bg-slate-800 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md min-w-[220px] ${
+                    isCritical
+                      ? "border-red-200 dark:border-red-800"
+                      : "border-slate-200 dark:border-slate-700"
+                  }`}
+                >
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusColor[d.status]} ${isCritical ? "animate-pulse" : ""}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-sm text-navy dark:text-white truncate">{d.hostname}</span>
+                      {d.is_uplink && (
+                        <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-full">
+                          Uplink
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
+                      {d.device_role || DEVICE_TYPE_STYLES[(d.device_type || "").toLowerCase()]?.label || d.ip_address}
+                    </p>
+                  </div>
+                  {(d.critical_alert_count || 0) > 0 && (
+                    <span className="shrink-0 text-[11px] font-bold text-riskcrit bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 rounded-full">
+                      {d.critical_alert_count}
+                    </span>
+                  )}
+                  {canManage && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openTerminal(d.id, d.hostname);
+                      }}
+                      title="Open terminal"
+                      className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-navy dark:hover:text-white text-sm"
+                    >
+                      ⌨
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Classification blocks -- one per DEVICE_TYPE_OPTIONS bucket
           (Router/Switch/AP/NVR/Firewall/Server/Other/Unclassified) with a
           live count off the full fleet. Clicking a block narrows straight
@@ -3291,14 +3432,15 @@ export default function Devices() {
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
             {DEVICE_TYPE_OPTIONS.filter((opt) => opt.value !== "").map((opt) => {
               const style = DEVICE_TYPE_STYLES[opt.value] || DEVICE_TYPE_STYLES.other;
-              const count = classificationCounts[opt.value] || 0;
+              const count = opt.value === "ap" ? (wirelessApCount ?? (classificationCounts[opt.value] || 0)) : (classificationCounts[opt.value] || 0);
               return (
                 <button
                   key={opt.value}
                   type="button"
                   onClick={() => {
                     setClassificationView(opt.value);
-                    if (opt.value !== "ap") setDeviceTypeFilter(opt.value);
+                    setDeviceTypeFilter(opt.value);
+                    if (opt.value === "ap") setApSubView("inventory");
                   }}
                   className={`group relative flex flex-col items-center justify-center gap-1.5 rounded-2xl border p-5 text-center bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg hover:border-transparent overflow-hidden`}
                 >
@@ -3328,20 +3470,35 @@ export default function Devices() {
         </div>
       )}
 
-      {classificationView === "ap" ? (
+      {classificationView === "ap" && apSubView === "wireless" ? (
         <div>
           <button
             type="button"
-            onClick={() => setClassificationView(null)}
+            onClick={() => setApSubView("inventory")}
             className="mb-4 flex items-center gap-1.5 text-sm font-semibold text-brandblue hover:text-navy dark:hover:text-white"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><path d="M15 18l-6-6 6-6" /></svg>
-            Back to all devices
+            Back to AP inventory
           </button>
           <WirelessPage />
         </div>
       ) : (
       <>
+      {classificationView === "ap" && (
+        <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 text-sm">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing inventoried AP devices below (Health/Interfaces/Backups/Configuration tabs, same as switches).
+          </span>
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => setApSubView("wireless")}
+            className="text-brandblue hover:text-navy dark:hover:text-white font-semibold whitespace-nowrap"
+          >
+            View WLC-polled / standalone APs →
+          </button>
+        </div>
+      )}
       {classificationView !== null && (
         <div className="flex flex-wrap items-center gap-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-3">
           <button
@@ -3879,7 +4036,7 @@ export default function Devices() {
                 )}
                 {!isCollapsed && (
                 <>
-                <tr className={`cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40 border-l-4 ${
+                <tr id={`device-row-${d.id}`} className={`cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-slate-700/40 border-l-4 ${
                     expandedDeviceId === d.id ? "bg-sky-50/60 dark:bg-slate-900 border-l-accent" : "border-l-transparent bg-white dark:bg-slate-800"
                   }`} 
                   onClick={() => setExpandedDeviceId(expandedDeviceId === d.id ? null : d.id)}
