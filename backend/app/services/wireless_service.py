@@ -417,11 +417,11 @@ def poll_standalone_ap(db: Session, ap) -> dict:
     timeout = 5.0
 
     if vendor == "mikrotik":
-        return _poll_standalone_mikrotik(db, ap, device, auth, timeout)
+        return _poll_standalone_mikrotik(db, ap, device, auth, ip, timeout)
     if vendor == "ruckus":
-        return _poll_standalone_ruckus(db, ap, device, auth, timeout)
+        return _poll_standalone_ruckus(db, ap, device, auth, ip, timeout)
     if vendor == "tplink":
-        return _poll_standalone_tplink(db, ap, device, auth, timeout)
+        return _poll_standalone_tplink(db, ap, device, auth, ip, timeout)
 
     return {
         "error": "vendor_not_supported",
@@ -443,8 +443,18 @@ def _upsert_ssids_for_standalone(
     `ssids` maps index -> ssid_name; `client_counts` maps the same
     index -> client count (or None if count unavailable for that slot).
     Returns the count of SSID rows actually upserted.
+
+    `device` is None whenever the AP is polled using its own SNMP
+    credentials (WirelessAP.snmp_*) with no matching Device row at the
+    same IP -- WirelessSSID.controller_device_id is a real FK, so there's
+    nowhere to attach SSID rows for a pure-standalone AP. Returns 0
+    rather than raising in that case; the client-count refresh above this
+    call still succeeds independently.
     """
     from app.models.wireless import WirelessSSID
+
+    if device is None or not ssids:
+        return 0
 
     ssid_count = 0
     for idx, ssid_name in ssids.items():
@@ -466,13 +476,12 @@ def _upsert_ssids_for_standalone(
     return ssid_count
 
 
-def _poll_standalone_mikrotik(db, ap, device, auth, timeout: float) -> dict:
+def _poll_standalone_mikrotik(db, ap, device, auth, ip: str, timeout: float) -> dict:
     """MikroTik RouterOS WLAN client-count + SSID poll using MIKROTIK-MIB.
     See the _OID_MTXR_* constant block above for OID sources.
     """
     from app.services.snmp_service import _walk
 
-    ip = device.ip_address
     client_counts = _walk(ip, auth, _OID_MTXR_WLAP_CLIENT_COUNT, timeout)
     ssids = _walk(ip, auth, _OID_MTXR_WLAP_SSID, timeout)
     if not client_counts and not ssids:
@@ -492,17 +501,19 @@ def _poll_standalone_mikrotik(db, ap, device, auth, timeout: float) -> dict:
     ssid_count = _upsert_ssids_for_standalone(db, device, ap, ssids, count_by_idx, now)
     db.commit()
     db.refresh(ap)
-    return {"client_count": total_clients, "ssid_count": ssid_count}
+    result = {"client_count": total_clients, "ssid_count": ssid_count}
+    if device is None and ssids:
+        result["note"] = "SSID names weren't stored -- no managed Device row at this IP to attach them to."
+    return result
 
 
-def _poll_standalone_ruckus(db, ap, device, auth, timeout: float) -> dict:
+def _poll_standalone_ruckus(db, ap, device, auth, ip: str, timeout: float) -> dict:
     """Ruckus Unleashed / ZoneDirector client-count + SSID poll using
     RUCKUS-WLAN-MIB. See the _OID_RUCKUS_* constant block above for OID
     sources and caveats (SmartZone-only deployments won't populate this).
     """
     from app.services.snmp_service import _walk
 
-    ip = device.ip_address
     # Primary: Ruckus enterprise MIB -- ruckusZDApNumSta gives client count
     # per AP MAC, ruckusZDWlanSsid gives SSID names per WLAN index.
     sta_rows = _walk(ip, auth, _OID_RUCKUS_AP_NUM_STA, timeout)
@@ -539,10 +550,13 @@ def _poll_standalone_ruckus(db, ap, device, auth, timeout: float) -> dict:
     ssid_count = _upsert_ssids_for_standalone(db, device, ap, ssid_rows, {}, now)
     db.commit()
     db.refresh(ap)
-    return {"client_count": total_clients, "ssid_count": ssid_count}
+    result = {"client_count": total_clients, "ssid_count": ssid_count}
+    if device is None and ssid_rows:
+        result["note"] = "SSID names weren't stored -- no managed Device row at this IP to attach them to."
+    return result
 
 
-def _poll_standalone_tplink(db, ap, device, auth, timeout: float) -> dict:
+def _poll_standalone_tplink(db, ap, device, auth, ip: str, timeout: float) -> dict:
     """TP-Link EAP/Omada standalone AP client-count + SSID poll using
     TPLINK WLAN MIB. See the _OID_TPLINK_* constant block above for OID
     sources. Each radio is one table row; sums across all radios for the
@@ -551,7 +565,6 @@ def _poll_standalone_tplink(db, ap, device, auth, timeout: float) -> dict:
     """
     from app.services.snmp_service import _walk
 
-    ip = device.ip_address
     # Primary: TP-Link enterprise MIB -- tpApStationNumber (clients per
     # radio) and tpApSsid (SSID name per radio).
     client_rows = _walk(ip, auth, _OID_TPLINK_AP_STATION_NUMBER, timeout)
@@ -585,7 +598,10 @@ def _poll_standalone_tplink(db, ap, device, auth, timeout: float) -> dict:
     ssid_count = _upsert_ssids_for_standalone(db, device, ap, ssid_rows, count_by_idx, now)
     db.commit()
     db.refresh(ap)
-    return {"client_count": total_clients, "ssid_count": ssid_count}
+    result = {"client_count": total_clients, "ssid_count": ssid_count}
+    if device is None and ssid_rows:
+        result["note"] = "SSID names weren't stored -- no managed Device row at this IP to attach them to."
+    return result
 
 
 def find_matching_device_for_ap(db: Session, aps: list) -> dict[str, dict]:

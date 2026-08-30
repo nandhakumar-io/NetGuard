@@ -2153,6 +2153,7 @@ export default function Devices() {
   // with the old WLC/standalone panel one click away for the APs that
   // genuinely aren't inventoried Devices.
   const [apSubView, setApSubView] = useState<"inventory" | "wireless">("inventory");
+  const [showWirelessAdd, setShowWirelessAdd] = useState(false);
   // "Assign existing device" quick-picker shown in the classification
   // banner -- lets you move an already-inventoried device into the
   // classification you're viewing (e.g. pick a device out of
@@ -3124,7 +3125,26 @@ export default function Devices() {
               className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brandblue"
               value={form.device_type}
               title="Classification shown as a badge in the device list and usable as a filter (switch, router, wireless AP, NVR, etc.)"
-              onChange={(e) => setForm({ ...form, device_type: e.target.value })}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === "ap" && !editingDeviceId) {
+                  // An AP's real fields (SSID, channel, client counts,
+                  // WLC polling) live on the dedicated Wireless AP panel,
+                  // not this generic Device form's SNMP/NETCONF/RESTCONF
+                  // fields -- jump straight there instead of showing this
+                  // form with an AP type selected and irrelevant switch
+                  // fields underneath. Only for a brand-new device: don't
+                  // yank someone out of an in-progress edit of an
+                  // existing inventoried AP Device just for re-selecting
+                  // its own type in the dropdown.
+                  setShowWirelessAdd(true);
+                  cancelForm();
+                  setClassificationView("ap");
+                  setApSubView("wireless");
+                  return;
+                }
+                setForm({ ...form, device_type: val });
+              }}
             >
               {DEVICE_TYPE_OPTIONS.map((opt) => (
                 <option key={opt.value || "unclassified"} value={opt.value}>
@@ -3189,7 +3209,7 @@ export default function Devices() {
                   onClick={() => { setClassificationView("ap"); setApSubView("wireless"); }}
                   className="font-semibold underline underline-offset-2 hover:text-sky-900 dark:hover:text-sky-100"
                 >
-                  Wireless AP panel
+                  Wireless AP page
                 </button>{" "}
                 — the SSH/SNMP/NETCONF/RESTCONF fields below are for switches/routers and can be left off for most APs.
               </span>
@@ -3451,16 +3471,17 @@ export default function Devices() {
             className="mb-4 flex items-center gap-1.5 text-sm font-semibold text-brandblue hover:text-navy dark:hover:text-white"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><path d="M15 18l-6-6 6-6" /></svg>
-            Back to AP inventory
+            Back to AP classification
           </button>
-          <WirelessPage />
+          <WirelessPage initialShowForm={showWirelessAdd} />
         </div>
       ) : (
       <>
       {classificationView === "ap" && (
         <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 text-sm">
           <span className="text-slate-500 dark:text-slate-400">
-            Showing inventoried AP devices below (Health/Interfaces/Backups/Configuration tabs, same as switches).
+            Showing inventoried AP devices below (Health/Interfaces/Backups/Configuration tabs, same as switches) —
+            not the same list as the Wireless AP page, which covers WLC-polled and manually-added APs instead.
           </span>
           <div className="flex-1" />
           <button
@@ -3468,7 +3489,7 @@ export default function Devices() {
             onClick={() => setApSubView("wireless")}
             className="text-brandblue hover:text-navy dark:hover:text-white font-semibold whitespace-nowrap"
           >
-            View WLC-polled / standalone APs →
+            View Wireless AP page →
           </button>
         </div>
       )}

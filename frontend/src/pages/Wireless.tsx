@@ -198,7 +198,7 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(mins / 60)}h ago`;
 }
 
-export default function WirelessPage() {
+export default function WirelessPage({ initialShowForm = false }: { initialShowForm?: boolean }) {
   const [controllers, setControllers] = useState<WirelessController[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [summary, setSummary] = useState<WirelessSummary | null>(null);
@@ -209,7 +209,7 @@ export default function WirelessPage() {
   const [error, setError] = useState<string | null>(null);
 
   // Manual AP CRUD state
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(initialShowForm);
   const [form, setForm] = useState(emptyApForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
