@@ -22,6 +22,7 @@ from app.schemas.chatops import (
     ChatOpsCommandResponse,
     ChatOpsLinkCreate,
     ChatOpsLinkRead,
+    ChatOpsLinkSelfCreate,
 )
 from app.services import audit_service, chatops_service
 
@@ -264,6 +265,73 @@ def list_links(db: Session = Depends(get_db), _=Depends(CHATOPS_ADMIN_ROLES)):
         )
         for u in users
     ]
+
+
+@router.get("/links/me", response_model=ChatOpsLinkRead)
+def get_my_link(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Self-service read of the caller's own link status -- unlike GET
+    /links (admin-only, full roster), any authenticated user can check
+    whether *their own* account is linked without needing an admin to
+    look it up for them.
+    """
+    return ChatOpsLinkRead(
+        user_id=current_user.id, user_email=current_user.email, full_name=current_user.full_name,
+        slack_user_id=current_user.slack_user_id, msteams_user_id=current_user.msteams_user_id,
+    )
+
+
+@router.post("/links/me", response_model=ChatOpsLinkRead, status_code=201)
+def link_my_account(
+    payload: ChatOpsLinkSelfCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Self-service link: any authenticated user can attach their own
+    Slack/Teams ID without admin involvement. Previously POST /chatops/
+    links (admin-only) was the *only* way to link an account at all, so
+    every single user's Slack/Teams handle had to be typed in by an admin
+    by hand -- fine for a handful of users, a real bottleneck past that.
+    Admin-managed /links stays as-is for linking *someone else's*
+    account (onboarding on their behalf, fixing a mistyped ID, etc.).
+    """
+    if payload.platform not in ("slack", "teams"):
+        raise HTTPException(status_code=422, detail="platform must be 'slack' or 'teams'")
+
+    column = "slack_user_id" if payload.platform == "slack" else "msteams_user_id"
+    existing = db.query(User).filter(getattr(User, column) == payload.external_user_id).first()
+    if existing and existing.id != current_user.id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"That {payload.platform} account is already linked to {existing.email}",
+        )
+
+    setattr(current_user, column, payload.external_user_id)
+    db.commit()
+    db.refresh(current_user)
+
+    audit_service.record_event(
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"ChatOps Self-Link Created ({payload.platform})",
+        result="Linked", detail=f"{current_user.email} self-linked their {payload.platform} account",
+    )
+
+    return ChatOpsLinkRead(
+        user_id=current_user.id, user_email=current_user.email, full_name=current_user.full_name,
+        slack_user_id=current_user.slack_user_id, msteams_user_id=current_user.msteams_user_id,
+    )
+
+
+@router.delete("/links/me", status_code=204)
+def unlink_my_account(platform: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if platform not in ("slack", "teams"):
+        raise HTTPException(status_code=422, detail="platform must be 'slack' or 'teams'")
+    column = "slack_user_id" if platform == "slack" else "msteams_user_id"
+    setattr(current_user, column, None)
+    db.commit()
+
+    audit_service.record_event(
+        db, actor=current_user.email, tenant_id=current_user.tenant_id, action=f"ChatOps Self-Link Removed ({platform})",
+        result="Unlinked", detail=f"{current_user.email} unlinked their own {platform} account",
+    )
 
 
 @router.post("/links", response_model=ChatOpsLinkRead, status_code=201)

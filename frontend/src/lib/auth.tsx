@@ -24,6 +24,10 @@ export interface CurrentUser {
   // app.models.user.User.is_msp_staff) rather than one tenant --
   // gates visibility of the cross-tenant NOC board.
   is_msp_staff: boolean;
+  // Set for an SSO-only account (Google, etc) -- null for a local
+  // email/password account. No local password exists to change when set,
+  // so the Security page hides its "change password" card.
+  sso_provider: string | null;
 }
 
 /** True if `user` has network_admin either as their base role or via a

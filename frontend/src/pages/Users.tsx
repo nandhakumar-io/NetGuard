@@ -81,6 +81,7 @@ export default function Users() {
   const [permissionsUser, setPermissionsUser] = useState<AdminUser | null>(null);
   const [tenancyUser, setTenancyUser] = useState<AdminUser | null>(null);
   const [actioningId, setActioningId] = useState<string | null>(null);
+  const [resetPasswordResult, setResetPasswordResult] = useState<{ email: string; password: string } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -121,6 +122,25 @@ export default function Users() {
       alert(count > 0 ? `Signed out ${count} active session${count === 1 ? "" : "s"} for ${u.email}.` : `${u.email} has no active sessions.`);
     } catch (err: any) {
       alert(err?.response?.data?.detail || "Failed to revoke sessions");
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const resetPassword = async (u: AdminUser) => {
+    if (
+      !confirm(
+        `Reset ${u.email}'s password? This generates a new temporary password, ends every active session for ` +
+          `them, and shows the temporary password here once -- it isn't emailed or stored anywhere.`
+      )
+    )
+      return;
+    setActioningId(u.id);
+    try {
+      const res = await api.post(`/users/${u.id}/reset-password`);
+      setResetPasswordResult({ email: u.email, password: res.data.temporary_password });
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to reset password");
     } finally {
       setActioningId(null);
     }
@@ -461,6 +481,14 @@ export default function Users() {
                         Force Sign-Out
                       </button>
                       <button
+                        disabled={actioningId === u.id || currentUser?.id === u.id || !!u.sso_provider}
+                        onClick={() => resetPassword(u)}
+                        title={u.sso_provider ? "This account signs in via SSO and has no local password" : "Generate a new temporary password and end every active session"}
+                        className="text-xs font-bold text-amber-600 hover:underline disabled:opacity-40 disabled:no-underline"
+                      >
+                        Reset Password
+                      </button>
+                      <button
                         disabled={actioningId === u.id || currentUser?.id === u.id || u.is_active}
                         onClick={() => removeUser(u)}
                         title={u.is_active ? "Disable the account before deleting it" : undefined}
@@ -485,6 +513,62 @@ export default function Users() {
       {tenancyUser && (
         <TenancyModal user={tenancyUser} onClose={() => setTenancyUser(null)} onSaved={load} />
       )}
+      {resetPasswordResult && (
+        <ResetPasswordResultModal result={resetPasswordResult} onClose={() => setResetPasswordResult(null)} />
+      )}
+    </div>
+  );
+}
+
+function ResetPasswordResultModal({
+  result,
+  onClose,
+}: {
+  result: { email: string; password: string };
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(result.password);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable -- the text below is still selectable */
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-slate-800 rounded-xl w-full max-w-md p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="text-sm font-semibold text-navy dark:text-white mb-1">
+          Password reset for {result.email}
+        </p>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+          Every active session for this account was ended. This temporary password is shown once -- it isn't
+          emailed or stored anywhere, so copy it now and relay it to the user through a trusted channel.
+        </p>
+        <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 mb-4">
+          <span className="font-mono text-sm text-navy dark:text-white flex-1 break-all select-all">
+            {result.password}
+          </span>
+          <button
+            onClick={copy}
+            className="text-xs font-semibold text-brandblue hover:underline shrink-0"
+          >
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+        <button
+          onClick={onClose}
+          className="w-full bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors"
+        >
+          Done
+        </button>
+      </div>
     </div>
   );
 }

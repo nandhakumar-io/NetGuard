@@ -62,8 +62,17 @@ def create_subscription(
     user: User = Depends(get_current_user),
     tenant_id=Depends(get_tenant_scope),
 ):
-    if tenant_id is not None and payload.tenant_id != tenant_id:
-        raise HTTPException(status_code=403, detail="Cannot create a digest subscription for another tenant")
+    # Scoped (non-MSP) caller: default to their own tenant when omitted,
+    # and reject any attempt to name a different one. MSP staff (scope is
+    # None) must name the target tenant explicitly -- there's no "own
+    # tenant" to default to.
+    target_tenant_id = payload.tenant_id
+    if tenant_id is not None:
+        if target_tenant_id is not None and target_tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Cannot create a digest subscription for another tenant")
+        target_tenant_id = tenant_id
+    elif target_tenant_id is None:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
     try:
         cadence = DigestCadence(payload.cadence)
         severity_floor = DigestSeverityFloor(payload.severity_floor)
@@ -75,7 +84,7 @@ def create_subscription(
         raise HTTPException(status_code=422, detail="hour_utc must be between 0 and 23")
 
     sub = TenantDigestSubscription(
-        tenant_id=payload.tenant_id,
+        tenant_id=target_tenant_id,
         cadence=cadence,
         hour_utc=payload.hour_utc,
         day_of_week=payload.day_of_week if cadence == DigestCadence.WEEKLY else None,

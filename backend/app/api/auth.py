@@ -11,6 +11,7 @@ from app.core.security import (
     create_access_token,
     create_mfa_challenge_token,
     create_pin_step_up_token,
+    decode_access_token,
     decode_mfa_challenge_token,
     generate_refresh_token,
     hash_password,
@@ -21,6 +22,7 @@ from app.core.security import (
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
 from app.schemas.auth import (
+    ChangePasswordRequest,
     LoginRequest,
     MfaCodeRequest,
     MfaDisableRequest,
@@ -40,7 +42,13 @@ from app.schemas.auth import (
     UserCreate,
     UserRoleUpdate,
 )
-from app.services import mfa_service, rate_limiter, session_device
+from app.services import (
+    audit_service,
+    mfa_service,
+    rate_limiter,
+    session_device,
+    session_revocation_service,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -300,6 +308,65 @@ def mfa_disable(payload: MfaDisableRequest, db: Session = Depends(get_db), curre
     current_user.mfa_enabled = "false"
     db.commit()
     return {"mfa_enabled": False}
+
+
+_PASSWORD_MIN_LENGTH = 8
+
+
+@router.post("/change-password", status_code=204)
+def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Self-service password change -- the one gap in Security & Access
+    this app otherwise had no path for: MFA, the security PIN, and
+    secrets rotation could all be managed from the Security page, but a
+    user whose password was set at account creation (or who just wants
+    to rotate it) had no way to change it themselves without going
+    through an admin. Requires the current password (same "prove it's
+    really you" bar as disabling MFA or the PIN above) and revokes every
+    *other* session on success, since a changed password is commonly a
+    response to suspected compromise and the whole point is invalidated
+    if old sessions are left standing.
+    """
+    if current_user.sso_provider:
+        raise HTTPException(
+            status_code=400,
+            detail="This account signs in via SSO and has no local password to change.",
+        )
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(payload.new_password) < _PASSWORD_MIN_LENGTH:
+        raise HTTPException(status_code=422, detail=f"New password must be at least {_PASSWORD_MIN_LENGTH} characters")
+    if verify_password(payload.new_password, current_user.hashed_password):
+        raise HTTPException(status_code=422, detail="New password must be different from your current password")
+
+    current_user.hashed_password = hash_password(payload.new_password)
+    db.commit()
+
+    current_session_id = None
+    auth_header = request.headers.get("authorization", "")
+    # Best-effort: keep the session that made this request alive so the
+    # user isn't immediately signed out of the tab they just used to
+    # change their password; every other session gets revoked below.
+    if auth_header.lower().startswith("bearer "):
+        try:
+            claims = decode_access_token(auth_header.split(" ", 1)[1])
+            current_session_id = claims.get("sid")
+        except JWTError:
+            pass
+
+    revoked = session_revocation_service.revoke_all_sessions(
+        db, current_user, actor_email=current_user.email, reason="password changed",
+        keep_session_id=current_session_id,
+    )
+    audit_service.record_event(
+        db, actor=current_user.email, action="Password Changed", result="Success",
+        detail=f"{revoked} other session(s) signed out.",
+        tenant_id=current_user.tenant_id,
+    )
 
 
 # --- Security PIN (step-up auth for terminal access + critical actions) ---
@@ -668,4 +735,8 @@ def get_me(current_user: User = Depends(get_current_user)):
         "is_msp_staff": current_user.is_msp_staff,
         "tenant_id": str(current_user.tenant_id) if current_user.tenant_id else None,
         "tenant_name": current_user.tenant.name if current_user.tenant else None,
+        # Lets the Security page hide the "change password" card for an
+        # SSO-only account (no local password to change -- see
+        # app.api.auth.change_password's matching check).
+        "sso_provider": current_user.sso_provider,
     }

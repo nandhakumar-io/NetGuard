@@ -34,6 +34,24 @@ class FlowExporter(BaseModel):
     flow_count: int
 
 
+class TopPort(BaseModel):
+    port: int | None
+    service: str
+    protocol: str
+    bytes: int
+    packets: int
+    distinct_hosts: int
+    pct: float
+
+
+class BandwidthAnomaly(BaseModel):
+    ip_address: str
+    recent_bytes: int
+    expected_bytes: int
+    multiplier: float
+    detected_at: str
+
+
 class TrafficSummary(BaseModel):
     window_minutes: int
     top_talkers: list[TopTalker]
@@ -41,3 +59,5 @@ class TrafficSummary(BaseModel):
     protocol_breakdown: list[ProtocolShare]
     bandwidth_timeseries: list[BandwidthPoint]
     exporters: list[FlowExporter]
+    top_ports: list[TopPort]
+    anomalies: list[BandwidthAnomaly]

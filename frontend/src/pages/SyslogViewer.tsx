@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { SyslogMessage, SyslogSummary } from "../lib/types";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { EmptyState } from "../components/EmptyState";
+import { downloadCsv, todayStamp, toCsv } from "../lib/csv";
 
 // Numeric syslog severity (0=most severe) -> display config. Matches
 // app.models.syslog_message.SyslogSeverity's numeric values exactly, so
@@ -213,6 +214,32 @@ export default function SyslogViewer() {
 
       {/* Feed */}
       <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
+        {!loading && messages.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100 dark:border-slate-800">
+            <p className="text-[11px] font-semibold text-slate-400">
+              {messages.length} message{messages.length === 1 ? "" : "s"} shown
+            </p>
+            <button
+              onClick={() =>
+                downloadCsv(
+                  `netguard-syslog-${todayStamp()}.csv`,
+                  toCsv(messages, [
+                    { header: "Received at", value: (m) => m.received_at },
+                    { header: "Severity", value: (m) => m.severity },
+                    { header: "Device", value: (m) => m.device_hostname || m.reported_hostname || m.source_ip },
+                    { header: "Source IP", value: (m) => m.source_ip },
+                    { header: "Tag", value: (m) => m.tag ?? "" },
+                    { header: "Category", value: (m) => m.correlated_category ?? "" },
+                    { header: "Message", value: (m) => m.message },
+                  ])
+                )
+              }
+              className="text-xs font-semibold text-brandblue hover:underline"
+            >
+              Export CSV
+            </button>
+          </div>
+        )}
         {loading ? (
           <p className="text-xs text-slate-400 p-6 text-center">Loading syslog feed…</p>
         ) : messages.length === 0 ? (

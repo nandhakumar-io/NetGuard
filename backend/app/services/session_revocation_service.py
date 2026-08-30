@@ -23,17 +23,24 @@ from app.models.user import User
 from app.services import audit_service, notification_service
 
 
-def revoke_all_sessions(db: Session, target_user: User, *, actor_email: str, reason: str = "") -> int:
+def revoke_all_sessions(
+    db: Session, target_user: User, *, actor_email: str, reason: str = "", keep_session_id: str | None = None
+) -> int:
     """Revokes every currently-active (non-revoked) refresh token
     belonging to target_user. Returns the number of sessions actually
     revoked so the caller (API layer) can report something meaningful
     back ("Signed out 3 active sessions" vs. "No active sessions").
+
+    `keep_session_id`, when given, excludes that one session row from
+    the revocation -- used by the self-service password-change flow
+    (app.api.auth.change_password) so changing your own password
+    doesn't also sign you out of the tab you just used to change it,
+    while every *other* session still gets invalidated.
     """
-    records = (
-        db.query(RefreshToken)
-        .filter(RefreshToken.user_id == target_user.id, RefreshToken.revoked.is_(False))
-        .all()
-    )
+    query = db.query(RefreshToken).filter(RefreshToken.user_id == target_user.id, RefreshToken.revoked.is_(False))
+    if keep_session_id:
+        query = query.filter(RefreshToken.id != keep_session_id)
+    records = query.all()
     count = len(records)
     for record in records:
         record.revoked = True

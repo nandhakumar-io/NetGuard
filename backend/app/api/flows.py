@@ -17,10 +17,12 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
 from app.schemas.flow import (
+    BandwidthAnomaly,
     BandwidthPoint,
     FlowExporter,
     ProtocolShare,
     TopConversation,
+    TopPort,
     TopTalker,
     TrafficSummary,
 )
@@ -43,10 +45,39 @@ def get_top_talkers(
 def get_top_conversations(
     minutes: int = Query(60, ge=1, le=10080),
     limit: int = Query(10, ge=1, le=50),
+    host: str | None = Query(None, description="Restrict to conversations involving this IP (drill-down from a talker)"),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    return flow_service.top_conversations(db, minutes=minutes, limit=limit)
+    return flow_service.top_conversations(db, minutes=minutes, limit=limit, host=host)
+
+
+@router.get("/top-ports", response_model=list[TopPort])
+def get_top_ports(
+    minutes: int = Query(60, ge=1, le=10080),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return flow_service.top_ports(db, minutes=minutes, limit=limit)
+
+
+@router.get("/anomalies", response_model=list[BandwidthAnomaly])
+def get_anomalies(
+    recent_minutes: int = Query(15, ge=1, le=180),
+    baseline_minutes: int = Query(360, ge=15, le=10080),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Hosts whose recent traffic rate is a spike against their own
+    recent baseline. Same detector the dashboard's timeline pulls from
+    (app.services.flow_service.detect_bandwidth_anomalies), exposed
+    directly here so Traffic Analysis can show it without needing to
+    remember to check the dashboard.
+    """
+    return flow_service.detect_bandwidth_anomalies(
+        db, recent_minutes=recent_minutes, baseline_minutes=baseline_minutes
+    )
 
 
 @router.get("/protocol-breakdown", response_model=list[ProtocolShare])
@@ -93,4 +124,6 @@ def get_traffic_summary(
         protocol_breakdown=flow_service.protocol_breakdown(db, minutes=minutes),
         bandwidth_timeseries=flow_service.bandwidth_timeseries(db, minutes=minutes),
         exporters=flow_service.exporters(db, minutes=minutes),
+        top_ports=flow_service.top_ports(db, minutes=minutes, limit=10),
+        anomalies=flow_service.detect_bandwidth_anomalies(db),
     )

@@ -49,6 +49,22 @@ type GitRepoConfig = {
   created_at: string;
 };
 
+type DigestSubscription = {
+  id: string;
+  tenant_id: string;
+  cadence: "daily" | "weekly";
+  hour_utc: number;
+  day_of_week: number | null;
+  recipients: string;
+  severity_floor: "all" | "warning" | "critical";
+  is_active: boolean;
+  last_sent_at: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+type TenantOption = { id: string; name: string };
+
 const emptyLinkForm = { platform: "slack" as "slack" | "teams", external_user_id: "", user_email: "" };
 
 const emptyRepoForm = {
@@ -60,6 +76,24 @@ const emptyRepoForm = {
   auto_sync_enabled: true,
   access_token: "",
   webhook_secret: "",
+};
+
+const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+const severityFloorCopy: Record<DigestSubscription["severity_floor"], string> = {
+  all: "Every severity still pages live — digest is a rollup only",
+  warning: "Warning and below wait for the digest; critical still pages live",
+  critical: "Everything waits for the digest — nothing pages live",
+};
+
+const emptyDigestForm = {
+  tenant_id: "",
+  cadence: "weekly" as DigestSubscription["cadence"],
+  hour_utc: 8,
+  day_of_week: 0,
+  recipients: "",
+  severity_floor: "all" as DigestSubscription["severity_floor"],
+  is_active: true,
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1").replace(/\/$/, "");
@@ -112,7 +146,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-type IntegrationTabId = "chatops" | "notifications" | "syslog" | "gitops";
+type IntegrationTabId = "chatops" | "notifications" | "syslog" | "gitops" | "digests";
 
 const INTEGRATION_TABS: { id: IntegrationTabId; label: string; blurb: string; icon: React.ReactNode }[] = [
   {
@@ -155,6 +189,16 @@ const INTEGRATION_TABS: { id: IntegrationTabId; label: string; blurb: string; ic
       </svg>
     ),
   },
+  {
+    id: "digests",
+    label: "Email Digests",
+    blurb: "Scheduled activity reports",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 8l9 6 9-6" />
+      </svg>
+    ),
+  },
 ];
 
 export default function IntegrationsPage() {
@@ -185,7 +229,7 @@ export default function IntegrationsPage() {
               onClick={() => setTab(t.id)}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-bold whitespace-nowrap border-b-2 -mb-px transition-colors ${
                 active
-                  ? "border-blue-600 dark:border-blue-400 text-navy dark:text-slate-100"
+                  ? "border-blue-600 dark:border-blue-400 text-navy dark:text-white"
                   : "border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100"
               }`}
             >
@@ -211,16 +255,146 @@ export default function IntegrationsPage() {
       <div className={tab === "gitops" ? "flex flex-col gap-8" : "hidden"}>
         <GitOpsSection canManage={canManage} />
       </div>
+      <div className={tab === "digests" ? "flex flex-col gap-8" : "hidden"}>
+        <DigestsSection canManage={canManage} />
+      </div>
     </div>
   );
 }
 
 // =============================== ChatOps ===================================
 
+// Self-service link status/management for the *current* user, shown to
+// everyone regardless of role -- see GET/POST/DELETE /chatops/links/me.
+// Previously the only way to link an account at all was the admin-only
+// roster below, so every user's Slack/Teams ID had to be typed in by an
+// admin by hand.
+function MyChatOpsLinkPanel() {
+  const { user } = useAuth();
+  const toast = useToast();
+  const [link, setLink] = useState<ChatOpsLink | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [platform, setPlatform] = useState<"slack" | "teams">("slack");
+  const [externalId, setExternalId] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [unlinkingPlatform, setUnlinkingPlatform] = useState<"slack" | "teams" | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    api
+      .get<ChatOpsLink>("/chatops/links/me")
+      .then((res) => setLink(res.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!externalId.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post("/chatops/links/me", { platform, external_user_id: externalId.trim() });
+      setExternalId("");
+      toast.success(`${platform === "slack" ? "Slack" : "Teams"} account linked.`);
+      load();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to link account.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const unlink = async (p: "slack" | "teams") => {
+    setUnlinkingPlatform(p);
+    try {
+      await api.delete("/chatops/links/me", { params: { platform: p } });
+      toast.success(`${p === "slack" ? "Slack" : "Teams"} account unlinked.`);
+      load();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to unlink account.");
+    } finally {
+      setUnlinkingPlatform(null);
+    }
+  };
+
+  return (
+    <div className="p-5 border-b border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/60">
+      <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3">
+        My link{user ? ` — ${user.email}` : ""}
+      </p>
+
+      {loading ? (
+        <p className="text-xs text-slate-400 dark:text-slate-500">Loading…</p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {link?.slack_user_id ? (
+              <span className="text-[11px] font-mono bg-purple-600/10 dark:bg-purple-400/10 border border-purple-600/25 dark:border-purple-400/25 text-purple-600 dark:text-purple-400 px-2 py-1 rounded-full flex items-center gap-2">
+                Slack: {link.slack_user_id}
+                <button onClick={() => unlink("slack")} disabled={unlinkingPlatform === "slack"} className="font-bold hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50">
+                  ×
+                </button>
+              </span>
+            ) : (
+              <span className="text-[11px] text-slate-400 dark:text-slate-500">Slack: not linked</span>
+            )}
+            {link?.msteams_user_id ? (
+              <span className="text-[11px] font-mono bg-blue-600/10 dark:bg-blue-400/10 border border-blue-600/25 dark:border-blue-400/25 text-blue-600 dark:text-blue-400 px-2 py-1 rounded-full flex items-center gap-2">
+                Teams: {link.msteams_user_id}
+                <button onClick={() => unlink("teams")} disabled={unlinkingPlatform === "teams"} className="font-bold hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50">
+                  ×
+                </button>
+              </span>
+            ) : (
+              <span className="text-[11px] text-slate-400 dark:text-slate-500">Teams: not linked</span>
+            )}
+          </div>
+
+          <form onSubmit={submit} className="flex flex-wrap gap-2 items-start">
+            <select
+              value={platform}
+              onChange={(e) => setPlatform(e.target.value as "slack" | "teams")}
+              className="border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+            >
+              <option value="slack">Slack</option>
+              <option value="teams">Microsoft Teams</option>
+            </select>
+            <input
+              value={externalId}
+              onChange={(e) => setExternalId(e.target.value)}
+              placeholder={platform === "slack" ? "Your Slack user ID (e.g. U0123ABC)" : "Your Teams user ID"}
+              className="flex-1 min-w-[220px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+            />
+            <button
+              type="submit"
+              disabled={saving || !externalId.trim()}
+              className="bg-blue-600 dark:bg-blue-400 text-slate-50 dark:text-slate-950 rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
+            >
+              {saving ? "Linking…" : "Link"}
+            </button>
+          </form>
+          {error && <p className="text-red-600 dark:text-red-400 text-xs">{error}</p>}
+          <p className="text-[11px] text-slate-400 dark:text-slate-500">
+            Find your Slack member ID via your Slack profile → "More" → "Copy member ID". A NetGuard admin
+            can link/unlink on your behalf from the roster below if you don't have it handy.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatOpsSection({ canManage }: { canManage: boolean }) {
   const confirm = useConfirm();
   const [links, setLinks] = useState<ChatOpsLink[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Non-admins can't call GET /chatops/links (403 -- roster is
+  // admin-only), so skip the fetch entirely for them; they get the
+  // self-service "My Link" panel below instead.
+  const [loading, setLoading] = useState(canManage);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(emptyLinkForm);
@@ -239,7 +413,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, []);
+  useEffect(() => { if (canManage) load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -277,7 +451,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
             </svg>
           </div>
           <div>
-            <h2 className="text-lg font-bold text-navy dark:text-slate-100">ChatOps</h2>
+            <h2 className="text-lg font-bold text-navy dark:text-white">ChatOps</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
               Linked users can run <code className="font-mono text-blue-600 dark:text-blue-400">/netguard approve &lt;id&gt;</code>,{" "}
               <code className="font-mono text-blue-600 dark:text-blue-400">reject</code>, <code className="font-mono text-blue-600 dark:text-blue-400">rollback</code>,{" "}
@@ -309,9 +483,16 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
         <CopyField label="Teams outgoing webhook URL" value={`${API_BASE}/chatops/teams/commands`} />
       </div>
 
-      {error && <p className="text-red-600 dark:text-red-400 text-sm p-5">{error}</p>}
+      <MyChatOpsLinkPanel />
 
-      {loading ? (
+      {canManage && error && <p className="text-red-600 dark:text-red-400 text-sm p-5">{error}</p>}
+
+      {canManage && (
+        <div className="px-5 pt-4">
+          <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">All linked accounts</p>
+        </div>
+      )}
+      {!canManage ? null : loading ? (
         <p className="text-xs text-slate-400 dark:text-slate-500 p-5">Loading links…</p>
       ) : links.length === 0 ? (
         <p className="text-xs text-slate-400 dark:text-slate-500 italic p-5">No Slack or Teams accounts linked yet.</p>
@@ -320,7 +501,7 @@ function ChatOpsSection({ canManage }: { canManage: boolean }) {
           {links.map((l) => (
             <div key={l.user_id} className="p-4 flex items-center justify-between gap-3 flex-wrap">
               <div>
-                <p className="font-bold text-navy dark:text-slate-100 text-sm">{l.full_name}</p>
+                <p className="font-bold text-navy dark:text-white text-sm">{l.full_name}</p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">{l.user_email}</p>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -652,7 +833,7 @@ function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
           </svg>
         </div>
         <div>
-          <h2 className="text-lg font-bold text-navy dark:text-slate-100">Alert Notifications</h2>
+          <h2 className="text-lg font-bold text-navy dark:text-white">Alert Notifications</h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
             Where critical alerts and rule breaches get sent, in addition to the in-app Notification Center.
           </p>
@@ -663,7 +844,7 @@ function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
         {/* --- Email --- */}
         <div className="p-5">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-bold text-navy dark:text-slate-100">Email (SMTP)</h3>
+            <h3 className="text-sm font-bold text-navy dark:text-white">Email (SMTP)</h3>
             {smtp && (
               <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${smtp.smtp_enabled ? "bg-emerald-600/10 dark:bg-emerald-400/10 text-emerald-600 dark:text-emerald-400" : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400"}`}>
                 {smtp.smtp_enabled ? "Enabled" : "Disabled"}
@@ -715,7 +896,7 @@ function AlertNotificationsSection({ canManage }: { canManage: boolean }) {
         {/* --- Slack --- */}
         <div className="p-5">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-bold text-navy dark:text-slate-100">Slack</h3>
+            <h3 className="text-sm font-bold text-navy dark:text-white">Slack</h3>
             {canManage && (
               <button onClick={() => { setSlackForm({ name: "", url: "" }); setSlackError(null); setShowSlackForm(true); }} className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:brightness-110">
                 + Add webhook
@@ -905,7 +1086,7 @@ function RemoteSyslogSection({ canManage }: { canManage: boolean }) {
             </svg>
           </div>
           <div>
-            <h2 className="text-lg font-bold text-navy dark:text-slate-100">Remote Syslog Forwarding</h2>
+            <h2 className="text-lg font-bold text-navy dark:text-white">Remote Syslog Forwarding</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
               Forward every NetGuard alert/event (same fan-out as email, Slack, Teams, and webhooks) to an
               external syslog collector — Splunk, Graylog, an rsyslog relay, or a SIEM ingest point — over
@@ -942,7 +1123,7 @@ function RemoteSyslogSection({ canManage }: { canManage: boolean }) {
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {dests.map((d) => (
                   <tr key={d.id}>
-                    <td className="py-2 pr-3 font-bold text-navy dark:text-slate-100">{d.name}</td>
+                    <td className="py-2 pr-3 font-bold text-navy dark:text-white">{d.name}</td>
                     <td className="py-2 pr-3 font-mono text-slate-600 dark:text-slate-400">
                       {d.host}:{d.port} <span className="uppercase text-slate-400 dark:text-slate-500">({d.protocol})</span>
                     </td>
@@ -978,7 +1159,7 @@ function RemoteSyslogSection({ canManage }: { canManage: boolean }) {
 
         {showForm && canManage && (
           <form onSubmit={save} className="mt-4 border border-slate-200 dark:border-slate-700 rounded-lg p-4 flex flex-col gap-3 max-w-lg">
-            <h3 className="text-sm font-bold text-navy dark:text-slate-100">{editingId ? "Edit destination" : "Add remote syslog destination"}</h3>
+            <h3 className="text-sm font-bold text-navy dark:text-white">{editingId ? "Edit destination" : "Add remote syslog destination"}</h3>
             <input placeholder="Name (e.g. Splunk Prod)" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400" />
             <div className="grid grid-cols-3 gap-2">
               <input placeholder="Host / IP" value={form.host} onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))} className="col-span-2 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400" />
@@ -1035,6 +1216,12 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  // Editing an existing repo re-uses the same form, PATCHing instead of
+  // POSTing. Access token / webhook secret fields start blank -- "leave
+  // blank to keep the current value" rather than round-tripping a secret
+  // the UI never actually has (has_access_token/has_webhook_secret are
+  // just booleans from the API, never the plaintext).
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -1050,21 +1237,64 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
 
   useEffect(load, []);
 
+  const openCreateForm = () => {
+    setEditingId(null);
+    setForm(emptyRepoForm);
+    setSaveError(null);
+    setShowForm(true);
+  };
+
+  const openEditForm = (r: GitRepoConfig) => {
+    setEditingId(r.id);
+    setForm({
+      name: r.name,
+      repo_url: r.repo_url,
+      branch: r.branch,
+      template_path: r.template_path,
+      direction: r.direction,
+      auto_sync_enabled: r.auto_sync_enabled,
+      access_token: "",
+      webhook_secret: "",
+    });
+    setSaveError(null);
+    setShowForm(true);
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     setSaveError(null);
     try {
-      await api.post("/gitops/repos", {
-        ...form,
-        access_token: form.access_token || null,
-        webhook_secret: form.webhook_secret || null,
-      });
+      if (editingId) {
+        // Only send credential fields if the operator actually typed
+        // something new -- an empty string here would otherwise wipe out
+        // a previously-saved token/secret on every unrelated edit (e.g.
+        // just fixing a typo'd branch name).
+        const payload: Record<string, unknown> = {
+          name: form.name,
+          repo_url: form.repo_url,
+          branch: form.branch,
+          template_path: form.template_path,
+          direction: form.direction,
+          auto_sync_enabled: form.auto_sync_enabled,
+        };
+        if (form.access_token) payload.access_token = form.access_token;
+        if (form.webhook_secret) payload.webhook_secret = form.webhook_secret;
+        await api.patch(`/gitops/repos/${editingId}`, payload);
+        toast.success(`${form.name} updated.`);
+      } else {
+        await api.post("/gitops/repos", {
+          ...form,
+          access_token: form.access_token || null,
+          webhook_secret: form.webhook_secret || null,
+        });
+      }
       setShowForm(false);
+      setEditingId(null);
       setForm(emptyRepoForm);
       load();
     } catch (err: any) {
-      setSaveError(err?.response?.data?.detail || "Failed to add repo.");
+      setSaveError(err?.response?.data?.detail || `Failed to ${editingId ? "update" : "add"} repo.`);
     } finally {
       setSaving(false);
     }
@@ -1110,7 +1340,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
             </svg>
           </div>
           <div>
-            <h2 className="text-lg font-bold text-navy dark:text-slate-100">GitOps / Config-as-Code</h2>
+            <h2 className="text-lg font-bold text-navy dark:text-white">GitOps / Config-as-Code</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
               Pull direction reads <code className="font-mono text-blue-600 dark:text-blue-400">*.j2</code> files under the template
               path and queues them as new template versions for review — never auto-published. Push direction
@@ -1120,11 +1350,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
         </div>
         {canManage && (
           <button
-            onClick={() => {
-              setForm(emptyRepoForm);
-              setSaveError(null);
-              setShowForm(true);
-            }}
+            onClick={openCreateForm}
             className="bg-blue-600 dark:bg-blue-400 text-slate-50 dark:text-slate-950 rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition shrink-0"
           >
             + Add Repo
@@ -1147,7 +1373,7 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
             <div key={r.id} className="p-5 flex flex-col gap-3">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <p className="font-bold text-navy dark:text-slate-100 text-sm">{r.name}</p>
+                  <p className="font-bold text-navy dark:text-white text-sm">{r.name}</p>
                   <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-2 py-0.5 rounded-full">
                     {directionCopy[r.direction]}
                   </span>
@@ -1175,6 +1401,12 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
                           Sync Now
                         </>
                       )}
+                    </button>
+                    <button
+                      onClick={() => openEditForm(r)}
+                      className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400"
+                    >
+                      Edit
                     </button>
                     <button
                       onClick={() => removeRepo(r)}
@@ -1222,6 +1454,9 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
 
       {showForm && (
         <form onSubmit={submit} className="p-5 border-t border-slate-200 dark:border-slate-700 flex flex-col gap-3 bg-slate-50/60 dark:bg-slate-800/60">
+          <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            {editingId ? "Edit repo" : "New repo"}
+          </p>
           {saveError && <p className="text-red-600 dark:text-red-400 text-xs">{saveError}</p>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <input
@@ -1268,23 +1503,44 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
               />
               Auto-sync (periodic safety-net pull)
             </label>
-            <input
-              type="password"
-              placeholder="Access token (optional for public read-only repos)"
-              value={form.access_token}
-              onChange={(e) => setForm((f) => ({ ...f, access_token: e.target.value }))}
-              className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
-            />
-            <input
-              type="password"
-              placeholder="Webhook secret (needed for push-triggered sync)"
-              value={form.webhook_secret}
-              onChange={(e) => setForm((f) => ({ ...f, webhook_secret: e.target.value }))}
-              className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
-            />
+            <div>
+              <input
+                type="password"
+                placeholder={editingId ? "New access token (leave blank to keep current)" : "Access token (optional for public read-only repos)"}
+                value={form.access_token}
+                onChange={(e) => setForm((f) => ({ ...f, access_token: e.target.value }))}
+                className="w-full border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+              />
+              {editingId && (
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+                  Currently {repos.find((r) => r.id === editingId)?.has_access_token ? "set" : "not set"} — leave blank to keep it unchanged.
+                </p>
+              )}
+            </div>
+            <div>
+              <input
+                type="password"
+                placeholder={editingId ? "New webhook secret (leave blank to keep current)" : "Webhook secret (needed for push-triggered sync)"}
+                value={form.webhook_secret}
+                onChange={(e) => setForm((f) => ({ ...f, webhook_secret: e.target.value }))}
+                className="w-full border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+              />
+              {editingId && (
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+                  Currently {repos.find((r) => r.id === editingId)?.has_webhook_secret ? "set" : "not set"} — leave blank to keep it unchanged.
+                </p>
+              )}
+            </div>
           </div>
           <div className="flex gap-2 justify-end">
-            <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:text-slate-100">
+            <button
+              type="button"
+              onClick={() => {
+                setShowForm(false);
+                setEditingId(null);
+              }}
+              className="px-4 py-2 text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+            >
               Cancel
             </button>
             <button
@@ -1292,7 +1548,362 @@ function GitOpsSection({ canManage }: { canManage: boolean }) {
               disabled={saving}
               className="bg-blue-600 dark:bg-blue-400 text-slate-50 dark:text-slate-950 rounded-md px-5 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
             >
-              {saving ? "Adding…" : "Add Repo"}
+              {saving ? (editingId ? "Saving…" : "Adding…") : editingId ? "Save changes" : "Add Repo"}
+            </button>
+          </div>
+        </form>
+      )}
+    </Panel>
+  );
+}
+
+// =========================== Email Digests ==================================
+// Surfaces app.api.tenant_digest -- a full per-tenant scheduled digest
+// (Alert/Incident/AuditLog rollup, daily or weekly, its own recipient
+// list and severity floor) that previously had no UI at all despite the
+// backend, model, and dispatcher (app.services.tenant_digest_service)
+// being fully built. A scoped (non-MSP) admin manages exactly one
+// subscription for their own tenant; MSP staff can create/manage one per
+// tenant they oversee.
+
+function DigestsSection({ canManage }: { canManage: boolean }) {
+  const { user } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
+
+  const [subs, setSubs] = useState<DigestSubscription[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // MSP staff can target any tenant, so they get a picker; a scoped
+  // admin's own tenant is inferred server-side (see
+  // TenantDigestSubscriptionCreate.tenant_id), so the form never even
+  // shows the field for them.
+  const [tenants, setTenants] = useState<TenantOption[]>([]);
+
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptyDigestForm);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    api
+      .get<DigestSubscription[]>("/tenant-digest-subscriptions")
+      .then((res) => {
+        setSubs(res.data);
+        setError(null);
+      })
+      .catch((err) => setError(err?.response?.data?.detail || "Failed to load digest subscriptions."))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  useEffect(() => {
+    if (!user?.is_msp_staff) return;
+    api
+      .get<TenantOption[]>("/tenants")
+      .then((res) => setTenants(res.data))
+      .catch(() => {});
+  }, [user?.is_msp_staff]);
+
+  const tenantName = (id: string) => tenants.find((t) => t.id === id)?.name || id.slice(0, 8);
+
+  const openCreateForm = () => {
+    setEditingId(null);
+    setForm({ ...emptyDigestForm, tenant_id: tenants[0]?.id || "" });
+    setSaveError(null);
+    setShowForm(true);
+  };
+
+  const openEditForm = (s: DigestSubscription) => {
+    setEditingId(s.id);
+    setForm({
+      tenant_id: s.tenant_id,
+      cadence: s.cadence,
+      hour_utc: s.hour_utc,
+      day_of_week: s.day_of_week ?? 0,
+      recipients: s.recipients,
+      severity_floor: s.severity_floor,
+      is_active: s.is_active,
+    });
+    setSaveError(null);
+    setShowForm(true);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        cadence: form.cadence,
+        hour_utc: form.hour_utc,
+        day_of_week: form.cadence === "weekly" ? form.day_of_week : null,
+        recipients: form.recipients,
+        severity_floor: form.severity_floor,
+        is_active: form.is_active,
+      };
+      if (editingId) {
+        await api.put(`/tenant-digest-subscriptions/${editingId}`, payload);
+        toast.success("Digest subscription updated.");
+      } else {
+        if (user?.is_msp_staff) payload.tenant_id = form.tenant_id;
+        await api.post("/tenant-digest-subscriptions", payload);
+        toast.success("Digest subscription created.");
+      }
+      setShowForm(false);
+      setEditingId(null);
+      setForm(emptyDigestForm);
+      load();
+    } catch (err: any) {
+      setSaveError(err?.response?.data?.detail || `Failed to ${editingId ? "update" : "create"} digest subscription.`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (s: DigestSubscription) => {
+    if (!(await confirm(`Remove this digest subscription? ${s.recipients} will stop receiving it.`, { confirmLabel: "Remove" }))) return;
+    try {
+      await api.delete(`/tenant-digest-subscriptions/${s.id}`);
+      toast.success("Digest subscription removed.");
+      load();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to remove digest subscription.");
+    }
+  };
+
+  const toggleActive = async (s: DigestSubscription) => {
+    setTogglingId(s.id);
+    try {
+      await api.put(`/tenant-digest-subscriptions/${s.id}`, { is_active: !s.is_active });
+      load();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to update digest subscription.");
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
+  const sendNow = async (s: DigestSubscription) => {
+    setSendingId(s.id);
+    try {
+      await api.post(`/tenant-digest-subscriptions/${s.id}/send-now`);
+      toast.success(`Digest sent to ${s.recipients}.`);
+      load();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to send digest.");
+    } finally {
+      setSendingId(null);
+    }
+  };
+
+  const cadenceLabel = (s: DigestSubscription) =>
+    s.cadence === "weekly"
+      ? `Weekly, ${DAY_NAMES[s.day_of_week ?? 0]} ${String(s.hour_utc).padStart(2, "0")}:00 UTC`
+      : `Daily, ${String(s.hour_utc).padStart(2, "0")}:00 UTC`;
+
+  return (
+    <Panel>
+      <div className="p-5 flex items-start justify-between gap-4 flex-wrap border-b border-slate-200 dark:border-slate-700">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-lg bg-amber-600/10 dark:bg-amber-400/10 border border-amber-600/25 dark:border-amber-400/25 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 8l9 6 9-6" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-lg font-bold text-navy dark:text-white">Email Digests</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
+              A recurring Alert / Incident / Audit Log rollup, emailed on its own daily or weekly schedule —
+              the antidote to real-time email for low-priority noise. Set a severity floor and anything below
+              it stops paging live and only shows up here instead; in-app, Slack, Teams, and webhook delivery
+              stay real-time regardless.
+            </p>
+          </div>
+        </div>
+        {canManage && (
+          <button
+            onClick={openCreateForm}
+            disabled={user?.is_msp_staff && tenants.length === 0}
+            className="bg-blue-600 dark:bg-blue-400 text-slate-50 dark:text-slate-950 rounded-md px-4 py-2 text-xs font-bold hover:brightness-110 transition shrink-0 disabled:opacity-50"
+          >
+            + Add Digest
+          </button>
+        )}
+      </div>
+
+      {error && <p className="text-red-600 dark:text-red-400 text-sm p-5">{error}</p>}
+
+      {loading ? (
+        <p className="text-xs text-slate-400 dark:text-slate-500 p-5">Loading digest subscriptions…</p>
+      ) : subs.length === 0 ? (
+        <div className="p-8 text-center">
+          <p className="text-sm text-slate-500 dark:text-slate-400">No email digests configured yet.</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+            Add one to get a scheduled rollup instead of chasing every alert in real time.
+          </p>
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-200 dark:divide-slate-700">
+          {subs.map((s) => (
+            <div key={s.id} className="p-5 flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {user?.is_msp_staff && (
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-2 py-0.5 rounded-full">
+                      {tenantName(s.tenant_id)}
+                    </span>
+                  )}
+                  <span className="text-sm font-bold text-navy dark:text-white">{cadenceLabel(s)}</span>
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                      s.is_active
+                        ? "bg-emerald-600/10 dark:bg-emerald-400/10 text-emerald-600 dark:text-emerald-400 border border-emerald-600/25 dark:border-emerald-400/25"
+                        : "bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                    }`}
+                  >
+                    {s.is_active ? "Active" : "Paused"}
+                  </span>
+                </div>
+                {canManage && (
+                  <div className="flex gap-4 shrink-0">
+                    <button
+                      onClick={() => sendNow(s)}
+                      disabled={sendingId === s.id}
+                      className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 hover:brightness-110 disabled:opacity-50"
+                    >
+                      {sendingId === s.id ? "Sending…" : "Send Now"}
+                    </button>
+                    <button
+                      onClick={() => toggleActive(s)}
+                      disabled={togglingId === s.id}
+                      className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 disabled:opacity-50"
+                    >
+                      {s.is_active ? "Pause" : "Resume"}
+                    </button>
+                    <button
+                      onClick={() => openEditForm(s)}
+                      className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => remove(s)}
+                      className="text-[10px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400 hover:brightness-125"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">{s.recipients}</p>
+              <div className="flex items-center justify-between flex-wrap gap-3 text-[11px] text-slate-400 dark:text-slate-500">
+                <span>{severityFloorCopy[s.severity_floor]}</span>
+                <span>{s.last_sent_at ? `Last sent ${new Date(s.last_sent_at).toLocaleString()}` : "Never sent"}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showForm && (
+        <form onSubmit={submit} className="p-5 border-t border-slate-200 dark:border-slate-700 flex flex-col gap-3 bg-slate-50/60 dark:bg-slate-800/60">
+          <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            {editingId ? "Edit digest" : "New digest"}
+          </p>
+          {saveError && <p className="text-red-600 dark:text-red-400 text-xs">{saveError}</p>}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {!editingId && user?.is_msp_staff && (
+              <select
+                value={form.tenant_id}
+                onChange={(e) => setForm((f) => ({ ...f, tenant_id: e.target.value }))}
+                className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+              >
+                {tenants.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            )}
+            <input
+              required
+              type="text"
+              placeholder="Recipients (comma-separated emails)"
+              value={form.recipients}
+              onChange={(e) => setForm((f) => ({ ...f, recipients: e.target.value }))}
+              className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:text-slate-500 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400 sm:col-span-2"
+            />
+            <select
+              value={form.cadence}
+              onChange={(e) => setForm((f) => ({ ...f, cadence: e.target.value as DigestSubscription["cadence"] }))}
+              className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+            >
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+            {form.cadence === "weekly" && (
+              <select
+                value={form.day_of_week}
+                onChange={(e) => setForm((f) => ({ ...f, day_of_week: Number(e.target.value) }))}
+                className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+              >
+                {DAY_NAMES.map((d, i) => (
+                  <option key={d} value={i}>{d}</option>
+                ))}
+              </select>
+            )}
+            <select
+              value={form.hour_utc}
+              onChange={(e) => setForm((f) => ({ ...f, hour_utc: Number(e.target.value) }))}
+              className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400"
+            >
+              {Array.from({ length: 24 }, (_, h) => (
+                <option key={h} value={h}>{String(h).padStart(2, "0")}:00 UTC</option>
+              ))}
+            </select>
+            <select
+              value={form.severity_floor}
+              onChange={(e) => setForm((f) => ({ ...f, severity_floor: e.target.value as DigestSubscription["severity_floor"] }))}
+              className="border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-md px-3 py-2 text-sm outline-none focus:border-blue-600 dark:border-blue-400 sm:col-span-2"
+            >
+              <option value="all">No live suppression — digest is a rollup only</option>
+              <option value="warning">Suppress warning/info from live email</option>
+              <option value="critical">Suppress everything from live email</option>
+            </select>
+            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 sm:col-span-2">
+              <input
+                type="checkbox"
+                checked={form.is_active}
+                onChange={(e) => setForm((f) => ({ ...f, is_active: e.target.checked }))}
+                className="accent-blue-600 dark:accent-blue-400"
+              />
+              Active
+            </label>
+          </div>
+
+          <div className="flex gap-2 justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                setShowForm(false);
+                setEditingId(null);
+              }}
+              className="px-4 py-2 text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving || !form.recipients || (!editingId && !!user?.is_msp_staff && !form.tenant_id)}
+              className="bg-blue-600 dark:bg-blue-400 text-slate-50 dark:text-slate-950 rounded-md px-5 py-2 text-xs font-bold hover:brightness-110 transition disabled:opacity-50"
+            >
+              {saving ? (editingId ? "Saving…" : "Adding…") : editingId ? "Save changes" : "Add Digest"}
             </button>
           </div>
         </form>

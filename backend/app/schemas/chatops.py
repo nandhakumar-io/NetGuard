@@ -10,6 +10,11 @@ class ChatOpsLinkCreate(BaseModel):
     user_email: str
 
 
+class ChatOpsLinkSelfCreate(BaseModel):
+    platform: str  # "slack" | "teams"
+    external_user_id: str
+
+
 class ChatOpsLinkRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -1637,6 +1637,24 @@ export interface FlowExporter {
   flow_count: number;
 }
 
+export interface TopPort {
+  port: number;
+  service: string;
+  protocol: string;
+  bytes: number;
+  packets: number;
+  distinct_hosts: number;
+  pct: number;
+}
+
+export interface BandwidthAnomaly {
+  ip_address: string;
+  recent_bytes: number;
+  expected_bytes: number;
+  multiplier: number;
+  detected_at: string;
+}
+
 export interface TrafficSummary {
   window_minutes: number;
   top_talkers: TopTalker[];
@@ -1644,6 +1662,8 @@ export interface TrafficSummary {
   protocol_breakdown: ProtocolShare[];
   bandwidth_timeseries: BandwidthPoint[];
   exporters: FlowExporter[];
+  top_ports: TopPort[];
+  anomalies: BandwidthAnomaly[];
 }
 
 // --- Customizable Alert Rules ---

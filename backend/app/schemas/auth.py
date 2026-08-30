@@ -84,6 +84,11 @@ class MfaDisableRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class SecurityPinStatus(BaseModel):
     pin_set: bool
     pin_required: bool

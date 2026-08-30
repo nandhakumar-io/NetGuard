@@ -100,3 +100,14 @@ class UserRoleCounts(BaseModel):
 class AdminUserListResponse(BaseModel):
     users: list[AdminUserRead]
     counts: UserRoleCounts
+
+
+class AdminPasswordResetResponse(BaseModel):
+    """One-time response for POST /users/{id}/reset-password. The plaintext
+    temporary password is returned exactly once here (never stored, never
+    logged) for the admin to hand to the user out of band -- there's no
+    outbound-email service in this app to deliver it any other way.
+    """
+
+    temporary_password: str
+    revoked_sessions: int

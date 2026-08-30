@@ -771,18 +771,24 @@ def top_talkers(db: Session, *, minutes: int = 60, limit: int = 10) -> list[dict
     return [{"ip_address": ip, "bytes": v["bytes"], "packets": v["packets"]} for ip, v in ranked]
 
 
-def top_conversations(db: Session, *, minutes: int = 60, limit: int = 10) -> list[dict]:
+def top_conversations(db: Session, *, minutes: int = 60, limit: int = 10, host: str | None = None) -> list[dict]:
+    """Top conversations by bytes. When `host` is given, restricts to
+    conversations where that IP is either side -- the drill-down a Top
+    Talkers row links to ("show me exactly who this host was talking
+    to"), rather than only the unfiltered fleet-wide top N.
+    """
     cutoff = _since(minutes)
+    query = db.query(
+        FlowRecord.src_ip,
+        FlowRecord.dst_ip,
+        FlowRecord.ip_protocol,
+        func.sum(FlowRecord.bytes).label("b"),
+        func.sum(FlowRecord.packets).label("p"),
+    ).filter(FlowRecord.received_at >= cutoff)
+    if host:
+        query = query.filter((FlowRecord.src_ip == host) | (FlowRecord.dst_ip == host))
     rows = (
-        db.query(
-            FlowRecord.src_ip,
-            FlowRecord.dst_ip,
-            FlowRecord.ip_protocol,
-            func.sum(FlowRecord.bytes).label("b"),
-            func.sum(FlowRecord.packets).label("p"),
-        )
-        .filter(FlowRecord.received_at >= cutoff)
-        .group_by(FlowRecord.src_ip, FlowRecord.dst_ip, FlowRecord.ip_protocol)
+        query.group_by(FlowRecord.src_ip, FlowRecord.dst_ip, FlowRecord.ip_protocol)
         .order_by(func.sum(FlowRecord.bytes).desc())
         .limit(limit)
         .all()
@@ -794,6 +800,69 @@ def top_conversations(db: Session, *, minutes: int = 60, limit: int = 10) -> lis
             "protocol": protocol_name(r.ip_protocol),
             "bytes": int(r.b or 0),
             "packets": int(r.p or 0),
+        }
+        for r in rows
+    ]
+
+
+# Common port -> service name for readability in the Top Ports panel.
+# Not exhaustive -- unrecognized ports just show their number, same
+# spirit as PROTOCOL_NAMES falling back to "IP <n>" above.
+_WELL_KNOWN_PORTS: dict[int, str] = {
+    20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP",
+    53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP", 80: "HTTP",
+    110: "POP3", 123: "NTP", 143: "IMAP", 161: "SNMP", 162: "SNMP-TRAP",
+    179: "BGP", 389: "LDAP", 443: "HTTPS", 445: "SMB", 465: "SMTPS",
+    514: "SYSLOG", 587: "SUBMISSION", 636: "LDAPS", 993: "IMAPS",
+    995: "POP3S", 1194: "OPENVPN", 1433: "MSSQL", 1521: "ORACLE",
+    2055: "NETFLOW", 3306: "MYSQL", 3389: "RDP",
+    5432: "POSTGRES", 5060: "SIP", 6343: "SFLOW", 6379: "REDIS",
+    8080: "HTTP-ALT", 8443: "HTTPS-ALT", 9200: "ELASTIC",
+}
+
+
+def _port_label(port: int | None) -> str:
+    if port is None:
+        return "n/a"
+    return _WELL_KNOWN_PORTS.get(port, str(port))
+
+
+def top_ports(db: Session, *, minutes: int = 60, limit: int = 10) -> list[dict]:
+    """Destination ports/services ranked by bytes -- "what's actually
+    running on the wire" (web, DNS, database replication, etc.), which
+    top-talkers and protocol-breakdown alone can't answer since both
+    are silent on port/application.
+    """
+    cutoff = _since(minutes)
+    rows = (
+        db.query(
+            FlowRecord.dst_port,
+            FlowRecord.ip_protocol,
+            func.sum(FlowRecord.bytes).label("b"),
+            func.sum(FlowRecord.packets).label("p"),
+            func.count(func.distinct(FlowRecord.src_ip)).label("hosts"),
+        )
+        .filter(FlowRecord.received_at >= cutoff, FlowRecord.dst_port.isnot(None))
+        .group_by(FlowRecord.dst_port, FlowRecord.ip_protocol)
+        .order_by(func.sum(FlowRecord.bytes).desc())
+        .limit(limit)
+        .all()
+    )
+    total = (
+        db.query(func.sum(FlowRecord.bytes))
+        .filter(FlowRecord.received_at >= cutoff, FlowRecord.dst_port.isnot(None))
+        .scalar()
+        or 1
+    )
+    return [
+        {
+            "port": r.dst_port,
+            "service": _port_label(r.dst_port),
+            "protocol": protocol_name(r.ip_protocol),
+            "bytes": int(r.b or 0),
+            "packets": int(r.p or 0),
+            "distinct_hosts": int(r.hosts or 0),
+            "pct": round(100 * int(r.b or 0) / total, 1),
         }
         for r in rows
     ]

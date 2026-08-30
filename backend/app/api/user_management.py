@@ -13,6 +13,8 @@ cards with live counts, not audit-activity columns -- see GET /users).
 Restricted to NETWORK_ADMIN only (not AUDITOR) since every endpoint here
 except the list is a write.
 """
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -23,6 +25,7 @@ from app.core.security import hash_password
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.schemas.user_management import (
+    AdminPasswordResetResponse,
     AdminUserCreate,
     AdminUserListResponse,
     AdminUserRead,
@@ -384,6 +387,47 @@ def revoke_user_sessions(
         db, user, actor_email=current_user.email, reason="manual force sign-out",
     )
     return {"revoked_count": revoked_count}
+
+
+@router.post("/{user_id}/reset-password", response_model=AdminPasswordResetResponse)
+def reset_user_password(
+    user_id: str, db: Session = Depends(get_db), current_user: User = Depends(_admin_only)
+):
+    """The other half of the account-recovery story POST /auth/change-password
+    covers for a user acting on their own account: this is for when they
+    *can't* (locked out, forgot their password, offboarded-then-reinstated)
+    and an admin needs to get them back in. Generates a fresh random
+    temporary password, sets it directly (bypassing the old-password check
+    change-password requires, since the whole point is the user can't
+    provide that), and force-revokes every existing session -- same
+    reasoning as a self-service password change: a new password should
+    invalidate whatever session state existed under the old one. There's
+    no outbound-email service in this app, so the plaintext temporary
+    password is returned once in the response for the admin to relay to
+    the user directly; it is never stored or logged anywhere.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.sso_provider:
+        raise HTTPException(
+            status_code=400,
+            detail="This account signs in via SSO and has no local password to reset.",
+        )
+
+    temp_password = secrets.token_urlsafe(12)
+    user.hashed_password = hash_password(temp_password)
+    db.commit()
+
+    revoked = session_revocation_service.revoke_all_sessions(
+        db, user, actor_email=current_user.email, reason="admin password reset",
+    )
+    audit_service.record_event(
+        db, actor=current_user.email, action="Password Reset (Admin)", result="Success",
+        detail=f"Reset password for {user.email}; {revoked} session(s) revoked.",
+        tenant_id=current_user.tenant_id,
+    )
+    return AdminPasswordResetResponse(temporary_password=temp_password, revoked_sessions=revoked)
 
 
 @router.delete("/{user_id}", status_code=204)

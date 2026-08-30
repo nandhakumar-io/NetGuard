@@ -50,6 +50,16 @@ export default function Security() {
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
+  // Change password (self-service) -- separate error/message/busy state
+  // from every other card here, same convention as the PIN block below,
+  // so an error in one card never clobbers or clears another's.
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
+  const [passwordBusy, setPasswordBusy] = useState(false);
+
   // Security PIN (step-up auth for terminal access + critical actions).
   // Separate error/message/busy state from MFA above so an error in one
   // card never clobbers or clears the other's.
@@ -369,6 +379,36 @@ export default function Security() {
     }
   };
 
+  const changePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordError(null);
+    setPasswordMessage(null);
+    if (newPassword !== newPasswordConfirm) {
+      setPasswordError("New passwords don't match.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordError("New password must be at least 8 characters.");
+      return;
+    }
+    setPasswordBusy(true);
+    try {
+      await api.post("/auth/change-password", {
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setNewPasswordConfirm("");
+      setPasswordMessage("Password changed. Every other session was signed out; this one stays active.");
+      loadSessions();
+    } catch (err: any) {
+      setPasswordError(err?.response?.data?.detail || "Could not change password.");
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
+
   return (
     <div className="max-w-xl">
       <h1 className="text-xl font-bold text-navy mb-1">Security</h1>
@@ -376,6 +416,61 @@ export default function Security() {
 
       {error && <p className="text-riskcrit text-sm mb-4">{error}</p>}
       {message && <p className="text-sm mb-4 text-green-700">{message}</p>}
+
+      {!user?.sso_provider && (
+        <>
+          <div className="bg-white border border-slate-200 rounded-xl p-6">
+            <p className="text-sm font-semibold text-navy mb-1">Password</p>
+            <p className="text-xs text-slate-500 mb-4">
+              Changing your password signs you out of every other active session -- this one stays signed in.
+            </p>
+
+            {passwordError && <p className="text-riskcrit text-sm mb-3">{passwordError}</p>}
+            {passwordMessage && <p className="text-sm mb-3 text-green-700">{passwordMessage}</p>}
+
+            <form onSubmit={changePassword} className="space-y-3">
+              <input
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                type="password"
+                placeholder="Current password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                required
+              />
+              <input
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                type="password"
+                placeholder="New password (min. 8 characters)"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                minLength={8}
+                required
+              />
+              <input
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                type="password"
+                placeholder="Confirm new password"
+                autoComplete="new-password"
+                value={newPasswordConfirm}
+                onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                minLength={8}
+                required
+              />
+              <button
+                type="submit"
+                disabled={passwordBusy}
+                className="w-full bg-brandblue text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-navy transition-colors disabled:opacity-50"
+              >
+                {passwordBusy ? "Changing password..." : "Change password"}
+              </button>
+            </form>
+          </div>
+
+          <h2 className="text-lg font-bold text-navy mt-8 mb-1">Two-Factor Authentication</h2>
+        </>
+      )}
 
       <div className="bg-white border border-slate-200 rounded-xl p-6">
         <div className="flex items-center justify-between mb-4">
