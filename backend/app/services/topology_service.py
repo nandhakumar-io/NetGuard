@@ -791,22 +791,69 @@ def build_topology(db: Session, tenant_id: uuid.UUID | None = None) -> TopologyG
         # 5-member trunk rendered as "LLDP x10") -- keying on the
         # unordered endpoint pair collapses both sides' reports of the
         # same cable back into the one member it actually is.
-        seen_links: dict[frozenset, DiscoveredNeighbor] = {}
-        for row in rows:
-            link_key = frozenset({
-                (str(row.device_id), row.local_port),
-                (str(row.neighbor_device_id), row.neighbor_port),
-            })
-            existing = seen_links.get(link_key)
-            # A device can also re-report the same physical link across
-            # multiple discovery runs (history) from the *same* side --
-            # keep whichever row was confirmed most recently.
-            if existing is not None and (existing.discovered_at or datetime.min.replace(tzinfo=timezone.utc)) >= (
-                row.discovered_at or datetime.min.replace(tzinfo=timezone.utc)
-            ):
-                continue
-            seen_links[link_key] = row
-        for row in seen_links.values():
+        def _norm_port(p: str | None) -> str:
+            return (p or "").strip().lower()
+
+        def _latest_per_local_port(rs: list[DiscoveredNeighbor]) -> list[DiscoveredNeighbor]:
+            # Collapse repeated self-reports of the identical local_port
+            # (the same side re-confirming the same cable across separate
+            # discovery runs) down to the most recently discovered row.
+            by_port: dict[str, DiscoveredNeighbor] = {}
+            for r in rs:
+                key = _norm_port(r.local_port)
+                existing = by_port.get(key)
+                if existing is None or (r.discovered_at or datetime.min.replace(tzinfo=timezone.utc)) > (
+                    existing.discovered_at or datetime.min.replace(tzinfo=timezone.utc)
+                ):
+                    by_port[key] = r
+            return list(by_port.values())
+
+        rows_a = _latest_per_local_port([r for r in rows if str(r.device_id) == a_id])
+        rows_b = _latest_per_local_port([r for r in rows if str(r.device_id) == b_id])
+        # Pair each A-side row with its B-side mirror by matching each
+        # row's own self-reported local_port against the OTHER row's
+        # neighbor_port. This replaces a previous approach that keyed
+        # purely on the frozenset of both sides' reports (device, port)
+        # pairs, including the *neighbor*-reported port -- which silently
+        # failed to dedupe (a genuine N-cable trunk rendered as up to 2N
+        # members / "LLDP x12" for 6 real cables) whenever one side's
+        # neighbor-port ifIndex->name lookup didn't resolve to the exact
+        # same string the neighbor uses for its own local_port (SNMP
+        # timeout, vendor formatting difference, etc). A device's report
+        # of its OWN local_port is always reliable, so matching on that
+        # self-reported value first -- with a fall through to the raw
+        # neighbor_port anyway -- correctly collapses both sides' rows
+        # for the same cable even when the cross-resolution above failed.
+        used_b: set[int] = set()
+        deduped_rows: list[DiscoveredNeighbor] = []
+        for ra in rows_a:
+            ra_lp, ra_np = _norm_port(ra.local_port), _norm_port(ra.neighbor_port)
+            match_idx = None
+            for i, rb in enumerate(rows_b):
+                if i in used_b:
+                    continue
+                rb_lp, rb_np = _norm_port(rb.local_port), _norm_port(rb.neighbor_port)
+                if (ra_np and ra_np == rb_lp) or (rb_np and rb_np == ra_lp):
+                    match_idx = i
+                    break
+            if match_idx is not None:
+                used_b.add(match_idx)
+                rb = rows_b[match_idx]
+                # Either row describes the same physical cable -- keep
+                # whichever side confirmed it more recently.
+                deduped_rows.append(
+                    ra
+                    if (ra.discovered_at or datetime.min.replace(tzinfo=timezone.utc))
+                    >= (rb.discovered_at or datetime.min.replace(tzinfo=timezone.utc))
+                    else rb
+                )
+            else:
+                deduped_rows.append(ra)
+        for i, rb in enumerate(rows_b):
+            if i not in used_b:
+                deduped_rows.append(rb)
+
+        for row in deduped_rows:
             confirmed_at = row.discovered_at
             is_stale = bool(
                 confirmed_at
