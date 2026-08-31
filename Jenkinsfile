@@ -288,24 +288,19 @@ pipeline {
             steps {
                 script {
                     try {
-                        deploy(IMAGE_TAG)
-
-                        // Force clean the remote repository state and manually sync infrastructure because deploy() overwrites them.
-                        // NOTE: this MUST run after deploy() (which re-syncs /opt/NetGuard from git/artifact,
-                        // clobbering these files) and BEFORE anything that actually does `docker compose up`.
-                        // If deploy() itself brings the stack up as its last step, this ordering will NOT fix
-                        // the mount error -- deploy() needs to be split so compose-up happens separately, after this sync.
+                        // Force clean the remote repository state and manually sync infrastructure because deploy() misses them.
+                        // IMPORTANT: this MUST run before deploy() (which runs docker compose up), and it MUST
+                        // rm -rf the destination first -- a previous failed mount can leave Docker having
+                        // auto-created these paths as empty directories, and scp will happily write *into*
+                        // a stale directory instead of replacing it, silently reproducing this exact bug forever.
                         sshagent(['kenpachi-prod']) {
-                            sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "rm -rf /opt/NetGuard/docker/nats/nats-server.conf /opt/NetGuard/backend/app/nats/nats-server.conf"'
                             sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard/docker/nats"'
+                            sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
                             sh 'scp -o StrictHostKeyChecking=no docker/nats/nats-server.conf kenpachi-prod@172.17.1.6:/opt/NetGuard/docker/nats/nats-server.conf'
                         }
 
-                        // Belt-and-braces: force the stack to pick up the files we just synced,
-                        // in case deploy() already brought it up using stale ones.
-                        sshagent(['kenpachi-prod']) {
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "cd /opt/NetGuard && docker compose up -d"'
-                        }
+                        deploy(IMAGE_TAG)
 
                         healthCheck()
 
