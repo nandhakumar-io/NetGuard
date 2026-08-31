@@ -28,6 +28,12 @@ services:
     - ALL
     networks:
     - netguard-internal
+    cap_add:
+    - CHOWN
+    - FOWNER
+    - SETGID
+    - SETUID
+    - DAC_OVERRIDE
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.2-p0
     restart: unless-stopped
@@ -303,6 +309,12 @@ services:
     - ALL
     networks:
     - netguard-identity
+    cap_add:
+    - CHOWN
+    - FOWNER
+    - SETGID
+    - SETUID
+    - DAC_OVERRIDE
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     restart: unless-stopped
