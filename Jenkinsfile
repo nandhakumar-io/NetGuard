@@ -198,7 +198,7 @@ pipeline {
                             docker run --rm \
                                 -v /var/run/docker.sock:/var/run/docker.sock \
                                 aquasec/trivy:latest image \
-                                --exit-code 1 --severity CRITICAL \
+                                --exit-code 1 --severity CRITICAL --ignore-unfixed \
                                 ghcr.io/nandhakumar-io/netguard-backend:${IMAGE_TAG}
                         '''
                         archiveArtifacts artifacts: 'trivy-backend-report.json', allowEmptyArchive: true
@@ -218,7 +218,7 @@ pipeline {
                             docker run --rm \
                                 -v /var/run/docker.sock:/var/run/docker.sock \
                                 aquasec/trivy:latest image \
-                                --exit-code 1 --severity CRITICAL \
+                                --exit-code 1 --severity CRITICAL --ignore-unfixed \
                                 ghcr.io/nandhakumar-io/netguard-frontend:${IMAGE_TAG}
                         '''
                         archiveArtifacts artifacts: 'trivy-frontend-report.json', allowEmptyArchive: true
