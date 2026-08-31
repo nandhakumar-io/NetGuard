@@ -115,14 +115,14 @@ pipeline {
                 // OpenBao root-unseal credentials" -- this is the gate that
                 // actually checks that, rather than relying on .gitignore
                 // and code review alone.
-                sh '''
-                    docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
-                        detect --source=/repo --report-path=/repo/gitleaks-report.json --exit-code=0
-                '''
                 script {
-                    def report = readJSON file: 'gitleaks-report.json'
-                    if (report && report.size() > 0) {
-                        echo "gitleaks found ${report.size()} potential secret(s) -- see gitleaks-report.json"
+                    // Use native gitleaks exit code instead of relying on the pipeline-utility-steps readJSON DSL
+                    def exitCode = sh(
+                        script: 'docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source=/repo --report-path=/repo/gitleaks-report.json',
+                        returnStatus: true
+                    )
+                    if (exitCode != 0) {
+                        echo "gitleaks found potential secret(s) or encountered an error -- see gitleaks-report.json"
                         currentBuild.result = 'UNSTABLE'
                     }
                 }
