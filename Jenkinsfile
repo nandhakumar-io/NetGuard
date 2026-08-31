@@ -288,14 +288,24 @@ pipeline {
             steps {
                 script {
                     try {
-                        // Force clean the remote repository state and manually sync infrastructure because deploy() misses them
+                        deploy(IMAGE_TAG)
+
+                        // Force clean the remote repository state and manually sync infrastructure because deploy() overwrites them.
+                        // NOTE: this MUST run after deploy() (which re-syncs /opt/NetGuard from git/artifact,
+                        // clobbering these files) and BEFORE anything that actually does `docker compose up`.
+                        // If deploy() itself brings the stack up as its last step, this ordering will NOT fix
+                        // the mount error -- deploy() needs to be split so compose-up happens separately, after this sync.
                         sshagent(['kenpachi-prod']) {
                             sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
                             sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard/docker/nats"'
                             sh 'scp -o StrictHostKeyChecking=no docker/nats/nats-server.conf kenpachi-prod@172.17.1.6:/opt/NetGuard/docker/nats/nats-server.conf'
                         }
 
-                        deploy(IMAGE_TAG)
+                        // Belt-and-braces: force the stack to pick up the files we just synced,
+                        // in case deploy() already brought it up using stale ones.
+                        sshagent(['kenpachi-prod']) {
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "cd /opt/NetGuard && docker compose up -d"'
+                        }
 
                         healthCheck()
 
