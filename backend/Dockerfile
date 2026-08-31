@@ -21,10 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # entry also adds NET_RAW/NET_ADMIN to the container's capability
     # bounding set (cap_add). Every other service keeps cap_drop: ALL
     # with no bounding-set exception, so this capability is inert there.
-    && setcap cap_net_raw,cap_net_admin+eip "$(command -v nmap)" \
-    && setcap cap_net_raw+eip "$(command -v ping)" \
-    && setcap cap_net_raw+eip "$(command -v traceroute)" \
-    && setcap cap_net_raw+eip "$(command -v mtr)"
+    && setcap cap_net_raw,cap_net_admin+eip "$(readlink -f $(command -v nmap))" \
+    && setcap cap_net_raw+eip "$(readlink -f $(command -v ping))" \
+    && setcap cap_net_raw+eip "$(readlink -f $(command -v traceroute))" \
+    && setcap cap_net_raw+eip "$(readlink -f $(command -v mtr))"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
