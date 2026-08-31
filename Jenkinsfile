@@ -288,10 +288,11 @@ pipeline {
             steps {
                 script {
                     try {
-                        // Force clean the remote repository state so `deploy()` git pull doesn't silently abort
+                        // Force clean the remote repository state and manually sync infrastructure because deploy() misses them
                         sshagent(['kenpachi-prod']) {
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "rm -rf /opt/NetGuard/backend/app/nats"'
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "cd /opt/NetGuard && git restore . || true"'
+                            sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard/docker/nats"'
+                            sh 'scp -o StrictHostKeyChecking=no docker/nats/nats-server.conf kenpachi-prod@172.17.1.6:/opt/NetGuard/docker/nats/nats-server.conf'
                         }
 
                         deploy(IMAGE_TAG)
