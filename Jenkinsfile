@@ -238,10 +238,9 @@ pipeline {
                         sh '''
                             docker run --rm \
                                 -v /var/run/docker.sock:/var/run/docker.sock \
-                                -v "$PWD:/report" \
                                 anchore/syft:latest \
                                 ghcr.io/nandhakumar-io/netguard-backend:${IMAGE_TAG} \
-                                -o cyclonedx-json=/report/sbom-backend.json
+                                -o cyclonedx-json > sbom-backend.json
                         '''
                         archiveArtifacts artifacts: 'sbom-backend.json'
                     }
@@ -251,10 +250,9 @@ pipeline {
                         sh '''
                             docker run --rm \
                                 -v /var/run/docker.sock:/var/run/docker.sock \
-                                -v "$PWD:/report" \
                                 anchore/syft:latest \
                                 ghcr.io/nandhakumar-io/netguard-frontend:${IMAGE_TAG} \
-                                -o cyclonedx-json=/report/sbom-frontend.json
+                                -o cyclonedx-json > sbom-frontend.json
                         '''
                         archiveArtifacts artifacts: 'sbom-frontend.json'
                     }
