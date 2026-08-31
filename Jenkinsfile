@@ -76,12 +76,14 @@ pipeline {
                 stage('Backend (pip-audit)') {
                     steps {
                         dir('backend') {
-                            sh '''
-                                pip install --break-system-packages -q pip-audit || true
-                                pip-audit -r requirements.txt -f json -o pip-audit-report.json || \
-                                    { echo "pip-audit found issues -- see pip-audit-report.json"; \
-                                      currentBuild.result = 'UNSTABLE'; }
-                            '''
+                            script {
+                                sh 'pip install --break-system-packages -q pip-audit || true'
+                                def exitCode = sh(script: 'export PATH="$HOME/.local/bin:$PATH" && pip-audit -r requirements.txt -f json -o pip-audit-report.json', returnStatus: true)
+                                if (exitCode != 0) {
+                                    echo "pip-audit found issues -- see pip-audit-report.json"
+                                    currentBuild.result = 'UNSTABLE'
+                                }
+                            }
                         }
                         archiveArtifacts artifacts: 'backend/pip-audit-report.json', allowEmptyArchive: true
                     }
@@ -89,11 +91,13 @@ pipeline {
                 stage('Frontend (npm audit)') {
                     steps {
                         dir('frontend') {
-                            sh '''
-                                npm audit --omit=dev --audit-level=high --json > npm-audit-report.json || \
-                                    { echo "npm audit found high/critical issues -- see npm-audit-report.json"; \
-                                      currentBuild.result = 'UNSTABLE'; }
-                            '''
+                            script {
+                                def exitCode = sh(script: 'npm audit --omit=dev --audit-level=high --json > npm-audit-report.json', returnStatus: true)
+                                if (exitCode != 0) {
+                                    echo "npm audit found high/critical issues -- see npm-audit-report.json"
+                                    currentBuild.result = 'UNSTABLE'
+                                }
+                            }
                         }
                         archiveArtifacts artifacts: 'frontend/npm-audit-report.json', allowEmptyArchive: true
                     }
@@ -134,12 +138,14 @@ pipeline {
                 // hardcoded credentials, weak crypto) that a style linter
                 // isn't designed to catch.
                 dir('backend') {
-                    sh '''
-                        pip install --break-system-packages -q bandit || true
-                        bandit -r app -f json -o bandit-report.json -ll || \
-                            { echo "bandit found medium+/high-severity issues -- see bandit-report.json"; \
-                              currentBuild.result = 'UNSTABLE'; }
-                    '''
+                    script {
+                        sh 'pip install --break-system-packages -q bandit || true'
+                        def exitCode = sh(script: 'export PATH="$HOME/.local/bin:$PATH" && bandit -r app -f json -o bandit-report.json -ll', returnStatus: true)
+                        if (exitCode != 0) {
+                            echo "bandit found medium+/high-severity issues -- see bandit-report.json"
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                    }
                 }
                 archiveArtifacts artifacts: 'backend/bandit-report.json', allowEmptyArchive: true
             }
