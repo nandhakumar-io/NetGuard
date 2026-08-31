@@ -315,6 +315,8 @@ services:
     - SETGID
     - SETUID
     - DAC_OVERRIDE
+    tmpfs:
+    - /var/run/postgresql
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     restart: unless-stopped
