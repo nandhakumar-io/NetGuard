@@ -298,6 +298,7 @@ pipeline {
                             sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard/docker/nats"'
                             sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
                             sh 'scp -o StrictHostKeyChecking=no docker/nats/nats-server.conf kenpachi-prod@172.17.1.6:/opt/NetGuard/docker/nats/nats-server.conf'
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "test -f /opt/NetGuard/docker/nats/nats-server.conf && echo NATS_CONF_OK || (echo NATS_CONF_MISSING_OR_DIR; exit 1)"'
                         }
 
                         deploy(IMAGE_TAG)
