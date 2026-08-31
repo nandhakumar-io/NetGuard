@@ -262,6 +262,8 @@ services:
     restart: unless-stopped
     cap_add:
     - IPC_LOCK
+    - SETUID
+    - SETGID
     cap_drop:
     - ALL
     read_only: true
