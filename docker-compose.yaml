@@ -152,7 +152,7 @@ services:
 
     volumes:
       - netguard_natsdata:/data
-      - ./backend/app/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./docker/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
 
     # No `ports:` block: monitoring is now bound to 127.0.0.1:8222 inside
     # the container (see nats-server.conf), not published, and was never

@@ -288,14 +288,6 @@ pipeline {
             steps {
                 script {
                     try {
-                        // Force-sync backend configurations that the infra deployer script might miss
-                        // and destroy the bad phantom directory Docker auto-created in its place
-                        sshagent(['kenpachi-prod']) {
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "rm -rf /opt/NetGuard/backend/app/nats/nats-server.conf"'
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard/backend/app/nats"'
-                            sh 'scp -o StrictHostKeyChecking=no backend/app/nats/nats-server.conf kenpachi-prod@172.17.1.6:/opt/NetGuard/backend/app/nats/nats-server.conf'
-                        }
-
                         deploy(IMAGE_TAG)
 
                         healthCheck()
