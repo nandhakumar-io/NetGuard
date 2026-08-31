@@ -288,6 +288,12 @@ pipeline {
             steps {
                 script {
                     try {
+                        // Force clean the remote repository state so `deploy()` git pull doesn't silently abort
+                        sshagent(['kenpachi-prod']) {
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "rm -rf /opt/NetGuard/backend/app/nats"'
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "cd /opt/NetGuard && git restore . || true"'
+                        }
+
                         deploy(IMAGE_TAG)
 
                         healthCheck()
