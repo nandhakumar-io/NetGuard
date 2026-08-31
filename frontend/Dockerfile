@@ -6,6 +6,8 @@ WORKDIR /app
 # always gets the exact, previously-resolved dependency tree instead of
 # silently re-resolving on every build.
 COPY package.json package-lock.json ./
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+RUN npm install -g npm@latest
 RUN npm ci
 
 COPY . .
