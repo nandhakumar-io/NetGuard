@@ -301,6 +301,12 @@ pipeline {
                             sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "test -f /opt/NetGuard/docker/nats/nats-server.conf && echo NATS_CONF_OK || (echo NATS_CONF_MISSING_OR_DIR; exit 1)"'
                         }
 
+                        // Force-scp the updated docker-compose.yaml because the shared library's deploy() script
+                        // literally skips updating the compose file!
+                        sshagent(['kenpachi-prod']) {
+                            sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
+                        }
+
                         deploy(IMAGE_TAG)
 
                         healthCheck()
