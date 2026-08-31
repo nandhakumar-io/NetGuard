@@ -1,652 +1,363 @@
 services:
-
-  # ============================================================
-  # DATABASE
-  # ============================================================
-
   db:
     image: postgres:16-alpine
     restart: unless-stopped
-
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-netguard}
-      # No weak default -- this role owns every table (see
-      # docker/db-init/01-create-app-role.sh's rationale for why that
-      # ownership matters) and only the one-shot `migrate` service uses
-      # it, so there's no dev-convenience reason to let it silently fall
-      # back to a guessable value the way api/worker creds used to.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-netguard}
-      # Consumed by docker/db-init/01-create-app-role.sh on first cluster
-      # init only, to create the least-privilege runtime role that api/
-      # workers actually connect as (Section 18). Not required to match
-      # POSTGRES_PASSWORD and should not.
-      NETGUARD_APP_DB_PASSWORD: ${NETGUARD_APP_DB_PASSWORD:?NETGUARD_APP_DB_PASSWORD must be set}
-
+      NETGUARD_APP_DB_PASSWORD: ${NETGUARD_APP_DB_PASSWORD:?NETGUARD_APP_DB_PASSWORD
+        must be set}
     volumes:
-      - netguard_pgdata:/var/lib/postgresql/data
-      - ./docker/db-init:/docker-entrypoint-initdb.d:ro
-
+    - netguard_pgdata:/var/lib/postgresql/data
+    - ./docker/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-netguard} -d ${POSTGRES_DB:-netguard}"
-        ]
+      - CMD-SHELL
+      - pg_isready -U ${POSTGRES_USER:-netguard} -d ${POSTGRES_DB:-netguard}
       interval: 5s
       timeout: 5s
       retries: 10
-
-    # Container hardening (Section 7). Postgres needs to write to
-    # /var/run/postgresql (unix socket dir) and /tmp at runtime, so those
-    # are tmpfs mounts rather than leaving the whole filesystem writable.
     read_only: true
     tmpfs:
-      - /tmp
-      - /var/run/postgresql
+    - /tmp
+    - /var/run/postgresql
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # PGBOUNCER
-  # ============================================================
-
+    - netguard-internal
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.2-p0
     restart: unless-stopped
-
     environment:
       DB_HOST: db
       DB_PORT: 5432
-      # Section 18: pgbouncer connects to Postgres, and authenticates
-      # every app-tier client, as netguard_app -- the least-privilege
-      # runtime role (see docker/db-init/01-create-app-role.sh), not the
-      # owning ${POSTGRES_USER} role. Only the one-shot `migrate`
-      # service uses the owner role, and it connects straight to `db`,
-      # bypassing pgbouncer entirely (see its DATABASE_URL) -- so
-      # pgbouncer never needs to know the owner credentials at all.
       DB_USER: netguard_app
       DB_PASSWORD: ${NETGUARD_APP_DB_PASSWORD}
       DB_NAME: ${POSTGRES_DB:-netguard}
-
       POOL_MODE: transaction
-      MAX_CLIENT_CONN: "500"
-      DEFAULT_POOL_SIZE: "25"
-
+      MAX_CLIENT_CONN: '500'
+      DEFAULT_POOL_SIZE: '25'
       AUTH_TYPE: scram-sha-256
-      LISTEN_PORT: "6432"
-
+      LISTEN_PORT: '6432'
     depends_on:
       db:
         condition: service_healthy
-
     read_only: true
     tmpfs:
-      - /tmp
-      - /var/run
+    - /tmp
+    - /var/run
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # REDIS
-  # ============================================================
-
+    - netguard-internal
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+      - CMD
+      - redis-cli
+      - ping
       interval: 5s
       timeout: 5s
       retries: 10
-
     read_only: true
     tmpfs:
-      - /tmp
+    - /tmp
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # NATS
-  # ============================================================
-
+    - netguard-internal
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
-
-    # Section 5 hardening: authenticated, subject-scoped accounts instead
-    # of the previous no-auth "-js -sd /data -m 8222" (see
-    # nats/nats-server.conf for the account/permission design). Passwords
-    # are env-substituted into the config by nats-server itself at
-    # startup -- they are not baked into the image or this compose file.
-    command: ["-c", "/etc/nats/nats-server.conf"]
-
+    command: echo "IyBOQVRTIHNlcnZlciBjb25maWcgKFNlY3Rpb24gNSkuIFJlcGxhY2VzIHRoZSBwcmV2aW91cyB6ZXJvLWF1dGgKIyBgLWpzIC1zZCAvZGF0YSAtbSA4MjIyYCBjb21tYW5kIHdpdGg6CiMgICAtIGF1dGhlbnRpY2F0aW9uIChwZXItc2VydmljZSBhY2NvdW50cy9jcmVkZW50aWFscywgbm90IGEgc2hhcmVkIHRva2VuKQojICAgLSBzdWJqZWN0LWxldmVsIGF1dGhvcml6YXRpb24gKGVhY2ggYWNjb3VudCBjYW4gb25seSBwdWJsaXNoL3N1YnNjcmliZQojICAgICB3aGF0IHRoYXQgc2VydmljZSBhY3R1YWxseSBuZWVkcykKIyAgIC0gbW9uaXRvcmluZyByZXN0cmljdGVkIHRvIGxvb3BiYWNrICh3YXMgMC4wLjAuMDo4MjIyLCByZWFjaGFibGUgZnJvbQojICAgICB0aGUgd2hvbGUgZmxhdCBpbnRlcm5hbCBuZXR3b3JrKQojCiMgQWNjb3VudCBkZXNpZ24sIG1hdGNoaW5nIHdobyBhY3R1YWxseSBjb25uZWN0cyAoc2VlIGdyZXAgb2YKIyBgbmF0cy5jb25uZWN0KGAgYWNyb3NzIGJhY2tlbmQvIC0tIHRocmVlIGNhbGwgc2l0ZXM6IHRoZSBBUEkvd29ya2VycwojIHZpYSBkZXZpY2Vfam9iX3NlcnZpY2UucHkgKyBldmVudF9idXMucHksIGFuZCB0aGUgRGV2aWNlIEdhdGV3YXkpOgojCiMgICBBUFAgYWNjb3VudCAgIC0tIGFwaSArIGFsbCBDZWxlcnkgd29ya2VycyAoYmVhdC9wb2xsZXIvZGVwbG95ZXIvCiMgICAgICAgICAgICAgICAgICAgIGZpcm13YXJlL3dvcmtlci9ub3RpZmllci9jb2xsZWN0b3IpLiBUaGVzZSBhbGwgcnVuCiMgICAgICAgICAgICAgICAgICAgIHRoZSBzYW1lIHRydXN0ZWQgYXBwbGljYXRpb24gY29kZSBhbmQgc2hhcmUgdGhlCiMgICAgICAgICAgICAgICAgICAgIGV2ZW50X2J1cyBKZXRTdHJlYW0gc3RyZWFtLCBzbyBvbmUgYWNjb3VudCBmb3IgdGhpcwojICAgICAgICAgICAgICAgICAgICB0aWVyIGlzIGEgcmVhc29uYWJsZSBib3VuZGFyeSAtLSB0aGUgbWVhbmluZ2Z1bAojICAgICAgICAgICAgICAgICAgICB0cnVzdCBib3VuZGFyeSBpbiB0aGlzIHN5c3RlbSBpcyBhcHAtdGllciB2cy4KIyAgICAgICAgICAgICAgICAgICAgZGV2aWNlLWdhdGV3YXktdGllciwgbm90IHdvcmtlci12cy13b3JrZXIuCiMgICAgIC0gcHVibGlzaCAgam9icy5yZXF1ZXN0ICAgICAgICAgICAgICAoc3VibWl0IGEgZGV2aWNlIGpvYikKIyAgICAgLSBzdWJzY3JpYmUgam9icy5yZXN1bHQuPiAgICAgICAgICAgIChvbmx5IElUUyBPV04gam9iJ3MgcmVzdHJ1bHQ7CiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBzdWJqZWN0IGluY2x1ZGVzIGpvYl9pZCkKIyAgICAgLSBwdWJsaXNoICB0ZXJtaW5hbC5vcGVuICAgICAgICAgICAgIChvcGVuIGFuIGludGVyYWN0aXZlIHNlc3Npb24gLS0KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VlIGFwcC5hcGkudGVybWluYWwgLwojICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBhcHAuc2NoZW1hcy50ZXJtaW5hbF9qb2IpCiMgICAgIC0gcHVibGlzaCAgdGVybWluYWwuc2Vzc2lvbi4qLmluICAgICAoYnJvd3NlciBrZXlzdHJva2VzIC0tIEFQSSBjYW4KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgb25seSBwdWJsaXNoIGlucHV0IGZvciBhCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlc3Npb25faWQgaXQgaXRzZWxmIGNyZWF0ZWQsCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNpbmNlIHRoYXQgSUQgaXMgYW4KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdW5ndWVzc2FibGUgdXVpZDQgaXQgY2hvc2UpCiMgICAgIC0gc3Vic2NyaWJlIHRlcm1pbmFsLnJlc3VsdC4+ICAgICAgICAob3duIHNlc3Npb24ncyBvcGVuIHJlc3VsdCkKIyAgICAgLSBzdWJzY3JpYmUgdGVybWluYWwuc2Vzc2lvbi4qLm91dCAgIChkZXZpY2Ugb3V0cHV0IGZvciBpdHMgb3duCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlc3Npb25zKQojICAgICAtIHN1YnNjcmliZSB0ZXJtaW5hbC5zZXNzaW9uLiouY3RsICAgKHNlc3Npb24gbGlmZWN5Y2xlIHNpZ25hbHMpCiMgICAgIC0gcHVibGlzaC9zdWJzY3JpYmUgbmV0Z3VhcmQuPiAgICAgICAoZGFzaGJvYXJkL2FsZXJ0cy90b3BvbG9neS8KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgbm90aWZpY2F0aW9ucyBVSS1yZWZyZXNoIGV2ZW50cykKIyAgICAgLSAkSlMuQVBJLj4gICAgICAgICAgICAgICAgICAgICAgICAgIChKZXRTdHJlYW0gc3RyZWFtL2NvbnN1bWVyCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG1hbmFnZW1lbnQgLS0gZXZlbnRfYnVzLnB5CiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxhemlseSBjcmVhdGVzIHRoZQojICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBORVRHVUFSRF9FVkVOVFMgc3RyZWFtKQojICAgICBEZWxpYmVyYXRlbHkgQ0FOTk9UIHB1Ymxpc2ggdGVybWluYWwuc2Vzc2lvbi4qLm91dCBvciAuY3RsLCBhbmQKIyAgICAgQ0FOTk9UIHB1Ymxpc2ggam9icy5yZXN1bHQuPiAtLSB0aG9zZSBhcmUgdGhlIEdhdGV3YXkncyBleGNsdXNpdmUKIyAgICAgb3V0cHV0czsgYSBjb21wcm9taXNlZCBBUEkgZm9yZ2luZyBhICJmYWtlIGRldmljZSBzYWlkIHRoaXMiIG91dHB1dAojICAgICBtZXNzYWdlIG9yIGEgZmFrZSBqb2Ivc2Vzc2lvbiByZXN1bHQgaXMgZXhhY3RseSB3aGF0IHN1YmplY3QtbGV2ZWwKIyAgICAgQUNMcyAobm90IGp1c3QgdGhlIEhNQUMgc2lnbmF0dXJlIG9uIHRoZSBqb2Ivc2Vzc2lvbi1vcGVuIGVudmVsb3BlKQojICAgICBleGlzdCB0byBydWxlIG91dCBhdCB0aGUgdHJhbnNwb3J0IGxheWVyLgojCiMgICBHQVRFV0FZIGFjY291bnQgLS0gZGV2aWNlLWdhdGV3YXkgb25seS4KIyAgICAgLSBzdWJzY3JpYmUgam9icy5yZXF1ZXN0CiMgICAgIC0gcHVibGlzaCAgam9icy5yZXN1bHQuPgojICAgICAtIHN1YnNjcmliZSB0ZXJtaW5hbC5vcGVuCiMgICAgIC0gc3Vic2NyaWJlIHRlcm1pbmFsLnNlc3Npb24uKi5pbiAgICAob25seSBhZnRlciB0aGUgR2F0ZXdheSBpdHNlbGYKIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgb3BlbmVkIHRoYXQgc2Vzc2lvbikKIyAgICAgLSBwdWJsaXNoICB0ZXJtaW5hbC5yZXN1bHQuPgojICAgICAtIHB1Ymxpc2ggIHRlcm1pbmFsLnNlc3Npb24uKi5vdXQKIyAgICAgLSBwdWJsaXNoICB0ZXJtaW5hbC5zZXNzaW9uLiouY3RsCiMgICAgIERlbGliZXJhdGVseSBDQU5OT1QgcHVibGlzaCBqb2JzLnJlcXVlc3QsIHRlcm1pbmFsLm9wZW4sIG9yCiMgICAgIHRlcm1pbmFsLnNlc3Npb24uKi5pbiwgYW5kIENBTk5PVCBzdWJzY3JpYmUgdG8gbmV0Z3VhcmQuPiAtLSBhCiMgICAgIGNvbXByb21pc2VkIEdhdGV3YXkgaGFzIG5vIHJlYXNvbiB0byBmb3JnZSBhIGpvYi9zZXNzaW9uIHJlcXVlc3QKIyAgICAgYmFjayB0byBpdHNlbGYsIGluamVjdCBmYWtlIGJyb3dzZXIga2V5c3Ryb2tlcywgb3IgcHVzaCBmYWtlCiMgICAgIGRhc2hib2FyZCBldmVudHMsIHNvIG5vbmUgb2YgdGhvc2UgcGVybWlzc2lvbnMgaXMgZ3JhbnRlZC4KIwojICAgQVVESVQgYWNjb3VudCAtLSByZXNlcnZlZCBmb3IgYSBmdXR1cmUgYXVkaXQtZXZlbnQgY29uc3VtZXIKIyAgICAgKFNlY3Rpb24gMTMpLiBTdWJzY3JpYmUtb25seSwgb24gYXVkaXQuKiAtLSBub3RoaW5nIHB1Ymxpc2hlcyB0aGVyZQojICAgICB5ZXQsIHNvIHRoaXMgaXMgaW5lcnQgdW50aWwgdGhhdCBjb25zdW1lciBleGlzdHMsIGJ1dCB0aGUgYWNjb3VudAojICAgICBhbmQgaXRzIHJlc3RyaWN0ZWQgcGVybWlzc2lvbiBzZXQgYXJlIGRlZmluZWQgbm93IHNvIHdpcmluZyBpdCB1cAojICAgICBsYXRlciBkb2Vzbid0IHJlcXVpcmUgYW5vdGhlciBOQVRTLWNvbmZpZyBjaGFuZ2UuCiMKIyAgIFNZUyBhY2NvdW50IC0tIHN5c3RlbSBhY2NvdW50LCB1c2VkIG9ubHkgZm9yIGBuYXRzLXNlcnZlcmAKIyAgICAgb3BlcmF0aW9uYWwgY29tbWFuZHMsIG5vdCBieSBhbnkgTmV0R3VhcmQgc2VydmljZS4KIwojIFBhc3N3b3JkcyBjb21lIGZyb20gZW52aXJvbm1lbnQgc3Vic3RpdHV0aW9uIGF0IGNvbnRhaW5lciBzdGFydCAoc2VlCiMgZG9ja2VyLWNvbXBvc2UueWFtbCdzIGBuYXRzYCBzZXJ2aWNlLCB3aGljaCB0ZW1wbGF0ZXMgdGhpcyBmaWxlIGJlZm9yZQojIGBuYXRzLXNlcnZlcmAgcmVhZHMgaXQpIC0tIG5vdGhpbmcgaGVyZSBpcyBhIGxpdGVyYWwgc2VjcmV0LgoKbGlzdGVuOiAwLjAuMC4wOjQyMjIKCmpldHN0cmVhbSB7CiAgc3RvcmVfZGlyOiAvZGF0YQp9CgojIE1vbml0b3JpbmcgZW5kcG9pbnQ6IGJpbmQgdG8gbG9jYWxob3N0IG9ubHkuIFRoZSBwcmV2aW91cyBjb25maWcKIyBleHBvc2VkIDo4MjIyIHRvIHRoZSB3aG9sZSBuZXRndWFyZC1pbnRlcm5hbCBuZXR3b3JrIHdpdGggbm8KIyByZXN0cmljdGlvbjsgbm90aGluZyBvdXRzaWRlIHRoaXMgY29udGFpbmVyIG5lZWRzIGl0LCBzbyBpdCdzIG5vCiMgbG9uZ2VyIHB1Ymxpc2hlZCBpbiBkb2NrZXItY29tcG9zZS55YW1sIGVpdGhlci4KaHR0cDogMTI3LjAuMC4xOjgyMjIKCmFjY291bnRzOiB7CiAgU1lTOiB7CiAgICB1c2VyczogWwogICAgICB7IHVzZXI6ICIkTkFUU19TWVNfVVNFUiIsIHBhc3N3b3JkOiAiJE5BVFNfU1lTX1BBU1NXT1JEIiB9CiAgICBdCiAgfQoKICBBUFA6IHsKICAgIGpldHN0cmVhbTogZW5hYmxlZAogICAgdXNlcnM6IFsKICAgICAgeyB1c2VyOiAiJE5BVFNfQVBJX1VTRVIiLCBwYXNzd29yZDogIiROQVRTX0FQSV9QQVNTV09SRCIgfQogICAgXQogICAgZXhwb3J0czogW10KICAgIHBlcm1pc3Npb25zOiB7CiAgICAgIHB1Ymxpc2g6IHsKICAgICAgICBhbGxvdzogWyJqb2JzLnJlcXVlc3QiLCAidGVybWluYWwub3BlbiIsICJ0ZXJtaW5hbC5zZXNzaW9uLiouaW4iLCAibmV0Z3VhcmQuPiIsICIkSlMuQVBJLj4iXQogICAgICB9CiAgICAgIHN1YnNjcmliZTogewogICAgICAgIGFsbG93OiBbCiAgICAgICAgICAiam9icy5yZXN1bHQuPiIsICJ0ZXJtaW5hbC5yZXN1bHQuPiIsICJ0ZXJtaW5hbC5zZXNzaW9uLioub3V0IiwgInRlcm1pbmFsLnNlc3Npb24uKi5jdGwiLAogICAgICAgICAgIm5ldGd1YXJkLj4iLCAiX0lOQk9YLj4iCiAgICAgICAgXQogICAgICB9CiAgICB9CiAgfQoKICBHQVRFV0FZOiB7CiAgICB1c2VyczogWwogICAgICB7IHVzZXI6ICIkTkFUU19HQVRFV0FZX1VTRVIiLCBwYXNzd29yZDogIiROQVRTX0dBVEVXQVlfUEFTU1dPUkQiIH0KICAgIF0KICAgIHBlcm1pc3Npb25zOiB7CiAgICAgIHB1Ymxpc2g6IHsKICAgICAgICBhbGxvdzogWyJqb2JzLnJlc3VsdC4+IiwgInRlcm1pbmFsLnJlc3VsdC4+IiwgInRlcm1pbmFsLnNlc3Npb24uKi5vdXQiLCAidGVybWluYWwuc2Vzc2lvbi4qLmN0bCJdCiAgICAgIH0KICAgICAgc3Vic2NyaWJlOiB7CiAgICAgICAgYWxsb3c6IFsiam9icy5yZXF1ZXN0IiwgInRlcm1pbmFsLm9wZW4iLCAidGVybWluYWwuc2Vzc2lvbi4qLmluIiwgIl9JTkJPWC4+Il0KICAgICAgfQogICAgfQogIH0KCiAgQVVESVQ6IHsKICAgIHVzZXJzOiBbCiAgICAgIHsgdXNlcjogIiROQVRTX0FVRElUX1VTRVIiLCBwYXNzd29yZDogIiROQVRTX0FVRElUX1BBU1NXT1JEIiB9CiAgICBdCiAgICBwZXJtaXNzaW9uczogewogICAgICBwdWJsaXNoOiB7CiAgICAgICAgZGVueTogWyI+Il0KICAgICAgfQogICAgICBzdWJzY3JpYmU6IHsKICAgICAgICBhbGxvdzogWyJhdWRpdC4+Il0KICAgICAgfQogICAgfQogIH0KfQoKc3lzdGVtX2FjY291bnQ6IFNZUwoKbm9fYXV0aF91c2VyOiAiIgo="
+      | base64 -d > /tmp/nats.conf && nats-server -c /tmp/nats.conf
     environment:
       NATS_SYS_USER: ${NATS_SYS_USER:-sys}
       NATS_SYS_PASSWORD: ${NATS_SYS_PASSWORD:?NATS_SYS_PASSWORD must be set}
       NATS_API_USER: ${NATS_API_USER:-api}
       NATS_API_PASSWORD: ${NATS_API_PASSWORD:?NATS_API_PASSWORD must be set}
       NATS_GATEWAY_USER: ${NATS_GATEWAY_USER:-device-gateway}
-      NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?NATS_GATEWAY_PASSWORD must be set}
+      NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?NATS_GATEWAY_PASSWORD must be
+        set}
       NATS_AUDIT_USER: ${NATS_AUDIT_USER:-audit}
       NATS_AUDIT_PASSWORD: ${NATS_AUDIT_PASSWORD:?NATS_AUDIT_PASSWORD must be set}
-
     volumes:
-      - netguard_natsdata:/data
-      - ./docker/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
-
-    # No `ports:` block: monitoring is now bound to 127.0.0.1:8222 inside
-    # the container (see nats-server.conf), not published, and was never
-    # meant to be reachable from outside this container. The healthcheck
-    # below runs inside the container, so it can still reach it.
+    - netguard_natsdata:/data
     healthcheck:
       test:
-        [
-          "CMD",
-          "wget",
-          "-qO-",
-          "http://127.0.0.1:8222/healthz"
-        ]
+      - CMD
+      - wget
+      - -qO-
+      - http://127.0.0.1:8222/healthz
       interval: 5s
       timeout: 5s
       retries: 10
-
     read_only: true
     tmpfs:
-      - /tmp
+    - /tmp
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # VICTORIA METRICS
-  # ============================================================
-
+    - netguard-internal
+    entrypoint:
+    - /bin/sh
+    - -c
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.102.0
     restart: unless-stopped
-
     command:
-      - "--storageDataPath=/storage"
-      - "--retentionPeriod=90d"
-      - "--httpListenAddr=:8428"
-
+    - --storageDataPath=/storage
+    - --retentionPeriod=90d
+    - --httpListenAddr=:8428
     volumes:
-      - netguard_vmdata:/storage
-
+    - netguard_vmdata:/storage
     healthcheck:
       test:
-        [
-          "CMD",
-          "wget",
-          "-qO-",
-          "http://127.0.0.1:8428/health"
-        ]
+      - CMD
+      - wget
+      - -qO-
+      - http://127.0.0.1:8428/health
       interval: 5s
       timeout: 5s
       retries: 10
-
     read_only: true
     tmpfs:
-      - /tmp
+    - /tmp
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # GRAFANA
-  # ============================================================
-
+    - netguard-internal
   grafana:
     image: grafana/grafana:11.1.0
     restart: unless-stopped
-
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      # No weak default: an operator who forgets to set this must not
-      # silently get "admin/admin" on an internet-facing dashboard.
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
-
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD
+        must be set}
+      GF_SERVER_ROOT_URL: '%(protocol)s://%(domain)s:%(http_port)s/grafana'
+      GF_SERVER_SERVE_FROM_SUB_PATH: 'true'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
     volumes:
-      - netguard_grafanadata:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-
+    - netguard_grafanadata:/var/lib/grafana
+    - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       victoriametrics:
         condition: service_healthy
-
     networks:
-      - proxy
-      - netguard-internal
-
+    - proxy
+    - netguard-internal
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-
-      - "traefik.http.routers.netguard-grafana.rule=Host(`netguard.notoriousdev.in`) && PathPrefix(`/grafana`)"
-      - "traefik.http.routers.netguard-grafana.priority=10"
-      - "traefik.http.services.netguard-grafana.loadbalancer.server.port=3000"
-
+    - traefik.enable=true
+    - traefik.docker.network=proxy
+    - traefik.http.routers.netguard-grafana.rule=Host(`netguard.notoriousdev.in`)
+      && PathPrefix(`/grafana`)
+    - traefik.http.routers.netguard-grafana.priority=10
+    - traefik.http.services.netguard-grafana.loadbalancer.server.port=3000
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\"ok\"'"
-        ]
+      - CMD-SHELL
+      - wget -qO- http://localhost:3000/api/health | grep -q '"database":"ok"'
       interval: 10s
       timeout: 5s
       retries: 10
-
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-    # Not read_only: Grafana's image writes plugin/provisioning cache
-    # files under paths outside the /var/lib/grafana volume at startup;
-    # making the rootfs read_only here reliably breaks boot on 11.x
-    # without additional tmpfs mounts tuned per-plugin. Capability
-    # dropping and no-new-privileges still apply.
-
-  # ============================================================
-  # DATABASE MIGRATIONS
-  # ============================================================
-
+    - ALL
   migrate:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
-
     env_file:
-      - .env
-      - .env.device-gateway
-      # .env.device-gateway is needed here ONLY for the one-time 0121
-      # migration (re-encrypts existing device credentials from the
-      # general key onto the new device-credential-only key -- see that
-      # migration's docstring and app/core/crypto.py). `migrate` is a
-      # short-lived, one-shot job, not a long-running service, so
-      # holding both keys transiently is an acceptable exception to the
-      # "api/workers never get this key" rule below.
-
+    - .env
+    - .env.device-gateway
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-netguard}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-netguard}
-
     depends_on:
       db:
         condition: service_healthy
-
     command:
-      [
-        "alembic",
-        "upgrade",
-        "head"
-      ]
-
-    restart: "no"
-
+    - alembic
+    - upgrade
+    - head
+    restart: 'no'
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # API
-  # ============================================================
-
+    - netguard-internal
   api:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
-
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-      AUTO_MIGRATE_ON_STARTUP: "false"
-
-      SNMP_INPROCESS_POLLING_ENABLED: "false"
-      SYSLOG_LISTENER_ENABLED: "false"
-      NETFLOW_LISTENER_ENABLED: "false"
-      SFLOW_LISTENER_ENABLED: "false"
-      TOPOLOGY_SNAPSHOT_ENABLED: "false"
-
+      SKIP_MIGRATIONS: 'true'
+      AUTO_MIGRATE_ON_STARTUP: 'false'
+      SNMP_INPROCESS_POLLING_ENABLED: 'false'
+      SYSLOG_LISTENER_ENABLED: 'false'
+      NETFLOW_LISTENER_ENABLED: 'false'
+      SFLOW_LISTENER_ENABLED: 'false'
+      TOPOLOGY_SNAPSHOT_ENABLED: 'false'
     volumes:
-      # BACKUP_STORAGE_DIR and TERMINAL_RECORDING_DIR both default to
-      # ./data/... under the image's /app workdir, which -- unlike the dev
-      # compose file -- has nothing backing it here at all: no bind mount,
-      # no named volume. Every container recreation (redeploy, restart
-      # policy kicking in after a crash, `docker compose up -d` picking up
-      # a new BACKEND_TAG) wipes it, while the BackupJob/
-      # TerminalSessionRecording rows survive in Postgres. That's exactly
-      # what produced the two "server likely restarted mid-run" failed
-      # backups and the empty-terminal/failed-download symptoms: the DB
-      # says completed, the file is gone. All 3 `api` replicas share the
-      # same local-driver named volume on this host, so a download served
-      # by replica B works fine for a file replica A wrote.
-      - netguard_backups:/app/data/backups
-      - netguard_recordings:/app/data/terminal-recordings
-
+    - netguard_backups:/app/data/backups
+    - netguard_recordings:/app/data/terminal-recordings
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: ${API_REPLICAS:-3}
-
     networks:
-      - proxy
-      - netguard-internal
-      - netguard-identity
-
+    - proxy
+    - netguard-internal
+    - netguard-identity
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-      - "traefik.http.routers.netguard-api.rule=Host(`netguard-api.notoriousdev.in`)"
-      - "traefik.http.services.netguard-api.loadbalancer.server.port=8000"
-
-    # Section 7/8 container hardening. No cap_add here -- unlike
-    # `worker` (see below), the API does not run nmap discovery sweeps
-    # in-process, so it gets no raw-socket exception. If a live,
-    # synchronous ping/traceroute/path-trace feature turns out to run
-    # directly inside the api process rather than via a background
-    # queue, it will need the same NET_RAW addition `worker` has;
-    # flagged here rather than silently granted, since widening this
-    # should be a deliberate decision, not a default.
+    - traefik.enable=true
+    - traefik.docker.network=proxy
+    - traefik.http.routers.netguard-api.rule=Host(`netguard-api.notoriousdev.in`)
+    - traefik.http.services.netguard-api.loadbalancer.server.port=8000
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
-
-  # ============================================================
-  # OPENBAO
-  # ============================================================
-  # Secrets manager for device credentials (Section 4/17). Started here
-  # in "server" mode requiring manual `bao operator init` +
-  # `bao operator unseal` on first boot (see openbao/bootstrap/bootstrap.sh)
-  # -- deliberately not auto-unsealed by anything in this compose file,
-  # since an auto-unseal secret sitting in compose/env would just
-  # relocate the "is the master secret reachable from a compromised
-  # container" problem rather than solve it. Production deployments
-  # should use a real auto-unseal mechanism (cloud KMS) or a documented
-  # manual unseal runbook -- out of scope for this compose file.
-  #
-  # Only reachable from netguard-secrets (device-gateway) and
-  # netguard-internal (so migrate/bootstrap tooling and the `api`
-  # container's absence-of-access is enforced by network ACLs, not just
-  # by "we didn't give it a token"). If your environment can enforce a
-  # stricter ACL (api explicitly denied even on netguard-internal),
-  # prefer that -- this compose file is deliberately simple, not a
-  # substitute for real firewall rules.
-
+    - /tmp
   openbao:
     image: openbao/openbao:2.0
     restart: unless-stopped
-
     cap_add:
-      - IPC_LOCK  # OpenBao mlocks its memory to avoid secrets swapping to disk
-
+    - IPC_LOCK
     cap_drop:
-      - ALL
-
+    - ALL
     read_only: true
     tmpfs:
-      - /tmp
-
-    command: ["server", "-config=/vault/config/openbao.hcl"]
-
+    - /tmp
+    command:
+    - server
+    - -config=/vault/config/openbao.hcl
     volumes:
-      - netguard_openbaodata:/vault/data
-      - ./openbao/config/openbao.hcl:/vault/config/openbao.hcl:ro
-
+    - netguard_openbaodata:/vault/data
+    - ./openbao/config/openbao.hcl:/vault/config/openbao.hcl:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8200/v1/sys/health?standbyok=true"]
+      test:
+      - CMD
+      - wget
+      - -qO-
+      - http://localhost:8200/v1/sys/health?standbyok=true
       interval: 10s
       timeout: 5s
       retries: 10
-
     security_opt:
-      - no-new-privileges:true
-
-    # Only reachable from netguard-secrets, which today means
-    # device-gateway alone -- no compose service other than
-    # device-gateway sets OPENBAO_ROLE_ID/OPENBAO_SECRET_ID (see its
-    # environment block above), and openbao/bootstrap/bootstrap.sh is a
-    # manual operator script run against localhost:8200 or via
-    # `docker compose exec openbao ...`, not a networked compose
-    # service, so it needs no network entry here either.
-    #
-    # Previously this also listed netguard-internal "so migrate/bootstrap
-    # tooling ... and the api container's absence-of-access is enforced
-    # by network ACLs" -- that comment described the intent but the
-    # networks list below did the opposite: netguard-internal is also
-    # where `api` sits (see its service block above), so that membership
-    # actually gave `api` a network path to OpenBao's API, contradicting
-    # both this comment and Section 6's explicit "API -> OpenBao: DENY
-    # unless absolutely required". Nothing currently relies on it --
-    # removed rather than left as a residual, silently-wider-than-
-    # intended attack surface. If a future service genuinely needs
-    # OpenBao access, give it a name-scoped network of its own rather
-    # than reintroducing this.
+    - no-new-privileges:true
     networks:
-      - netguard-secrets
-
-
-  # ============================================================
-  # KEYCLOAK (Section 1 / 16)
-  # ============================================================
-  # External IdP. Runs in production mode behind Traefik, with its own
-  # dedicated PostgreSQL instance (Section 1: "must use PostgreSQL with a
-  # dedicated database/user"; Section 18: separate netguard/keycloak/
-  # audit DBs). NetGuard's `api` container is never given
-  # KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD -- those exist only in this
-  # service's own environment -- and Keycloak's admin console is reached
-  # only via a router rule scoped to an internal hostname (bind that
-  # Traefik rule to your management VPN/network at the edge; this
-  # compose file cannot enforce network-path restrictions upstream of
-  # Traefik itself, only that the app containers have no path to it).
-
+    - netguard-secrets
   keycloak-db:
     image: postgres:16-alpine
     restart: unless-stopped
-
     environment:
       POSTGRES_USER: ${KEYCLOAK_DB_USER:-keycloak}
       POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set}
       POSTGRES_DB: ${KEYCLOAK_DB_NAME:-keycloak}
-
     volumes:
-      - netguard_keycloakdata:/var/lib/postgresql/data
-
+    - netguard_keycloakdata:/var/lib/postgresql/data
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${KEYCLOAK_DB_USER:-keycloak} -d ${KEYCLOAK_DB_NAME:-keycloak}"
-        ]
+      - CMD-SHELL
+      - pg_isready -U ${KEYCLOAK_DB_USER:-keycloak} -d ${KEYCLOAK_DB_NAME:-keycloak}
       interval: 5s
       timeout: 5s
       retries: 10
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - netguard-identity
-
-
+    - netguard-identity
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     restart: unless-stopped
-
-    command: ["start", "--optimized"]
-
+    command:
+    - start
+    - --optimized
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/${KEYCLOAK_DB_NAME:-keycloak}
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
-
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:?KEYCLOAK_ADMIN must be set}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set}
-
-      # Production mode: HTTPS is required unless explicitly relaxed.
-      # Terminate real TLS at Traefik and set KC_PROXY accordingly in a
-      # real deployment -- left as edge/environment config, not baked
-      # into this compose file's image layer.
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD
+        must be set}
       KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-auth.netguard.notoriousdev.in}
       KC_PROXY: edge
-      KC_HTTP_ENABLED: "true"
-
-      # Never expose the admin console/API on the same hostname as the
-      # realm's browser-facing login endpoints in a real deployment --
-      # split via KC_HOSTNAME_ADMIN / a separate Traefik router bound to
-      # a management-only network, so a public login page and the admin
-      # console don't share an attack surface. Not fully wired here
-      # (single compose network model) -- see the residual-risk note in
-      # the Phase 5 summary.
-
+      KC_HTTP_ENABLED: 'true'
     depends_on:
       keycloak-db:
         condition: service_healthy
-
     read_only: true
     tmpfs:
-      - /tmp
-      - /opt/keycloak/data/tmp
+    - /tmp
+    - /opt/keycloak/data/tmp
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - proxy
-      - netguard-identity
-
+    - proxy
+    - netguard-identity
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-      - "traefik.http.routers.netguard-keycloak.rule=Host(`${KEYCLOAK_HOSTNAME:-netguard-auth.notoriousdev.in}`)"
-      - "traefik.http.services.netguard-keycloak.loadbalancer.server.port=8080"
-
-
-  # ============================================================
-  # DEVICE GATEWAY
-  # ============================================================
-  # The only container with a path to network devices (see comment on
-  # the netguard-execution network above). Consumes signed job requests
-  # from NATS `jobs.request`, independently re-validates them against
-  # Postgres (app/device_gateway/validator.py), executes against the
-  # device, and publishes the result to `jobs.result.<job_id>`.
-  #
-  # Deliberately NOT on the `proxy` network (unreachable from Traefik/
-  # the internet) and NOT holding Keycloak admin creds, an OpenBao root
-  # token, or the JWT SECRET_KEY -- only DEVICE_JOB_SIGNING_KEY (to
-  # verify job signatures) and DB read access.
-  #
-  # In a real deployment, `netguard-execution` should additionally be
-  # attached (via an external Docker network or host routing) to the
-  # actual network-management VLAN/subnet -- that wiring is
-  # environment-specific and left for the deployment's own network
-  # configuration; this compose file only establishes the isolation
-  # boundary (no OTHER container has a path there).
-
+    - traefik.enable=true
+    - traefik.docker.network=proxy
+    - traefik.http.routers.netguard-keycloak.rule=Host(`${KEYCLOAK_HOSTNAME:-netguard-auth.notoriousdev.in}`)
+    - traefik.http.services.netguard-keycloak.loadbalancer.server.port=8080
   device-gateway:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
-    command: ["python", "-m", "app.device_gateway.main"]
-
+    command:
+    - python
+    - -m
+    - app.device_gateway.main
     env_file:
-      - .env
-      - .env.device-gateway
-      # .env.device-gateway carries DEVICE_CREDENTIAL_ENCRYPTION_KEY(S)
-      # -- injected HERE ONLY, same reasoning as the OpenBao AppRole
-      # credentials below: do not add this file to `api` or any Celery
-      # worker's env_file list. See app/core/crypto.py's
-      # "Device-credential scope" section.
-
+    - .env
+    - .env.device-gateway
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
       NATS_URL: nats://${NATS_GATEWAY_USER:-device-gateway}:${NATS_GATEWAY_PASSWORD}@nats:4222
-      DEVICE_JOB_SIGNING_KEY: ${DEVICE_JOB_SIGNING_KEY:?DEVICE_JOB_SIGNING_KEY must be set}
-      # OpenBao AppRole credentials -- injected HERE ONLY. Do not add
-      # these to the `api` service's environment block; the whole point
-      # of Section 4 is that the API process has no path to device
-      # credentials, and giving it these three values would silently
-      # undo that. See openbao/bootstrap/bootstrap.sh for how these are
-      # generated, and its warning about not passing OPENBAO_SECRET_ID
-      # via plain compose env in a real deployment.
+      DEVICE_JOB_SIGNING_KEY: ${DEVICE_JOB_SIGNING_KEY:?DEVICE_JOB_SIGNING_KEY must
+        be set}
       OPENBAO_ADDR: http://openbao:8200
       OPENBAO_ROLE_ID: ${OPENBAO_ROLE_ID:-}
       OPENBAO_SECRET_ID: ${OPENBAO_SECRET_ID:-}
       OPENBAO_MOUNT: netguard-devices
-
     depends_on:
       pgbouncer:
         condition: service_started
@@ -654,763 +365,464 @@ services:
         condition: service_healthy
       openbao:
         condition: service_healthy
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-      - netguard-execution
-      - netguard-secrets
-
-
-  # ============================================================
-  # TOPOLOGY COLLECTOR
-  # ============================================================
-
+    - netguard-internal
+    - netguard-execution
+    - netguard-secrets
   collector:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-      AUTO_MIGRATE_ON_STARTUP: "false"
-
-      SNMP_INPROCESS_POLLING_ENABLED: "false"
-      SYSLOG_LISTENER_ENABLED: "false"
-      NETFLOW_LISTENER_ENABLED: "false"
-      SFLOW_LISTENER_ENABLED: "false"
-
-      TOPOLOGY_SNAPSHOT_ENABLED: "true"
-
+      SKIP_MIGRATIONS: 'true'
+      AUTO_MIGRATE_ON_STARTUP: 'false'
+      SNMP_INPROCESS_POLLING_ENABLED: 'false'
+      SYSLOG_LISTENER_ENABLED: 'false'
+      NETFLOW_LISTENER_ENABLED: 'false'
+      SFLOW_LISTENER_ENABLED: 'false'
+      TOPOLOGY_SNAPSHOT_ENABLED: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: 1
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # SYSLOG COLLECTOR
-  # ============================================================
-
+    - netguard-internal
   syslog-collector:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "uvicorn",
-        "app.collectors.syslog_collector:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000"
-      ]
-
+    - uvicorn
+    - app.collectors.syslog_collector:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8000'
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
     deploy:
       replicas: 1
-
     ports:
-      - "1514:1514/udp"
-
+    - 1514:1514/udp
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
+    - netguard-internal
     healthcheck:
       test:
-        [
-          "CMD",
-          "python3",
-          "-c",
-          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"
-        ]
+      - CMD
+      - python3
+      - -c
+      - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz',
+        timeout=3).status == 200 else 1)
       interval: 10s
       timeout: 5s
       retries: 5
-
-
-  # ============================================================
-  # FLOW COLLECTOR
-  # ============================================================
-
   flow-collector:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "uvicorn",
-        "app.collectors.flow_collector:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000"
-      ]
-
+    - uvicorn
+    - app.collectors.flow_collector:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8000'
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
     deploy:
       replicas: 1
-
     ports:
-      - "2055:2055/udp"
-      - "6343:6343/udp"
-
+    - 2055:2055/udp
+    - 6343:6343/udp
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
+    - netguard-internal
     healthcheck:
       test:
-        [
-          "CMD",
-          "python3",
-          "-c",
-          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"
-        ]
+      - CMD
+      - python3
+      - -c
+      - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz',
+        timeout=3).status == 200 else 1)
       interval: 10s
       timeout: 5s
       retries: 5
-
-
-  # ============================================================
-  # CELERY BEAT
-  # ============================================================
-
   beat:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "beat",
-        "-S",
-        "redbeat.RedBeatScheduler",
-        "--loglevel=info"
-      ]
-
+    - celery
+    - -A
+    - app.celery_app.celery_app
+    - beat
+    - -S
+    - redbeat.RedBeatScheduler
+    - --loglevel=info
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
     deploy:
       replicas: ${BEAT_REPLICAS:-2}
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY POLLER
-  # ============================================================
-
+    - netguard-internal
   poller:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "polling",
-        "--loglevel=info",
-        "--concurrency=8",
-        "--hostname=poller@%h"
-      ]
-
+    - celery
+    - -A
+    - app.celery_app.celery_app
+    - worker
+    - -Q
+    - polling
+    - --loglevel=info
+    - --concurrency=8
+    - --hostname=poller@%h
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: ${POLLER_REPLICAS:-1}
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY DEPLOYER
-  # ============================================================
-
+    - netguard-internal
   deployer:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "deploy",
-        "--loglevel=info",
-        "--concurrency=4",
-        "--hostname=deployer@%h"
-      ]
-
+    - celery
+    - -A
+    - app.celery_app.celery_app
+    - worker
+    - -Q
+    - deploy
+    - --loglevel=info
+    - --concurrency=4
+    - --hostname=deployer@%h
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: ${DEPLOYER_REPLICAS:-2}
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY FIRMWARE
-  # ============================================================
-
+    - netguard-internal
   firmware:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "firmware",
-        "--loglevel=info",
-        "--concurrency=2",
-        "--hostname=firmware@%h"
-      ]
-
+    - celery
+    - -A
+    - app.celery_app.celery_app
+    - worker
+    - -Q
+    - firmware
+    - --loglevel=info
+    - --concurrency=2
+    - --hostname=firmware@%h
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: ${FIRMWARE_REPLICAS:-1}
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # DEFAULT CELERY WORKER
-  # ============================================================
-
+    - netguard-internal
   worker:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
     command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "celery",
-        "--loglevel=info",
-        "--concurrency=4",
-        "--hostname=worker@%h"
-      ]
-
+    - celery
+    - -A
+    - app.celery_app.celery_app
+    - worker
+    - -Q
+    - celery
+    - --loglevel=info
+    - --concurrency=4
+    - --hostname=worker@%h
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
-
-    # Section 7/8 hardening. This queue runs nmap host-discovery
-    # sweeps (app.services.network_discovery_service) plus ping/
-    # traceroute-based reachability checks, which need raw-socket
-    # access even as the non-root `netguard` user -- see the
-    # Dockerfile's setcap lines. Every other service on this image
-    # gets cap_drop: ALL with no exception.
     cap_add:
-      - NET_RAW
-      - NET_ADMIN
+    - NET_RAW
+    - NET_ADMIN
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # CELERY NOTIFIER (dedicated queue for live alert delivery)
-  # ============================================================
-
+    - netguard-internal
   notifier:
     image: ghcr.io/nandhakumar-io/netguard-backend:${BACKEND_TAG}
     restart: unless-stopped
-
-    # Consumes ONLY the `notify` queue -- dispatch_alert_notification_task
-    # (SMTP/syslog/Slack/Teams/webhooks/push for every alert),
-    # run_escalation_sweep_task, run_ipam_conflict_alert_sweep_task, and
-    # run_jit_expiry_notify_sweep_task (see app/celery_app.py's
-    # task_routes). Split out from the general `worker` so a backlog on
-    # the shared `celery` queue (drift sweep, compliance/uptime reports,
-    # tenant digests, snapshot retention, IPAM rescans, discovery sweeps,
-    # GitOps sync) can never delay live alert notifications -- this is
-    # the "no delay between alert and notification" path for a production
-    # NOC. Concurrency is deliberately higher than the general worker:
-    # each unit of work here is a handful of short blocking network calls
-    # (SMTP, syslog socket, webhook POSTs, push sends), not CPU-bound, and
-    # a real outage can fan out dozens of these at once.
     command:
-      [
-        "celery",
-        "-A",
-        "app.celery_app.celery_app",
-        "worker",
-        "-Q",
-        "notify",
-        "--loglevel=info",
-        "--concurrency=16",
-        "--hostname=notifier@%h"
-      ]
-
+    - celery
+    - -A
+    - app.celery_app.celery_app
+    - worker
+    - -Q
+    - notify
+    - --loglevel=info
+    - --concurrency=16
+    - --hostname=notifier@%h
     env_file:
-      - .env
-
+    - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://netguard_app:${NETGUARD_APP_DB_PASSWORD}@pgbouncer:6432/${POSTGRES_DB:-netguard}
-
       REDIS_URL: redis://redis:6379/0
-
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
-
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
-
-      SKIP_MIGRATIONS: "true"
-
+      SKIP_MIGRATIONS: 'true'
     depends_on:
       migrate:
         condition: service_completed_successfully
-
       pgbouncer:
         condition: service_started
-
       redis:
         condition: service_healthy
-
       nats:
         condition: service_healthy
-
       victoriametrics:
         condition: service_healthy
-
     deploy:
       replicas: ${NOTIFIER_REPLICAS:-2}
-
     read_only: true
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
+    - ALL
     tmpfs:
-      - /tmp
-
+    - /tmp
     networks:
-      - netguard-internal
-
-
-  # ============================================================
-  # FRONTEND
-  # ============================================================
-
+    - netguard-internal
   frontend:
     image: ghcr.io/nandhakumar-io/netguard-frontend:${FRONTEND_TAG}
     restart: unless-stopped
-
     environment:
       VITE_API_BASE_URL: https://netguard-api.notoriousdev.in/api/v1
-
     depends_on:
-      - api
-
-    # Static asset server (nginx serving the Vite build) -- no
-    # application logic runs here, but it still gets the same baseline
-    # hardening as everything else (Section 7). tmpfs paths cover
-    # nginx's default writable dirs (cache/pid/client-body temp).
+    - api
     read_only: true
     tmpfs:
-      - /tmp
-      - /var/cache/nginx
-      - /var/run
+    - /tmp
+    - /var/cache/nginx
+    - /var/run
     security_opt:
-      - no-new-privileges:true
+    - no-new-privileges:true
     cap_drop:
-      - ALL
-
+    - ALL
     networks:
-      - proxy
-
+    - proxy
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
-      - "traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)"
-      - "traefik.http.routers.netguard-frontend.priority=1"
-      - "traefik.http.services.netguard-frontend.loadbalancer.server.port=6001"
-
-
-# ================================================================
-# VOLUMES
-# ================================================================
-
+    - traefik.enable=true
+    - traefik.docker.network=proxy
+    - traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)
+    - traefik.http.routers.netguard-frontend.priority=1
+    - traefik.http.services.netguard-frontend.loadbalancer.server.port=6001
 volumes:
-  netguard_pgdata:
-  netguard_natsdata:
-  netguard_vmdata:
-  netguard_grafanadata:
-  netguard_backups:
-  netguard_recordings:
-  netguard_openbaodata:
-  netguard_keycloakdata:
-
-
-# ================================================================
-# NETWORKS
-# ================================================================
-
+  netguard_pgdata: null
+  netguard_natsdata: null
+  netguard_vmdata: null
+  netguard_grafanadata: null
+  netguard_backups: null
+  netguard_recordings: null
+  netguard_openbaodata: null
+  netguard_keycloakdata: null
 networks:
-
-  # Shared with Traefik and cloudflared.
-  #
-  # Traefik:
-  #   cloudflared -> traefik:80
-  #
-  # NetGuard:
-  #   traefik -> frontend
-  #   traefik -> api
-  #   traefik -> grafana
-  #
   proxy:
     external: true
-
-  # Private application network.
-  #
-  # PostgreSQL
-  # PgBouncer
-  # Redis
-  # NATS
-  # VictoriaMetrics
-  # API
-  # Workers
-  # Collectors
-  #
-  # are isolated here from the public/proxy network.
-  netguard-internal:
-
-  # Execution network: ONLY the device-gateway container sits here, plus
-  # (read-only, for validator.py's DB checks) a route back to the data
-  # network. This is the network with a route to the network-management
-  # VLAN/subnets in real deployments -- everything else, including the
-  # api container, has no path onto this network and therefore no path
-  # to devices. See device_gateway/main.py and Phase 1 finding "no
-  # Device Gateway exists / API can reach devices today".
+  netguard-internal: null
   netguard-execution:
     internal: true
-
-  # Secrets network: OpenBao + device-gateway only. The `api` container
-  # is deliberately never attached here -- see Section 4 ("API -> OpenBao
-  # DENY unless absolutely required"). Internal-only: OpenBao's own admin
-  # UI/API is never reachable from Traefik/the internet regardless of any
-  # port mapping elsewhere.
   netguard-secrets:
     internal: true
     driver: bridge
-
-  # Identity network: keycloak-db + keycloak, plus `api` (needs to reach
-  # Keycloak's discovery/JWKS/token endpoints server-side for
-  # oidc_service.py) and `frontend`/`proxy` for the browser-facing login
-  # redirect. NOT internal: true, because Keycloak's own container needs
-  # outbound reachability from Traefik on `proxy` separately for the
-  # browser leg -- the isolation this network actually buys is that
-  # keycloak-db is unreachable from netguard-internal (so a compromised
-  # `api`/worker process, which already has no Keycloak admin
-  # credentials per Section 1, also has no network path to Keycloak's
-  # own database).
-  netguard-identity:
+  netguard-identity: null
