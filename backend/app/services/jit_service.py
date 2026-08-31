@@ -20,9 +20,16 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.change_request import ChangeRequest
+from app.models.device import Device
 from app.models.jit_elevation import JitElevation, JitElevationStatus
 from app.models.user import User
 from app.services import audit_service, notification_service
+
+
+class JitDeviceNotFoundError(Exception):
+    """Raised when a device-scoped JIT request names a device_id that
+    doesn't exist -- caught at the API layer and turned into a 400
+    rather than letting a bad UUID silently produce an unscoped grant."""
 
 MAX_DURATION_MINUTES = 8 * 60  # 8 hours -- a JIT grant that "expires" next quarter isn't JIT
 
@@ -298,9 +305,17 @@ def request_elevation(
     duration_minutes: int,
     change_request_id: uuid.UUID | None,
     requested_by_email: str,
+    device_id: uuid.UUID | None = None,
+    scoped_operation: str | None = None,
 ) -> JitElevation:
     danger, danger_reason = _danger_context(db, change_request_id)
     capped_duration = min(duration_minutes, DANGER_MAX_DURATION_MINUTES) if danger else duration_minutes
+
+    device = None
+    if device_id is not None:
+        device = db.get(Device, device_id)
+        if device is None:
+            raise JitDeviceNotFoundError(f"device {device_id} not found")
 
     elevation = JitElevation(
         user_id=user_id,
@@ -308,6 +323,8 @@ def request_elevation(
         reason=reason,
         requested_duration_minutes=capped_duration,
         change_request_id=change_request_id,
+        device_id=device_id,
+        scoped_operation=scoped_operation,
         requested_by=user_id,
         status=JitElevationStatus.PENDING,
         requires_dual_approval=danger,
@@ -317,7 +334,10 @@ def request_elevation(
     db.commit()
     db.refresh(elevation)
 
-    detail = f"Requested {elevated_role} for {capped_duration}m: {reason}"
+    scope_note = f" scoped to device {device.hostname}" if device is not None else " (fleet-wide)"
+    if device is not None and scoped_operation:
+        scope_note += f", operation {scoped_operation}"
+    detail = f"Requested {elevated_role} for {capped_duration}m{scope_note}: {reason}"
     if danger:
         detail += (
             f" [linked change request is {danger_reason} -- window capped at "

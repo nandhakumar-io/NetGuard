@@ -102,21 +102,60 @@ def _fetch_dev_default() -> str | None:
     return os.environ.get("NETGUARD_CRED_DEFAULT")
 
 
+def _try_openbao(credential_ref: str | None) -> str | None:
+    """Attempts to resolve `credential_ref` via OpenBao (Section 4). Returns
+    None (never raises) if OpenBao isn't configured in this process, the ref
+    is unset, or the read fails for any reason -- callers fall through to
+    the legacy DB-Fernet / env-var chain below. This is deliberately
+    fail-open-to-the-next-method rather than fail-closed: during migration,
+    a device that hasn't been moved into OpenBao yet must keep working via
+    its existing DB-encrypted credential, not start failing outright.
+
+    Only ever returns something in a process that actually has
+    OPENBAO_ROLE_ID/OPENBAO_SECRET_ID configured -- see
+    app.device_gateway.openbao_client.get_client(). In practice that's
+    only the device-gateway container; calling this from the API process
+    is a no-op because get_client() returns None there.
+    """
+    if not credential_ref:
+        return None
+    try:
+        from app.device_gateway import openbao_client
+    except ImportError:
+        return None
+    client = openbao_client.get_client()
+    if client is None:
+        return None
+    try:
+        secret = client.read_device_credential(credential_ref)
+    except openbao_client.OpenBaoSecretNotFoundError:
+        return None
+    except openbao_client.OpenBaoError:
+        logger.warning("credential_service: OpenBao read failed for ref '%s'; falling back", credential_ref, exc_info=True)
+        return None
+    return secret.get("password") or secret.get("value")
+
+
 def get_ssh_password(device: Device) -> str:
     """Resolve the SSH password for a device.
 
-    Priority (same order as the SNMP getters below): the DB-encrypted
-    password set via POST /devices/{id}/ssh-credentials, then the legacy
-    ssh_credential_ref -> NETGUARD_CRED_<REF> env var, then (development
-    only) NETGUARD_CRED_DEFAULT.
+    Priority: OpenBao (if this process is configured for it -- see
+    _try_openbao), then the DB-encrypted password set via POST
+    /devices/{id}/ssh-credentials, then the legacy ssh_credential_ref ->
+    NETGUARD_CRED_<REF> env var, then (development only)
+    NETGUARD_CRED_DEFAULT.
 
     Raises CredentialNotFoundError (rather than silently deploying with an
     empty/wrong password) if none of those resolve to anything -- a missing
     credential should fail loudly before we ever open a connection to a
     production network device.
     """
+    openbao_password = _try_openbao(device.ssh_credential_ref)
+    if openbao_password:
+        return openbao_password
+
     if device.ssh_password_encrypted:
-        password = crypto.decrypt(device.ssh_password_encrypted)
+        password = crypto.decrypt_device_credential(device.ssh_password_encrypted)
         if password:
             return password
 
@@ -141,8 +180,48 @@ def set_ssh_password(device: Device, password: str) -> None:
     Pass "" to explicitly clear it (falls back to ssh_credential_ref / the
     dev default again). Caller is responsible for db.commit().
     """
-    device.ssh_password_encrypted = crypto.encrypt(password) if password else None
+    device.ssh_password_encrypted = crypto.encrypt_device_credential(password) if password else None
     if password:
+        device.credentials_rotated_at = datetime.now(timezone.utc)
+
+
+def get_ssh_private_key(device: Device) -> tuple[str, str | None]:
+    """Resolve the SSH private key (PEM) and optional passphrase for a
+    device, set via POST /devices/{id}/ssh-credentials with
+    auth_method="key". Same DB-encrypted-only pattern as
+    get_gnmi_password -- no legacy env-var fallback for key material,
+    since NETGUARD_CRED_<REF> was only ever designed for a single
+    password string, not a PEM blob plus an optional passphrase.
+
+    Raises CredentialNotFoundError if no key is configured -- callers
+    (terminal_executor, ProtocolManager) should fail loudly rather than
+    silently trying with no key at all.
+    """
+    if device.ssh_private_key_encrypted:
+        key_pem = crypto.decrypt_device_credential(device.ssh_private_key_encrypted)
+        if key_pem:
+            passphrase = None
+            if device.ssh_private_key_passphrase_encrypted:
+                passphrase = crypto.decrypt_device_credential(device.ssh_private_key_passphrase_encrypted)
+            return key_pem, passphrase
+    raise CredentialNotFoundError(
+        f"Device '{device.hostname}' has no SSH private key configured. "
+        "Set one via POST /devices/{id}/ssh-credentials."
+    )
+
+
+def set_ssh_private_key(device: Device, private_key: str, passphrase: str | None = None) -> None:
+    """Encrypts and stores the SSH private key (and optional passphrase
+    protecting it) directly on the device row. Pass private_key="" to
+    explicitly clear both fields (a cleared key with a leftover
+    passphrase would be meaningless). Caller is responsible for
+    db.commit()."""
+    device.ssh_private_key_encrypted = crypto.encrypt_device_credential(private_key) if private_key else None
+    if private_key and passphrase:
+        device.ssh_private_key_passphrase_encrypted = crypto.encrypt_device_credential(passphrase)
+    elif not private_key:
+        device.ssh_private_key_passphrase_encrypted = None
+    if private_key:
         device.credentials_rotated_at = datetime.now(timezone.utc)
 
 
@@ -153,7 +232,7 @@ def get_gnmi_password(device: Device) -> str:
     the encrypted-column lookup with a clear error when unset.
     """
     if device.gnmi_password_encrypted:
-        password = crypto.decrypt(device.gnmi_password_encrypted)
+        password = crypto.decrypt_device_credential(device.gnmi_password_encrypted)
         if password:
             return password
     raise CredentialNotFoundError(
@@ -165,7 +244,7 @@ def get_gnmi_password(device: Device) -> str:
 def set_gnmi_password(device: Device, password: str) -> None:
     """Encrypts and stores the gNMI password directly on the device row.
     Pass "" to explicitly clear it. Caller is responsible for db.commit()."""
-    device.gnmi_password_encrypted = crypto.encrypt(password) if password else None
+    device.gnmi_password_encrypted = crypto.encrypt_device_credential(password) if password else None
     if password:
         device.credentials_rotated_at = datetime.now(timezone.utc)
 
@@ -211,11 +290,11 @@ def set_snmp_credentials(
     explicitly clear a field. Caller is responsible for db.commit().
     """
     if community is not None:
-        device.snmp_community_encrypted = crypto.encrypt(community) if community else None
+        device.snmp_community_encrypted = crypto.encrypt_device_credential(community) if community else None
     if v3_auth_key is not None:
-        device.snmp_auth_key_encrypted = crypto.encrypt(v3_auth_key) if v3_auth_key else None
+        device.snmp_auth_key_encrypted = crypto.encrypt_device_credential(v3_auth_key) if v3_auth_key else None
     if v3_priv_key is not None:
-        device.snmp_priv_key_encrypted = crypto.encrypt(v3_priv_key) if v3_priv_key else None
+        device.snmp_priv_key_encrypted = crypto.encrypt_device_credential(v3_priv_key) if v3_priv_key else None
     if community or v3_auth_key or v3_priv_key:
         device.credentials_rotated_at = datetime.now(timezone.utc)
 
@@ -227,7 +306,7 @@ def get_snmp_community(device: Device) -> str:
     NETGUARD_CRED_DEFAULT, before failing loudly.
     """
     if device.snmp_community_encrypted:
-        secret = crypto.decrypt(device.snmp_community_encrypted)
+        secret = crypto.decrypt_device_credential(device.snmp_community_encrypted)
         if secret:
             return secret
     if device.snmp_community_ref:
@@ -249,7 +328,7 @@ def get_snmp_v3_auth_key(device: Device) -> str | None:
     noAuthNoPriv). DB-encrypted value takes priority over the legacy
     env-var ref."""
     if device.snmp_auth_key_encrypted:
-        secret = crypto.decrypt(device.snmp_auth_key_encrypted)
+        secret = crypto.decrypt_device_credential(device.snmp_auth_key_encrypted)
         if secret:
             return secret
     if device.snmp_auth_credential_ref:
@@ -265,7 +344,7 @@ def get_snmp_v3_priv_key(device: Device) -> str | None:
     noAuthNoPriv/authNoPriv). DB-encrypted value takes priority over the
     legacy env-var ref."""
     if device.snmp_priv_key_encrypted:
-        secret = crypto.decrypt(device.snmp_priv_key_encrypted)
+        secret = crypto.decrypt_device_credential(device.snmp_priv_key_encrypted)
         if secret:
             return secret
     if device.snmp_privacy_credential_ref:

@@ -4,8 +4,9 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_tenant_id, get_current_user, require_roles
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
 from app.models.interface_alert_config import InterfaceAlertConfig
@@ -32,14 +33,17 @@ from app.schemas.config_management import (
     RunningConfigResponse,
     StartupConfigResponse,
 )
+from app.schemas.device_job import DeviceOperation
 from app.services import (
     audit_service,
     config_format_service,
+    device_job_service,
     diff_engine,
     metrics_service,
     snapshot_service,
     snmp_service,
 )
+from app.services.device_job_service import DeviceJobFailedError, DeviceJobTimeoutError
 from app.services.protocol_manager import ProtocolManager, select_protocol
 from app.services.rollback_service import list_snapshots
 
@@ -66,6 +70,35 @@ def _get_device(db: Session, device_id: uuid.UUID) -> Device:
     return device
 
 
+async def _live_running_config_or_502(db: Session, device: Device, requested_by: str) -> str:
+    """Reads the device's live running config, raising a 502 HTTPException
+    (matching the ProtocolManager-based callers' existing error contract)
+    on failure. Routes through the Device Gateway when enabled -- see
+    view_running_config above, the first call site migrated -- rather
+    than opening a device connection in this process.
+    """
+    if settings.DEVICE_GATEWAY_ENABLED:
+        try:
+            job_result = await device_job_service.submit_job(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=requested_by,
+            )
+            return job_result.output
+        except DeviceJobTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except DeviceJobFailedError as exc:
+            raise HTTPException(status_code=502, detail=exc.error or "Failed to read live running config") from exc
+
+    pm = ProtocolManager(db, device)
+    result = pm.get_running_config()
+    if not result.success:
+        raise HTTPException(status_code=502, detail=result.error or "Failed to read live running config")
+    return result.output
+
+
 def _latest_snapshot(db: Session, device_id: uuid.UUID) -> ConfigSnapshot | None:
     return (
         db.query(ConfigSnapshot)
@@ -86,8 +119,46 @@ def _get_snapshot_for_device(db: Session, device_id: uuid.UUID, snapshot_id: uui
 # View Running Config
 # ---------------------------------------------------------------------------
 @router.get("/running", response_model=RunningConfigResponse)
-def view_running_config(device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)):
+async def view_running_config(
+    device_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant_id: uuid.UUID | None = Depends(get_current_tenant_id),
+):
     device = _get_device(db, device_id)
+
+    if settings.DEVICE_GATEWAY_ENABLED:
+        # Migrated path (Phase 3): the API no longer opens a device
+        # connection itself -- it asks the Device Gateway to, and the
+        # Gateway independently re-validates tenant/device before doing
+        # so. See app/device_gateway/README.md for what is and isn't
+        # migrated yet; this is the first live call site.
+        try:
+            job_result = await device_job_service.submit_job(
+                tenant_id=str(tenant_id or device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=str(current_user.id),
+            )
+        except DeviceJobTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except DeviceJobFailedError as exc:
+            raise HTTPException(status_code=502, detail=exc.error or "Failed to read running configuration") from exc
+
+        is_xml = config_format_service.looks_like_xml(job_result.output)
+        return RunningConfigResponse(
+            device_id=device.id,
+            hostname=device.hostname,
+            protocol="gateway",
+            config=job_result.output,
+            config_pretty=config_format_service.pretty_xml(job_result.output) if is_xml else None,
+            is_xml=is_xml,
+            retrieved_at=datetime.datetime.utcnow(),
+        )
+
+    # Legacy path: unchanged, still available while DEVICE_GATEWAY_ENABLED
+    # defaults to false / while other call sites haven't migrated yet.
     pm = ProtocolManager(db, device)
     result = pm.get_running_config()
     if not result.success:
@@ -524,22 +595,19 @@ def restore_config(
 # Compare Configurations
 # ---------------------------------------------------------------------------
 @router.post("/compare", response_model=CompareConfigResponse)
-def compare_config(
+async def compare_config(
     device_id: uuid.UUID,
     payload: CompareConfigRequest,
     db: Session = Depends(get_db),
-    _=Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     device = _get_device(db, device_id)
 
-    def _resolve(snapshot_id: uuid.UUID | None) -> tuple[str, str]:
+    async def _resolve(snapshot_id: uuid.UUID | None) -> tuple[str, str]:
         """Returns (label, config_text). None => live running config."""
         if snapshot_id is None:
-            pm = ProtocolManager(db, device)
-            result = pm.get_running_config()
-            if not result.success:
-                raise HTTPException(status_code=502, detail=result.error or "Failed to read live running config")
-            return "live running config", result.output
+            output = await _live_running_config_or_502(db, device, requested_by=str(current_user.id))
+            return "live running config", output
         snap = _get_snapshot_for_device(db, device_id, snapshot_id)
         return f"backup v{snap.version}", snapshot_service.decrypt_config(snap.running_config_encrypted)
 
@@ -550,10 +618,10 @@ def compare_config(
         base_label, base_config = f"backup v{latest.version}", snapshot_service.decrypt_config(
             latest.running_config_encrypted
         )
-        target_label, target_config = _resolve(None)
+        target_label, target_config = await _resolve(None)
     else:
-        base_label, base_config = _resolve(payload.base_snapshot_id)
-        target_label, target_config = _resolve(payload.target_snapshot_id)
+        base_label, base_config = await _resolve(payload.base_snapshot_id)
+        target_label, target_config = await _resolve(payload.target_snapshot_id)
 
     identical = base_config == target_config
 
@@ -705,10 +773,10 @@ def set_golden_config_from_backup(
 
 
 @router.post("/golden-config/compare", response_model=GoldenConfigCompareResponse)
-def compare_golden_config(
+async def compare_golden_config(
     device_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _=Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Compares the device's live running config against its golden
     config -- the manual, on-demand equivalent of what Drift Detection
@@ -718,16 +786,13 @@ def compare_golden_config(
     if not golden:
         raise HTTPException(status_code=404, detail="No golden config set for this device yet.")
 
-    pm = ProtocolManager(db, device)
-    result = pm.get_running_config()
-    if not result.success:
-        raise HTTPException(status_code=502, detail=result.error or "Failed to read live running config")
+    live_output = await _live_running_config_or_502(db, device, requested_by=str(current_user.id))
 
     golden_text = snapshot_service.decrypt_config(golden.config_encrypted)
-    identical = golden_text == result.output
+    identical = golden_text == live_output
 
     diff_base = config_format_service.pretty_xml(golden_text) or golden_text
-    diff_target = config_format_service.pretty_xml(result.output) or result.output
+    diff_target = config_format_service.pretty_xml(live_output) or live_output
     diff = diff_engine.generate_diff(diff_base, diff_target)
 
     return GoldenConfigCompareResponse(device_id=device.id, identical=identical, diff=diff)

@@ -9,11 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.device import Device
 from app.models.user import User
-from app.services import credential_service, gnmi_service
+from app.services import credential_service
 
 router = APIRouter(prefix="/gnmi", tags=["gnmi"])
 
@@ -38,9 +39,21 @@ def gnmi_status(db: Session = Depends(get_db), _user: User = Depends(get_current
     actually running right now (not just whether the device is flagged
     supports_gnmi) plus the last update/error timestamps -- lets an
     operator tell "streaming, just quiet since nothing changed" apart
-    from "never actually connected"."""
-    supervisor = gnmi_service.get_supervisor()
-    live_status = supervisor.status() if supervisor else {}
+    from "never actually connected".
+
+    Reads Device.gnmi_subscription_active/heartbeat_at, written by the
+    supervisor's reconcile loop in the device-gateway process (see
+    app.services.gnmi_service.GnmiSupervisor._write_heartbeat) -- NOT
+    gnmi_service.get_supervisor(), which would always return None here
+    since the supervisor moved out of this (`api`) process as part of
+    the Section 4 device-credential key re-scoping. A heartbeat older
+    than 2x the reconcile interval is treated as stale (Gateway down or
+    unreachable) rather than trusting a possibly-ancient active flag.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    stale_after = timedelta(seconds=2 * settings.GNMI_DEVICE_ROSTER_REFRESH_SECONDS)
+    now = datetime.now(timezone.utc)
 
     devices = db.query(Device).filter(Device.supports_gnmi.is_(True)).all()
     return [
@@ -48,7 +61,11 @@ def gnmi_status(db: Session = Depends(get_db), _user: User = Depends(get_current
             device_id=d.id,
             hostname=d.hostname,
             supports_gnmi=d.supports_gnmi,
-            subscribed=live_status.get(str(d.id), False),
+            subscribed=bool(
+                d.gnmi_subscription_active
+                and d.gnmi_subscription_heartbeat_at is not None
+                and (now - d.gnmi_subscription_heartbeat_at) <= stale_after
+            ),
             last_gnmi_update_at=d.last_gnmi_update_at.isoformat() if d.last_gnmi_update_at else None,
             last_gnmi_error=d.last_gnmi_error,
         )

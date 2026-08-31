@@ -113,4 +113,6 @@ def sso_providers():
     """
     return {
         "google": bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET and settings.GOOGLE_REDIRECT_URI),
+        "keycloak": bool(settings.OIDC_ISSUER and settings.OIDC_CLIENT_ID and settings.OIDC_REDIRECT_URI),
+        "local": True,
     }

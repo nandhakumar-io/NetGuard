@@ -1122,7 +1122,7 @@ def list_device_snapshots(device_id: uuid.UUID, db: Session = Depends(get_db), _
 
 
 @router.get("/{device_id}/rollback/preview", response_model=RollbackPreviewResponse)
-def preview_device_rollback(
+async def preview_device_rollback(
     device_id: uuid.UUID,
     snapshot_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -1142,7 +1142,7 @@ def preview_device_rollback(
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
     try:
-        preview = rollback_service.preview_rollback(db, device, snapshot)
+        preview = await rollback_service.preview_rollback(db, device, snapshot, requested_by=str(current_user.id))
     except rollback_service.RollbackError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -1150,7 +1150,7 @@ def preview_device_rollback(
 
 
 @router.post("/{device_id}/rollback", response_model=RollbackResponse, status_code=202)
-def rollback_device(
+async def rollback_device(
     device_id: uuid.UUID,
     payload: RollbackRequest,
     db: Session = Depends(get_db),
@@ -1178,7 +1178,7 @@ def rollback_device(
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
     try:
-        cr = rollback_service.initiate_rollback(db, device, snapshot, current_user, reason=payload.reason)
+        cr = await rollback_service.initiate_rollback(db, device, snapshot, current_user, reason=payload.reason)
     except rollback_service.RollbackError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -1192,8 +1192,8 @@ def rollback_device(
 
 
 @router.get("/{device_id}/rollback/sections", response_model=list[RollbackSection])
-def list_device_rollback_sections(
-    device_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user)
+async def list_device_rollback_sections(
+    device_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Independently revertible sections (ACLs, VLANs, interface
     stanzas, ...) found in the device's current configuration -- the
@@ -1204,11 +1204,11 @@ def list_device_rollback_sections(
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return rollback_service.list_rollback_sections(db, device)
+    return await rollback_service.list_rollback_sections(db, device, requested_by=str(current_user.id))
 
 
 @router.get("/{device_id}/rollback/partial/preview", response_model=PartialRollbackPreviewResponse)
-def preview_partial_device_rollback(
+async def preview_partial_device_rollback(
     device_id: uuid.UUID,
     snapshot_id: uuid.UUID,
     section_key: str,
@@ -1228,7 +1228,9 @@ def preview_partial_device_rollback(
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
     try:
-        preview = rollback_service.preview_partial_rollback(db, device, snapshot, section_key)
+        preview = await rollback_service.preview_partial_rollback(
+            db, device, snapshot, section_key, requested_by=str(current_user.id)
+        )
     except rollback_service.RollbackError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -1236,7 +1238,7 @@ def preview_partial_device_rollback(
 
 
 @router.post("/{device_id}/rollback/partial", response_model=RollbackResponse, status_code=202)
-def rollback_device_partial(
+async def rollback_device_partial(
     device_id: uuid.UUID,
     payload: PartialRollbackRequest,
     db: Session = Depends(get_db),
@@ -1262,7 +1264,7 @@ def rollback_device_partial(
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
     try:
-        cr = rollback_service.initiate_partial_rollback(
+        cr = await rollback_service.initiate_partial_rollback(
             db, device, snapshot, payload.section_key, current_user, reason=payload.reason
         )
     except rollback_service.RollbackError as exc:
@@ -1373,10 +1375,12 @@ def poll_device_metrics(
         raise HTTPException(status_code=400, detail="SNMP monitoring is not enabled for this device")
 
     try:
-        metrics_service.poll_device(db, device)
+        metrics_service.poll_device_via_gateway_or_inprocess(db, device, requested_by=current_user.email)
     except metrics_service.credential_service.CredentialNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
+    except metrics_service.SnmpNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 - includes device_job_service's DeviceJobTimeoutError/DeviceJobFailedError
         raise HTTPException(status_code=400, detail=f"On-demand poll failed: {exc}")
 
     return {"status": "success"}
@@ -1797,11 +1801,41 @@ def test_ssh_credentials(
         raise HTTPException(status_code=404, detail="Device not found")
 
     used_protocol = protocol_manager.select_protocol(device)
-    result = protocol_manager.ProtocolManager(db, device, operator=current_user.email).get_running_config()
+
+    # Section 3/9: was an unconditional in-process ProtocolManager call
+    # with no DEVICE_GATEWAY_ENABLED gate (found in the hardening audit
+    # alongside backup_service.py and runbook_execution_service.py).
+    from app.core.config import settings
+
+    if settings.DEVICE_GATEWAY_ENABLED:
+        from app.services import device_job_service
+        from app.services.device_job_service import (
+            DeviceJobFailedError,
+            DeviceJobTimeoutError,
+            DeviceOperation,
+        )
+
+        try:
+            device_job_service.submit_job_sync(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=current_user.email,
+            )
+            success, error = True, None
+        except DeviceJobTimeoutError as exc:
+            success, error = False, str(exc)
+        except DeviceJobFailedError as exc:
+            success, error = False, (exc.error or "Device Gateway rejected the test connection")
+    else:
+        result = protocol_manager.ProtocolManager(db, device, operator=current_user.email).get_running_config()
+        success, error = result.success, result.error
+
     return SshTestResult(
-        success=result.success,
-        message=result.error or f"Connected via {used_protocol} and read the running config.",
-        protocol=used_protocol if result.success else None,
+        success=success,
+        message=error or f"Connected via {used_protocol} and read the running config.",
+        protocol=used_protocol if success else None,
     )
 
 

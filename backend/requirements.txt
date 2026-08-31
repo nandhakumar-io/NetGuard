@@ -62,3 +62,4 @@ ruff==0.16.1
 # requirements.txt` alone. It's installed via apt-get in backend/Dockerfile.
 # If you're running the backend outside that image (e.g. locally), install
 # it yourself: `apt-get install nmap` / `brew install nmap`.
+slowapi==0.1.10

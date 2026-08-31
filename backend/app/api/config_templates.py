@@ -334,9 +334,9 @@ def reject_template_version(
 
 
 @router.post("/{template_id}/diff-preview", response_model=TemplateDiffPreviewResponse)
-def preview_template_diff(
+async def preview_template_diff(
     template_id: uuid.UUID, payload: TemplateDiffPreviewRequest, db: Session = Depends(get_db),
-    _=Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
     """Renders the template, then runs the rendered output through the
     same structural-diff machinery used for drift detection
@@ -345,7 +345,14 @@ def preview_template_diff(
     actual delta a template produces on this specific device -- not just
     the raw rendered text in isolation.
     """
+    from app.core.config import settings
     from app.models.device import Device
+    from app.schemas.device_job import DeviceOperation
+    from app.services import device_job_service
+    from app.services.device_job_service import (
+        DeviceJobFailedError,
+        DeviceJobTimeoutError,
+    )
 
     row = _get_template(db, template_id)
     rendered, _version = _render(db, row, payload.variables, payload.version_id)
@@ -355,13 +362,28 @@ def preview_template_diff(
         raise HTTPException(status_code=404, detail="Device not found")
 
     if payload.compare_against == "live":
-        from app.services.protocol_manager import ProtocolManager
+        if settings.DEVICE_GATEWAY_ENABLED:
+            try:
+                job_result = await device_job_service.submit_job(
+                    tenant_id=str(device.tenant_id),
+                    device_id=str(device.id),
+                    operation=DeviceOperation.GET_RUNNING_CONFIG,
+                    params={},
+                    requested_by=str(current_user.id),
+                )
+                base_label, base_config = "live running config", job_result.output
+            except DeviceJobTimeoutError as exc:
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
+            except DeviceJobFailedError as exc:
+                raise HTTPException(status_code=502, detail=exc.error or "Failed to read live running config") from exc
+        else:
+            from app.services.protocol_manager import ProtocolManager
 
-        pm = ProtocolManager(db, device)
-        result = pm.get_running_config()
-        if not result.success:
-            raise HTTPException(status_code=502, detail=result.error or "Failed to read live running config")
-        base_label, base_config = "live running config", result.output
+            pm = ProtocolManager(db, device)
+            result = pm.get_running_config()
+            if not result.success:
+                raise HTTPException(status_code=502, detail=result.error or "Failed to read live running config")
+            base_label, base_config = "live running config", result.output
     else:
         golden = db.query(GoldenConfig).filter(GoldenConfig.device_id == device.id).first()
         if not golden:

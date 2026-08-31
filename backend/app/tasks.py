@@ -362,7 +362,13 @@ def run_nightly_drift_sweep_task() -> int:
     retry_kwargs={"max_retries": 1},
 )
 def snmp_poll_task(self, device_id: str) -> str:
-    from app.services import metrics_service
+    from app.core.config import settings
+    from app.services import device_job_service, metrics_service
+    from app.services.device_job_service import (
+        DeviceJobFailedError,
+        DeviceJobTimeoutError,
+        DeviceOperation,
+    )
 
     db = SessionLocal()
     try:
@@ -370,7 +376,23 @@ def snmp_poll_task(self, device_id: str) -> str:
         if device is None:
             return "device_missing"
         try:
-            metric = metrics_service.poll_device(db, device)
+            # Section 4 key-rescoping follow-up: this worker (`poller`)
+            # no longer holds DEVICE_CREDENTIAL_ENCRYPTION_KEY, so SNMP
+            # community/v3 credentials can't be decrypted here anymore --
+            # dispatch to the Device Gateway instead, same pattern as
+            # every other device-facing operation.
+            if settings.DEVICE_GATEWAY_ENABLED:
+                job_result = device_job_service.submit_job_sync(
+                    tenant_id=str(device.tenant_id),
+                    device_id=str(device.id),
+                    operation=DeviceOperation.SNMP_POLL,
+                    params={},
+                    requested_by="system:snmp-poll",
+                )
+                import json
+                metric = json.loads(job_result.output) if job_result.output else {}
+            else:
+                metric = metrics_service.poll_device(db, device)
             # poll_device returns a dict (mirrors the old DeviceMetric row's
             # columns, see its docstring) since the VictoriaMetrics cutover --
             # not an ORM row, so this must be a key lookup, not attribute
@@ -386,6 +408,13 @@ def snmp_poll_task(self, device_id: str) -> str:
             )
             db.commit()
             return "credential_missing"
+        except (DeviceJobTimeoutError, DeviceJobFailedError) as exc:
+            audit_service.record_event(
+                db, actor="system:snmp-poll", action="SNMP Poll Failed", result="error",
+                device_hostname=device.hostname, detail=str(exc),
+            )
+            db.commit()
+            return "gateway_job_failed"
     finally:
         db.close()
 

@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
@@ -73,5 +73,17 @@ class ConfigDrift(Base):
     # as an unplanned finding. The alert raised alongside it (if any) is
     # separately suppressed via Alert.suppressed_by_window_id.
     maintenance_window_id = Column(UUID(as_uuid=True), ForeignKey("maintenance_windows.id"), nullable=True)
+
+    # Section 15 support (migration 0120): true when this drift has no
+    # DEPLOYED ChangeRequest for the same device in the lookback window
+    # AND no active maintenance window -- i.e. nothing in NetGuard
+    # explains the change. Set by drift_service.detect_drift, which is
+    # the only place this is computed; not backfilled for history
+    # predating the check (default false there, not asserted-attributed).
+    # This is a detection signal for break-glass/out-of-band activity,
+    # not a judgment that the change was unauthorized -- see the
+    # break-glass runbook (docs/break-glass.md) for how a legitimate
+    # emergency change should be reconciled afterward.
+    unattributed = Column(Boolean, nullable=False, default=False)
 
     detected_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

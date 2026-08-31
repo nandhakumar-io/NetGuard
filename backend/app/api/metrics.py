@@ -179,7 +179,7 @@ def poll_device_now(device_id: uuid.UUID, db: Session = Depends(get_db), current
     "Refresh now" button on the device's health detail view."""
     device = _get_device(db, device_id, tenant_id)
     try:
-        return metrics_service.poll_device(db, device)
+        return metrics_service.poll_device_via_gateway_or_inprocess(db, device, requested_by=current_user.email)
     except metrics_service.SnmpNotConfiguredError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except metrics_service.credential_service.CredentialNotFoundError as exc:

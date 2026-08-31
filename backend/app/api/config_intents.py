@@ -1,7 +1,7 @@
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.device import Device
@@ -12,10 +12,10 @@ from app.schemas.config_intent import (
     RenderIntentRequest,
     RenderIntentResponse,
 )
+from app.schemas.device_job import DeviceOperation
 from app.services import (
     config_intent_service,
-    credential_service,
-    deployment_engine,
+    device_job_service,
     snapshot_service,
 )
 from app.services.config_intent_service import (
@@ -24,6 +24,7 @@ from app.services.config_intent_service import (
     UnsupportedIntentError,
     Vendor,
 )
+from app.services.device_job_service import DeviceJobFailedError, DeviceJobTimeoutError
 from app.services.pipeline_service import DEVICE_TYPE_MAP
 
 router = APIRouter(prefix="/config-intents", tags=["config-intents"])
@@ -90,20 +91,45 @@ def _resolve_vendor(db: Session, payload: RenderIntentRequest) -> tuple[Vendor, 
     return vendor, device
 
 
-def _current_config_for_device(device: Device, db: Session) -> tuple[str | None, str]:
-    try:
-        ssh_password = credential_service.get_ssh_password(device)
-        netmiko_type = DEVICE_TYPE_MAP.get(
-            device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
-        )
-        current_config, _proto = deployment_engine.read_running_config(
-            netmiko_type, device.ip_address, device.ssh_username or "admin", ssh_password
-        )
-        return current_config, "live"
-    except credential_service.CredentialNotFoundError:
-        pass
-    except Exception:
-        pass
+async def _current_config_for_device(
+    device: Device, db: Session, requested_by: str
+) -> tuple[str | None, str]:
+    if settings.DEVICE_GATEWAY_ENABLED:
+        # Same rule as everywhere else: the API process must not decrypt
+        # a device credential or open a device-facing socket itself. Ask
+        # the Device Gateway to read the running config over NATS
+        # (jobs.request/jobs.result) instead -- see
+        # app.services.device_job_service and app.device_gateway.executor.
+        try:
+            job_result = await device_job_service.submit_job(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=requested_by,
+            )
+            return job_result.output, "live"
+        except (DeviceJobTimeoutError, DeviceJobFailedError):
+            pass
+    else:
+        # Legacy in-process path -- only reachable when an operator has
+        # explicitly opted out of the Device Gateway (local dev without
+        # one running). Not used by default; see settings.DEVICE_GATEWAY_ENABLED.
+        try:
+            from app.services import credential_service, deployment_engine
+
+            ssh_password = credential_service.get_ssh_password(device)
+            netmiko_type = DEVICE_TYPE_MAP.get(
+                device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
+            )
+            current_config, _proto = deployment_engine.read_running_config(
+                netmiko_type, device.ip_address, device.ssh_username or "admin", ssh_password
+            )
+            return current_config, "live"
+        except credential_service.CredentialNotFoundError:
+            pass
+        except Exception:
+            pass
 
     latest = (
         db.query(ConfigSnapshot)
@@ -117,7 +143,7 @@ def _current_config_for_device(device: Device, db: Session) -> tuple[str | None,
 
 
 @router.post("/render", response_model=RenderIntentResponse)
-def render_intent(
+async def render_intent(
     payload: RenderIntentRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)
 ):
     """Renders one config intent into a real CLI snippet for the target
@@ -146,7 +172,9 @@ def render_intent(
     proposed_config = None
     current_source = None
     if device is not None:
-        current_config, current_source = _current_config_for_device(device, db)
+        current_config, current_source = await _current_config_for_device(
+            device, db, requested_by=str(current_user.id)
+        )
         proposed_config = config_intent_service.build_proposed_config(current_config, intent, vendor)
 
     return RenderIntentResponse(

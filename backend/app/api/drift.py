@@ -296,7 +296,7 @@ def get_rollback_recommendation(drift_id: uuid.UUID, db: Session = Depends(get_d
 
 
 @router.post("/drift/{drift_id}/remediate", response_model=dict, status_code=202)
-def remediate_drift(
+async def remediate_drift(
     drift_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(DRIFT_REVIEW_ROLES),
@@ -319,7 +319,7 @@ def remediate_drift(
         raise HTTPException(status_code=404, detail="Device for this drift record no longer exists")
 
     try:
-        cr = drift_service.remediate_drift(db, drift, device, current_user)
+        cr = await drift_service.remediate_drift(db, drift, device, current_user)
     except drift_service.RemediationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

@@ -162,6 +162,13 @@ def trigger_remediation(
     # Local import: avoids a service<->service import cycle at module
     # load time (protocol_manager itself pulls in alert_service, which
     # some callers of *this* module also import).
+    from app.core.config import settings
+    from app.services import device_job_service
+    from app.services.device_job_service import (
+        DeviceJobFailedError,
+        DeviceJobTimeoutError,
+        DeviceOperation,
+    )
     from app.services.protocol_manager import ProtocolManager
 
     action_label = (
@@ -170,12 +177,38 @@ def trigger_remediation(
     )
 
     try:
-        manager = ProtocolManager(db, device, operator=user.email)
-        result = manager.deploy_config(command)
+        # Section 3/9 of the hardening spec: this is automated,
+        # alert-triggered remediation -- a device *write* -- so it must
+        # go through the same Device Gateway independent-validation path
+        # as an operator-initiated deploy, not open a connection directly
+        # from this (API/worker) process. Previously this called
+        # ProtocolManager.deploy_config() unconditionally, with no
+        # DEVICE_GATEWAY_ENABLED gate at all -- the one unconditional
+        # in-process device *write* found in the whole codebase during
+        # the hardening audit. Matches the DEPLOY_CONFIG pattern already
+        # used by pipeline_service.py's change-request deploy path.
+        if settings.DEVICE_GATEWAY_ENABLED:
+            try:
+                job_result = device_job_service.submit_job_sync(
+                    tenant_id=str(device.tenant_id),
+                    device_id=str(device.id),
+                    operation=DeviceOperation.DEPLOY_CONFIG,
+                    params={"config_text": command},
+                    requested_by=user.email,
+                )
+                result_success, result_output, result_error = True, job_result.output, None
+            except DeviceJobTimeoutError as exc:
+                result_success, result_output, result_error = False, None, str(exc)
+            except DeviceJobFailedError as exc:
+                result_success, result_output, result_error = False, None, (exc.error or "Device Gateway rejected the remediation job")
+        else:
+            manager = ProtocolManager(db, device, operator=user.email)
+            result = manager.deploy_config(command)
+            result_success, result_output, result_error = result.success, result.output, result.error
 
-        execution.status = RunbookExecutionStatus.SUCCESS if result.success else RunbookExecutionStatus.FAILED
-        execution.output = result.output
-        execution.error = result.error
+        execution.status = RunbookExecutionStatus.SUCCESS if result_success else RunbookExecutionStatus.FAILED
+        execution.output = result_output
+        execution.error = result_error
         execution.completed_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(execution)
@@ -184,11 +217,11 @@ def trigger_remediation(
             db,
             actor=user.email,
             action=f"Runbook remediation: {runbook.remediation_label or action_label}",
-            result="Success" if result.success else "Failed",
+            result="Success" if result_success else "Failed",
             device_hostname=device.hostname,
             detail=(
                 f"runbook={runbook.title!r} runbook_id={runbook.id} "
-                f"execution_id={execution.id}" + (f" error={result.error}" if result.error else "")
+                f"execution_id={execution.id}" + (f" error={result_error}" if result_error else "")
             ),
         )
         return execution

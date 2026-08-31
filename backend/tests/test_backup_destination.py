@@ -28,7 +28,15 @@ def test_backup_destination_model_instantiation():
     assert dest.created_by == "admin@example.com"
 
 
-def test_encrypt_decrypt_config():
+def test_encrypt_decrypt_config(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.core import crypto
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SECRET_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    crypto._multi_fernet.cache_clear()
+
     config = {
         "bucket": "my-backup-bucket",
         "region": "us-east-1",

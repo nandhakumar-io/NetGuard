@@ -486,3 +486,18 @@ class Device(Base):
     # updates have arrived yet".
     last_gnmi_update_at = Column(DateTime(timezone=True), nullable=True)
     last_gnmi_error = Column(Text, nullable=True)
+
+    # DB-backed heartbeat, written by GnmiSupervisor's reconcile loop
+    # every GNMI_DEVICE_ROSTER_REFRESH_SECONDS (see app.services.
+    # gnmi_service). Added when the supervisor moved from `api` into
+    # `device-gateway` (Section 4 key re-scoping): GET /gnmi/status
+    # previously read the supervisor's in-process singleton directly,
+    # which only worked because the supervisor and the API route ran in
+    # the same process. Now that they're in different processes/
+    # containers, the API route reads these two columns instead --
+    # gnmi_subscription_active is what the last reconcile tick observed,
+    # and gnmi_subscription_heartbeat_at lets a stale heartbeat (Gateway
+    # down/unreachable) be treated as "not subscribed" rather than
+    # trusting a last-known-active flag that could be arbitrarily old.
+    gnmi_subscription_active = Column(Boolean, nullable=False, default=False, server_default="false")
+    gnmi_subscription_heartbeat_at = Column(DateTime(timezone=True), nullable=True)

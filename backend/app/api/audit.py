@@ -1,12 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, get_tenant_scope
 from app.models.audit_log import AuditLog
 from app.models.user import User
+from app.services import audit_service
 
 router = APIRouter(prefix="/audit-logs", tags=["audit"])
 
@@ -57,3 +58,23 @@ def list_audit_logs(
         }
         for log in logs
     ]
+
+
+@router.get("/integrity")
+def check_audit_integrity(
+    limit: int = Query(10000, ge=1, le=100000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recomputes the audit-log hash chain (migration 0119) and reports
+    whether it's intact. Restricted to Security/Auditor/Network Admin --
+    unlike GET /audit-logs itself (a normal read per the RBAC matrix),
+    an integrity check reveals whether tampering has occurred, which is
+    a more sensitive signal than the log contents themselves.
+    """
+    from app.models.user import UserRole
+
+    if current_user.role not in (UserRole.SECURITY, UserRole.AUDITOR, UserRole.NETWORK_ADMIN):
+        raise HTTPException(status_code=403, detail="Requires Security, Auditor, or Network Admin role")
+
+    return audit_service.verify_chain(db, limit=limit)

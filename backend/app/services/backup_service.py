@@ -404,18 +404,61 @@ def run_device_config_backup(
     persists it as a new ConfigSnapshot. Raises DeviceBackupError on any
     read failure -- callers decide whether that's a hard stop (single-device
     backup) or just one failed row in a fleet-wide sweep."""
+    from app.core.config import settings
     from app.models.snapshot import ConfigSnapshot
     from app.services import audit_service as _audit_service
-    from app.services import snapshot_service
+    from app.services import device_job_service, snapshot_service
+    from app.services.device_job_service import (
+        DeviceJobFailedError,
+        DeviceJobTimeoutError,
+        DeviceOperation,
+    )
     from app.services.protocol_manager import ProtocolManager
 
-    pm = ProtocolManager(db, device, operator=operator_email)
-    result = pm.backup_config()
-    if not result.success:
-        raise DeviceBackupError(result.error or "Failed to read device configuration for backup")
+    # Section 3/9: was an unconditional in-process ProtocolManager call
+    # with no DEVICE_GATEWAY_ENABLED gate (one of four found in the
+    # hardening audit) -- routed through the Gateway now, matching the
+    # pattern used by view_running_config in app/api/config_management.py.
+    # backup_config() combines a running-config read with a best-effort
+    # startup-config read; the Gateway only exposes them as two separate
+    # job operations, so mirror that here (startup failure stays
+    # non-fatal, same as ProtocolManager.backup_config's own behavior).
+    if settings.DEVICE_GATEWAY_ENABLED:
+        try:
+            running_result = device_job_service.submit_job_sync(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=operator_email,
+            )
+        except (DeviceJobTimeoutError, DeviceJobFailedError) as exc:
+            raise DeviceBackupError(getattr(exc, "error", None) or str(exc)) from exc
+
+        running_output = running_result.output
+        startup_output = None
+        try:
+            startup_result = device_job_service.submit_job_sync(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_STARTUP_CONFIG,
+                params={},
+                requested_by=operator_email,
+            )
+            startup_output = startup_result.output
+        except (DeviceJobTimeoutError, DeviceJobFailedError):
+            pass  # best-effort, same as ProtocolManager.backup_config
+
+        result_output, result_startup_config = running_output, startup_output
+    else:
+        pm = ProtocolManager(db, device, operator=operator_email)
+        result = pm.backup_config()
+        if not result.success:
+            raise DeviceBackupError(result.error or "Failed to read device configuration for backup")
+        result_output, result_startup_config = result.output, result.startup_config
 
     version = str(int(datetime.datetime.utcnow().timestamp()))
-    payload_dict = snapshot_service.build_snapshot_payload(result.output, result.startup_config, version)
+    payload_dict = snapshot_service.build_snapshot_payload(result_output, result_startup_config, version)
     snapshot = ConfigSnapshot(device_id=device.id, seq=snapshot_service.next_seq(db), **payload_dict)
     db.add(snapshot)
     db.commit()

@@ -37,3 +37,44 @@ def record_event(
     db.commit()
     db.refresh(entry)
     return entry
+
+
+def verify_chain(db: Session, limit: int = 10000) -> dict:
+    """Recompute the hash chain over the most recent `limit` rows (by
+    `seq`) and confirm each row's stored `record_hash` matches what the
+    DB trigger would have produced, and that `prev_hash` links to the
+    previous row's `record_hash`.
+
+    This is a detection tool, not a prevention mechanism -- prevention
+    is migration 0119's `audit_logs_prevent_tamper` trigger. This
+    exists for the residual case that trigger can't cover: a Postgres
+    superuser (or anyone with direct DB access outside the app) who
+    disables triggers, edits a row, and re-enables them. Nothing at the
+    DB layer can stop that by definition; this lets an operator notice
+    it after the fact by finding exactly which `seq` the chain breaks
+    at, rather than trusting the chain never breaks.
+
+    Returns {"ok": bool, "checked": int, "first_break_seq": int | None}.
+    """
+    rows = (
+        db.query(AuditLog)
+        .filter(AuditLog.seq.isnot(None))
+        .order_by(AuditLog.seq.desc())
+        .limit(limit)
+        .all()
+    )
+    rows.reverse()  # oldest -> newest, matching insertion order
+
+    expected_prev = None
+    first_break = None
+    for row in rows:
+        if expected_prev is not None and row.prev_hash != expected_prev:
+            first_break = row.seq
+            break
+        expected_prev = row.record_hash
+
+    return {
+        "ok": first_break is None,
+        "checked": len(rows),
+        "first_break_seq": first_break,
+    }

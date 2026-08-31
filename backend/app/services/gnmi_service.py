@@ -311,9 +311,36 @@ class GnmiSupervisor:
         try:
             while not self._stop.is_set():
                 await self._reconcile_once()
+                await asyncio.to_thread(self._write_heartbeat)
                 await asyncio.sleep(settings.GNMI_DEVICE_ROSTER_REFRESH_SECONDS)
         except asyncio.CancelledError:
             pass
+
+    def _write_heartbeat(self) -> None:
+        """Persists this reconcile tick's subscription status so
+        GET /gnmi/status (running in the `api` process, a different
+        container than this supervisor since the Section 4 key
+        re-scoping) can read real status from the DB instead of an
+        in-process singleton it no longer shares with the supervisor.
+        Best-effort: a DB hiccup here shouldn't take down the reconcile
+        loop itself, just leave the heartbeat stale until the next tick
+        (which the API route already treats as "not subscribed" -- see
+        its staleness check)."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        live_status = self.status()
+        db = SessionLocal()
+        try:
+            for device_id_str, active in live_status.items():
+                device = db.query(Device).filter(Device.id == device_id_str).first()
+                if device is not None:
+                    device.gnmi_subscription_active = active
+                    device.gnmi_subscription_heartbeat_at = now
+            db.commit()
+        except Exception:
+            logger.exception("gnmi_service: failed to write subscription heartbeat")
+            db.rollback()
+        finally:
+            db.close()
 
     async def _reconcile_once(self) -> None:
         def _fetch_enabled_ids() -> list[str]:

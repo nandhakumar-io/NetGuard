@@ -11,6 +11,9 @@ interface JitElevation {
   elevated_role: string;
   reason: string;
   change_request_id: string | null;
+  device_id: string | null;
+  device_hostname: string | null;
+  scoped_operation: string | null;
   requested_by: string;
   requested_at: string | null;
   requested_duration_minutes: number;
@@ -96,6 +99,11 @@ export default function JitAccess() {
   const [reason, setReason] = useState("");
   const [duration, setDuration] = useState(60);
   const [changeRequestId, setChangeRequestId] = useState("");
+  // Device/operation scoping (Section 10): both optional. Left blank,
+  // the grant stays fleet-wide (old behavior) -- set deviceId to narrow
+  // it to one device, same as pasting a change request ID above.
+  const [deviceId, setDeviceId] = useState("");
+  const [scopedOperation, setScopedOperation] = useState("");
 
   const [metrics, setMetrics] = useState<JitApprovalMetrics | null>(null);
 
@@ -144,9 +152,13 @@ export default function JitAccess() {
         reason,
         duration_minutes: duration,
         change_request_id: changeRequestId.trim() || null,
+        device_id: deviceId.trim() || null,
+        scoped_operation: deviceId.trim() ? scopedOperation.trim() || null : null,
       });
       setReason("");
       setChangeRequestId("");
+      setDeviceId("");
+      setScopedOperation("");
       load();
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Failed to submit request.");
@@ -230,7 +242,45 @@ export default function JitAccess() {
               className="border border-slate-200 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-2 py-1.5 text-sm"
             />
           </label>
+          <label className="text-xs text-slate-500 dark:text-slate-400 flex flex-col gap-1 sm:col-span-2">
+            Scope to device (optional)
+            <input
+              type="text"
+              value={deviceId}
+              onChange={(e) => setDeviceId(e.target.value)}
+              placeholder="Device ID -- leave blank for fleet-wide"
+              className="border border-slate-200 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-2 py-1.5 text-sm"
+            />
+          </label>
+          {deviceId.trim() && (
+            <label className="text-xs text-slate-500 dark:text-slate-400 flex flex-col gap-1 sm:col-span-2">
+              Scope to operation (optional)
+              <select
+                value={scopedOperation}
+                onChange={(e) => setScopedOperation(e.target.value)}
+                className="border border-slate-200 dark:border-slate-600 dark:bg-slate-900 rounded-lg px-2 py-1.5 text-sm"
+              >
+                <option value="">Any operation this role allows</option>
+                <option value="get_running_config">Get running config</option>
+                <option value="get_startup_config">Get startup config</option>
+                <option value="deploy_config">Deploy config</option>
+                <option value="rollback_config">Rollback config</option>
+                <option value="reboot">Reboot</option>
+              </select>
+            </label>
+          )}
         </div>
+        {deviceId.trim() ? (
+          <ImpactClassificationBadge
+            classification="safe"
+            label="Scoped to one device -- Device Gateway will refuse to use this grant against any other device"
+          />
+        ) : (
+          <ImpactClassificationBadge
+            classification="caution"
+            label="Fleet-wide -- this grant's role capability applies to every device unless scoped above"
+          />
+        )}
         {role === "network_admin" && (
           <ImpactClassificationBadge
             classification="caution"

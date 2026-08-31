@@ -1,5 +1,5 @@
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -66,13 +66,13 @@ def test_list_snapshots_returns_newest_first(db_session):
     assert [s.id for s in result] == [snap2.id, snap1.id]
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_initiate_rollback_builds_approved_change_request(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_initiate_rollback_builds_approved_change_request(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device, config="interface Gi0/1\n ip address 10.1.1.1\n", version="1")
     admin = _make_admin(db_session)
 
-    cr = rollback_service.initiate_rollback(db_session, device, snapshot, admin, reason="interface flapping")
+    cr = await rollback_service.initiate_rollback(db_session, device, snapshot, admin, reason="interface flapping")
 
     assert cr.status == ChangeStatus.APPROVED
     assert cr.is_rollback == "true"
@@ -82,8 +82,8 @@ def test_initiate_rollback_builds_approved_change_request(mock_read, db_session)
     assert cr.approved_by == admin.id
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_initiate_rollback_rejects_snapshot_from_another_device(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_initiate_rollback_rejects_snapshot_from_another_device(mock_read, db_session):
     device_a = _make_device(db_session)
     device_b = Device(
         hostname="rtr-03", ip_address="10.0.0.3", vendor=DeviceVendor.CISCO,
@@ -97,11 +97,11 @@ def test_initiate_rollback_rejects_snapshot_from_another_device(mock_read, db_se
     admin = _make_admin(db_session)
 
     with pytest.raises(rollback_service.RollbackError, match="does not belong to device"):
-        rollback_service.initiate_rollback(db_session, device_b, snapshot, admin)
+        await rollback_service.initiate_rollback(db_session, device_b, snapshot, admin)
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_initiate_rollback_rejects_when_device_has_in_flight_change(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_initiate_rollback_rejects_when_device_has_in_flight_change(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device)
     admin = _make_admin(db_session)
@@ -114,26 +114,29 @@ def test_initiate_rollback_rejects_when_device_has_in_flight_change(mock_read, d
     db_session.commit()
 
     with pytest.raises(rollback_service.RollbackError, match="already has change request"):
-        rollback_service.initiate_rollback(db_session, device, snapshot, admin)
+        await rollback_service.initiate_rollback(db_session, device, snapshot, admin)
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=("interface Gi0/1\n live\n", "ssh"))
-def test_initiate_rollback_uses_live_read_as_current_config_when_available(mock_read, db_session):
+@patch(
+    "app.services.rollback_service._live_running_config",
+    new_callable=AsyncMock, return_value="interface Gi0/1\n live\n",
+)
+async def test_initiate_rollback_uses_live_read_as_current_config_when_available(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device)
     admin = _make_admin(db_session)
 
-    cr = rollback_service.initiate_rollback(db_session, device, snapshot, admin)
+    cr = await rollback_service.initiate_rollback(db_session, device, snapshot, admin)
 
     assert cr.current_config == "interface Gi0/1\n live\n"
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_initiate_rollback_falls_back_to_latest_snapshot_when_live_read_unavailable(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_initiate_rollback_falls_back_to_latest_snapshot_when_live_read_unavailable(mock_read, db_session):
     device = _make_device(db_session)
     snap1 = _make_snapshot(db_session, device, config="interface Gi0/1\n old\n", version="1")
     admin = _make_admin(db_session)
 
-    cr = rollback_service.initiate_rollback(db_session, device, snap1, admin)
+    cr = await rollback_service.initiate_rollback(db_session, device, snap1, admin)
 
     assert cr.current_config == "interface Gi0/1\n old\n"

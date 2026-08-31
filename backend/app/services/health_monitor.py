@@ -145,50 +145,66 @@ def _napalm_getter(netmiko_type: str, ip_address: str, username: str, password: 
         device.close()
 
 
+def check_bgp_neighbors_from_raw(neighbors: dict | None) -> CheckOutcome:
+    """Pure interpreter -- no device I/O. Takes whatever a NAPALM
+    get_bgp_neighbors() call already returned (whether that call happened
+    in-process, as in check_bgp_neighbors below, or inside the Device
+    Gateway, with the raw dict relayed back over a DeviceJobResult -- see
+    app.services.pipeline_service's Gateway-backed monitoring path) and
+    scores it. Keeping this device-I/O-free is what makes it callable
+    from both places without duplicating the pass/fail logic."""
+    if neighbors is None:
+        return CheckOutcome("routing", "bgp_neighbor", True, "Not applicable for this platform")
+
+    total = 0
+    up = 0
+    for vrf_data in neighbors.values():
+        for peer_ip, peer in vrf_data.get("peers", {}).items():
+            total += 1
+            if peer.get("is_up"):
+                up += 1
+
+    if total == 0:
+        return CheckOutcome("routing", "bgp_neighbor", True, "No BGP neighbors configured")
+
+    passed = up == total
+    return CheckOutcome("routing", "bgp_neighbor", passed, f"{up}/{total} BGP neighbor(s) up")
+
+
 def check_bgp_neighbors(netmiko_type: str, ip_address: str, username: str, password: str) -> CheckOutcome:
     try:
         neighbors = _napalm_getter(netmiko_type, ip_address, username, password, "get_bgp_neighbors")
-        if neighbors is None:
-            return CheckOutcome("routing", "bgp_neighbor", True, "Not applicable for this platform")
-
-        total = 0
-        up = 0
-        for vrf_data in neighbors.values():
-            for peer_ip, peer in vrf_data.get("peers", {}).items():
-                total += 1
-                if peer.get("is_up"):
-                    up += 1
-
-        if total == 0:
-            return CheckOutcome("routing", "bgp_neighbor", True, "No BGP neighbors configured")
-
-        passed = up == total
-        return CheckOutcome("routing", "bgp_neighbor", passed, f"{up}/{total} BGP neighbor(s) up")
+        return check_bgp_neighbors_from_raw(neighbors)
     except Exception as exc:  # noqa: BLE001
         return CheckOutcome("routing", "bgp_neighbor", False, f"BGP check failed: {exc}")
+
+
+def check_ospf_neighbors_from_raw(ospf: dict | None) -> CheckOutcome:
+    """Pure interpreter -- see check_bgp_neighbors_from_raw's docstring."""
+    if ospf is None:
+        return CheckOutcome("routing", "ospf_neighbor", True, "Not applicable for this platform")
+
+    total = 0
+    full = 0
+    for vrf_data in ospf.values():
+        for neighbors in vrf_data.get("neighbors", {}).values():
+            if isinstance(neighbors, list):
+                for n in neighbors:
+                    total += 1
+                    if str(n.get("state", "")).lower().startswith("full"):
+                        full += 1
+
+    if total == 0:
+        return CheckOutcome("routing", "ospf_neighbor", True, "No OSPF neighbors configured")
+
+    passed = full == total
+    return CheckOutcome("routing", "ospf_neighbor", passed, f"{full}/{total} OSPF neighbor(s) FULL")
 
 
 def check_ospf_neighbors(netmiko_type: str, ip_address: str, username: str, password: str) -> CheckOutcome:
     try:
         ospf = _napalm_getter(netmiko_type, ip_address, username, password, "get_ospf_neighbors")
-        if ospf is None:
-            return CheckOutcome("routing", "ospf_neighbor", True, "Not applicable for this platform")
-
-        total = 0
-        full = 0
-        for vrf_data in ospf.values():
-            for neighbors in vrf_data.get("neighbors", {}).values():
-                if isinstance(neighbors, list):
-                    for n in neighbors:
-                        total += 1
-                        if str(n.get("state", "")).lower().startswith("full"):
-                            full += 1
-
-        if total == 0:
-            return CheckOutcome("routing", "ospf_neighbor", True, "No OSPF neighbors configured")
-
-        passed = full == total
-        return CheckOutcome("routing", "ospf_neighbor", passed, f"{full}/{total} OSPF neighbor(s) FULL")
+        return check_ospf_neighbors_from_raw(ospf)
     except Exception as exc:  # noqa: BLE001
         return CheckOutcome("routing", "ospf_neighbor", False, f"OSPF check failed: {exc}")
 
@@ -218,6 +234,21 @@ def check_dns(hostname_or_ip: str, timeout_sec: float = DNS_TIMEOUT_SEC) -> Chec
         socket.setdefaulttimeout(None)
 
 
+def check_dhcp_from_raw(facts: dict | None, ip_address: str) -> CheckOutcome:
+    """Pure interpreter -- see check_bgp_neighbors_from_raw's docstring.
+    Takes get_facts() output (or None) plus the ip_address being checked
+    -- unlike the routing checks, the pass/fail decision here also
+    depends on a value (ip_address) that isn't part of the getter output
+    itself."""
+    if facts is None:
+        return CheckOutcome("services", "dhcp", True, "Not applicable for this platform")
+
+    if ip_address.startswith("169.254."):
+        return CheckOutcome("services", "dhcp", False, "Device has a link-local (APIPA) address -- no DHCP lease")
+
+    return CheckOutcome("services", "dhcp", True, f"Device reachable at {ip_address} (lease/static address valid)")
+
+
 def check_dhcp(netmiko_type: str, ip_address: str, username: str, password: str) -> CheckOutcome:
     """Confirms the device itself has a valid (non-expired, non-link-local)
     IP -- i.e. if it's meant to be DHCP-addressed, it actually got a lease.
@@ -226,13 +257,7 @@ def check_dhcp(netmiko_type: str, ip_address: str, username: str, password: str)
     """
     try:
         facts = _napalm_getter(netmiko_type, ip_address, username, password, "get_facts")
-        if facts is None:
-            return CheckOutcome("services", "dhcp", True, "Not applicable for this platform")
-
-        if ip_address.startswith("169.254."):
-            return CheckOutcome("services", "dhcp", False, "Device has a link-local (APIPA) address -- no DHCP lease")
-
-        return CheckOutcome("services", "dhcp", True, f"Device reachable at {ip_address} (lease/static address valid)")
+        return check_dhcp_from_raw(facts, ip_address)
     except Exception as exc:  # noqa: BLE001
         return CheckOutcome("services", "dhcp", False, f"DHCP/facts check failed: {exc}")
 
@@ -257,6 +282,24 @@ def check_http(ip_address: str, timeout_sec: float = HTTP_TIMEOUT_SEC) -> CheckO
     return CheckOutcome("services", "http", False, f"No HTTP(S) response: {last_error}")
 
 
+def check_vpn_from_raw(sas: dict | None) -> CheckOutcome:
+    """Pure interpreter -- see check_bgp_neighbors_from_raw's docstring.
+    A raw value of None covers both "no NAPALM driver for this platform"
+    and "getter not supported on this driver" -- the legacy in-process
+    check_vpn below collapses both cases to the same outcome too, so this
+    doesn't lose any information the caller previously had."""
+    if sas is None:
+        return CheckOutcome("services", "vpn", True, "Not applicable for this platform")
+
+    if not sas:
+        return CheckOutcome("services", "vpn", True, "No VPN tunnels configured")
+
+    total = len(sas)
+    up = sum(1 for sa in sas.values() if str(sa.get("state", "")).lower() in ("up", "established"))
+    passed = up == total
+    return CheckOutcome("services", "vpn", passed, f"{up}/{total} VPN tunnel(s) up")
+
+
 def check_vpn(netmiko_type: str, ip_address: str, username: str, password: str) -> CheckOutcome:
     """Checks IPSec/VPN tunnel state via NAPALM's IPSec getter where
     supported. Devices with no VPN configured pass trivially (nothing to
@@ -279,13 +322,7 @@ def check_vpn(netmiko_type: str, ip_address: str, username: str, password: str) 
         finally:
             device.close()
 
-        if not sas:
-            return CheckOutcome("services", "vpn", True, "No VPN tunnels configured")
-
-        total = len(sas)
-        up = sum(1 for sa in sas.values() if str(sa.get("state", "")).lower() in ("up", "established"))
-        passed = up == total
-        return CheckOutcome("services", "vpn", passed, f"{up}/{total} VPN tunnel(s) up")
+        return check_vpn_from_raw(sas)
     except AttributeError:
         return CheckOutcome("services", "vpn", True, "VPN getter not supported on this platform")
     except Exception as exc:  # noqa: BLE001
@@ -394,6 +431,7 @@ def run_health_suite(
     hostname: str | None = None,
     enabled_checks: set[str] | None = None,
     traffic_impact_fn=None,
+    remote_check_overrides: dict[str, callable] | None = None,
 ) -> list[CheckOutcome]:
     """Runs the post-deployment health suite described in SRS 6.9:
 
@@ -425,6 +463,19 @@ def run_health_suite(
     default (None) since, unlike every other check, it needs a DB
     session and a baseline captured before the deploy started, which
     this network-only module deliberately doesn't own itself.
+
+    `remote_check_overrides`, when given, replaces one or more of the
+    four credentialed checks (bgp_neighbor / ospf_neighbor / dhcp / vpn)
+    with a caller-supplied zero-arg closure, instead of building the
+    default closure that calls check_bgp_neighbors() etc. directly with
+    `username`/`password`. This is how a Gateway-backed caller (see
+    app.services.pipeline_service) avoids ever holding the device's SSH
+    credential in-worker for these checks: it builds closures that call
+    device_job_service.submit_job_sync(...) and interpret the result via
+    check_bgp_neighbors_from_raw() / check_ospf_neighbors_from_raw() /
+    check_dhcp_from_raw() / check_vpn_from_raw() instead, and passes
+    username="" / password="" here since those defaults are never used
+    for an overridden check name.
     """
     all_checks: dict[str, callable] = {
         "ping": lambda: check_ping(ip_address),
@@ -436,6 +487,8 @@ def run_health_suite(
         "http": lambda: check_http(ip_address),
         "vpn": lambda: check_vpn(netmiko_type, ip_address, username, password),
     }
+    if remote_check_overrides:
+        all_checks.update(remote_check_overrides)
     if traffic_impact_fn is not None:
         all_checks["traffic_impact"] = traffic_impact_fn
 
@@ -493,6 +546,7 @@ def run_monitoring_window(
     sleep_fn=time.sleep,
     enabled_checks: set[str] | None = None,
     traffic_impact_fn=None,
+    remote_check_overrides: dict[str, callable] | None = None,
 ) -> MonitoringResult:
     """Real-Time Health Monitoring (FR-9 / SRS 6.7).
 
@@ -538,6 +592,7 @@ def run_monitoring_window(
         outcomes = run_health_suite(
             ip_address, netmiko_type=netmiko_type, username=username, password=password, hostname=hostname,
             enabled_checks=enabled_checks, traffic_impact_fn=traffic_impact_fn,
+            remote_check_overrides=remote_check_overrides,
         )
         passed = suite_passed(outcomes)
         rounds.append(PollRound(round_number, elapsed, outcomes, passed))

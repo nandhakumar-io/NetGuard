@@ -27,6 +27,7 @@ from app.schemas.jit_elevation import (
     JitElevationRequest,
 )
 from app.services import jit_service
+from app.services.jit_service import JitDeviceNotFoundError
 
 router = APIRouter(prefix="/jit-access", tags=["jit-access"])
 
@@ -51,10 +52,14 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
     user_ids = {r.user_id for r in rows} | {r.requested_by for r in rows}
     users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()}
     now = datetime.datetime.now(datetime.timezone.utc)
-    # Grants are role-based and unscoped to specific devices (see
-    # PERMISSION_MATRIX), so any new capability applies to the whole
-    # fleet -- one count covers every row being hydrated.
+    # Grants are role-based and, unless device_id narrows them, unscoped
+    # to specific devices (see PERMISSION_MATRIX) -- an unscoped grant's
+    # new capability applies to the whole fleet. One count covers every
+    # unscoped row being hydrated; device-scoped rows use 1 instead (see
+    # blast_radius_devices below).
     total_devices = db.query(Device).count()
+    device_ids = {r.device_id for r in rows if r.device_id}
+    devices_by_id = {d.id: d for d in db.query(Device).filter(Device.id.in_(device_ids)).all()} if device_ids else {}
 
     out = []
     for r in rows:
@@ -70,7 +75,10 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
         current_role = requester.role.value if requester and hasattr(requester.role, "value") else (requester.role if requester else None)
         elevated_role_value = r.elevated_role.value if hasattr(r.elevated_role, "value") else r.elevated_role
         capabilities_gained = _capabilities_gained(current_role, elevated_role_value)
-        blast_radius_devices = total_devices if capabilities_gained else 0
+        if r.device_id:
+            blast_radius_devices = 1 if capabilities_gained else 0
+        else:
+            blast_radius_devices = total_devices if capabilities_gained else 0
 
         out.append(
             JitElevationRead(
@@ -80,6 +88,9 @@ def _hydrate(db: Session, rows: list[JitElevation]) -> list[JitElevationRead]:
                 elevated_role=r.elevated_role,
                 reason=r.reason,
                 change_request_id=str(r.change_request_id) if r.change_request_id else None,
+                device_id=str(r.device_id) if r.device_id else None,
+                device_hostname=devices_by_id[r.device_id].hostname if r.device_id in devices_by_id else None,
+                scoped_operation=r.scoped_operation,
                 requested_by=str(r.requested_by),
                 requested_at=r.requested_at.isoformat() if r.requested_at else None,
                 requested_duration_minutes=r.requested_duration_minutes,
@@ -136,15 +147,27 @@ def request_jit_access(
         except ValueError:
             raise HTTPException(400, "Invalid change_request_id")
 
-    elevation = jit_service.request_elevation(
-        db,
-        user_id=user.id,
-        elevated_role=payload.elevated_role.value,
-        reason=payload.reason,
-        duration_minutes=payload.duration_minutes,
-        change_request_id=change_request_uuid,
-        requested_by_email=user.email,
-    )
+    device_uuid = None
+    if payload.device_id:
+        try:
+            device_uuid = uuid.UUID(payload.device_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid device_id")
+
+    try:
+        elevation = jit_service.request_elevation(
+            db,
+            user_id=user.id,
+            elevated_role=payload.elevated_role.value,
+            reason=payload.reason,
+            duration_minutes=payload.duration_minutes,
+            change_request_id=change_request_uuid,
+            requested_by_email=user.email,
+            device_id=device_uuid,
+            scoped_operation=payload.scoped_operation.value if payload.scoped_operation else None,
+        )
+    except JitDeviceNotFoundError:
+        raise HTTPException(404, "Device not found")
     return _hydrate(db, [elevation])[0]
 
 

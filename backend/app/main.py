@@ -1,293 +1,115 @@
-import asyncio
+"""NetGuard FastAPI application entrypoint.
+
+Wires together the ~57 route modules aggregated in app.api.router,
+CORS, the Demo Mode gate, and startup-time production-secrets
+validation (Section 8 / Section 16 of the hardening spec: this process
+is the one assumed-compromisable component, so it deliberately holds
+no Keycloak admin credentials, no OpenBao root token, and -- once
+DEVICE_GATEWAY_ENABLED is true, the default -- no device-management
+network path and no device-credential decryption key; see
+app/device_gateway/main.py, which runs as its own separate container).
+
+Run via `uvicorn app.main:app` (see backend/Dockerfile's CMD and
+entrypoint.sh, which applies Alembic migrations first).
+"""
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import models  # noqa: F401  ensures models are registered on Base.metadata
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.demo_mode import DemoModeMiddleware
 
-logger = logging.getLogger("netguard.snmp_inprocess")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("netguard.api")
 
-_snmp_poll_loop_task: asyncio.Task | None = None
-_syslog_transport = None  # asyncio.DatagramTransport | None -- see app.services.syslog_service
-_trap_transport = None  # asyncio.DatagramTransport | None -- see app.services.trap_service
-_flow_transport = None  # asyncio.DatagramTransport | None -- see app.services.flow_service (NetFlow/IPFIX)
-_sflow_transport = None  # asyncio.DatagramTransport | None -- see app.services.flow_service (sFlow)
-_topology_snapshot_loop_task: asyncio.Task | None = None
+# Threat model T17 (Denial of service): no application-level rate limiting
+# existed anywhere in the API prior to this -- a single client (including,
+# on the local-auth login endpoint, an unauthenticated one) could send
+# unlimited requests. Per-client-IP default; individual routers can layer
+# tighter limits (e.g. login/MFA) via the same `limiter` instance.
+limiter = Limiter(key_func=get_remote_address, default_limits=[settings.RATE_LIMIT_DEFAULT])
+
+# Threat model T17: no request body size cap existed either. Rejects
+# oversized bodies before they reach route handlers/JSON parsing.
+_MAX_BODY_BYTES = settings.MAX_REQUEST_BODY_BYTES
 
 
-async def _snmp_inprocess_poll_loop() -> None:
-    """Celery/Redis-free equivalent of app.tasks.run_snmp_poll_sweep_task +
-    snmp_poll_task: every SNMP_POLL_INTERVAL_SECONDS, polls every
-    SNMP-enabled device and records a health sample for it in
-    VictoriaMetrics. Runs directly in
-    the FastAPI event loop (each poll offloaded to a worker thread via
-    asyncio.to_thread since metrics_service/SNMP I/O and the DB session are
-    synchronous), so the Health Dashboard / device Health tab work without
-    any extra infrastructure. Guarded by SNMP_INPROCESS_POLLING_ENABLED --
-    turn it off once a real Celery worker + beat are deployed so devices
-    aren't polled twice on the same schedule.
-    """
-    from app.core.database import SessionLocal
-    from app.models.device import Device
-    from app.services import metrics_service
-
-    def _poll_all_snmp_devices() -> int:
-        db = SessionLocal()
-        try:
-            devices = db.query(Device).filter(Device.supports_snmp.is_(True)).all()
-        finally:
-            db.close()
-
-        polled = 0
-        for device_id in [d.id for d in devices]:
-            db = SessionLocal()
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
             try:
-                device = db.get(Device, device_id)
-                if device is None:
-                    continue
-                try:
-                    metrics_service.poll_device(db, device)
-                    polled += 1
-                except metrics_service.SnmpNotConfiguredError:
-                    pass
-                except metrics_service.credential_service.CredentialNotFoundError as exc:
-                    logger.warning("SNMP poll skipped for %s: %s", device.hostname, exc)
-                except Exception:
-                    logger.exception("SNMP poll failed for %s", device.hostname)
-            finally:
-                db.close()
-        return polled
-
-    while True:
-        try:
-            polled = await asyncio.to_thread(_poll_all_snmp_devices)
-            if polled:
-                logger.info("SNMP in-process sweep polled %d device(s)", polled)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("SNMP in-process sweep failed")
-        await asyncio.sleep(settings.SNMP_POLL_INTERVAL_SECONDS)
+                if int(content_length) > _MAX_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Request body too large"},
+                    )
+            except ValueError:
+                pass
+        return await call_next(request)
 
 
-async def _topology_snapshot_loop() -> None:
-    """Periodically captures a TopologySnapshot so the Topology page can
-    diff "now" against "settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS ago"
-    -- see app.services.topology_service.capture_snapshot /
-    diff_snapshots and GET /topology/diff.
-    """
-    from app.core.database import SessionLocal
-    from app.models.topology_snapshot import TopologySnapshot
-    from app.services import topology_service
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Defense-in-depth backstop named explicitly in threat model T2: even
+    with React's default JSX escaping, an XSS that lands should not have a
+    free ride. Conservative defaults; loosen CSP per-route if a legitimate
+    need (e.g. embedding Grafana) requires it."""
 
-    def _capture() -> None:
-        db = SessionLocal()
-        try:
-            # Grab the previous snapshot *before* inserting the new one so
-            # we can diff "then" vs. "now" and raise a real alert on any
-            # actual change (a device/link appearing or disappearing),
-            # instead of the topology page being the only place a rewired
-            # or lost link ever shows up.
-            previous = (
-                db.query(TopologySnapshot).order_by(TopologySnapshot.captured_at.desc()).first()
-            )
-            newest = topology_service.capture_snapshot(db)
-            if previous is not None:
-                topology_service.raise_topology_change_alert(db, previous, newest)
-        finally:
-            db.close()
-
-    while True:
-        try:
-            await asyncio.to_thread(_capture)
-            logger.info("Captured topology snapshot")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Topology snapshot capture failed")
-        await asyncio.sleep(settings.TOPOLOGY_SNAPSHOT_INTERVAL_SECONDS)
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'",
+        )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        return response
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Fail loudly before accepting any traffic if ENVIRONMENT=production
-    # is set but SECRET_KEY/SECRET_ENCRYPTION_KEY/CORS_ALLOWED_ORIGINS are
-    # still on insecure dev defaults -- see Settings.validate_production_secrets.
+    # Fail closed rather than boot with dev-default secrets in production
+    # (see Settings.validate_production_secrets' own docstring for why).
     settings.validate_production_secrets()
-
-    # ntfy is per-user (subscriptions stored in the DB, not a global
-    # setting), so it can't be checked here the way Slack/Teams can --
-    # but the same FRONTEND_URL problem applies to it too (see
-    # push_service._action_deep_link), so it's flagged in the warning
-    # text below whenever any Slack/Teams webhook is configured, and the
-    # README/.env.example call it out unconditionally for ntfy users.
-    if settings.FRONTEND_URL.startswith("http://localhost") and (
-        settings.SLACK_WEBHOOK_URL or settings.TEAMS_WEBHOOK_URL
-    ):
-        logger.warning(
-            "FRONTEND_URL is still the localhost default (%s) but Slack/Teams "
-            "notifications are configured -- every alert action button (acknowledge/"
-            "escalate/run runbook), and every ntfy push action button if any user has "
-            "an ntfy subscription set up, will link to localhost and fail for anyone "
-            "opening it on a phone or from outside this machine. Set FRONTEND_URL in "
-            "your .env to this app's actual reachable URL.",
-            settings.FRONTEND_URL,
-        )
-
-    if settings.API_BASE_URL.startswith("http://localhost"):
-        logger.warning(
-            "API_BASE_URL is still the localhost default (%s) -- every ntfy "
-            "acknowledge/escalate/resolve action button (see "
-            "push_service._ntfy_actions_header) POSTs directly to this URL, so "
-            "on a phone or any machine other than this server the button will "
-            "silently fail to reach the API. Set API_BASE_URL in your .env to "
-            "this backend's actual reachable URL.",
-            settings.API_BASE_URL,
-        )
-
-    # Schema is owned by Alembic migrations (see backend/alembic/). The
-    # Docker image's entrypoint.sh runs `alembic upgrade head` before
-    # starting uvicorn -- but when running locally with `uvicorn
-    # app.main:app` directly (no entrypoint.sh in the loop), that step
-    # gets skipped and the DB silently drifts behind the models, which is
-    # exactly what caused `relation "golden_configs" does not exist`, etc.
-    # Apply any pending migrations here too so local/dev runs stay in sync
-    # automatically. This is idempotent -- alembic no-ops if already at head.
-    if settings.AUTO_MIGRATE_ON_STARTUP:
-        try:
-            from alembic.config import Config as AlembicConfig
-
-            from alembic import command
-
-            backend_dir = Path(__file__).resolve().parent.parent
-            alembic_cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
-            alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
-            await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
-            logger.info("Alembic migrations applied (upgrade head).")
-        except Exception:
-            logger.exception(
-                "Auto-migration on startup FAILED -- the app is very likely running "
-                "against an out-of-date schema right now (missing tables/columns "
-                "will surface as 500s on random endpoints, e.g. device delete or "
-                "SNMP setup). Run `alembic upgrade head` manually from backend/ "
-                "and restart."
-            )
-
-    # Seed the small set of common default alert runbooks (clear ARP
-    # cache, clear MAC table, etc.) on first startup -- see
-    # app.services.alert_runbook_seed. Idempotent and best-effort, same
-    # as everything else in this function; run after migrations so the
-    # alert_runbooks table is guaranteed to exist.
-    try:
-        from app.core.database import SessionLocal
-        from app.services.alert_runbook_seed import seed_default_runbooks
-
-        seed_db = SessionLocal()
-        try:
-            await asyncio.to_thread(seed_default_runbooks, seed_db)
-        finally:
-            seed_db.close()
-    except Exception:
-        logger.exception("Default alert runbook seeding failed (non-fatal)")
-
-    global _snmp_poll_loop_task
-    if settings.SNMP_INPROCESS_POLLING_ENABLED and _snmp_poll_loop_task is None:
-        _snmp_poll_loop_task = asyncio.create_task(_snmp_inprocess_poll_loop())
-        logger.info(
-            "SNMP in-process polling enabled (every %ss) -- no Redis/Celery required.",
-            settings.SNMP_POLL_INTERVAL_SECONDS,
-        )
-
-    global _syslog_transport
-    if settings.SYSLOG_LISTENER_ENABLED and _syslog_transport is None:
-        from app.services import syslog_service
-
-        _syslog_transport = await syslog_service.start_syslog_listener(
-            host=settings.SYSLOG_UDP_HOST, port=settings.SYSLOG_UDP_PORT
-        )
-
-    global _trap_transport
-    if settings.SNMP_TRAP_LISTENER_ENABLED and _trap_transport is None:
-        from app.services import trap_service
-
-        _trap_transport = await trap_service.start_trap_listener(
-            host=settings.SNMP_TRAP_UDP_HOST, port=settings.SNMP_TRAP_UDP_PORT
-        )
-
-    global _flow_transport
-    if settings.NETFLOW_LISTENER_ENABLED and _flow_transport is None:
-        from app.services import flow_service
-
-        _flow_transport = await flow_service.start_flow_listener(
-            host=settings.NETFLOW_UDP_HOST, port=settings.NETFLOW_UDP_PORT
-        )
-
-    global _sflow_transport
-    if settings.SFLOW_LISTENER_ENABLED and _sflow_transport is None:
-        from app.services import flow_service
-
-        _sflow_transport = await flow_service.start_sflow_listener(
-            host=settings.SFLOW_UDP_HOST, port=settings.SFLOW_UDP_PORT
-        )
-
-    if settings.GNMI_INPROCESS_STREAMING_ENABLED:
-        from app.services import gnmi_service
-
-        await gnmi_service.start_gnmi_supervisor()
-        logger.info(
-            "gNMI streaming-telemetry supervisor started (roster refresh every %ss)",
-            settings.GNMI_DEVICE_ROSTER_REFRESH_SECONDS,
-        )
-
-    global _topology_snapshot_loop_task
-    if settings.TOPOLOGY_SNAPSHOT_ENABLED and _topology_snapshot_loop_task is None:
-        _topology_snapshot_loop_task = asyncio.create_task(_topology_snapshot_loop())
-
+    logger.info(
+        "NetGuard API starting: environment=%s device_gateway_enabled=%s",
+        settings.ENVIRONMENT, settings.DEVICE_GATEWAY_ENABLED,
+    )
     yield
+    logger.info("NetGuard API shutting down")
 
-    if _snmp_poll_loop_task is not None:
-        _snmp_poll_loop_task.cancel()
-        _snmp_poll_loop_task = None
-
-    if _syslog_transport is not None:
-        _syslog_transport.close()
-        _syslog_transport = None
-
-    if _trap_transport is not None:
-        _trap_transport.close()
-        _trap_transport = None
-
-    if _flow_transport is not None:
-        _flow_transport.close()
-        _flow_transport = None
-
-    if _sflow_transport is not None:
-        _sflow_transport.close()
-        _sflow_transport = None
-
-    if settings.GNMI_INPROCESS_STREAMING_ENABLED:
-        from app.services import gnmi_service
-
-        await gnmi_service.stop_gnmi_supervisor()
-
-    if _topology_snapshot_loop_task is not None:
-        _topology_snapshot_loop_task.cancel()
-        _topology_snapshot_loop_task = None
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Intelligent Automated Network Change Management & Self-Healing Platform",
-    version="1.0.0",
     lifespan=lifespan,
+    # Root-level docs stay on for now (auth is still required on every
+    # data endpoint); flip to None in production if the spec's threat
+    # model is later extended to treat schema disclosure itself as
+    # sensitive.
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS: exact origin allow-list only, never "*" -- see
+# Settings.CORS_ALLOWED_ORIGINS' own comment for why "*" combined with
+# allow_credentials=True is a credential-theft CSRF hole, not just a
+# lint warning.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins_list,
@@ -296,106 +118,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Added after CORSMiddleware above so it sits *inside* it in the request
-# pipeline (Starlette wraps middleware in the reverse order they're
-# added) -- same reasoning as the unhandled_exception_handler below: a
-# 403 raised here still needs to pass back out through CORSMiddleware to
-# get CORS headers, or the browser reports it as an opaque network error
-# instead of a readable 403 with a "detail" message.
+# Ahead of routing so no new endpoint can ever forget to check Demo
+# Mode -- see app/core/demo_mode.py's module docstring.
 app.add_middleware(DemoModeMiddleware)
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Catch-all for anything a route/dependency raises that isn't already
-    an HTTPException.
-
-    Without this, an unhandled exception propagates past FastAPI's
-    ExceptionMiddleware (which sits *inside* CORSMiddleware in the
-    Starlette stack) all the way out to Starlette's ServerErrorMiddleware,
-    which sits *outside* CORSMiddleware and generates its own fallback 500
-    -- one with no CORS headers on it, because it never passes back
-    through CORSMiddleware's response-wrapping. The browser then can't
-    read that response at all (it fails the CORS check), so axios/fetch
-    reports it as an opaque "Network Error" with no status code or body
-    -- exactly what device delete, alert clearing, or any other endpoint
-    looks like in the UI whenever something throws that the endpoint
-    itself didn't anticipate and catch.
-
-    Registering a handler here means FastAPI's ExceptionMiddleware catches
-    the exception itself and calls this handler *before* the request ever
-    reaches ServerErrorMiddleware -- so the JSONResponse below still flows
-    back out through CORSMiddleware and gets proper headers, and the
-    frontend gets a real 500 + JSON body it can actually show the user
-    instead of a dead end.
-    """
-    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal server error: {exc}"},
-    )
-
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 
-@app.get("/")
-def root():
-    return {"app": settings.APP_NAME, "status": "ok", "docs": "/docs"}
-
-
-@app.get("/health")
-@app.get("/healthz")
-def health():
-    """Liveness probe: answers "is the process up" only -- no DB/Redis
-    dialout, ~0ms, so a load balancer/orchestrator can hit this at a tight
-    interval without adding load to either dependency. /healthz is the
-    conventional k8s-style alias for the same check; keep /health too since
-    existing deployments/monitors already point at it.
-    """
-    return {"status": "healthy"}
-
-
-@app.get("/readyz")
-def readyz():
-    """Readiness probe: actually dials DB and Redis so a load balancer with
-    multiple workers (now viable behind the Redis-backed rate limiter) can
-    tell "process is up" (/healthz) apart from "process can actually serve
-    traffic" (this) -- e.g. during startup before migrations finish, or if
-    Redis/Postgres drops. Kept intentionally cheap (SELECT 1 / PING, no
-    Ollama/NetBox/GNS3/SMTP dialout) so it's safe to poll frequently; use
-    GET /health/detailed for the full dependency breakdown instead.
-    """
-    import redis
-    from sqlalchemy import text
-
-    from app.core.database import SessionLocal
-
-    checks: dict[str, str] = {}
-    ready = True
-
-    db = SessionLocal()
-    try:
-        db.execute(text("SELECT 1"))
-        checks["database"] = "ok"
-    except Exception as exc:
-        checks["database"] = f"error: {exc}"
-        ready = False
-    finally:
-        db.close()
-
-    try:
-        client = redis.Redis.from_url(settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
-        client.ping()
-        checks["redis"] = "ok"
-    except Exception as exc:
-        checks["redis"] = f"error: {exc}"
-        ready = False
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
-
-    body = {"status": "ready" if ready else "not_ready", "checks": checks}
-    return JSONResponse(status_code=200 if ready else 503, content=body)
+@app.get("/health", tags=["health"])
+async def liveness() -> dict[str, str]:
+    """Unauthenticated liveness probe for the load balancer/orchestrator
+    -- answers "is the process up" in ~0ms. Deliberately separate from
+    the authenticated, dependency-dialing GET /api/v1/health/detailed
+    in app.api.health, which can take a couple of seconds and must not
+    be on the hot path Traefik/Docker healthchecks hit every few
+    seconds."""
+    return {"status": "ok"}

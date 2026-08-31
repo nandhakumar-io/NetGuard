@@ -18,6 +18,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
@@ -25,12 +26,12 @@ from app.models.user import User
 from app.services import (
     audit_service,
     config_section_service,
-    credential_service,
-    deployment_engine,
+    device_job_service,
     diff_engine,
     event_bus,
     snapshot_service,
 )
+from app.services.device_job_service import DeviceJobFailedError, DeviceJobTimeoutError
 
 
 class RollbackError(Exception):
@@ -72,7 +73,44 @@ def _netmiko_type(device: Device) -> str:
     )
 
 
-def preview_rollback(db: Session, device: Device, snapshot: ConfigSnapshot) -> dict:
+async def _live_running_config(device: Device, requested_by: str) -> str | None:
+    """Best-effort live read of a device's running config. Routes through
+    the Device Gateway (see app.services.device_job_service) rather than
+    opening a Netmiko/NAPALM session in this process -- this module runs
+    inside the API, which must not decrypt device credentials or hold
+    device-network connectivity itself. Returns None on any failure
+    (unreachable device, no credential, Gateway timeout/rejection); every
+    caller in this module already treats a None live-read as non-fatal
+    and falls back to the last snapshot.
+    """
+    if not settings.DEVICE_GATEWAY_ENABLED:
+        # Legacy in-process path -- only reachable when explicitly opted
+        # out of the Device Gateway (local dev without one running).
+        try:
+            from app.services import credential_service, deployment_engine
+
+            ssh_password = credential_service.get_ssh_password(device)
+            current_config, _used_protocol = deployment_engine.read_running_config(
+                _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
+            )
+            return current_config
+        except Exception:
+            return None
+
+    try:
+        job_result = await device_job_service.submit_job(
+            tenant_id=str(device.tenant_id),
+            device_id=str(device.id),
+            operation=device_job_service.DeviceOperation.GET_RUNNING_CONFIG,
+            params={},
+            requested_by=requested_by,
+        )
+        return job_result.output
+    except (DeviceJobTimeoutError, DeviceJobFailedError):
+        return None
+
+
+async def preview_rollback(db: Session, device: Device, snapshot: ConfigSnapshot, requested_by: str) -> dict:
     """Read-only counterpart to initiate_rollback: builds the exact same
     "what's live right now vs. what this snapshot would restore" diff,
     but creates no ChangeRequest and pushes nothing to the device. Used
@@ -94,22 +132,8 @@ def preview_rollback(db: Session, device: Device, snapshot: ConfigSnapshot) -> d
     # to roll back yet), it just downgrades what "current" means in the
     # response so the caller can show that honestly instead of a diff
     # against stale data with no indication it's stale.
-    current_config = None
-    current_source = "unavailable"
-    try:
-        ssh_password = credential_service.get_ssh_password(device)
-        current_config, _used_protocol = deployment_engine.read_running_config(
-            _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
-        )
-        current_source = "live"
-    except credential_service.CredentialNotFoundError:
-        pass
-    except Exception:
-        # Any live-read failure (unreachable device, auth failure, etc.)
-        # falls back the same way initiate_rollback does -- a preview
-        # should degrade gracefully, not 500 just because the device is
-        # down right now.
-        pass
+    current_config = await _live_running_config(device, requested_by)
+    current_source = "live" if current_config is not None else "unavailable"
 
     if current_config is None:
         latest = (
@@ -171,7 +195,7 @@ def preview_rollback(db: Session, device: Device, snapshot: ConfigSnapshot) -> d
     }
 
 
-def initiate_rollback(
+async def initiate_rollback(
     db: Session,
     device: Device,
     snapshot: ConfigSnapshot,
@@ -209,14 +233,7 @@ def initiate_rollback(
     # touched it rather than just the last thing NetGuard happened to
     # deploy. A failure here is never a reason to block an emergency
     # rollback -- it just falls back to the most recent known snapshot.
-    current_config = None
-    try:
-        ssh_password = credential_service.get_ssh_password(device)
-        current_config, _used_protocol = deployment_engine.read_running_config(
-            _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
-        )
-    except credential_service.CredentialNotFoundError:
-        pass  # will fail loudly again inside the pipeline, where it's actionable
+    current_config = await _live_running_config(device, requested_by=str(actor.id))
 
     if current_config is None:
         latest = (
@@ -277,19 +294,12 @@ def initiate_rollback(
 # ---------------------------------------------------------------------------
 
 
-def _current_config_for_device(db: Session, device: Device) -> tuple[str | None, str]:
+async def _current_config_for_device(db: Session, device: Device, requested_by: str) -> tuple[str | None, str]:
     """Best-effort live read with the same live -> last-snapshot ->
     unavailable fallback chain used elsewhere in this module."""
-    try:
-        ssh_password = credential_service.get_ssh_password(device)
-        current_config, _used_protocol = deployment_engine.read_running_config(
-            _netmiko_type(device), device.ip_address, device.ssh_username or "admin", ssh_password
-        )
+    current_config = await _live_running_config(device, requested_by)
+    if current_config is not None:
         return current_config, "live"
-    except credential_service.CredentialNotFoundError:
-        pass
-    except Exception:
-        pass
 
     latest = (
         db.query(ConfigSnapshot)
@@ -302,12 +312,12 @@ def _current_config_for_device(db: Session, device: Device) -> tuple[str | None,
     return None, "unavailable"
 
 
-def list_rollback_sections(db: Session, device: Device) -> list[dict]:
+async def list_rollback_sections(db: Session, device: Device, requested_by: str) -> list[dict]:
     """Sections available to partially roll back, derived from the
     device's current (live, or last-snapshot-as-fallback) configuration.
     Powers the "what do you want to revert?" picker in the rollback
     confirmation modal, alongside the existing full-snapshot list."""
-    current_config, current_source = _current_config_for_device(db, device)
+    current_config, current_source = await _current_config_for_device(db, device, requested_by)
     if not current_config:
         return []
     return [
@@ -316,7 +326,9 @@ def list_rollback_sections(db: Session, device: Device) -> list[dict]:
     ] if current_source else []
 
 
-def preview_partial_rollback(db: Session, device: Device, snapshot: ConfigSnapshot, section_key: str) -> dict:
+async def preview_partial_rollback(
+    db: Session, device: Device, snapshot: ConfigSnapshot, section_key: str, requested_by: str
+) -> dict:
     """Read-only preview of a section-level rollback: shows the diff
     that reverting only `section_key` (e.g. "ACL:BLOCK_TELNET") to its
     version in `snapshot` would produce, without touching the device or
@@ -325,7 +337,7 @@ def preview_partial_rollback(db: Session, device: Device, snapshot: ConfigSnapsh
         raise RollbackError(f"Snapshot {snapshot.id} does not belong to device '{device.hostname}'.")
 
     target_config = snapshot_service.decrypt_config(snapshot.running_config_encrypted)
-    current_config, current_source = _current_config_for_device(db, device)
+    current_config, current_source = await _current_config_for_device(db, device, requested_by)
 
     if not current_config:
         raise RollbackError(
@@ -366,7 +378,7 @@ def preview_partial_rollback(db: Session, device: Device, snapshot: ConfigSnapsh
     }
 
 
-def initiate_partial_rollback(
+async def initiate_partial_rollback(
     db: Session,
     device: Device,
     snapshot: ConfigSnapshot,
@@ -395,7 +407,7 @@ def initiate_partial_rollback(
         )
 
     target_config = snapshot_service.decrypt_config(snapshot.running_config_encrypted)
-    current_config, _current_source = _current_config_for_device(db, device)
+    current_config, _current_source = await _current_config_for_device(db, device, requested_by=str(actor.id))
     if not current_config:
         raise RollbackError(
             f"No live or previously-snapshotted configuration is available for '{device.hostname}' "

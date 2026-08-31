@@ -22,6 +22,28 @@ if [ "${SKIP_MIGRATIONS:-false}" = "true" ]; then
 else
   echo "Applying database migrations..."
   alembic upgrade head
+
+  # Re-sync netguard_app's grants after every migration (Section 18 /
+  # 0119's owner-vs-runtime-role split -- see grants.sql). Only the
+  # `migrate` service runs this block (SKIP_MIGRATIONS is unset only for
+  # it), and only `migrate` connects to Postgres as the owning role that
+  # can run GRANT/ALTER DEFAULT PRIVILEGES in the first place -- api and
+  # the workers connect as netguard_app itself, which couldn't run this
+  # script even if it tried. Uses DATABASE_URL's own credentials, so it
+  # runs as whatever role `migrate` is configured with, without needing
+  # a second connection string.
+  echo "Syncing netguard_app grants..."
+  python3 - <<'PYEOF'
+import os
+import psycopg2
+
+url = os.environ["DATABASE_URL"].replace("postgresql+psycopg2://", "postgresql://", 1)
+with psycopg2.connect(url) as conn:
+    conn.autocommit = True
+    with conn.cursor() as cur, open("/app/alembic/grants.sql") as f:
+        cur.execute(f.read())
+print("netguard_app grants synced.")
+PYEOF
 fi
 
 exec "$@"

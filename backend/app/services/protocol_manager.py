@@ -501,6 +501,47 @@ class ProtocolManager:
             execution_time_ms=elapsed,
         )
 
+    def get_bgp_neighbors(self) -> ProtocolResult:
+        """NAPALM-only (routing-state getters have no NETCONF/RESTCONF
+        equivalent wired up here yet) -- returns raw get_bgp_neighbors()
+        output as a JSON string in `output` so a caller (the Device
+        Gateway executor, or health_monitor's *_from_raw interpreters)
+        can parse it, rather than a human-readable str(dict)."""
+        return self._napalm_json_getter("get_bgp_neighbors", "get_bgp_neighbors")
+
+    def get_ospf_neighbors(self) -> ProtocolResult:
+        return self._napalm_json_getter("get_ospf_neighbors", "get_ospf_neighbors")
+
+    def get_vpn_status(self) -> ProtocolResult:
+        return self._napalm_json_getter("get_ipsec_ike_sas", "get_vpn_status")
+
+    def _napalm_json_getter(self, napalm_getter: str, operation_name: str) -> ProtocolResult:
+        import json as _json
+
+        creds = self._safe_credentials(protocol="ssh", operation=operation_name)
+        if isinstance(creds, ProtocolResult):
+            return creds
+        username, password = creds
+
+        start = time.perf_counter()
+        try:
+            data = _napalm_getter(self.device, username, password, napalm_getter)
+        except Exception:  # noqa: BLE001 - matches _napalm_getter's own best-effort contract
+            data = None
+        elapsed = (time.perf_counter() - start) * 1000
+
+        # A getter genuinely not supported on this platform (AttributeError
+        # inside _napalm_getter, swallowed there) and "platform has no
+        # NAPALM driver at all" both surface as data is None -- callers
+        # (health_monitor's *_from_raw interpreters) already treat a raw
+        # value of None as "not applicable for this platform", matching
+        # the legacy in-process check_* functions' behavior.
+        return self._record(
+            protocol="ssh", operation=operation_name, success=True,
+            request=None, response=_json.dumps(data) if data is not None else None, http_status=None,
+            error=None, execution_time_ms=elapsed,
+        )
+
     def health_check(self) -> ProtocolResult:
         """Cheap reachability probe used before deployment/drift runs and
         by GET /devices/{id}/health. Tries the selected protocol's

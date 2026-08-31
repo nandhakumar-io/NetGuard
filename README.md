@@ -1,153 +1,108 @@
-# NetGuard
+# Device Gateway (Phase 3)
 
-Intelligent Automated Network Change Management & Self-Healing Platform
+## What this is
 
-## Overview
-
-NetGuard is an automated network change management platform designed to reduce configuration errors, improve deployment reliability, and provide automatic rollback in case of failures.
-
-The platform manages the complete lifecycle of a network configuration change:
-
-```
-Change Request → AI Risk Analysis → Syntax Validation → Network Sanity Checks
-→ Manager Approval → Snapshot → Deployment → Health Monitoring
-→ Success  |  Automatic Rollback
-```
-
-See `docs/SRS.pdf` for the full Software Requirements Specification.
-
-## Key Features
-
-- Automated network configuration deployment
-- AI-based risk analysis
-- Configuration syntax validation
-- Automatic backup and rollback
-- Real-time health monitoring
-- Secure approval workflow
-- Complete audit logging
-
-## Project Structure
+A separate process (own container, own Docker network) that consumes
+signed job requests from NATS, independently re-validates them against
+Postgres, and is the only thing in the deployment with a network path to
+managed devices. See `../../../docker-compose.yaml`'s `device-gateway`
+service and the `netguard-execution` network for the isolation boundary.
 
 ```
-netguard/
-├── backend/              FastAPI backend (API, business logic, network automation)
-│   ├── app/
-│   │   ├── api/          Route handlers (change requests, devices, deployments, auth)
-│   │   ├── core/         Config, security, database session
-│   │   ├── models/       SQLAlchemy ORM models
-│   │   ├── schemas/      Pydantic request/response schemas
-│   │   └── services/     Business logic (risk engine, validation, rollback, snapshot)
-│   ├── tests/
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/              React + TypeScript + Tailwind dashboard
-│   ├── src/
-│   │   ├── components/    Reusable UI (RiskBadge, ConfigDiff, StatusCard...)
-│   │   ├── pages/         Dashboard, Change Requests, Devices, Audit Log
-│   │   └── lib/           API client, types
-│   └── Dockerfile
-├── docker/
-│   └── docker-compose.yml Full local stack (Postgres, PgBouncer, Redis, NATS,
-│                           VictoriaMetrics, Traefik, api×N, collector, worker,
-│                           frontend)
-├── docs/                   SRS and design docs
-└── .env.example
+API --(signed job over NATS jobs.request)--> Device Gateway --(SSH/NETCONF/RESTCONF)--> Device
+     <--(result over NATS jobs.result.<id>)--
 ```
 
-## Quick Start (Docker)
+## Files
 
-```bash
-cp .env.example .env
-docker compose -f docker/docker-compose.yml up --build
-```
+- `app/schemas/device_job.py` — the signed job envelope (shared by API and Gateway)
+- `app/services/device_job_service.py` — API-side: builds, signs, publishes a job, awaits the result
+- `app/device_gateway/validator.py` — **the trust boundary**: independently checks signature, expiry, replay, tenant match, approval state, self-approval, JIT state
+- `app/device_gateway/executor.py` — maps a validated job to a `protocol_manager` call
+- `app/device_gateway/main.py` — NATS consumer entrypoint (`python -m app.device_gateway.main`)
+- `tests/test_device_gateway_validator.py` — 11 tests proving the validator actually rejects forged/expired/replayed/cross-tenant/self-approved/unapproved jobs
 
-Everything is reached through Traefik on :80 now, not by hitting container
-ports directly:
+## What's migrated vs. what isn't (be honest about scope)
 
-- App (frontend + API):  http://localhost/
-- API docs:              http://localhost/docs
-- Traefik dashboard:     http://localhost:8080
+**Migrated (this change):** the job-dispatch pattern itself, end to end,
+with a real, tested validator. `DeviceOperation.GET_RUNNING_CONFIG` /
+`GET_STARTUP_CONFIG` / `DEPLOY_CONFIG` / `ROLLBACK_CONFIG` / `REBOOT` are
+defined as the initial operation whitelist.
 
-`api` is a stateless, horizontally-scaled service (`API_REPLICAS` in `.env`,
-default 3) sitting behind Traefik. Everything that has to run exactly once
-regardless of API replica count lives in its own singleton service instead
-of `api`'s event loop: `collector` (topology snapshots), `syslog-collector`
-(syslog UDP, port 1514/udp), and `flow-collector` (NetFlow/IPFIX + sFlow
-UDP, ports 2055/udp and 6343/udp). SNMP polling itself no longer runs
-in-process anywhere -- it's driven by the Celery `beat`+`poller` services
-below. A one-shot `migrate` service applies Alembic migrations before any
-of the above start, instead of each of them racing `alembic upgrade head`
-against the DB independently. `pgbouncer` pools Postgres connections across
-all of the above so N `api` replicas don't multiply out to N times as many
-Postgres connections.
+`GET /devices/{device_id}/config/running` (`app/api/config_management.py`)
+is the first live call site: behind `settings.DEVICE_GATEWAY_ENABLED`
+(default `False`), it calls `device_job_service.submit_job()` instead of
+`ProtocolManager` directly. Flag defaults off so nothing changes until an
+operator has actually deployed the `device-gateway` container and
+switches it on deliberately. Covered by
+`tests/test_config_management_gateway_migration.py` (asserts the legacy
+path is what runs by default, and that the gateway path calls
+`submit_job` with the right tenant/device/user and maps the result back
+into the existing response schema).
 
-To scale the API tier: `API_REPLICAS=6 docker compose -f docker/docker-compose.yml up --build -d`.
+**Not yet migrated — tracked follow-up work:**
 
-The Celery job-queue tier is split by queue rather than one generic
-`worker`: `beat` (RedBeat-scheduled, HA via a Redis lock -- any number of
-replicas can run, only the lock holder ticks), `poller` (SNMP + reachability
-polling, high concurrency), `deployer` (the change-request deploy pipeline),
-`firmware` (firmware upgrade jobs, isolated so a long flash/reboot can't
-block deploys), and `worker` (the low-volume catch-all: drift sweeps,
-compliance reports, snapshot retention, escalation, GitOps sync). Scale any
-of them independently via `BEAT_REPLICAS` / `POLLER_REPLICAS` /
-`DEPLOYER_REPLICAS` / `FIRMWARE_REPLICAS` in `.env`.
+1. **Only one endpoint migrated so far** (`GET /devices/{device_id}/config/running`).
+   `app/api/deployments.py`, the rest of `config_management.py`
+   (backup/restore/rollback/deploy), and others still call
+   `protocol_manager` / `deployment_engine` directly. Swapping each
+   remaining call site is mechanical, following the same pattern, but
+   needs its own test per endpoint.
 
-## Quick Start (Local, without Docker)
+2. **Terminal (interactive SSH, `app/api/terminal.py`) is NOT migrated.**
+   It's a streaming, stateful session, not a single request/response job
+   — the envelope/validator pattern above doesn't map directly onto
+   "keep a live PTY open for N minutes with keystroke passthrough".
+   Section 14 of the hardening spec wants
+   `Browser -> NetGuard -> Authorized terminal session -> Device Gateway -> Device`;
+   doing this properly means the Gateway holding the actual SSH
+   connection and the API proxying a WebSocket that only carries
+   already-authorized terminal I/O — a separate design pass, not a
+   trivial extension of this envelope.
 
-**Backend**
-```bash
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+3. **`api` container's Docker network membership hasn't been changed
+   yet.** Adding `netguard-execution` as an `internal: true` network
+   that only `device-gateway` sits on stops any *new* container from
+   getting a path to devices through it, but it doesn't retroactively
+   remove whatever reachability the `api`/worker containers already had
+   through other means (their own outbound routing, if the real device
+   VLAN is reachable from `netguard-internal` in a given deployment).
+   Full enforcement requires the actual production network topology
+   (host firewall rules / real VLAN wiring), which is deployment-
+   specific and out of scope for this compose file alone — flagged as a
+   residual risk, not silently assumed solved.
 
-**Frontend**
-```bash
-cd frontend
-npm install
-npm run dev
-```
+4. **JIT elevation is still fleet-wide, not device-scoped** (see Phase 1
+   finding). The validator checks that a JIT grant is active and belongs
+   to the requester, but cannot yet check "is this grant scoped to THIS
+   device" — that requires a schema change to `JitElevation`
+   (`app.models.jit_elevation`) that's out of this change's scope.
 
-## Roadmap (matches SRS functional requirements)
+5. **Credentials are still resolved via `credential_service`/Fernet
+   inside whatever process calls `protocol_manager`** — since
+   `executor.py` reuses `protocol_manager` as-is, credential resolution
+   now happens inside the Gateway process rather than the API process,
+   which is real, meaningful progress (the API no longer needs
+   `SECRET_ENCRYPTION_KEY` at all once every call site is migrated) —
+   but OpenBao integration (Phase 4) hasn't happened yet, so credentials
+   are still Fernet-encrypted DB fields, just decrypted in a smaller,
+   more isolated process now instead of the internet-facing one.
 
-- [x] Project scaffold, FR-1 (auth stub), core data models
-- [x] FR-2 Device inventory CRUD
-- [x] FR-3 Change request workflow + approvals
-- [x] FR-4 Config diff engine
-- [x] FR-5 / FR-6 Syntax validation + AI risk scoring
-- [x] FR-7 Snapshot service (encrypted backups) + git-style version history per device
-- [x] FR-8 Deployment engine (Netmiko / NAPALM)
-- [x] FR-9 Health monitoring (real polling over a configurable window, not a single check)
-- [x] FR-10 Self-healing rollback (automatic) + manual rollback to any prior snapshot
-- [x] FR-11 Notifications (email / Slack / Teams)
-- [x] FR-12 Immutable audit log
+## Security properties this delivers today
 
-## Change Management & Rollback
-
-- Every deployment automatically snapshots (and encrypts) the device's config immediately before applying a change.
-- After deploying, NetGuard actually polls the health suite -- infrastructure, routing, services -- every
-  `HEALTH_MONITOR_POLL_INTERVAL_SECONDS` for up to `HEALTH_MONITOR_WINDOW_SECONDS` (see `.env.example`), not a
-  single check right after the push. The first failing round triggers automatic rollback immediately.
-- `GET /devices/{id}/snapshots` lists a device's full config version history.
-- `POST /devices/{id}/rollback` (Network Administrators) restores any prior snapshot on demand. It runs through
-  the exact same Snapshot → Deploy → Health Monitor pipeline as a normal change, so a manual rollback gets the
-  same safety net -- including automatic rollback if the restore itself fails its health checks.
-
-## Tech Stack
-
-Frontend: React, TypeScript, Tailwind CSS, Recharts
-Backend: FastAPI, Python, Celery, Redis, SQLAlchemy
-Network Automation: Netmiko, NAPALM, Paramiko
-Database: PostgreSQL
-Monitoring: Prometheus, Grafana
-AI Model: Llama LLM
-
-## System Requirements
-
-- Python 3.11+
-- Node.js 20+
-- Docker & Docker Compose
-- PostgreSQL
-- Redis
+- A job the API publishes cannot be executed by the Gateway unless it's
+  correctly signed with `DEVICE_JOB_SIGNING_KEY` — a secret the API
+  process needs to hold to publish jobs, but which is *not* the JWT
+  `SECRET_KEY`, *not* the Fernet `SECRET_ENCRYPTION_KEY`, and not a
+  device credential. Compromising the API still means an attacker can
+  ask the Gateway to do device operations, scoped to what a real user's
+  JWT-derived request could ask for — this is a real reduction in blast
+  radius versus today's in-process device connectivity, but it is *not*
+  full isolation until items 1–3 above are also done.
+- The Gateway independently re-derives tenant match, approval status,
+  and self-approval — a bug in the API's own approval-gating logic does
+  not automatically mean the Gateway will execute an unapproved or
+  self-approved change.
+- Replay of a captured job is rejected once its `job_id` has been seen,
+  and any job past its (short) `expires_at` is rejected regardless of
+  signature validity.

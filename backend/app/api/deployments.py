@@ -198,10 +198,10 @@ def _validate_rollback_target(db: Session, deployment_id: uuid.UUID, tenant_id) 
 
 
 @router.get("/{deployment_id}/rollback/preview", response_model=DeploymentRollbackPreviewResponse)
-def preview_deployment_rollback(
+async def preview_deployment_rollback(
     deployment_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     tenant_id=Depends(get_tenant_scope),
 ):
     """Dry-run counterpart to POST /deployments/{id}/rollback: shows the
@@ -216,7 +216,7 @@ def preview_deployment_rollback(
     deployment, device, snapshot = _validate_rollback_target(db, deployment_id, tenant_id)
 
     try:
-        preview = rollback_service.preview_rollback(db, device, snapshot)
+        preview = await rollback_service.preview_rollback(db, device, snapshot, requested_by=str(current_user.id))
     except rollback_service.RollbackError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -237,7 +237,7 @@ def preview_deployment_rollback(
 
 
 @router.post("/{deployment_id}/rollback", response_model=dict, status_code=202)
-def rollback_deployment(
+async def rollback_deployment(
     deployment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -273,7 +273,7 @@ def rollback_deployment(
     cr = db.get(ChangeRequest, deployment.change_request_id)
 
     try:
-        rollback_cr = rollback_service.initiate_rollback(
+        rollback_cr = await rollback_service.initiate_rollback(
             db, device, snapshot, current_user,
             reason=f"Partial rollback of deployment {deployment.id} (batch CR {deployment.change_request_id})",
         )

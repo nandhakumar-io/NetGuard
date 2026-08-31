@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 from app.models.user import UserRole
+from app.schemas.device_job import DeviceOperation
 
 
 class JitElevationRequest(BaseModel):
@@ -8,6 +9,14 @@ class JitElevationRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=2000)
     duration_minutes: int = Field(gt=0, le=480, description="Requested window length, in minutes (max 8h).")
     change_request_id: str | None = None
+    # Optional scoping (Section 10): when device_id is set, the grant only
+    # authorizes actions against that one device instead of the whole
+    # fleet; scoped_operation narrows further to one operation. Leaving
+    # both unset preserves the old fleet-wide-role behavior for cases
+    # that genuinely need it (e.g. incident response with no single
+    # device in mind yet) -- scoping down is opt-in, not forced.
+    device_id: str | None = None
+    scoped_operation: DeviceOperation | None = None
 
 
 class JitDecisionRequest(BaseModel):
@@ -21,6 +30,9 @@ class JitElevationRead(BaseModel):
     elevated_role: str
     reason: str
     change_request_id: str | None = None
+    device_id: str | None = None
+    device_hostname: str | None = None
+    scoped_operation: str | None = None
     requested_by: str
     requested_at: str | None = None
     requested_duration_minutes: int
@@ -37,10 +49,13 @@ class JitElevationRead(BaseModel):
     is_stale: bool = False  # ACTIVE in the DB but expires_at has already lapsed (sweep hasn't caught it yet)
     time_to_approve_seconds: float | None = None  # requested_at -> decided_at, null while still pending
     # Blast radius: this app's RBAC is role-based with no per-device
-    # scoping (see app.api.rbac.PERMISSION_MATRIX), so any capability a
-    # role gains applies fleet-wide. blast_radius_devices is the current
-    # total device count when the grant confers at least one new
-    # capability the requester doesn't already have, else 0.
+    # scoping (see app.api.rbac.PERMISSION_MATRIX), so an *unscoped*
+    # grant's capability applies fleet-wide. blast_radius_devices is the
+    # current total device count when the grant confers at least one new
+    # capability the requester doesn't already have, else 0 -- unless
+    # device_id narrows the grant to one device, in which case this is 1
+    # regardless of role, since the Gateway will refuse to use the grant
+    # against any other device (see app.device_gateway.validator.validate).
     capabilities_gained: list[str] = []
     blast_radius_devices: int = 0
     # Danger feedback from the linked change request (see

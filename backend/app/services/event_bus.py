@@ -109,6 +109,8 @@ class _PublisherLoop:
                 name="netguard-event-bus-publisher",
                 reconnect_time_wait=2,
                 max_reconnect_attempts=-1,
+                user=settings.NATS_API_USER,
+                password=settings.NATS_API_PASSWORD,
             )
             self._js = self._nc.jetstream()
             try:
@@ -230,7 +232,11 @@ class _NatsConnection:
 
     async def _ensure_jetstream(self):
         if self._nc is None or self._nc.is_closed:
-            self._nc = await nats.connect(servers=[settings.NATS_URL])
+            self._nc = await nats.connect(
+                servers=[settings.NATS_URL],
+                user=settings.NATS_API_USER,
+                password=settings.NATS_API_PASSWORD,
+            )
             self._js = self._nc.jetstream()
         return self._js
 

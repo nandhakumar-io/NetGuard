@@ -1075,3 +1075,40 @@ def purge_old_metrics(db: Session, retention_days: int) -> int:
     existing scheduled call site doesn't need to be torn out separately.
     """
     return 0
+
+
+def poll_device_via_gateway_or_inprocess(db: Session, device: "Device", requested_by: str) -> dict:
+    """Same result contract as poll_device() (a dict mirroring the old
+    DeviceMetric row's columns), but dispatches through the Device
+    Gateway when DEVICE_GATEWAY_ENABLED, since neither `api` nor `poller`
+    hold DEVICE_CREDENTIAL_ENCRYPTION_KEY anymore (Section 4 key
+    re-scoping) and so can't decrypt SNMP credentials themselves. Shared
+    by every SNMP-poll call site outside the Gateway process itself
+    (app.tasks.snmp_poll_task, app.api.devices/api.metrics's on-demand
+    poll routes, app.main's background poll loop) so the branch isn't
+    duplicated four times.
+
+    Raises SnmpNotConfiguredError / credential_service.CredentialNotFoundError
+    same as poll_device(), plus DeviceJobTimeoutError/DeviceJobFailedError
+    when the Gateway path itself fails (rejected job, Gateway unreachable,
+    etc.) -- callers already handling the first two should add handling
+    for the Gateway-specific pair too.
+    """
+    from app.core.config import settings
+
+    if not settings.DEVICE_GATEWAY_ENABLED:
+        return poll_device(db, device)
+
+    import json
+
+    from app.services import device_job_service
+    from app.services.device_job_service import DeviceOperation
+
+    job_result = device_job_service.submit_job_sync(
+        tenant_id=str(device.tenant_id),
+        device_id=str(device.id),
+        operation=DeviceOperation.SNMP_POLL,
+        params={},
+        requested_by=requested_by,
+    )
+    return json.loads(job_result.output) if job_result.output else {}

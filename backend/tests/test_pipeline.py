@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -8,10 +9,24 @@ from sqlalchemy.orm import sessionmaker
 from app.core.database import Base
 from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
 from app.models.device import Device, DeviceVendor
-from app.models.protocol_operation import ProtocolName
+from app.schemas.device_job import DeviceJobResult
 from app.services import pipeline_service
+from app.services.device_job_service import DeviceJobFailedError
 from app.services.health_monitor import CheckOutcome, MonitoringResult, PollRound
-from app.services.protocol_manager import ProtocolResult
+
+
+def _job_result(*, success=True, output="ok", error=None, protocol="ssh") -> DeviceJobResult:
+    """Builds a DeviceJobResult the same shape device_job_service.submit_job_sync
+    returns after a real round trip through the Device Gateway -- both the
+    pre-deploy GET_RUNNING_CONFIG re-validation read and the DEPLOY_CONFIG/
+    ROLLBACK_CONFIG pushes go through this single call now (see
+    pipeline_service.py Section 3/8 migration), so every deploy-path test
+    mocks this one function instead of the old in-process ProtocolManager."""
+    return DeviceJobResult(
+        job_id="test-job", success=success, output=output, error=error,
+        executed_at=datetime.now(timezone.utc).isoformat(), protocol=protocol,
+        execution_time_ms=10.0,
+    )
 
 
 def _monitoring_result(outcomes: list[CheckOutcome], healthy: bool, rounds: int = 1) -> MonitoringResult:
@@ -63,12 +78,11 @@ def _make_cr(db):
 
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
-@patch("app.services.pipeline_service.protocol_manager.ProtocolManager.deploy_config")
-def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session):
-    mock_deploy.return_value = ProtocolResult(
-        success=True, protocol=ProtocolName.NETCONF, operation="deploy_config",
-        output="ok", error=None, execution_time_ms=10.0, correlation_id="123"
-    )
+@patch("app.services.pipeline_service.device_job_service.submit_job_sync")
+def test_pipeline_success_path(mock_submit, mock_health, mock_notify, db_session):
+    # Two Gateway job round trips on the happy path: the pre-deploy
+    # GET_RUNNING_CONFIG re-validation read, then the DEPLOY_CONFIG push.
+    mock_submit.side_effect = [_job_result(output="! current config"), _job_result()]
     outcomes = [CheckOutcome("infrastructure", "ping", True, "2 packets received")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=True, rounds=3)
 
@@ -93,19 +107,19 @@ def test_pipeline_success_path(mock_deploy, mock_health, mock_notify, db_session
 
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
-@patch("app.services.pipeline_service.protocol_manager.ProtocolManager.deploy_config")
+@patch("app.services.pipeline_service.device_job_service.submit_job_sync")
 def test_pipeline_rolls_back_on_failed_health_check(
-    mock_deploy, mock_health, mock_notify, db_session
+    mock_submit, mock_health, mock_notify, db_session
 ):
     # Self-healing rollback re-pushes the pre-flight snapshot's config via
-    # the same deploy path used for the original change (ProtocolManager.
-    # restore_config() -> deploy_config()) -- there's no separate
-    # "rollback_config" call in this pipeline, so deploy_config is mocked
-    # to succeed for *both* the initial deploy and the restore push.
-    mock_deploy.return_value = ProtocolResult(
-        success=True, protocol=ProtocolName.NETCONF, operation="deploy_config",
-        output="ok", error=None, execution_time_ms=10.0, correlation_id="123"
-    )
+    # a separate ROLLBACK_CONFIG Gateway job -- three Gateway round trips
+    # total on this path: GET_RUNNING_CONFIG (pre-deploy re-validation),
+    # DEPLOY_CONFIG (the original change), ROLLBACK_CONFIG (the restore
+    # push after the health check fails), all mocked to succeed here so
+    # the test isolates the health-check-triggers-rollback behavior.
+    mock_submit.side_effect = [
+        _job_result(output="! current config"), _job_result(), _job_result(),
+    ]
     outcomes = [CheckOutcome("infrastructure", "ping", False, "timeout")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=False, rounds=1)
 
@@ -113,18 +127,22 @@ def test_pipeline_rolls_back_on_failed_health_check(
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")
 
     assert result.status == ChangeStatus.ROLLED_BACK
-    # Called once for the original deploy, once more to restore the
-    # pre-flight snapshot after the health check failed.
-    assert mock_deploy.call_count == 2
+    # Called for: GET_RUNNING_CONFIG re-validation, the original
+    # DEPLOY_CONFIG, and the ROLLBACK_CONFIG restore after the health
+    # check failed.
+    assert mock_submit.call_count == 3
+    ops = [call.kwargs["operation"] for call in mock_submit.call_args_list]
+    assert ops[-1] == "rollback_config"
 
 
 @patch("app.services.pipeline_service.notification_service.notify")
-@patch("app.services.pipeline_service.protocol_manager.ProtocolManager.deploy_config")
-def test_pipeline_marks_failed_when_deploy_fails(mock_deploy, mock_notify, db_session):
-    mock_deploy.return_value = ProtocolResult(
-        success=False, protocol=ProtocolName.NETCONF, operation="deploy_config",
-        output="", error="auth failure", execution_time_ms=10.0, correlation_id="123"
-    )
+@patch("app.services.pipeline_service.device_job_service.submit_job_sync")
+def test_pipeline_marks_failed_when_deploy_fails(mock_submit, mock_notify, db_session):
+    # GET_RUNNING_CONFIG re-validation succeeds; the DEPLOY_CONFIG push
+    # fails -- device_job_service raises DeviceJobFailedError rather than
+    # returning success=False, mirroring what a real rejected/failed
+    # Gateway job looks like from the caller's side.
+    mock_submit.side_effect = [_job_result(output="! current config"), DeviceJobFailedError("auth failure")]
 
     cr = _make_cr(db_session)
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")

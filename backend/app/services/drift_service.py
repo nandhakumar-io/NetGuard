@@ -41,7 +41,9 @@ if TYPE_CHECKING:
     from app.models.change_request import ChangeRequest
     from app.models.user import User
 
+from app.core.config import settings
 from app.models.alert import Alert, AlertSource
+from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.compliance_baseline import ComplianceBaseline
 from app.models.config_drift import (
     ConfigDrift,
@@ -55,12 +57,14 @@ from app.models.snapshot import ConfigSnapshot
 from app.services import (
     alert_service,
     audit_service,
+    device_job_service,
     diff_engine,
     event_bus,
     maintenance_window_service,
     risk_engine,
     snapshot_service,
 )
+from app.services.device_job_service import DeviceJobFailedError, DeviceJobTimeoutError
 from app.services.protocol_manager import ProtocolManager
 
 # Compliance score starts at 100 (fully compliant) and is docked per
@@ -181,6 +185,32 @@ def _rollback_recommended(severity: DriftSeverity, compliance_score: int) -> boo
     return severity in (DriftSeverity.HIGH, DriftSeverity.CRITICAL) or compliance_score < 60
 
 
+def _is_attributed(db: Session, device: Device, lookback_hours: int = 48) -> bool:
+    """Section 15 support: is there something in NetGuard that explains a
+    change to this device right now? True if either an active
+    maintenance window covers it (checked separately by the caller via
+    active_window) or a ChangeRequest for this device reached a
+    deploying/monitoring/success state within the lookback window.
+    Approximate by design -- `updated_at` isn't a precise "deployed at"
+    timestamp (see the field's own comment in app.models.change_request),
+    so this is a coarse signal for surfacing likely break-glass/
+    out-of-band activity to a human, not a hard authorization check.
+    """
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=lookback_hours)
+    recent_cr = (
+        db.query(ChangeRequest)
+        .filter(
+            ChangeRequest.device_id == device.id,
+            ChangeRequest.status.in_(
+                [ChangeStatus.DEPLOYING, ChangeStatus.MONITORING, ChangeStatus.SUCCESS]
+            ),
+            ChangeRequest.updated_at >= since,
+        )
+        .first()
+    )
+    return recent_cr is not None
+
+
 def detect_drift(
     db: Session,
     device: Device,
@@ -194,11 +224,31 @@ def detect_drift(
     """
     baseline_label, baseline_config = _resolve_baseline_config(db, device, baseline)
 
-    pm = ProtocolManager(db, device, operator=triggered_by)
-    live_result = pm.get_running_config()
-    if not live_result.success:
-        raise RuntimeError(live_result.error or f"Failed to read live running configuration from {device.hostname}")
-    live_config = live_result.output
+    # Routed through the Device Gateway (see app.services.device_job_service)
+    # rather than opening a Netmiko/NAPALM session in this process, same
+    # as remediate_drift below. Called from both a sync API route and a
+    # Celery task -- neither runs inside an asyncio event loop -- so the
+    # sync bridge (submit_job_sync) is safe to use here.
+    if settings.DEVICE_GATEWAY_ENABLED:
+        try:
+            job_result = device_job_service.submit_job_sync(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=device_job_service.DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=triggered_by,
+            )
+        except DeviceJobTimeoutError as exc:
+            raise RuntimeError(str(exc)) from exc
+        except DeviceJobFailedError as exc:
+            raise RuntimeError(exc.error or f"Failed to read live running configuration from {device.hostname}") from exc
+        live_config = job_result.output
+    else:
+        pm = ProtocolManager(db, device, operator=triggered_by)
+        live_result = pm.get_running_config()
+        if not live_result.success:
+            raise RuntimeError(live_result.error or f"Failed to read live running configuration from {device.hostname}")
+        live_config = live_result.output
 
     diff_text = diff_engine.generate_diff(baseline_config, live_config)
     added, removed, modified = _count_diff_lines(diff_text)
@@ -220,6 +270,14 @@ def detect_drift(
     # suppresses the paired alert via the same window.
     active_window = maintenance_window_service.find_active_window(db, device.id)
 
+    # Section 15 support: only worth checking (and only meaningful) when
+    # there's an actual change to explain and it isn't already covered by
+    # a maintenance window -- an unchanged scan or one inside a planned
+    # window isn't a break-glass signal either way.
+    unattributed = bool(
+        (added or removed) and active_window is None and not _is_attributed(db, device)
+    )
+
     drift = ConfigDrift(
         device_id=device.id,
         baseline=baseline,
@@ -234,6 +292,7 @@ def detect_drift(
         cli_diff="\n".join(drift_analysis.cli_diff) if drift_analysis.cli_diff else None,
         status=DriftStatus.OPEN,
         maintenance_window_id=active_window.id if active_window else None,
+        unattributed=unattributed,
     )
     db.add(drift)
     db.commit()
@@ -252,6 +311,30 @@ def detect_drift(
             + (f" llm_error={drift_analysis.llm_error}" if drift_analysis.llm_error else "")
         ),
     )
+
+    if unattributed:
+        # Section 15: a config change with no NetGuard ChangeRequest and
+        # no active maintenance window behind it is exactly what a
+        # break-glass emergency change (or an unauthorized out-of-band
+        # change) looks like from here -- NetGuard can't see the
+        # emergency path itself (by design, see docs/break-glass.md), but
+        # it can and should flag the aftermath distinctly rather than
+        # filing it as an ordinary drift finding. This is a separate,
+        # higher-signal audit event on top of the one above, not a
+        # replacement for it.
+        audit_service.record_event(
+            db,
+            actor="system",
+            action="Unattributed Configuration Change Detected",
+            result="needs_review",
+            device_hostname=device.hostname,
+            detail=(
+                f"{device.hostname}: +{added}/-{removed} lines with no matching "
+                f"NetGuard change request or maintenance window in the prior 48h. "
+                f"Possible break-glass/emergency access use or unauthorized change -- "
+                f"see docs/break-glass.md for the reconciliation process."
+            ),
+        )
 
     alert = None
     if severity in ALERTING_SEVERITIES and (added or removed):
@@ -326,7 +409,7 @@ class RemediationError(Exception):
     baseline type, device busy with another change, etc)."""
 
 
-def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "User") -> "ChangeRequest":
+async def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "User") -> "ChangeRequest":
     """One-click "push golden config to fix drift": builds a ChangeRequest
     that redeploys the drift's own baseline config back to the device and
     submits it into the normal review queue -- PENDING_APPROVAL, same as
@@ -350,7 +433,6 @@ def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "Use
     instead of being silently reinterpreted as "restore the old backup".
     """
     from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatus
-    from app.services import credential_service, deployment_engine
 
     if drift.status != DriftStatus.OPEN:
         raise RemediationError(
@@ -386,19 +468,37 @@ def remediate_drift(db: Session, drift: ConfigDrift, device: Device, actor: "Use
     # Best-effort live read for the audit-trail/diff "before" side; a
     # failed read never blocks remediation -- it just falls back to the
     # drift record's own captured live_config-less diff_text context.
+    # Routed through the Device Gateway (see app.services.device_job_service)
+    # rather than opening a Netmiko session in this process -- the API
+    # must not decrypt device credentials or hold device connectivity
+    # itself.
     current_config = None
-    try:
-        ssh_password = credential_service.get_ssh_password(device)
-        from app.services.pipeline_service import DEVICE_TYPE_MAP
+    if settings.DEVICE_GATEWAY_ENABLED:
+        try:
+            job_result = await device_job_service.submit_job(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=device_job_service.DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=str(actor.id),
+            )
+            current_config = job_result.output
+        except (DeviceJobTimeoutError, DeviceJobFailedError):
+            pass
+    else:
+        try:
+            from app.services import credential_service, deployment_engine
+            from app.services.pipeline_service import DEVICE_TYPE_MAP
 
-        netmiko_type = DEVICE_TYPE_MAP.get(
-            device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
-        )
-        current_config, _ = deployment_engine.read_running_config(
-            netmiko_type, device.ip_address, device.ssh_username or "admin", ssh_password
-        )
-    except Exception:
-        pass
+            ssh_password = credential_service.get_ssh_password(device)
+            netmiko_type = DEVICE_TYPE_MAP.get(
+                device.vendor.value if hasattr(device.vendor, "value") else device.vendor, "cisco_ios"
+            )
+            current_config, _ = deployment_engine.read_running_config(
+                netmiko_type, device.ip_address, device.ssh_username or "admin", ssh_password
+            )
+        except Exception:
+            pass
 
     priority = ChangePriority.EMERGENCY if drift.severity == DriftSeverity.CRITICAL else ChangePriority.HIGH
 

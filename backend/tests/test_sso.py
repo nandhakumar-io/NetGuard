@@ -52,15 +52,16 @@ def _configure_google(monkeypatch):
 
 def test_providers_reports_disabled_when_unconfigured(client, monkeypatch):
     monkeypatch.setattr("app.core.config.settings.GOOGLE_CLIENT_ID", None)
+    monkeypatch.setattr("app.core.config.settings.OIDC_ISSUER", None)
     resp = client.get("/api/v1/sso/providers")
     assert resp.status_code == 200
-    assert resp.json() == {"google": False}
+    assert resp.json() == {"google": False, "keycloak": False, "local": True}
 
 
 def test_providers_reports_enabled_when_configured(client, monkeypatch):
     _configure_google(monkeypatch)
     resp = client.get("/api/v1/sso/providers")
-    assert resp.json() == {"google": True}
+    assert resp.json()["google"] is True
 
 
 def test_login_redirects_to_google_when_configured(client, monkeypatch):

@@ -139,10 +139,40 @@ def _resolve_current_config(db: Session, device: Device, current_user: User) -> 
     of the diff/risk analysis actually was, and so POST
     /change-requests/{id}/rescore has something concrete to retry.
     """
-    pm = protocol_manager.ProtocolManager(db, device, operator=current_user.email)
-    live_running = pm.get_running_config()
-    if live_running.success:
-        return live_running.output, "live"
+    # Section 3/9: was an unconditional in-process ProtocolManager call
+    # with no DEVICE_GATEWAY_ENABLED gate (one of four found in the
+    # hardening audit, alongside backup_service.py, devices.py's
+    # ssh-credentials/test endpoint, and runbook_execution_service.py's
+    # deploy_config write). This is a sync `def` FastAPI route (runs in
+    # a threadpool, so submit_job_sync's own-event-loop requirement is
+    # safe here).
+    from app.core.config import settings
+
+    if settings.DEVICE_GATEWAY_ENABLED:
+        from app.services import device_job_service
+        from app.services.device_job_service import (
+            DeviceJobFailedError,
+            DeviceJobTimeoutError,
+            DeviceOperation,
+        )
+
+        try:
+            job_result = device_job_service.submit_job_sync(
+                tenant_id=str(device.tenant_id),
+                device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG,
+                params={},
+                requested_by=current_user.email,
+            )
+            return job_result.output, "live"
+        except (DeviceJobTimeoutError, DeviceJobFailedError):
+            pass  # falls through to the snapshot fallback below
+    else:
+        pm = protocol_manager.ProtocolManager(db, device, operator=current_user.email)
+        live_running = pm.get_running_config()
+        if live_running.success:
+            return live_running.output, "live"
+
     snapshot_config = _latest_config(db, device.id)
     if snapshot_config is not None:
         return snapshot_config, "snapshot"
@@ -736,6 +766,21 @@ def approve_change_request(
     cr = _get_scoped_change_request(db, cr_id, tenant_id)
     if cr.status != ChangeStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail=f"Cannot approve a request in status '{cr.status.value}'")
+
+    # Self-approval defense (Section 11 / Section 20 test checklist).
+    # Previously this was only enforced inside the role-chain branch
+    # (approval_chain_service._act, for CRs that have a chain) and the
+    # dual-approval "same admin twice" check below (for Critical-Risk /
+    # blast-radius CRs) -- a routine low/medium-risk CR with neither a
+    # chain nor requires_dual_approval had NO check at all here, so its
+    # own submitter could approve it. The Device Gateway's validator.py
+    # independently re-checks this too (defense-in-depth, in case this
+    # check has a bug), but that was never meant to be the ONLY check --
+    # see its own comment ("Even if the API's own approval endpoint has
+    # a bug..."), which presumes an API-level check exists in the first
+    # place.
+    if cr.submitted_by == current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot approve a change request you submitted yourself.")
 
     # Role-based approval chain (segregation of duties): if this CR has a
     # chain (Peer Review -> Manager Sign-off -> Admin Approval, see

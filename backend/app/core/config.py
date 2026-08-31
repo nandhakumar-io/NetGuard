@@ -24,6 +24,51 @@ class Settings(BaseSettings):
     # dev-only key if unset -- production deployments should set this.
     SECRET_ENCRYPTION_KEY: str | None = None
     SECRET_ENCRYPTION_KEYS: str | None = None
+
+    # Device-credential-only Fernet key (Section 4 follow-up). Scoped to
+    # exactly the six Device SSH/SNMP `*_encrypted` columns -- see
+    # app.core.crypto's "Device-credential scope" section for why this is
+    # a separate key from SECRET_ENCRYPTION_KEY(S) rather than reusing it.
+    # docker-compose.yaml injects this ONLY into `device-gateway` (and
+    # `migrate`, transiently, for the one-time re-encryption migration) --
+    # never into `api` or the Celery workers.
+    DEVICE_CREDENTIAL_ENCRYPTION_KEY: str | None = None
+    DEVICE_CREDENTIAL_ENCRYPTION_KEYS: str | None = None
+
+    # HMAC key shared ONLY between the API (publisher) and the Device
+    # Gateway (consumer) -- see app.schemas.device_job. Deliberately a
+    # separate secret from SECRET_KEY (JWT signing) and
+    # SECRET_ENCRYPTION_KEY(S) (device-credential DB encryption): a leak
+    # of any one of these three must not automatically compromise the
+    # other two. Dev-only fallback below; production must set this via
+    # env/secret store (see validate_production_secrets).
+    DEVICE_JOB_SIGNING_KEY: str = "change-me-device-job-signing-key"
+
+    # Feature flag for the Phase 3 migration (see app/device_gateway/).
+    # When true, migrated API endpoints publish a signed job to the Device
+    # Gateway over NATS instead of talking to the device in-process via
+    # ProtocolManager.
+    # Secure-by-default: route device connectivity through the Device
+    # Gateway. Deliberately defaults to True (not False) -- the whole
+    # point of the Gateway is that the API/worker processes shouldn't be
+    # able to reach devices or decrypt credentials at all, so an
+    # operator who forgets to set this should get the safe path, not the
+    # legacy in-process one. Set to false only for local dev without a
+    # gateway container running.
+    DEVICE_GATEWAY_ENABLED: bool = True
+
+    # OpenBao (Section 4). Only ever meaningfully set on the
+    # device-gateway container -- see docker-compose.yaml, which does
+    # NOT inject OPENBAO_ROLE_ID/OPENBAO_SECRET_ID into the `api`
+    # service. Left unset here means "OpenBao not configured in this
+    # process", which app.device_gateway.openbao_client.get_client()
+    # treats as "fall back to the legacy DB-Fernet credential path" --
+    # not an error, so a Gateway can be deployed before OpenBao is fully
+    # rolled out.
+    OPENBAO_ADDR: str | None = None
+    OPENBAO_ROLE_ID: str | None = None
+    OPENBAO_SECRET_ID: str | None = None
+    OPENBAO_MOUNT: str = "netguard-devices"
     # Comma-separated list of exact frontend origins allowed to call this
     # API with credentials, e.g. "https://netguard.example.com". Never
     # use "*" here together with allow_credentials=True (see main.py) --
@@ -36,6 +81,11 @@ class Settings(BaseSettings):
     # the frontend is now reached through Traefik on :80 rather than the
     # Vite dev server's :5173 directly -- see docker/docker-compose.yml.
     CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost"
+
+    # Threat model T17 (DoS): app-level defaults; a single client (incl. an
+    # unauthenticated one hitting /auth/login) previously had no limit at all.
+    RATE_LIMIT_DEFAULT: str = "120/minute"
+    MAX_REQUEST_BODY_BYTES: int = 10 * 1024 * 1024  # 10 MiB
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:
@@ -58,6 +108,8 @@ class Settings(BaseSettings):
             problems.append("SECRET_KEY is still the default placeholder")
         if not self.SECRET_ENCRYPTION_KEY:
             problems.append("SECRET_ENCRYPTION_KEY is unset (falls back to a key committed in app/core/crypto.py)")
+        if self.DEVICE_JOB_SIGNING_KEY == "change-me-device-job-signing-key":
+            problems.append("DEVICE_JOB_SIGNING_KEY is still the default placeholder")
         if self.CORS_ALLOWED_ORIGINS.strip() in ("", "*"):
             problems.append("CORS_ALLOWED_ORIGINS is unset or \"*\" -- set it to your real frontend origin(s)")
 
@@ -65,6 +117,25 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Refusing to start with ENVIRONMENT=production and insecure defaults: "
                 + "; ".join(problems)
+            )
+
+    def validate_device_gateway_secrets(self) -> None:
+        """Called once at Device Gateway startup only (see
+        app.device_gateway.main) -- deliberately NOT folded into
+        validate_production_secrets() above, since that runs in every
+        process (api, every Celery worker) via the shared Settings
+        object, and DEVICE_CREDENTIAL_ENCRYPTION_KEY is meaningful only
+        in the one process meant to hold it. Requiring it globally would
+        either force every process to have it (defeating the point of
+        scoping it to the Gateway) or silently skip validation
+        everywhere (defeating the point of validating it at all)."""
+        if self.ENVIRONMENT != "production":
+            return
+        if not self.DEVICE_CREDENTIAL_ENCRYPTION_KEY and not self.DEVICE_CREDENTIAL_ENCRYPTION_KEYS:
+            raise RuntimeError(
+                "Refusing to start Device Gateway with ENVIRONMENT=production: "
+                "DEVICE_CREDENTIAL_ENCRYPTION_KEY(S) is unset (falls back to a key "
+                "committed in app/core/crypto.py)"
             )
 
     JWT_ALGORITHM: str = "HS256"
@@ -99,6 +170,27 @@ class Settings(BaseSettings):
     # Event bus (dashboard/topology/alerts/notifications live-update fan-out).
     # Replaces the old Redis pub/sub channels -- see app/services/event_bus.py.
     NATS_URL: str = "nats://localhost:4222"
+
+    # Section 5 hardening: the `api` account credentials nats-server.conf
+    # grants to the app tier (api + all Celery workers). NATS_URL carries
+    # no embedded credentials on purpose -- these are passed to
+    # nats.connect(user=..., password=...) explicitly at each call site
+    # so they never end up logged in a connection-string dump. Not
+    # required (None) so that a plain dev NATS with --auth off, e.g. a
+    # bare `nats:2.10-alpine` without nats-server.conf, still works
+    # locally without these being set.
+    NATS_API_USER: str | None = None
+    NATS_API_PASSWORD: str | None = None
+
+    # Section 5: the GATEWAY account nats-server.conf grants to
+    # device-gateway only (subscribe jobs.request/terminal.open, publish
+    # jobs.result.>/terminal.result.>/terminal.session.*.{out,ctl}).
+    # device-gateway's own process is the only one meant to ever read
+    # these two values (see device_gateway/main.py) -- deliberately
+    # named/scoped separately from NATS_API_* rather than reusing it, so
+    # a leaked API .env can never be replayed as gateway credentials.
+    NATS_GATEWAY_USER: str | None = None
+    NATS_GATEWAY_PASSWORD: str | None = None
 
     # Time-series store backing the SNMP Health Dashboard (device/interface
     # metrics) -- replaces the old device_metrics/interface_metrics Postgres
@@ -748,6 +840,52 @@ class Settings(BaseSettings):
     SSO_GROUP_ROLE_MAP: str | None = None
     GOOGLE_WORKSPACE_SERVICE_ACCOUNT_JSON: str | None = None
     GOOGLE_WORKSPACE_ADMIN_EMAIL: str | None = None
+
+    # --- Identity provider selection (Section 1) ---
+    # "local": email/password + TOTP only (app.api.auth), as today.
+    # "oidc": adds Keycloak login (app.api.keycloak_sso) as an available
+    # option alongside local auth -- local auth is deliberately never
+    # fully disabled by this switch (see Section 1: "preserve existing
+    # local authentication as an optional fallback/development mode").
+    # AUTH_PROVIDER only controls what the frontend advertises/prefers;
+    # it does not gate which login endpoints exist.
+    AUTH_PROVIDER: str = "local"
+
+    # Keycloak / generic OIDC login (see app.services.oidc_service /
+    # app.api.keycloak_sso). Separate from the Google SSO settings above
+    # -- both providers can be enabled at once during a migration window
+    # (Section 1: "Google SSO should eventually be migrated behind
+    # Keycloak"), each provisioning/linking NetGuard users independently
+    # via the same find_or_create_user() used for Google, with
+    # provider="keycloak" so the two never collide on sso_subject.
+    #
+    # OIDC_ISSUER, e.g. "https://auth.example.internal/realms/netguard".
+    # JWKS URL, token endpoint, and authorization endpoint are all
+    # derived from this at startup via the issuer's
+    # /.well-known/openid-configuration document rather than configured
+    # individually -- one fewer place for the JWKS URL in particular to
+    # drift out of sync with the issuer, which would otherwise let an
+    # operator accidentally validate tokens against a stale/wrong key set.
+    OIDC_ISSUER: str | None = None
+    OIDC_CLIENT_ID: str | None = None
+    # Confidential client secret. Kept in addition to PKCE (defense in
+    # depth -- see oidc_service.py's docstring on why this deployment
+    # uses both rather than treating them as alternatives), never sent
+    # to the browser.
+    OIDC_CLIENT_SECRET: str | None = None
+    # Must exactly match a redirect URI registered on the Keycloak client,
+    # e.g. "https://netguard.example.com/api/v1/sso/keycloak/callback".
+    OIDC_REDIRECT_URI: str | None = None
+    # Expected `aud` claim. Defaults to OIDC_CLIENT_ID (the common case)
+    # but is separately configurable because some Keycloak setups issue
+    # tokens with a distinct API audience via an audience mapper.
+    OIDC_AUDIENCE: str | None = None
+    # How long a fetched JWKS key set is trusted before re-fetching, so
+    # Keycloak signing-key rotation is picked up automatically without a
+    # NetGuard restart, without hitting the JWKS endpoint on every login.
+    OIDC_JWKS_CACHE_SECONDS: int = 3600
+    OIDC_DEFAULT_ROLE: str = "network_engineer"
+    OIDC_GROUP_ROLE_MAP: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

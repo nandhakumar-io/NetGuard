@@ -7,7 +7,7 @@
 """
 import datetime
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -240,12 +240,15 @@ def test_retention_status_for_device_reports_counts(db_session):
 # ---------------------------------------------------------------------------
 # Rollback preview
 # ---------------------------------------------------------------------------
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=("interface Gi0/1\n live\n", "ssh"))
-def test_preview_rollback_uses_live_config_and_computes_diff(mock_read, db_session):
+@patch(
+    "app.services.rollback_service._live_running_config",
+    new_callable=AsyncMock, return_value="interface Gi0/1\n live\n",
+)
+async def test_preview_rollback_uses_live_config_and_computes_diff(mock_read, db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device, config="interface Gi0/1\n restored\n", version="1")
 
-    preview = rollback_service.preview_rollback(db_session, device, snapshot)
+    preview = await rollback_service.preview_rollback(db_session, device, snapshot, requested_by="tester")
 
     assert preview["current_source"] == "live"
     assert preview["identical"] is False
@@ -255,20 +258,20 @@ def test_preview_rollback_uses_live_config_and_computes_diff(mock_read, db_sessi
     assert preview["blocked"] is False
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_preview_rollback_falls_back_to_last_snapshot_with_warning(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_preview_rollback_falls_back_to_last_snapshot_with_warning(mock_read, db_session):
     device = _make_device(db_session)
     old_snap = _make_snapshot(db_session, device, config="interface Gi0/1\n old\n", version="1")
 
-    preview = rollback_service.preview_rollback(db_session, device, old_snap)
+    preview = await rollback_service.preview_rollback(db_session, device, old_snap, requested_by="tester")
 
     assert preview["current_source"] == "last_snapshot"
     assert preview["warning"] is not None
     assert preview["identical"] is True  # only snapshot on file, comparing to itself
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_preview_rollback_flags_in_flight_change_as_blocked(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_preview_rollback_flags_in_flight_change_as_blocked(mock_read, db_session):
     device = _make_device(db_session)
     admin = _make_admin(db_session)
     snapshot = _make_snapshot(db_session, device)
@@ -280,27 +283,27 @@ def test_preview_rollback_flags_in_flight_change_as_blocked(mock_read, db_sessio
     db_session.add(in_flight)
     db_session.commit()
 
-    preview = rollback_service.preview_rollback(db_session, device, snapshot)
+    preview = await rollback_service.preview_rollback(db_session, device, snapshot, requested_by="tester")
 
     assert preview["blocked"] is True
     assert "already has change request" in preview["blocked_reason"]
 
 
-@patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none"))
-def test_preview_rollback_rejects_snapshot_from_another_device(mock_read, db_session):
+@patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None)
+async def test_preview_rollback_rejects_snapshot_from_another_device(mock_read, db_session):
     device_a = _make_device(db_session, hostname="rtr-a")
     device_b = _make_device(db_session, hostname="rtr-b")
     snapshot = _make_snapshot(db_session, device_a)
 
     with pytest.raises(rollback_service.RollbackError, match="does not belong to device"):
-        rollback_service.preview_rollback(db_session, device_b, snapshot)
+        await rollback_service.preview_rollback(db_session, device_b, snapshot, requested_by="tester")
 
 
-def test_preview_rollback_creates_no_change_request(db_session):
+async def test_preview_rollback_creates_no_change_request(db_session):
     device = _make_device(db_session)
     snapshot = _make_snapshot(db_session, device)
 
-    with patch("app.services.rollback_service.deployment_engine.read_running_config", return_value=(None, "none")):
-        rollback_service.preview_rollback(db_session, device, snapshot)
+    with patch("app.services.rollback_service._live_running_config", new_callable=AsyncMock, return_value=None):
+        await rollback_service.preview_rollback(db_session, device, snapshot, requested_by="tester")
 
     assert db_session.query(ChangeRequest).count() == 0

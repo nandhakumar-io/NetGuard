@@ -29,7 +29,11 @@ def rotation_status(current_user: User = Depends(get_current_user)):
     are currently configured (2+ means an old key is still kept around
     as a fallback, which is expected mid-rotation and worth flagging if
     it lingers)."""
-    return {"active_key_count": crypto.active_key_count()}
+    return {
+        "active_key_count": crypto.active_key_count(),
+        "device_credential_active_key_count": crypto.device_credential_active_key_count(),
+        "device_credential_key_configured": crypto.device_credential_key_configured(),
+    }
 
 
 @router.post("/rotate")

@@ -62,6 +62,20 @@ class JitElevation(Base):
     reason = Column(Text, nullable=False)
     change_request_id = Column(UUID(as_uuid=True), ForeignKey("change_requests.id"), nullable=True, index=True)
 
+    # Device/operation scoping (Section 10 follow-up from Phase 1: JIT
+    # grants were fleet-wide -- any capability the elevated role has
+    # applied to every device). When device_id is set, the grant only
+    # authorizes actions against that one device; NULL preserves the old
+    # fleet-wide behavior for grants that genuinely need it (e.g. "give
+    # me admin for the next hour to handle this incident" with no single
+    # device in mind). scoped_operation narrows further to one
+    # DeviceOperation (app.schemas.device_job) when set; NULL means any
+    # operation the elevated role's permissions allow. Device Gateway's
+    # validator.py enforces both independently of the API -- see its
+    # module docstring, which previously documented this as unenforceable.
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True, index=True)
+    scoped_operation = Column(String, nullable=True)
+
     requested_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     requested_at = Column(DateTime(timezone=True), server_default=func.now())
     requested_duration_minutes = Column(Integer, nullable=False)  # requested window length, echoed back for the reviewer

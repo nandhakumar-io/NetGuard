@@ -38,15 +38,16 @@ from app.models.deployment import (
 )
 from app.models.device import Device
 from app.models.snapshot import ConfigSnapshot
+from app.schemas.device_job import DeviceOperation
 from app.services import (
     audit_service,
     credential_service,
+    device_job_service,
     event_bus,
     flow_service,
     health_monitor,
     maintenance_window_service,
     notification_service,
-    protocol_manager,
     snapshot_service,
     validation_engine,
 )
@@ -99,6 +100,60 @@ def _make_traffic_impact_fn(db: Session, baseline: flow_service.TrafficBaseline)
         return health_monitor.check_traffic_impact(comparisons)
 
     return _fn
+
+
+def _gateway_check_overrides(device: Device, actor_email: str) -> dict[str, callable]:
+    """Builds health_monitor.run_health_suite's remote_check_overrides for
+    the four checks that need a device credential (bgp_neighbor,
+    ospf_neighbor, dhcp, vpn) when DEVICE_GATEWAY_ENABLED, so this worker
+    never resolves device.ssh_credential_ref for post-deploy monitoring --
+    see the ssh_password comment in run_deployment_for_device. Each
+    closure submits a short-lived signed job and hands the Gateway's raw
+    NAPALM-getter output to the same pure interpreter the legacy
+    in-process check_* functions use, so the pass/fail scoring logic is
+    identical either way -- only where the device connection happens
+    differs.
+    """
+    import json as _json
+
+    def _remote_check(operation: DeviceOperation, category: str, check_name: str, interpret):
+        def _fn() -> health_monitor.CheckOutcome:
+            try:
+                job_result = device_job_service.submit_job_sync(
+                    tenant_id=str(device.tenant_id), device_id=str(device.id),
+                    operation=operation, params={}, requested_by=actor_email,
+                )
+            except device_job_service.DeviceJobTimeoutError as exc:
+                return health_monitor.CheckOutcome(category, check_name, False, f"Device Gateway timeout: {exc}")
+            except device_job_service.DeviceJobFailedError as exc:
+                return health_monitor.CheckOutcome(category, check_name, False, f"Device Gateway error: {exc.error}")
+
+            try:
+                raw = _json.loads(job_result.output) if job_result.output else None
+            except (ValueError, TypeError):
+                raw = None
+            return interpret(raw)
+
+        return _fn
+
+    return {
+        "bgp_neighbor": _remote_check(
+            DeviceOperation.GET_BGP_NEIGHBORS, "routing", "bgp_neighbor",
+            health_monitor.check_bgp_neighbors_from_raw,
+        ),
+        "ospf_neighbor": _remote_check(
+            DeviceOperation.GET_OSPF_NEIGHBORS, "routing", "ospf_neighbor",
+            health_monitor.check_ospf_neighbors_from_raw,
+        ),
+        "dhcp": _remote_check(
+            DeviceOperation.GET_FACTS, "services", "dhcp",
+            lambda raw: health_monitor.check_dhcp_from_raw(raw, device.ip_address),
+        ),
+        "vpn": _remote_check(
+            DeviceOperation.GET_VPN_STATUS, "services", "vpn",
+            health_monitor.check_vpn_from_raw,
+        ),
+    }
 
 
 def target_device_ids(cr: ChangeRequest) -> list[uuid.UUID]:
@@ -250,27 +305,39 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     # Resolved up front so a missing/misconfigured credential fails loudly
     # before we ever touch the snapshot or attempt a connection, and is
     # recorded in the audit trail like any other pre-flight failure.
-    try:
-        ssh_password = credential_service.get_ssh_password(device)
-    except credential_service.CredentialNotFoundError as exc:
-        deployment = Deployment(
-            change_request_id=cr.id, device_id=device.id,
-            status=DeploymentStatus.FAILED, protocol="ssh", error_message=str(exc),
-        )
-        db.add(deployment)
-        db.commit()
-        db.refresh(deployment)
-        _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Failed to retrieve credentials: {exc}", "ERROR")
-        audit_service.record_event(
-            db, actor="system", action="Credential Retrieval", result="Failed",
-            device_hostname=device.hostname, change_request_id=cr.id, detail=str(exc),
-        )
-        notification_service.notify(
-            "Deployment Failed", f"{device.hostname}: {exc}", severity="critical",
-            device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
-        )
-        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
-        return deployment
+    #
+    # Gateway note (Section 3/8 of the hardening spec): deploy/rollback/
+    # validate above already go through the Gateway via submit_job_sync
+    # regardless of this flag -- see the comment on that block -- but the
+    # post-deploy monitoring window below still resolved and held this
+    # credential in-worker for its BGP/OSPF/DHCP/VPN checks. When the
+    # Gateway is enabled, this worker has no remaining use for the
+    # credential at all, so it isn't resolved -- ssh_password stays None
+    # and the monitoring window below is built from Gateway-backed check
+    # closures instead of being passed this value.
+    ssh_password: str | None = None
+    if not settings.DEVICE_GATEWAY_ENABLED:
+        try:
+            ssh_password = credential_service.get_ssh_password(device)
+        except credential_service.CredentialNotFoundError as exc:
+            deployment = Deployment(
+                change_request_id=cr.id, device_id=device.id,
+                status=DeploymentStatus.FAILED, protocol="ssh", error_message=str(exc),
+            )
+            db.add(deployment)
+            db.commit()
+            db.refresh(deployment)
+            _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Failed to retrieve credentials: {exc}", "ERROR")
+            audit_service.record_event(
+                db, actor="system", action="Credential Retrieval", result="Failed",
+                device_hostname=device.hostname, change_request_id=cr.id, detail=str(exc),
+            )
+            notification_service.notify(
+                "Deployment Failed", f"{device.hostname}: {exc}", severity="critical",
+                device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
+            )
+            event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
+            return deployment
 
     # We have a valid device, proceed to create the Deployment early to attach logs
     deployment = Deployment(
@@ -357,10 +424,25 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     # rather than trusted from earlier in the workflow. Any failure fails
     # the deployment outright; it never degrades to a warning that lets a
     # bad config reach the device.
-    pm = protocol_manager.ProtocolManager(db, device, operator=actor_email)
+    #
+    # Read via the Device Gateway (Section 3/8): this worker process no
+    # longer opens a device connection itself for this read -- it submits
+    # a signed, independently-revalidated job and the Gateway is the one
+    # that resolves the credential and talks to the device. A Gateway
+    # timeout/rejection is treated the same as a failed live read always
+    # was here -- fall back to the change request's on-file config rather
+    # than failing validation outright, since a live read has always been
+    # best-effort in this step.
     _log_deployment(db, deployment.id, "VALIDATE", "Re-running automated validation before deploy...")
-    live_running = pm.get_running_config()
-    inventory_config = live_running.output if live_running.success else cr.current_config
+    try:
+        get_config_result = device_job_service.submit_job_sync(
+            tenant_id=str(device.tenant_id), device_id=str(device.id),
+            operation=DeviceOperation.GET_RUNNING_CONFIG, params={},
+            requested_by=actor_email,
+        )
+        inventory_config = get_config_result.output
+    except (device_job_service.DeviceJobTimeoutError, device_job_service.DeviceJobFailedError):
+        inventory_config = cr.current_config
     validation = validation_engine.validate_syntax(
         cr.proposed_config,
         vendor=device.vendor.value if hasattr(device.vendor, "value") else device.vendor,
@@ -387,28 +469,52 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         return deployment
     _log_deployment(db, deployment.id, "VALIDATE", "Validation passed.")
 
-    # --- 3. Configuration Deployment (FR-8) via ProtocolManager ---
+    # --- 3. Configuration Deployment (FR-8) via the Device Gateway ---
+    # This is the mutating operation Section 3/8/9 is centrally about: the
+    # worker process must not itself hold network-device connectivity or
+    # decrypt the device's SSH credential to push this config. It submits
+    # a signed DEPLOY_CONFIG job carrying change_request_id=cr.id -- the
+    # Gateway independently re-checks (see device_gateway/validator.py)
+    # that this change request exists, is APPROVED (or DEPLOYING, for the
+    # in-flight case), and was not self-approved, before it ever touches
+    # the device. A compromised worker forging this call still can't push
+    # an unapproved or self-approved change.
     _log_deployment(db, deployment.id, "DEPLOY", "Deploying requested configuration lines...")
 
-    # We pass the proposed_config to deploy_config
-    deploy_result = pm.deploy_config(cr.proposed_config)
-    deployment.protocol = deploy_result.protocol.value if hasattr(deploy_result.protocol, 'value') else deploy_result.protocol
+    try:
+        deploy_job_result = device_job_service.submit_job_sync(
+            tenant_id=str(device.tenant_id), device_id=str(device.id),
+            operation=DeviceOperation.DEPLOY_CONFIG, params={"config_text": cr.proposed_config},
+            requested_by=actor_email, change_request_id=str(cr.id),
+            timeout_seconds=120.0,  # config pushes can run longer than the 30s default
+        )
+        deploy_success, deploy_error = True, None
+        deploy_protocol = deploy_job_result.protocol or "ssh"
+        deploy_execution_ms = deploy_job_result.execution_time_ms or 0.0
+    except device_job_service.DeviceJobFailedError as exc:
+        deploy_success, deploy_error = False, exc.error
+        deploy_protocol, deploy_execution_ms = "ssh", 0.0
+    except device_job_service.DeviceJobTimeoutError as exc:
+        deploy_success, deploy_error = False, str(exc)
+        deploy_protocol, deploy_execution_ms = "ssh", 0.0
 
-    if not deploy_result.success:
+    deployment.protocol = deploy_protocol
+
+    if not deploy_success:
         deployment.status = DeploymentStatus.FAILED
-        deployment.error_message = deploy_result.error
+        deployment.error_message = deploy_error
         db.commit()
-        msg = f"Deployment failed over {deploy_result.protocol}: {deploy_result.error}"
+        msg = f"Deployment failed over {deploy_protocol}: {deploy_error}"
         _log_deployment(db, deployment.id, "DEPLOY", msg, "ERROR")
         notification_service.notify(
-            "Deployment Failed", f"{device.hostname}: {deploy_result.error}", severity="critical",
+            "Deployment Failed", f"{device.hostname}: {deploy_error}", severity="critical",
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
         event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
         _check_circuit_breaker(db, device)
         return deployment
 
-    _log_deployment(db, deployment.id, "DEPLOY", f"Deployment succeeded swiftly over {deploy_result.protocol} ({deploy_result.execution_time_ms:.0f}ms).")
+    _log_deployment(db, deployment.id, "DEPLOY", f"Deployment succeeded swiftly over {deploy_protocol} ({deploy_execution_ms:.0f}ms).")
 
     # --- 4. Real-Time Health Monitoring (FR-9) ---
     # Actually polls the full suite (BGP/OSPF adjacency, DNS/DHCP/HTTP/VPN,
@@ -440,10 +546,11 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         device.ip_address,
         netmiko_type=netmiko_type,
         username=device.ssh_username or "admin",
-        password=ssh_password,
+        password=ssh_password or "",
         hostname=device.hostname,
         enabled_checks=enabled_checks,
         traffic_impact_fn=_make_traffic_impact_fn(db, traffic_baseline) if traffic_baseline else None,
+        remote_check_overrides=_gateway_check_overrides(device, actor_email) if settings.DEVICE_GATEWAY_ENABLED else None,
     )
     for round_ in monitoring.rounds:
         _log_deployment(db, deployment.id, "VERIFY", f"Completed verification round {round_.round_number} (t+{round_.elapsed_seconds}s). Passed: {len([o for o in round_.outcomes if o.passed])}/{len(round_.outcomes)}")
@@ -503,21 +610,41 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     restore_commands = (snapshot_service.decrypt_config(snapshot.running_config_encrypted)).splitlines()
     restore_text = "\n".join([line for line in restore_commands if line.strip()])
 
-    rollback_result = pm.restore_config(restore_text)
+    # Migrated to the Device Gateway, same as the DEPLOY step above --
+    # this is still a mutating write to the device, so the worker must
+    # not resolve the credential/connect itself here either. cr.status is
+    # still DEPLOYING at this point in the pipeline (set by
+    # run_deployment_pipeline_task and not changed until this function
+    # returns), which the Gateway's validator accepts for MUTATING_OPERATIONS
+    # alongside APPROVED -- an unrelated/unapproved change can't ride in
+    # on this call.
+    try:
+        rollback_job_result = device_job_service.submit_job_sync(
+            tenant_id=str(device.tenant_id), device_id=str(device.id),
+            operation=DeviceOperation.ROLLBACK_CONFIG, params={"config_text": restore_text},
+            requested_by=actor_email, change_request_id=str(cr.id),
+            timeout_seconds=120.0,
+        )
+        rollback_success, rollback_error = True, None
+        rollback_protocol = rollback_job_result.protocol or "ssh"
+    except device_job_service.DeviceJobFailedError as exc:
+        rollback_success, rollback_error, rollback_protocol = False, exc.error, "ssh"
+    except device_job_service.DeviceJobTimeoutError as exc:
+        rollback_success, rollback_error, rollback_protocol = False, str(exc), "ssh"
 
-    deployment.status = DeploymentStatus.ROLLED_BACK if rollback_result.success else DeploymentStatus.FAILED
-    deployment.error_message = rollback_result.error
+    deployment.status = DeploymentStatus.ROLLED_BACK if rollback_success else DeploymentStatus.FAILED
+    deployment.error_message = rollback_error
     db.commit()
 
-    if rollback_result.success:
-        _log_deployment(db, deployment.id, "ROLLBACK", f"Rollback succeeded via {rollback_result.protocol}. Device returned to known-good state.", "WARN")
+    if rollback_success:
+        _log_deployment(db, deployment.id, "ROLLBACK", f"Rollback succeeded via {rollback_protocol}. Device returned to known-good state.", "WARN")
     else:
-        _log_deployment(db, deployment.id, "ROLLBACK", f"CRITICAL: Rollback failed! {rollback_result.error}", "ERROR")
+        _log_deployment(db, deployment.id, "ROLLBACK", f"CRITICAL: Rollback failed! {rollback_error}", "ERROR")
 
     notification_service.notify(
         "Automatic Rollback Triggered",
         f"{device.hostname}: health checks failed after deployment. Rollback "
-        f"{'succeeded' if rollback_result.success else 'FAILED — manual intervention required'}.",
+        f"{'succeeded' if rollback_success else 'FAILED — manual intervention required'}.",
         severity="critical",
         device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
     )

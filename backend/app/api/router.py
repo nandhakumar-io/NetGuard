@@ -33,6 +33,7 @@ from app.api import (
     ipam,
     jit_access,
     jobs,
+    keycloak_sso,
     maintenance_windows,
     metrics,
     network_discovery,
@@ -63,6 +64,7 @@ api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(approval_delegates.router)
 api_router.include_router(sso.router)
+api_router.include_router(keycloak_sso.router)
 api_router.include_router(health.router)
 api_router.include_router(devices.router)
 api_router.include_router(device_groups.router)
