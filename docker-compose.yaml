@@ -281,12 +281,18 @@ services:
     read_only: true
     tmpfs:
     - /tmp
+    # Config is embedded as base64 to avoid Docker auto-creating the mount
+    # path as an empty directory (same pattern as the `nats` service above).
+    # Decode to /tmp/openbao.hcl at startup; /tmp is a tmpfs so the file
+    # is never written to the read-only root filesystem.
+    entrypoint:
+    - /bin/sh
+    - -c
     command:
-    - server
-    - -config=/vault/config/openbao.hcl
+    - echo "IyBPcGVuQmFvIHNlcnZlciBjb25maWcgKFNlY3Rpb24gMTcpLiBGaWxlIHN0b3JhZ2UgYmFja2VuZCAtLSBmaW5lIGZvciBhCiMgc2luZ2xlLW5vZGUgZGVwbG95bWVudDsgbW92ZSB0byBSYWZ0L2ludGVncmF0ZWQgc3RvcmFnZSBvciBhbiBIQQojIGJhY2tlbmQgYmVmb3JlIHJ1bm5pbmcgbW9yZSB0aGFuIG9uZSBPcGVuQmFvIHJlcGxpY2EuCiMKIyBUTFMgaXMgaW50ZW50aW9uYWxseSBsZWZ0IGRpc2FibGVkIG9uIHRoZSBsaXN0ZW5lciBoZXJlIGJlY2F1c2UgT3BlbkJhbwojIHNpdHMgZW50aXJlbHkgb24gbmV0Z3VhcmQtc2VjcmV0cy9uZXRndWFyZC1pbnRlcm5hbCwgbmV2ZXIgb24gdGhlIHByb3h5CiMgbmV0d29yaywgYW5kIHRoZSBjb21wb3NlIGZpbGUgZ2l2ZXMgaXQgbm8gcHVibGlzaGVkIHBvcnQgLS0gc2VlCiMgZG9ja2VyLWNvbXBvc2UueWFtbCdzIGNvbW1lbnQgb24gdGhlIGBvcGVuYmFvYCBzZXJ2aWNlIGZvciB0aGUgbmV0d29yawojIEFDTCByZWFzb25pbmcuIFRlcm1pbmF0ZSBUTFMgYXQgdGhlIGxpc3RlbmVyIGluc3RlYWQgaWYgT3BlbkJhbyBpcyBldmVyCiMgcmVhY2hhYmxlIGZyb20gYSBuZXR3b3JrIHlvdSBkb24ndCBmdWxseSB0cnVzdC4KCnVpID0gZmFsc2UKCmxpc3RlbmVyICJ0Y3AiIHsKICBhZGRyZXNzICAgICA9ICIwLjAuMC4wOjgyMDAiCiAgdGxzX2Rpc2FibGUgPSB0cnVlCn0KCnN0b3JhZ2UgImZpbGUiIHsKICBwYXRoID0gIi92YXVsdC9kYXRhIgp9CgojIERpc2FibGVkOiBtbG9jayBpcyBoYW5kbGVkIHZpYSB0aGUgSVBDX0xPQ0sgY2FwYWJpbGl0eSBncmFudGVkIGluCiMgZG9ja2VyLWNvbXBvc2UueWFtbCBpbnN0ZWFkIG9mIGJlaW5nIHR1cm5lZCBvZmYgaGVyZSwgc28gc2VjcmV0cyBzdGlsbAojIGRvbid0IGdldCBzd2FwcGVkIHRvIGRpc2suCmRpc2FibGVfbWxvY2sgPSBmYWxzZQoKYXBpX2FkZHIgICAgID0gImh0dHA6Ly9vcGVuYmFvOjgyMDAiCmNsdXN0ZXJfYWRkciA9ICJodHRwOi8vb3BlbmJhbzo4MjAxIgoKbG9nX2xldmVsID0gImluZm8iCg=="
+        | base64 -d > /tmp/openbao.hcl && bao server -config=/tmp/openbao.hcl
     volumes:
     - netguard_openbaodata:/vault/data
-    - ./openbao/config/openbao.hcl:/vault/config/openbao.hcl:ro
     healthcheck:
       test:
       - CMD
@@ -300,9 +306,6 @@ services:
     - no-new-privileges:true
     networks:
     - netguard-secrets
-    entrypoint:
-    - /bin/sh
-    - -c
   keycloak-db:
     image: postgres:16-alpine
     restart: unless-stopped

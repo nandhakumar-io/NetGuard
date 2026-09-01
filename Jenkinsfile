@@ -294,13 +294,14 @@ pipeline {
                         // auto-created these paths as empty directories, and scp will happily write *into*
                         // a stale directory instead of replacing it, silently reproducing this exact bug forever.
                         sshagent(['kenpachi-prod']) {
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "rm -rf /opt/NetGuard/docker/nats/nats-server.conf /opt/NetGuard/backend/app/nats/nats-server.conf /opt/NetGuard/openbao/config/openbao.hcl"'
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard/docker/nats /opt/NetGuard/openbao/config"'
+                            // NATS and OpenBao configs are embedded as base64 in docker-compose.yaml
+                            // so no host-side config file mounts exist -- only docker-compose.yaml
+                            // itself needs to be synced.  Clean up any stale mount paths a prior
+                            // failed run may have left as empty directories so Docker doesn't try
+                            // to mount a directory over what should be a file path.
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard"'
                             sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
-                            sh 'scp -o StrictHostKeyChecking=no docker/nats/nats-server.conf kenpachi-prod@172.17.1.6:/opt/NetGuard/docker/nats/nats-server.conf'
-                            sh 'scp -o StrictHostKeyChecking=no openbao/config/openbao.hcl kenpachi-prod@172.17.1.6:/opt/NetGuard/openbao/config/openbao.hcl'
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "test -f /opt/NetGuard/docker/nats/nats-server.conf && echo NATS_CONF_OK || (echo NATS_CONF_MISSING_OR_DIR; exit 1)"'
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "test -f /opt/NetGuard/openbao/config/openbao.hcl && echo BAO_CONF_OK || (echo BAO_CONF_MISSING_OR_DIR; exit 1)"'
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "test -f /opt/NetGuard/docker-compose.yaml && echo COMPOSE_OK || (echo COMPOSE_MISSING; exit 1)"'
                         }
 
                         deploy(IMAGE_TAG)
