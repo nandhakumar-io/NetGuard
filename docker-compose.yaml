@@ -55,6 +55,9 @@ services:
     tmpfs:
     - /tmp
     - /var/run
+    # pgbouncer entrypoint writes /etc/pgbouncer/userlist.txt at startup;
+    # needs to be tmpfs on a read_only container.
+    - /etc/pgbouncer
     security_opt:
     - no-new-privileges:true
     cap_drop:
@@ -347,9 +350,11 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     restart: unless-stopped
+    # Note: --optimized requires a custom image pre-built with `kc.sh build`.
+    # The stock quay.io/keycloak image must use plain `start` which builds
+    # its configuration on first launch (slower but correct).
     command:
     - start
-    - --optimized
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/${KEYCLOAK_DB_NAME:-keycloak}
