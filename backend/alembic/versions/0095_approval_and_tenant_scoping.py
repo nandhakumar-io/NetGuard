@@ -33,6 +33,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from migration_helpers import add_column_if_missing
 
 revision = "0095"
 down_revision = "0094"
@@ -41,27 +42,39 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "users",
         sa.Column("is_approved", sa.Boolean(), nullable=False, server_default=sa.true()),
     )
 
-    op.add_column(
+    add_column_if_missing(
         "webhook_endpoints",
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=True),
     )
-    op.create_index("ix_webhook_endpoints_tenant_id", "webhook_endpoints", ["tenant_id"])
-    op.create_foreign_key(
-        "fk_webhook_endpoints_tenant_id", "webhook_endpoints", "tenants", ["tenant_id"], ["id"],
+    with op.get_context().autocommit_block():
+        op.execute("CREATE INDEX IF NOT EXISTS ix_webhook_endpoints_tenant_id ON webhook_endpoints (tenant_id)")
+
+    op.execute(
+        "DO $$ BEGIN "
+        "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_webhook_endpoints_tenant_id') THEN "
+        "ALTER TABLE webhook_endpoints ADD CONSTRAINT fk_webhook_endpoints_tenant_id FOREIGN KEY (tenant_id) REFERENCES tenants (id); "
+        "END IF; "
+        "END $$;"
     )
 
-    op.add_column(
+    add_column_if_missing(
         "alert_rules",
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=True),
     )
-    op.create_index("ix_alert_rules_tenant_id", "alert_rules", ["tenant_id"])
-    op.create_foreign_key(
-        "fk_alert_rules_tenant_id", "alert_rules", "tenants", ["tenant_id"], ["id"],
+    with op.get_context().autocommit_block():
+        op.execute("CREATE INDEX IF NOT EXISTS ix_alert_rules_tenant_id ON alert_rules (tenant_id)")
+
+    op.execute(
+        "DO $$ BEGIN "
+        "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_alert_rules_tenant_id') THEN "
+        "ALTER TABLE alert_rules ADD CONSTRAINT fk_alert_rules_tenant_id FOREIGN KEY (tenant_id) REFERENCES tenants (id); "
+        "END IF; "
+        "END $$;"
     )
 
     # Backfill both new tenant_id columns onto the "Default" tenant, same

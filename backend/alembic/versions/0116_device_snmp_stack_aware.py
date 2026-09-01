@@ -15,6 +15,7 @@ until explicitly opted in.
 import sqlalchemy as sa
 
 from alembic import op
+from migration_helpers import add_column_if_missing
 
 revision = "0116"
 down_revision = "0115"
@@ -23,7 +24,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "devices",
         sa.Column("snmp_stack_aware", sa.Boolean(), nullable=False, server_default="false"),
     )

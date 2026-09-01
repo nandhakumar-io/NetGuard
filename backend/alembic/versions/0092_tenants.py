@@ -85,8 +85,8 @@ def upgrade() -> None:
     )
 
     with op.get_context().autocommit_block():
-        op.create_index("ix_devices_tenant_id", "devices", ["tenant_id"])
-        op.create_index("ix_users_tenant_id", "users", ["tenant_id"])
+        op.execute("CREATE INDEX IF NOT EXISTS ix_devices_tenant_id ON devices (tenant_id)")
+        op.execute("CREATE INDEX IF NOT EXISTS ix_users_tenant_id ON users (tenant_id)")
 
     op.create_foreign_key(
         "fk_devices_tenant_id", "devices", "tenants", ["tenant_id"], ["id"]

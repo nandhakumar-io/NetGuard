@@ -1,0 +1,83 @@
+import base64
+import re
+
+cfg_raw = """Iy BOQVRTIHNlcnZlciBjb25maWcgKFNlY3Rpb24gNSkuIFJlcGxhY2VzIHRoZSBwcmV2aW91cyB6ZXJvLWF1dGgKIyBgLWpzIC1zZCAvZGF0YSAtbSA4MjIyYCBjb21tYW5kIHdpdGg6CiMgICAtIGF1dGhlbnRpY2F0aW9uIChwZXItc2VydmljZSBhY2NvdW50cy9jcmVkZW50aWFscywgbm90IGEgc2hhcmVkIHRva2VuKQojICAgLSBzdWJqZWN0LWxldmVsIGF1dGhvcml6YXRpb24gKGVhY2ggYWNjb3VudCBjYW4gb25seSBwdWJsaXNoL3N1YnNjcmliZQojICAgICB3aGF0IHRoYXQgc2VydmljZSBhY3R1YWxseSBuZWVkcykKIyAgIC0gbW9uaXRvcmluZyByZXN0cmljdGVkIHRvIGxvb3BiYWNrICh3YXMgMC4wLjAuMDo4MjIyLCByZWFjaGFibGUgZnJvbQojICAgICB0aGUgd2hvbGUgZmxhdCBpbnRlcm5hbCBuZXR3b3JrKQojCiMgQWNjb3VudCBkZXNpZ24sIG1hdGNoaW5nIHdobyBhY3R1YWxseSBjb25uZWN0cyAoc2VlIGdyZXAgb2YKIyBgbmF0cy5jb25uZWN0KGAgYWNyb3NzIGJhY2tlbmQvIC0tIHRocmVlIGNhbGwgc2l0ZXM6IHRoZSBBUEkvd29ya2VycwojIHZpYSBkZXZpY2Vfam9iX3NlcnZpY2UucHkgKyBldmVudF9idXMucHksIGFuZCB0aGUgRGV2aWNlIEdhdGV3YXkpOgojCiMgICBBUFAgYWNjb3VudCAgIC0tIGFwaSArIGFsbCBDZWxlcnkgd29ya2VycyAoYmVhdC9wb2xsZXIvZGVwbG95ZXIvCiMgICAgICAgICAgICAgICAgICAgIGZpcm13YXJlL3dvcmtlci9ub3RpZmllci9jb2xsZWN0b3IpLiBUaGVzZSBhbGwgcnVuCiMgICAgICAgICAgICAgICAgICAgIHRoZSBzYW1lIHRydXN0ZWQgYXBwbGljYXRpb24gY29kZSBhbmQgc2hhcmUgdGhlCiMgICAgICAgICAgICAgICAgICAgIGV2ZW50X2J1cyBKZXRTdHJlYW0gc3RyZWFtLCBzbyBvbmUgYWNjb3VudCBmb3IgdGhpcwojICAgICAgICAgICAgICAgICAgICB0aWVyIGlzIGEgcmVhc29uYWJsZSBib3VuZGFyeSAtLSB0aGUgbWVhbmluZ2Z1bAojICAgICAgICAgICAgICAgICAgICB0cnVzdCBib3VuZGFyeSBpbiB0aGlzIHN5c3RlbSBpcyBhcHAtdGllciB2cy4KIyAgICAgICAgICAgICAgICAgICAgZGV2aWNlLWdhdGV3YXktdGllciwgbm90IHdvcmtlci12cy13b3JrZXIuCiMgICAgIC0gcHVibGlzaCAgam9icy5yZXF1ZXN0ICAgICAgICAgICAgICAoc3VibWl0IGEgZGV2aWNlIGpvYikKIyAgICAgLSBzdWJzY3JpYmUgam9icy5yZXN1bHQuPiAgICAgICAgICAgIChvbmx5IElUUyBPV04gam9iJ3MgcmVzdHJ1bHQ7CiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBzdWJqZWN0IGluY2x1ZGVzIGpvYl9pZCkKIyAgICAgLSBwdWJsaXNoICB0ZXJtaW5hbC5vcGVuICAgICAgICAgICAgIChvcGVuIGFuIGludGVyYWN0aXZlIHNlc3Npb24gLS0KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VlIGFwcC5hcGkudGVybWluYWwgLwojICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBhcHAuc2NoZW1hcy50ZXJtaW5hbF9qb2IpCiMgICAgIC0gcHVibGlzaCAgdGVybWluYWwuc2Vzc2lvbi4qLmluICAgICAoYnJvd3NlciBrZXlzdHJva2VzIC0tIEFQSSBjYW4KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgb25seSBwdWJsaXNoIGlucHV0IGZvciBhCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlc3Npb25faWQgaXQgaXRzZWxmIGNyZWF0ZWQsCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNpbmNlIHRoYXQgSUQgaXMgYW4KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdW5ndWVzc2FibGUgdXVpZDQgaXQgY2hvc2UpCiMgICAgIC0gc3Vic2NyaWJlIHRlcm1pbmFsLnJlc3VsdC4+ICAgICAgICAob3duIHNlc3Npb24ncyBvcGVuIHJlc3VsdCkKIyAgICAgLSBzdWJzY3JpYmUgdGVybWluYWwuc2Vzc2lvbi4qLm91dCAgIChkZXZpY2Ugb3V0cHV0IGZvciBpdHMgb3duCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlc3Npb25zKQojICAgICAtIHN1YnNjcmliZSB0ZXJtaW5hbC5zZXNzaW9uLiouY3RsICAgKHNlc3Npb24gbGlmZWN5Y2xlIHNpZ25hbHMpCiMgICAgIC0gcHVibGlzaC9zdWJzY3JpYmUgbmV0Z3VhcmQuPiAgICAgICAoZGFzaGJvYXJkL2FsZXJ0cy90b3BvbG9neS8KIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgbm90aWZpY2F0aW9ucyBVSS1yZWZyZXNoIGV2ZW50cykKIyAgICAgLSAkSlMuQVBJLj4gICAgICAgICAgICAgICAgICAgICAgICAgIChKZXRTdHJlYW0gc3RyZWFtL2NvbnN1bWVyCiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG1hbmFnZW1lbnQgLS0gZXZlbnRfYnVzLnB5CiMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxhemlseSBjcmVhdGVzIHRoZQojICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBORVRHVUFSRF9FVkVOVFMgc3RyZWFtKQojICAgICBEZWxpYmVyYXRlbHkgQ0FOTk9UIHB1Ymxpc2ggdGVybWluYWwuc2Vzc2lvbi4qLm91dCBvciAuY3RsLCBhbmQKIyAgICAgQ0FOTk9UIHB1Ymxpc2ggam9icy5yZXN1bHQuPiAtLSB0aG9zZSBhcmUgdGhlIEdhdGV3YXkncyBleGNsdXNpdmUKIyAgICAgb3V0cHV0czsgYSBjb21wcm9taXNlZCBBUEkgZm9yZ2luZyBhICJmYWtlIGRldmljZSBzYWlkIHRoaXMiIG91dHB1dAojICAgICBtZXNzYWdlIG9yIGEgZmFrZSBqb2Ivc2Vzc2lvbiByZXN1bHQgaXMgZXhhY3RseSB3aGF0IHN1YmplY3QtbGV2ZWwKIyAgICAgQUNMcyAobm90IGp1c3QgdGhlIEhNQUMgc2lnbmF0dXJlIG9uIHRoZSBqb2Ivc2Vzc2lvbi1vcGVuIGVudmVsb3BlKQojICAgICBleGlzdCB0byBydWxlIG91dCBhdCB0aGUgdHJhbnNwb3J0IGxheWVyLgojCiMgICBHQVRFV0FZIGFjY291bnQgLS0gZGV2aWNlLWdhdGV3YXkgb25seS4KIyAgICAgLSBzdWJzY3JpYmUgam9icy5yZXF1ZXN0CiMgICAgIC0gcHVibGlzaCAgam9icy5yZXN1bHQuPgojICAgICAtIHN1YnNjcmliZSB0ZXJtaW5hbC5vcGVuCiMgICAgIC0gc3Vic2NyaWJlIHRlcm1pbmFsLnNlc3Npb24uKi5pbiAgICAob25seSBhZnRlciB0aGUgR2F0ZXdheSBpdHNlbGYKIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgb3BlbmVkIHRoYXQgc2Vzc2lvbikKIyAgICAgLSBwdWJsaXNoICB0ZXJtaW5hbC5yZXN1bHQuPgojICAgICAtIHB1Ymxpc2ggIHRlcm1pbmFsLnNlc3Npb24uKi5vdXQKIyAgICAgLSBwdWJsaXNoICB0ZXJtaW5hbC5zZXNzaW9uLiouY3RsCiMgICAgIERlbGliZXJhdGVseSBDQU5OT1QgcHVibGlzaCBqb2JzLnJlcXVlc3QsIHRlcm1pbmFsLm9wZW4sIG9yCiMgICAgIHRlcm1pbmFsLnNlc3Npb24uKi5pbiwgYW5kIENBTk5PVCBzdWJzY3JpYmUgdG8gbmV0Z3VhcmQuPiAtLSBhCiMgICAgIGNvbXByb21pc2VkIEdhdGV3YXkgaGFzIG5vIHJlYXNvbiB0byBmb3JnZSBhIGpvYi9zZXNzaW9uIHJlcXVlc3QKIyAgICAgYmFjayB0byBpdHNlbGYsIGluamVjdCBmYWtlIGJyb3dzZXIga2V5c3Ryb2tlcywgb3IgcHVzaCBmYWtlCiMgICAgIGRhc2hib2FyZCBldmVudHMsIHNvIG5vbmUgb2YgdGhvc2UgcGVybWlzc2lvbnMgaXMgZ3JhbnRlZC4KIwojICAgQVVESVQgYWNjb3VudCAtLSByZXNlcnZlZCBmb3IgYSBmdXR1cmUgYXVkaXQtZXZlbnQgY29uc3VtZXIKIyAgICAgKFNlY3Rpb24gMTMpLiBTdWJzY3JpYmUtb25seSwgb24gYXVkaXQuKiAtLSBub3RoaW5nIHB1Ymxpc2hlcyB0aGVyZQojICAgICB5ZXQsIHNvIHRoaXMgaXMgaW5lcnQgdW50aWwgdGhhdCBjb25zdW1lciBleGlzdHMsIGJ1dCB0aGUgYWNjb3VudAojICAgICBhbmQgaXRzIHJlc3RyaWN0ZWQgcGVybWlzc2lvbiBzZXQgYXJlIGRlZmluZWQgbm93IHNvIHdpcmluZyBpdCB1cAojICAgICBsYXRlciBkb2Vzbid0IHJlcXVpcmUgYW5vdGhlciBOQVRTLWNvbmZpZyBjaGFuZ2UuCiMKIyAgIFNZUyBhY2NvdW50IC0tIHN5c3RlbSBhY2NvdW50LCB1c2VkIG9ubHkgZm9yIGBuYXRzLXNlcnZlcmAKIyAgICAgb3BlcmF0aW9uYWwgY29tbWFuZHMsIG5vdCBieSBhbnkgTmV0R3VhcmQgc2VydmljZS4KIwojIFBhc3N3b3JkcyBjb21lIGZyb20gZW52aXJvbm1lbnQgc3Vic3RpdHV0aW9uIGF0IGNvbnRhaW5lciBzdGFydCAoc2VlCiMgZG9ja2VyLWNvbXBvc2UueWFtbCdzIGBuYXRzYCBzZXJ2aWNlLCB3aGljaCB0ZW1wbGF0ZXMgdGhpcyBmaWxlIGJlZm9yZQojIGBuYXRzLXNlcnZlcmAgcmVhZHMgaXQpIC0tIG5vdGhpbmcgaGVyZSBpcyBhIGxpdGVyYWwgc2VjcmV0LgoKbGlzdGVuOiAwLjAuMC4wOjQyMjIKCmpldHN0cmVhbSB7CiAgc3RvcmVfZGlyOiAvZGF0YQp9CgojIE1vbml0b3JpbmcgZW5kcG9pbnQ6IGJpbmQgdG8gbG9jYWxob3N0IG9ubHkuIFRoZSBwcmV2aW91cyBjb25maWcKIyBleHBvc2VkIDo4MjIyIHRvIHRoZSB3aG9sZSBuZXRndWFyZC1pbnRlcm5hbCBuZXR3b3JrIHdpdGggbm8KIyByZXN0cmljdGlvbjsgbm90aGluZyBvdXRzaWRlIHRoaXMgY29udGFpbmVyIG5lZWRzIGl0LCBzbyBpdCdzIG5vCiMgbG9uZ2VyIHB1Ymxpc2hlZCBpbiBkb2NrZXItY29tcG9zZS55YW1sIGVpdGhlci4KaHR0cDogMTI3LjAuMC4xOjgyMjIKCmFjY291bnRzOiB7CiAgU1lTOiB7CiAgICB1c2VyczogWwogICAgICB7IHVzZXI6ICIkTkFUU19TWVNfVVNFUiIsIHBhc3N3b3JkOiAiJE5BVFNfU1lTX1BBU1NXT1JEIiB9CiAgICBdCiAgfQoKICBBUFA6IHsKICAgIGpldHN0cmVhbTogZW5hYmxlZAogICAgdXNlcnM6IFsKICAgICAgeyB1c2VyOiAiJE5BVFNfQVBJX1VTRVIiLCBwYXNzd29yZDogIiROQVRTX0FQSV9QQVNTV09SRCIgfQogICAgXQogICAgZXhwb3J0czogW10KICAgIHBlcm1pc3Npb25zOiB7CiAgICAgIHB1Ymxpc2g6IHsKICAgICAgICBhbGxvdzogWyJqb2JzLnJlcXVlc3QiLCAidGVybWluYWwub3BlbiIsICJ0ZXJtaW5hbC5zZXNzaW9uLiouaW4iLCAibmV0Z3VhcmQuPiIsICIkSlMuQVBJLj4iXQogICAgICB9CiAgICAgIHN1YnNjcmliZTogewogICAgICAgIGFsbG93OiBbCiAgICAgICAgICAiam9icy5yZXN1bHQuPiIsICJ0ZXJtaW5hbC5yZXN1bHQuPiIsICJ0ZXJtaW5hbC5zZXNzaW9uLioub3V0IiwgInRlcm1pbmFsLnNlc3Npb24uKi5jdGwiLAogICAgICAgICAgIm5ldGd1YXJkLj4iLCAiX0lOQk9YLj4iCiAgICAgICAgXQogICAgICB9CiAgICB9CiAgfQoKICBHQVRFV0FZOiB7CiAgICB1c2VyczogWwogICAgICB7IHVzZXI6ICIkTkFUU19HQVRFV0FZX1VTRVIiLCBwYXNzd29yZDogIiROQVRTX0dBVEVXQVlfUEFTU1dPUkQiIH0KICAgIF0KICAgIHBlcm1pc3Npb25zOiB7CiAgICAgIHB1Ymxpc2g6IHsKICAgICAgICBhbGxvdzogWyJqb2JzLnJlc3VsdC4+IiwgInRlcm1pbmFsLnJlc3VsdC4+IiwgInRlcm1pbmFsLnNlc3Npb24uKi5vdXQiLCAidGVybWluYWwuc2Vzc2lvbi4qLmN0bCJdCiAgICAgIH0KICAgICAgc3Vic2NyaWJlOiB7CiAgICAgICAgYWxsb3c6IFsiam9icy5yZXF1ZXN0IiwgInRlcm1pbmFsLm9wZW4iLCAidGVybWluYWwuc2Vzc2lvbi4qLmluIiwgIl9JTkJPWC4+Il0KICAgICAgfQogICAgfQogIH0KCiAgQVVESVQ6IHsKICAgIHVzZXJzOiBbCiAgICAgIHsgdXNlcjogIiROQVRTX0FVRElUX1VTRVIiLCBwYXNzd29yZDogIiROQVRTX0FVRElUX1BBU1NXT1JEIiB9CiAgICBdCiAgICBwZXJtaXNzaW9uczogewogICAgICBwdWJsaXNoOiB7CiAgICAgICAgZGVueTogWyI+Il0KICAgICAgfQogICAgICBzdWJzY3JpYmU6IHsKICAgICAgICBhbGxvdzogWyJhdWRpdC4+Il0KICAgICAgfQogICAgfQogIH0KfQoKc3lzdGVtX2FjY291bnQ6IFNZUwoKbm9fYXV0aF91c2VyOiAiIgo="""
+dec = base64.b64decode(cfg_raw.replace(' ','').replace('\\n',''))
+text = dec.decode()
+
+app_repl = '''users: [
+      { 
+        user: "$NATS_API_USER"
+        password: "$NATS_API_PASSWORD"
+        permissions: {
+          publish: {
+            allow: ["jobs.request", "terminal.open", "terminal.session.*.in", "netguard.>", "$JS.API.>"]
+          }
+          subscribe: {
+            allow: [
+              "jobs.result.>", "terminal.result.>", "terminal.session.*.out", "terminal.session.*.ctl",
+              "netguard.>", "_INBOX.>"
+            ]
+          }
+        }
+      }
+    ]
+    exports: []'''
+
+gw_repl = '''users: [
+      { 
+        user: "$NATS_GATEWAY_USER"
+        password: "$NATS_GATEWAY_PASSWORD"
+        permissions: {
+          publish: {
+            allow: ["jobs.result.>", "terminal.result.>", "terminal.session.*.out", "terminal.session.*.ctl"]
+          }
+          subscribe: {
+            allow: ["jobs.request", "terminal.open", "terminal.session.*.in", "_INBOX.>"]
+          }
+        }
+      }
+    ]'''
+
+audit_repl = '''users: [
+      { 
+        user: "$NATS_AUDIT_USER"
+        password: "$NATS_AUDIT_PASSWORD"
+        permissions: {
+          publish: {
+            deny: [">"]
+          }
+          subscribe: {
+            allow: ["audit.>"]
+          }
+        }
+      }
+    ]'''
+
+# Manually construct accounts block to be safe
+accounts_block = '''accounts: {
+  SYS: {
+    users: [
+      { user: "$NATS_SYS_USER", password: "$NATS_SYS_PASSWORD" }
+    ]
+  }
+
+  APP: {
+    jetstream: enabled
+    ''' + app_repl + '''
+  }
+
+  GATEWAY: {
+    ''' + gw_repl + '''
+  }
+
+  AUDIT: {
+    ''' + audit_repl + '''
+  }
+}'''
+
+# Replace from `accounts: {` to `}` before `system_account: SYS`
+text = re.sub(r'accounts: \{.*^\}', accounts_block, text, flags=re.MULTILINE | re.DOTALL)
+
+with open('new_nats.b64', 'w') as f:
+    f.write(base64.b64encode(text.encode()).decode())

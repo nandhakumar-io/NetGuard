@@ -40,7 +40,7 @@ class OnCallSchedule(Base):
     secondary_user_email = Column(String, nullable=True)
 
     rotation_type = Column(
-        Enum(OnCallRotationType, name="oncallrotationtype"),
+        Enum(OnCallRotationType, name="oncallrotationtype", values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
         default=OnCallRotationType.NONE,
         server_default=OnCallRotationType.NONE.value,

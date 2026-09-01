@@ -28,10 +28,7 @@ def upgrade() -> None:
 def op_create_index() -> None:
     from alembic import op
 
-    try:
-        op.create_index("ix_devices_block", "devices", ["block"])
-    except Exception:
-        pass
+    op.execute("CREATE INDEX IF NOT EXISTS ix_devices_block ON devices (block)")
 
 
 def downgrade() -> None:

@@ -1,0 +1,101 @@
+Applying database migrations...
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 0061 -> 0062, Expand AlertRuleMetric with interface/hardware health metrics
+INFO  [alembic.runtime.migration] Running upgrade 0062 -> 0063, IPAM: nmap OS/device-type fingerprint columns on subnet_scanned_hosts
+INFO  [alembic.runtime.migration] Running upgrade 0063 -> 0064, Devices: explicit is_uplink flag for WAN/uplink monitoring
+INFO  [alembic.runtime.migration] Running upgrade 0064 -> 0065, IPAM: scheduled subnet re-scan fields
+INFO  [alembic.runtime.migration] Running upgrade 0065 -> 0066, Drift: tag detections that happened during an active maintenance window
+INFO  [alembic.runtime.migration] Running upgrade 0066 -> 0067, JIT: dual-approval fields, fed by the linked change request's risk
+INFO  [alembic.runtime.migration] Running upgrade 0067 -> 0068, JIT: track whether an "expiring soon" notification has already fired
+INFO  [alembic.runtime.migration] Running upgrade 0068 -> 0069, User Management: last_login_at; Database Backups: backup_jobs table
+INFO  [alembic.runtime.migration] Running upgrade 0069 -> 0070, gnmi_streaming_telemetry
+INFO  [alembic.runtime.migration] Running upgrade 0070 -> 0071, terminal_session_recordings
+INFO  [alembic.runtime.migration] Running upgrade 0071 -> 0072, maintenance_window_change_request_link
+INFO  [alembic.runtime.migration] Running upgrade 0072 -> 0073, Cloud Backups: backup_destinations table, backup_jobs.offsite_results
+INFO  [alembic.runtime.migration] Running upgrade 0073 -> 0074, Network Discovery: discovery_scans, discovered_hosts tables
+INFO  [alembic.runtime.migration] Running upgrade 0074 -> 0075, Discovered host IPAM cross-reference: ipam_status, ipam_reservation_note
+INFO  [alembic.runtime.migration] Running upgrade 0075 -> 0076, Discovered host actor trail + persistent per-schedule ignore rules
+INFO  [alembic.runtime.migration] Running upgrade 0076 -> 0077, Discovered neighbor switchport (trunk/access mode + VLAN) columns
+INFO  [alembic.runtime.migration] Running upgrade 0077, 85cec3c5accf -> 0078, Merge heads
+INFO  [alembic.runtime.migration] Running upgrade 0078 -> 0079, User extra_roles (fine-grained custom permissions)
+INFO  [alembic.runtime.migration] Running upgrade 0079 -> 0080, User extra_permissions (fine-grained capability/page permissions)
+INFO  [alembic.runtime.migration] Running upgrade 0080 -> 0081, Discovery scan celery_task_id (for real scan cancellation)
+INFO  [alembic.runtime.migration] Running upgrade 0081 -> 0082, Push notification support (ntfy, Pushover) on webhook_endpoints
+INFO  [alembic.runtime.migration] Running upgrade 0082 -> 0083, add_syslog_destinations
+INFO  [alembic.runtime.migration] Running upgrade 0083 -> 0084, webhook action buttons
+INFO  [alembic.runtime.migration] Running upgrade 0084 -> 0085, push subscription action buttons
+INFO  [alembic.runtime.migration] Running upgrade 0085 -> 0086, device block (topology grouping)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+psycopg2.errors.InFailedSqlTransaction: current transaction is aborted, commands ignored until end of transaction block
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/local/bin/alembic", line 8, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 636, in main
+    CommandLine(prog=prog).main(argv=argv)
+  File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 626, in main
+    self.run_cmd(cfg, options)
+  File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 603, in run_cmd
+    fn(
+  File "/usr/local/lib/python3.12/site-packages/alembic/command.py", line 406, in upgrade
+    script.run_env()
+  File "/usr/local/lib/python3.12/site-packages/alembic/script/base.py", line 582, in run_env
+    util.load_python_file(self.dir, "env.py")
+  File "/usr/local/lib/python3.12/site-packages/alembic/util/pyfiles.py", line 95, in load_python_file
+    module = load_module_py(module_id, path)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/alembic/util/pyfiles.py", line 113, in load_module_py
+    spec.loader.exec_module(module)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/app/alembic/env.py", line 55, in <module>
+    run_migrations_online()
+  File "/app/alembic/env.py", line 49, in run_migrations_online
+    context.run_migrations()
+  File "<string>", line 8, in run_migrations
+  File "/usr/local/lib/python3.12/site-packages/alembic/runtime/environment.py", line 946, in run_migrations
+    self.get_context().run_migrations(**kw)
+  File "/usr/local/lib/python3.12/site-packages/alembic/runtime/migration.py", line 635, in run_migrations
+    head_maintainer.update_to_step(step)
+  File "/usr/local/lib/python3.12/site-packages/alembic/runtime/migration.py", line 867, in update_to_step
+    self._update_version(from_, to_)
+  File "/usr/local/lib/python3.12/site-packages/alembic/runtime/migration.py", line 802, in _update_version
+    ret = self.context.impl._exec(
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/alembic/ddl/impl.py", line 210, in _exec
+    return conn.execute(construct, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1418, in execute
+    return meth(
+           ^^^^^
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/sql/elements.py", line 515, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1640, in _execute_clauseelement
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 2355, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+sqlalchemy.exc.InternalError: (psycopg2.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+
+[SQL: UPDATE alembic_version SET version_num='0086' WHERE alembic_version.version_num = '0085']
+(Background on this error at: https://sqlalche.me/e/20/2j85)
