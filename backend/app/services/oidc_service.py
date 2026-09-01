@@ -217,6 +217,7 @@ def exchange_code_for_claims(code: str, code_verifier: str) -> dict:
         raise OidcLoginError("Keycloak rejected the login code (it may have expired, already been used, or PKCE verification failed)")
 
     id_token = token_resp.json().get("id_token")
+    access_token = token_resp.json().get("access_token")
     if not id_token:
         raise OidcLoginError("Keycloak did not return an id_token")
 
@@ -229,6 +230,7 @@ def exchange_code_for_claims(code: str, code_verifier: str) -> dict:
             algorithms=[key.get("alg", "RS256")],
             audience=audience,
             issuer=settings.OIDC_ISSUER,
+            access_token=access_token,
             options={"require_exp": True, "require_iat": True},
         )
     except JWTError as exc:

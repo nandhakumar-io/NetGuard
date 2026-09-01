@@ -58,7 +58,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # dangerouslySetInnerHTML, etc.) cannot read it and mint long-lived sessions.
 # Scoped to the auth path prefix so it isn't sent on every other API call.
 REFRESH_COOKIE_NAME = "netguard_refresh_token"
-_REFRESH_COOKIE_PATH = f"{settings.API_V1_PREFIX}/auth"
+_REFRESH_COOKIE_PATH = settings.API_V1_PREFIX
 
 
 def _set_refresh_cookie(response: Response, raw_refresh: str) -> None:
