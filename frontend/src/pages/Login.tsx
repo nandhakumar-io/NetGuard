@@ -48,7 +48,7 @@ const inputClass =
   "w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 placeholder:font-normal outline-none transition-colors focus:border-brandblue focus:ring-2 focus:ring-brandblue/20 focus:bg-white";
 
 export default function Login() {
-  const { login, verifyMfa, register, loginWithGoogle } = useAuth();
+  const { login, verifyMfa, register, loginWithGoogle, loginWithKeycloak } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<"login" | "register">("login");
@@ -60,6 +60,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleEnabled, setGoogleEnabled] = useState(false);
+  const [keycloakEnabled, setKeycloakEnabled] = useState(false);
   const [tenants, setTenants] = useState<{ id: string; name: string }[]>([]);
   const [tenantId, setTenantId] = useState("");
   // Set once POST /auth/register succeeds -- registration no longer logs
@@ -73,13 +74,13 @@ export default function Login() {
     const ssoError = searchParams.get("sso_error");
     if (ssoError) {
       const messages: Record<string, string> = {
-        sso_not_configured: "Google sign-in is not set up for this deployment.",
+        sso_not_configured: "Sign-in is not set up for this deployment.",
         invalid_or_expired_state: "That sign-in link expired. Please try again.",
-        google_login_failed: "Google sign-in failed. Please try again.",
+        google_login_failed: "Sign-in failed. Please try again.",
         account_disabled: "This account has been disabled. Contact your administrator.",
-        access_denied: "Google sign-in was cancelled.",
+        access_denied: "Sign-in was cancelled.",
       };
-      setError(messages[ssoError] || "Google sign-in failed. Please try again.");
+      setError(messages[ssoError] || "Sign-in failed. Please try again.");
     }
   }, [searchParams]);
 
@@ -89,8 +90,14 @@ export default function Login() {
   useEffect(() => {
     api
       .get("/sso/providers")
-      .then((res) => setGoogleEnabled(!!res.data?.google))
-      .catch(() => setGoogleEnabled(false));
+      .then((res) => {
+        setGoogleEnabled(!!res.data?.google);
+        setKeycloakEnabled(!!res.data?.keycloak);
+      })
+      .catch(() => {
+        setGoogleEnabled(false);
+        setKeycloakEnabled(false);
+      });
   }, []);
 
   // Fetch active tenant list for the register dropdown.
@@ -377,21 +384,34 @@ export default function Login() {
               </button>
             </form>
 
-            {mode === "login" && googleEnabled && (
+            {mode === "login" && (googleEnabled || keycloakEnabled) && (
               <>
                 <div className="flex items-center gap-3 my-5">
                   <div className="h-px bg-slate-200 flex-1" />
                   <span className="text-xs text-slate-400 font-medium">OR</span>
                   <div className="h-px bg-slate-200 flex-1" />
                 </div>
-                <button
-                  type="button"
-                  onClick={loginWithGoogle}
-                  className="w-full flex items-center justify-center gap-2.5 border border-slate-200 rounded-lg px-4 py-3 text-[15px] font-semibold text-slate-700 hover:bg-slate-50 transition"
-                >
-                  <GoogleIcon />
-                  Sign in with Google
-                </button>
+                <div className="space-y-3">
+                  {keycloakEnabled && (
+                    <button
+                      type="button"
+                      onClick={loginWithKeycloak}
+                      className="w-full flex items-center justify-center gap-2.5 bg-slate-800 text-white rounded-lg px-4 py-3 text-[15px] font-semibold hover:bg-slate-900 transition"
+                    >
+                      Sign In with SSO
+                    </button>
+                  )}
+                  {googleEnabled && (
+                    <button
+                      type="button"
+                      onClick={loginWithGoogle}
+                      className="w-full flex items-center justify-center gap-2.5 border border-slate-200 rounded-lg px-4 py-3 text-[15px] font-semibold text-slate-700 hover:bg-slate-50 transition"
+                    >
+                      <GoogleIcon />
+                      Sign in with Google
+                    </button>
+                  )}
+                </div>
               </>
             )}
 

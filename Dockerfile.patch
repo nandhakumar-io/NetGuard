@@ -1,0 +1,3 @@
+FROM ghcr.io/nandhakumar-io/netguard-frontend:237
+COPY Login.tsx /app/src/pages/Login.tsx
+COPY auth.tsx /app/src/lib/auth.tsx

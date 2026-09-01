@@ -68,6 +68,8 @@ interface AuthContextValue {
    *  the frontend only needs to kick it off and later read the token
    *  back off the callback URL fragment (handled in App.tsx routing). */
   loginWithGoogle: () => void;
+  /** Redirects the browser to the backend's Keycloak OIDC login endpoint. */
+  loginWithKeycloak: () => void;
   /** Called by the SSO callback route once the backend has redirected
    *  back with #access_token=... in the URL. Same effect as a normal
    *  login/verifyMfa resolving. */
@@ -158,13 +160,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = `${baseURL}/sso/google/login`;
   };
 
+  const loginWithKeycloak = () => {
+    const baseURL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1").replace(/\/$/, "");
+    window.location.href = `${baseURL}/sso/keycloak/login`;
+  };
+
   const completeSsoLogin = async (accessToken: string) => {
     setAccessToken(accessToken);
     await fetchMe();
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, verifyMfa, register, logout, refreshMe: fetchMe, loginWithGoogle, completeSsoLogin }}>
+    <AuthContext.Provider value={{ user, loading, login, verifyMfa, register, logout, refreshMe: fetchMe, loginWithGoogle, loginWithKeycloak, completeSsoLogin }}>
       {children}
     </AuthContext.Provider>
   );
