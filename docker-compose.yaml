@@ -294,11 +294,17 @@ services:
     volumes:
     - netguard_openbaodata:/vault/data
     healthcheck:
+      # OpenBao always starts sealed (HTTP 503) or uninitialized (HTTP 501).
+      # Adding uninitok=true&sealedok=true makes the endpoint return HTTP 200
+      # whenever the process is UP and accepting connections, giving Docker a
+      # proper liveness signal.  Vault-state checks (is it unsealed?) are the
+      # responsibility of the application layer (device-gateway), not the
+      # compose healthcheck.
       test:
       - CMD
       - wget
       - -qO-
-      - http://localhost:8200/v1/sys/health?standbyok=true
+      - http://localhost:8200/v1/sys/health?standbyok=true&uninitok=true&sealedok=true
       interval: 10s
       timeout: 5s
       retries: 10
