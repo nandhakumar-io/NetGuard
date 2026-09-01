@@ -20,12 +20,6 @@ storage "file" {
   path = "/vault/data"
 }
 
-# Disabled: set to true for containerised deployments -- even with IPC_LOCK
-# granted, the kernel's seccomp/AppArmor profile commonly blocks mlock(2)
-# inside a container, causing a hard exit.  Secrets-at-rest protection is
-# provided by the volume encryption of the underlying host storage instead.
-disable_mlock = true
-
 api_addr     = "http://openbao:8200"
 cluster_addr = "http://openbao:8201"
 
