@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -11,6 +11,10 @@ from app.models.change_request import ChangePriority, ChangeRequest, ChangeStatu
 from app.models.device import Device, DeviceVendor
 from app.schemas.device_job import DeviceJobResult
 from app.services import pipeline_service
+from app.services.change_validation_service import (
+    ChangeValidationResult,
+    CombinedDecision,
+)
 from app.services.device_job_service import DeviceJobFailedError
 from app.services.health_monitor import CheckOutcome, MonitoringResult, PollRound
 
@@ -50,6 +54,30 @@ def db_session():
     os.environ.pop("NETGUARD_CRED_TEST_PIPELINE_DEVICE", None)
 
 
+def _pass_validation() -> ChangeValidationResult:
+    """A PASS result from the OPA/Batfish gate in
+    pipeline_service.run_deployment_pipeline -- every pre-existing deploy-
+    path test mocks change_validation_service.validate_change to this so
+    it isolates the specific behavior under test (deploy success/failure,
+    rollback) from OPA/Batfish, which have their own dedicated tests in
+    test_change_validation_service.py and are exercised directly by
+    test_pipeline_final_gate.py.
+    """
+    return ChangeValidationResult(
+        decision=CombinedDecision.PASS,
+        overall_score=10,
+        syntax_passed=True,
+        syntax_errors=[],
+        syntax_warnings=[],
+        opa=None,
+        batfish=None,
+        risk_score=10,
+        risk_classification="Low Risk",
+        blast_radius_devices=0,
+        reasons=[],
+    )
+
+
 def _make_cr(db):
     device = Device(
         hostname="rtr-01",
@@ -76,13 +104,15 @@ def _make_cr(db):
     return cr
 
 
+@patch("app.services.pipeline_service.change_validation_service.validate_change", new_callable=AsyncMock)
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
 @patch("app.services.pipeline_service.device_job_service.submit_job_sync")
-def test_pipeline_success_path(mock_submit, mock_health, mock_notify, db_session):
+def test_pipeline_success_path(mock_submit, mock_health, mock_notify, mock_validate, db_session):
     # Two Gateway job round trips on the happy path: the pre-deploy
     # GET_RUNNING_CONFIG re-validation read, then the DEPLOY_CONFIG push.
     mock_submit.side_effect = [_job_result(output="! current config"), _job_result()]
+    mock_validate.return_value = _pass_validation()
     outcomes = [CheckOutcome("infrastructure", "ping", True, "2 packets received")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=True, rounds=3)
 
@@ -105,11 +135,12 @@ def test_pipeline_success_path(mock_submit, mock_health, mock_notify, db_session
     assert {c.poll_round for c in checks} == {1, 2, 3}
 
 
+@patch("app.services.pipeline_service.change_validation_service.validate_change", new_callable=AsyncMock)
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.health_monitor.run_monitoring_window")
 @patch("app.services.pipeline_service.device_job_service.submit_job_sync")
 def test_pipeline_rolls_back_on_failed_health_check(
-    mock_submit, mock_health, mock_notify, db_session
+    mock_submit, mock_health, mock_notify, mock_validate, db_session
 ):
     # Self-healing rollback re-pushes the pre-flight snapshot's config via
     # a separate ROLLBACK_CONFIG Gateway job -- three Gateway round trips
@@ -120,6 +151,7 @@ def test_pipeline_rolls_back_on_failed_health_check(
     mock_submit.side_effect = [
         _job_result(output="! current config"), _job_result(), _job_result(),
     ]
+    mock_validate.return_value = _pass_validation()
     outcomes = [CheckOutcome("infrastructure", "ping", False, "timeout")]
     mock_health.return_value = _monitoring_result(outcomes, healthy=False, rounds=1)
 
@@ -135,16 +167,56 @@ def test_pipeline_rolls_back_on_failed_health_check(
     assert ops[-1] == "rollback_config"
 
 
+@patch("app.services.pipeline_service.change_validation_service.validate_change", new_callable=AsyncMock)
 @patch("app.services.pipeline_service.notification_service.notify")
 @patch("app.services.pipeline_service.device_job_service.submit_job_sync")
-def test_pipeline_marks_failed_when_deploy_fails(mock_submit, mock_notify, db_session):
+def test_pipeline_marks_failed_when_deploy_fails(mock_submit, mock_notify, mock_validate, db_session):
     # GET_RUNNING_CONFIG re-validation succeeds; the DEPLOY_CONFIG push
     # fails -- device_job_service raises DeviceJobFailedError rather than
     # returning success=False, mirroring what a real rejected/failed
     # Gateway job looks like from the caller's side.
     mock_submit.side_effect = [_job_result(output="! current config"), DeviceJobFailedError("auth failure")]
+    mock_validate.return_value = _pass_validation()
 
     cr = _make_cr(db_session)
     result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")
 
     assert result.status == ChangeStatus.FAILED
+
+
+@patch("app.services.pipeline_service.change_validation_service.validate_change", new_callable=AsyncMock)
+@patch("app.services.pipeline_service.notification_service.notify")
+@patch("app.services.pipeline_service.device_job_service.submit_job_sync")
+def test_pipeline_blocks_deploy_when_opa_batfish_gate_blocks(mock_submit, mock_notify, mock_validate, db_session):
+    """Core safety guarantee (spec Section 17/25): a BLOCK decision from
+    the final OPA/Batfish gate must prevent DEPLOY_CONFIG from ever being
+    submitted -- not just be reflected in a decision object. Only the
+    GET_RUNNING_CONFIG pre-validation read should happen; the deploy call
+    must never occur.
+    """
+    mock_submit.side_effect = [_job_result(output="! current config")]
+    mock_validate.return_value = ChangeValidationResult(
+        decision=CombinedDecision.BLOCK,
+        overall_score=95,
+        syntax_passed=True,
+        syntax_errors=[],
+        syntax_warnings=[],
+        opa=None,
+        batfish=None,
+        risk_score=95,
+        risk_classification="Critical Risk",
+        blast_radius_devices=10,
+        reasons=["OPA policy evaluation denied this change"],
+    )
+
+    cr = _make_cr(db_session)
+    result = pipeline_service.run_deployment_pipeline(db_session, cr, actor_email="admin@netguard.ai")
+
+    assert result.status == ChangeStatus.FAILED
+    # Exactly one Gateway call (the pre-validation config read) -- deploy
+    # must never be submitted after a BLOCK.
+    assert mock_submit.call_count == 1
+    ops = [call.kwargs.get("operation") for call in mock_submit.call_args_list]
+    assert "deploy_config" not in [str(o).lower() for o in ops]
+    from app.schemas.device_job import DeviceOperation
+    assert all(op != DeviceOperation.DEPLOY_CONFIG for op in ops)

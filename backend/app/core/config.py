@@ -112,6 +112,10 @@ class Settings(BaseSettings):
             problems.append("DEVICE_JOB_SIGNING_KEY is still the default placeholder")
         if self.CORS_ALLOWED_ORIGINS.strip() in ("", "*"):
             problems.append("CORS_ALLOWED_ORIGINS is unset or \"*\" -- set it to your real frontend origin(s)")
+        if self.FABRIC_ENABLED and not self.FABRIC_GATEWAY_URL:
+            problems.append("FABRIC_ENABLED=true but FABRIC_GATEWAY_URL is unset")
+        if self.FABRIC_ENABLED and not self.FABRIC_GATEWAY_API_KEY:
+            problems.append("FABRIC_ENABLED=true but FABRIC_GATEWAY_API_KEY is unset")
 
         if problems:
             raise RuntimeError(
@@ -886,6 +890,75 @@ class Settings(BaseSettings):
     OIDC_JWKS_CACHE_SECONDS: int = 3600
     OIDC_DEFAULT_ROLE: str = "network_engineer"
     OIDC_GROUP_ROLE_MAP: str | None = None
+
+    # --- OPA (policy-as-code decision engine) -----------------------------
+    OPA_ENABLED: bool = True
+    OPA_URL: str = "http://opa:8181"
+    OPA_POLICY_PATH: str = "/v1/data/netguard"
+    OPA_TIMEOUT_SECONDS: float = 10.0
+    # Fail-closed: if OPA is unreachable, block rather than silently
+    # allowing every change through unvalidated policy.
+    OPA_FAIL_CLOSED: bool = True
+    OPA_POLICY_DATA_PATH: str | None = None
+
+    # --- Batfish (network behavior / pre-deployment simulation engine) ----
+    BATFISH_ENABLED: bool = True
+    BATFISH_HOST: str = "batfish"
+    BATFISH_PORT: int = 9997
+    BATFISH_SNAPSHOT_NAME_PREFIX: str = "netguard"
+    BATFISH_TIMEOUT_SECONDS: float = 120.0
+    # Fail-open by default: Batfish only covers a subset of vendors and is
+    # a heavier dependency than OPA, so an outage degrades to
+    # syntax+OPA+risk+impact rather than blocking every deployment
+    # outright. High-risk changes still get REVIEW rather than a silent
+    # PASS -- see change_validation_service._combine().
+    BATFISH_FAIL_CLOSED: bool = False
+    BATFISH_SNAPSHOT_RETENTION: int = 5
+
+    # --- Hyperledger Fabric evidence layer -------------------------------
+    # Master switch. False (dev/local without a Fabric network running) is
+    # a safe default: evidence rows are still created in Postgres at every
+    # hook point (change_validation_service, change_requests approve,
+    # pipeline_service, rollback_service), they just stay PENDING and are
+    # never submitted anywhere -- see fabric_service.anchor_evidence.
+    FABRIC_ENABLED: bool = False
+    # Async by design (Section 18/19 of the spec) -- normal API requests
+    # (approve, deploy) never block on ledger confirmation. Kept as its
+    # own flag rather than implied by FABRIC_ENABLED so a future synchronous
+    # mode (e.g. for a single-writer batch/CLI import) doesn't need a new
+    # setting name.
+    FABRIC_ASYNC_ANCHOR: bool = True
+    # When true, a CR whose priority is EMERGENCY or whose
+    # combined_validation_status/risk_classification marks it "critical"
+    # (see pipeline_service._is_critical_change) may not proceed to
+    # deployment/final approval while its validation or approval evidence
+    # is not yet ANCHORED -- Fabric unavailability blocks the change
+    # instead of silently degrading to "evidence pending forever". See
+    # Section 20: FABRIC_UNAVAILABLE must never be treated as VERIFIED.
+    FABRIC_REQUIRED_FOR_CRITICAL_CHANGES: bool = True
+    FABRIC_MAX_RETRIES: int = 5
+    # Base delay for the anchor worker's exponential backoff
+    # (attempt N waits FABRIC_RETRY_BASE_SECONDS * 2**N, capped at
+    # FABRIC_RETRY_MAX_SECONDS) -- see app.tasks.anchor_evidence_task.
+    FABRIC_RETRY_BASE_SECONDS: float = 2.0
+    FABRIC_RETRY_MAX_SECONDS: float = 300.0
+
+    # Base URL of the internal fabric-gateway sidecar (see fabric/gateway/,
+    # a small Node service wrapping @hyperledger/fabric-gateway so the
+    # FastAPI/Celery processes never link the Fabric SDK directly --
+    # Section 4 of the spec). Internal-network-only; never exposed to the
+    # public API or the frontend. No default host on purpose: an unset
+    # FABRIC_GATEWAY_URL with FABRIC_ENABLED=true is a misconfiguration
+    # fabric_service should fail loudly on rather than guessing.
+    FABRIC_GATEWAY_URL: str | None = None
+    FABRIC_GATEWAY_TIMEOUT_SECONDS: float = 15.0
+    # Shared bearer secret between the API/worker processes and the
+    # fabric-gateway sidecar (internal network, but defense in depth --
+    # same rationale as DEVICE_JOB_SIGNING_KEY for the Device Gateway).
+    FABRIC_GATEWAY_API_KEY: str | None = None
+
+    FABRIC_CHANNEL: str = "netguard-audit-channel"
+    FABRIC_CHAINCODE: str = "netguard-evidence"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

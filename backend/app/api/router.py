@@ -22,6 +22,7 @@ from app.api import (
     devices,
     drift,
     escalation_policies,
+    evidence,
     firmware_upgrades,
     flows,
     gitops,
@@ -74,6 +75,8 @@ api_router.include_router(config_management.router)
 api_router.include_router(config_management.snapshot_policy_router)
 api_router.include_router(config_search.router)
 api_router.include_router(change_requests.router)
+api_router.include_router(evidence.router)
+api_router.include_router(evidence.cr_router)
 api_router.include_router(audit.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(deployments.router)

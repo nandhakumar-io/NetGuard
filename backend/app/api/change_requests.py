@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +10,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, get_tenant_scope
 from app.models.alert import Alert
 from app.models.approval_chain import ApprovalStageStatus, ApprovalStageType
+from app.models.blockchain_evidence import AnchorStatus, EvidenceType
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
@@ -20,12 +22,17 @@ from app.schemas.approval_chain import (
     ApprovalStageRead,
 )
 from app.schemas.change_request import (
+    BatfishFindingReport,
+    BatfishValidationReport,
     BlastRadiusPreview,
     ChangeRequestCreate,
     ChangeRequestRead,
+    CombinedValidationReport,
     DeviceImpactPreview,
     ImpactSimulationPreview,
     ImpactSimulationRequest,
+    OpaValidationReport,
+    OpaViolationReport,
     PendingApprovalItem,
     RemovedLinkPreview,
     RiskAnalysisResult,
@@ -34,8 +41,10 @@ from app.schemas.change_request import (
 from app.services import (
     approval_chain_service,
     audit_service,
+    change_validation_service,
     diff_engine,
     event_bus,
+    fabric_service,
     impact_simulation_service,
     maintenance_window_service,
     protocol_manager,
@@ -44,8 +53,11 @@ from app.services import (
     topology_service,
     validation_engine,
 )
+from app.services.opa_service import OpaDecision
 from app.services.pipeline_service import target_device_ids
 from app.tasks import run_deployment_pipeline_task
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/change-requests", tags=["change-requests"])
 
@@ -558,6 +570,178 @@ def get_three_way_diff(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depend
     return ThreeWayDiffResponse(change_request_id=cr.id, **result)
 
 
+def _opa_report(opa) -> OpaValidationReport | None:
+    if opa is None:
+        return None
+    return OpaValidationReport(
+        passed=opa.passed,
+        decision=opa.decision,
+        violations=[
+            OpaViolationReport(policy=v.policy, severity=v.severity, message=v.message, details=v.details)
+            for v in opa.violations
+        ],
+        warnings=opa.warnings,
+        matched_policies=opa.matched_policies,
+        policy_version=opa.policy_version,
+        evaluation_time_ms=opa.evaluation_time_ms,
+        error=opa.error,
+    )
+
+
+def _batfish_report(batfish) -> BatfishValidationReport | None:
+    if batfish is None:
+        return None
+    return BatfishValidationReport(
+        status=batfish.status.value,
+        snapshot_id=batfish.snapshot_id,
+        findings=[
+            BatfishFindingReport(
+                query=f.query, source=f.source, destination=f.destination, protocol=f.protocol, port=f.port,
+                before=f.before, after=f.after, behavior_changed=f.behavior_changed, severity=f.severity,
+                explanation=f.explanation, affected_device=f.affected_device,
+            )
+            for f in batfish.findings
+        ],
+        behavior_changes=batfish.behavior_changes,
+        duration_ms=batfish.duration_ms,
+        batfish_version=batfish.batfish_version,
+        reason=batfish.reason,
+    )
+
+
+def _validation_report(cr_id: uuid.UUID, result) -> CombinedValidationReport:
+    return CombinedValidationReport(
+        change_request_id=cr_id,
+        decision=result.decision,
+        overall_score=result.overall_score,
+        syntax_passed=result.syntax_passed,
+        syntax_errors=result.syntax_errors,
+        syntax_warnings=result.syntax_warnings,
+        opa=_opa_report(result.opa),
+        batfish=_batfish_report(result.batfish),
+        risk_score=result.risk_score,
+        risk_classification=result.risk_classification,
+        blast_radius_devices=result.blast_radius_devices,
+        reasons=result.reasons,
+    )
+
+
+def _persist_validation(db: Session, cr: ChangeRequest, result) -> None:
+    """Writes the orchestrator's result onto the ChangeRequest row (Section
+    12/24) so it survives past this request -- both GET .../validation and
+    the frontend validation panel read these columns rather than re-running
+    validation on every page load."""
+    cr.combined_validation_status = result.decision
+    cr.combined_validation_score = result.overall_score
+    cr.combined_validation_summary = "; ".join(result.reasons) if result.reasons else None
+    if result.opa is not None:
+        cr.policy_validation_status = result.opa.decision
+        cr.policy_validation_result = result.opa.to_dict()
+        cr.policy_violations = [
+            {"policy": v.policy, "severity": v.severity, "message": v.message, "details": v.details}
+            for v in result.opa.violations
+        ]
+        cr.policy_warnings = result.opa.warnings
+        cr.policy_version = result.opa.policy_version
+    if result.batfish is not None:
+        cr.batfish_validation_status = result.batfish.status.value
+        cr.batfish_snapshot_id = result.batfish.snapshot_id
+        cr.batfish_result = result.batfish.to_dict()
+        cr.batfish_findings = [f.to_dict() for f in result.batfish.findings]
+        cr.batfish_behavior_changes = result.batfish.behavior_changes
+    cr.validated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(cr)
+
+
+@router.post("/{cr_id}/validate", response_model=CombinedValidationReport)
+async def run_validation(
+    cr_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant_id=Depends(get_tenant_scope),
+):
+    """Runs the full OPA + Batfish orchestrator (Section 12) on demand --
+    used both for the "Re-run validation" button on the Change Request
+    detail page and for a reviewer wanting a fresh read before acting on
+    approval. Uses the CR's on-file current/proposed config rather than a
+    fresh live device read; the pre-deploy gate in pipeline_service.py is
+    the one that re-validates against a fresh read immediately before a
+    push."""
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
+    device = db.get(Device, cr.device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Target device not found")
+
+    uplink_interfaces = topology_service.uplink_interfaces_for_device(db, device.id)
+    result = await change_validation_service.validate_change(
+        db,
+        device=device,
+        change_request=cr,
+        current_config=cr.current_config,
+        proposed_config=cr.proposed_config,
+        user_context={"id": str(current_user.id), "roles": [current_user.role.value]},
+        uplink_interfaces=uplink_interfaces,
+        mgmt_ip=device.ip_address,
+        actor=current_user.email,
+    )
+    _persist_validation(db, cr, result)
+    event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
+    return _validation_report(cr.id, result)
+
+
+@router.get("/{cr_id}/validation", response_model=CombinedValidationReport)
+def get_validation(cr_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(get_current_user), tenant_id=Depends(get_tenant_scope)):
+    """Returns the most recently persisted validation result for this CR
+    (from the columns POST .../validate or the pipeline_service pre-deploy
+    gate last wrote) without re-running anything. 404s with a clear detail
+    if validation has never been run for this CR yet, rather than
+    returning a report full of nulls that looks like a PASS."""
+    cr = _get_scoped_change_request(db, cr_id, tenant_id)
+    if cr.validated_at is None:
+        raise HTTPException(status_code=404, detail="This change request has not been validated yet")
+
+    opa_report = None
+    if cr.policy_validation_status is not None:
+        opa_report = OpaValidationReport(
+            passed=cr.policy_validation_status != OpaDecision.DENY,
+            decision=cr.policy_validation_status,
+            violations=[OpaViolationReport(**v) for v in (cr.policy_violations or [])],
+            warnings=cr.policy_warnings or [],
+            matched_policies=(cr.policy_validation_result or {}).get("matched_policies", []),
+            policy_version=cr.policy_version,
+            evaluation_time_ms=(cr.policy_validation_result or {}).get("evaluation_time_ms", 0.0),
+            error=(cr.policy_validation_result or {}).get("error"),
+        )
+
+    batfish_report = None
+    if cr.batfish_validation_status is not None:
+        batfish_report = BatfishValidationReport(
+            status=cr.batfish_validation_status,
+            snapshot_id=cr.batfish_snapshot_id,
+            findings=[BatfishFindingReport(**f) for f in (cr.batfish_findings or [])],
+            behavior_changes=cr.batfish_behavior_changes or 0,
+            duration_ms=(cr.batfish_result or {}).get("duration_ms", 0.0),
+            batfish_version=(cr.batfish_result or {}).get("batfish_version"),
+            reason=(cr.batfish_result or {}).get("reason"),
+        )
+
+    return CombinedValidationReport(
+        change_request_id=cr.id,
+        decision=cr.combined_validation_status or "pass",
+        overall_score=cr.combined_validation_score,
+        syntax_passed=True,
+        syntax_errors=[],
+        syntax_warnings=[],
+        opa=opa_report,
+        batfish=batfish_report,
+        risk_score=cr.combined_validation_score,
+        risk_classification=None,
+        blast_radius_devices=cr.batfish_behavior_changes,
+        reasons=(cr.combined_validation_summary or "").split("; ") if cr.combined_validation_summary else [],
+    )
+
+
 # Only DRAFT/PENDING_APPROVAL CRs can be rescored -- once a CR has been
 # approved (or moved beyond), the analysis that was approved must stay
 # exactly what gets deployed; rescoring after that point would silently
@@ -856,11 +1040,59 @@ def approve_change_request(
             detail=f"{reason}: the second approval must come from a different Network Administrator.",
         )
 
+    # Fabric evidence gate (Section 20): a critical change (dual-approval
+    # / emergency) may not finalize approval while its validation
+    # evidence is not yet ANCHORED, when FABRIC_REQUIRED_FOR_CRITICAL_CHANGES
+    # is set. FABRIC_UNAVAILABLE is never silently treated as VERIFIED --
+    # this raises rather than proceeding. Skipped entirely when Fabric is
+    # disabled (dev/local) so this never blocks environments that haven't
+    # opted into the evidence layer.
+    if settings.FABRIC_ENABLED and settings.FABRIC_REQUIRED_FOR_CRITICAL_CHANGES and fabric_service.is_critical_change(cr):
+        validation_evidence = [
+            e for e in fabric_service.get_evidence_for_change_request(db, cr.id)
+            if e.evidence_type == EvidenceType.CHANGE_VALIDATION
+        ]
+        latest = validation_evidence[-1] if validation_evidence else None
+        if latest is None or latest.anchor_status != AnchorStatus.ANCHORED:
+            audit_service.record_event(
+                db, actor=current_user.email, tenant_id=current_user.tenant_id,
+                action="Approval Blocked — Fabric Evidence Not Anchored", result="Blocked",
+                device_hostname=device.hostname if device else None, change_request_id=cr.id,
+                detail=f"anchor_status={latest.anchor_status.value if latest else 'NONE'}",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This critical change's validation evidence has not been anchored to Hyperledger "
+                    "Fabric yet (FABRIC_REQUIRED_FOR_CRITICAL_CHANGES=true). Retry once anchoring "
+                    "completes, or check GET /api/v1/change-requests/{id}/evidence."
+                ),
+            )
+
     cr.status = ChangeStatus.APPROVED
     cr.approved_by = current_user.id
     cr.approved_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(cr)
+
+    try:
+        fabric_service.anchor_evidence(
+            db,
+            evidence_type=EvidenceType.CHANGE_APPROVED,
+            change_request=cr,
+            device=device,
+            actor_subject=current_user.email,
+            previous_evidence=next(
+                (
+                    e for e in reversed(fabric_service.get_evidence_for_change_request(db, cr.id))
+                    if e.evidence_type == EvidenceType.CHANGE_VALIDATION
+                ),
+                None,
+            ),
+            fields={"decision": "APPROVED", "approver_subject": current_user.email},
+        )
+    except Exception:  # noqa: BLE001 -- evidence anchoring is additive, never blocks approval
+        logger.exception("Fabric approval-evidence anchoring failed for change request %s", cr.id)
 
     action = (
         "Approved (Peer Review + Manager Sign-off + Admin Approval chain complete)"
@@ -968,4 +1200,28 @@ def reject_change_request(
         device_hostname=device.hostname if device else None, change_request_id=cr.id,
     )
     event_bus.publish_event("change_request_status_changed", status=cr.status.value, change_request_id=str(cr.id))
+
+    # Section 3/9: best-effort CHANGE_REJECTED evidence anchor -- rejection is
+    # an audit-significant event that closes the change lifecycle, so it
+    # deserves a Fabric record just like CHANGE_APPROVED. Swallowed (never
+    # blocks rejection) per the "evidence is additive" contract (Section 1).
+    try:
+        fabric_service.anchor_evidence(
+            db,
+            evidence_type=EvidenceType.CHANGE_REJECTED,
+            change_request=cr,
+            device=device,
+            actor_subject=current_user.email,
+            previous_evidence=next(
+                (
+                    e for e in reversed(fabric_service.get_evidence_for_change_request(db, cr.id))
+                    if e.evidence_type == EvidenceType.CHANGE_VALIDATION
+                ),
+                None,
+            ),
+            fields={"decision": "REJECTED", "rejector_subject": current_user.email},
+        )
+    except Exception:  # noqa: BLE001 -- evidence anchoring is additive, never blocks rejection
+        logger.exception("Fabric rejection-evidence anchoring failed for change request %s", cr.id)
+
     return _hydrate(db, [cr])[0]

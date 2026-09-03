@@ -22,6 +22,7 @@ call and handled exactly one device (`cr.device_id`). It's now designed to
 be dispatched as Celery tasks (see app.tasks) -- see `run_deployment_pipeline`
 at the bottom, kept as a thin synchronous entry point for tests/CLI use.
 """
+import asyncio
 import datetime
 import logging
 import uuid
@@ -29,6 +30,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.blockchain_evidence import EvidenceType
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.deployment import (
     Deployment,
@@ -41,14 +43,18 @@ from app.models.snapshot import ConfigSnapshot
 from app.schemas.device_job import DeviceOperation
 from app.services import (
     audit_service,
+    change_validation_service,
     credential_service,
     device_job_service,
     event_bus,
+    evidence_service,
+    fabric_service,
     flow_service,
     health_monitor,
     maintenance_window_service,
     notification_service,
     snapshot_service,
+    topology_service,
     validation_engine,
 )
 
@@ -261,6 +267,55 @@ def _log_deployment(db: Session, deployment_id: uuid.UUID, step: str, message: s
 
 
 
+def _latest_validation_evidence(db: Session, cr: ChangeRequest):
+    """Most recent CHANGE_VALIDATION evidence for this CR, if any --
+    used both for the Section 11 pre-deploy hash-integrity gate (above)
+    and to link deployment/verification/rollback evidence back to it via
+    previous_evidence (Section 15's evidence chain: Validated -> ...).
+    Returns None when Fabric evidence was never anchored for this CR
+    (e.g. FABRIC_ENABLED was false at validation time) -- callers must
+    treat that as "no lineage available", not an error."""
+    evidence = [
+        e for e in fabric_service.get_evidence_for_change_request(db, cr.id)
+        if e.evidence_type == EvidenceType.CHANGE_VALIDATION
+    ]
+    return evidence[-1] if evidence else None
+
+
+def _anchor_pipeline_evidence(
+    db: Session,
+    *,
+    evidence_type: EvidenceType,
+    device: Device,
+    cr: ChangeRequest,
+    deployment: Deployment,
+    actor_email: str,
+    previous_evidence=None,
+    configuration_hash: str | None = None,
+    fields: dict,
+):
+    """Shared best-effort anchor call for every deployment/verification/
+    rollback evidence hook below (Sections 12/13/14). Isolated behind a
+    try/except at the call site's own level (not here, mirroring
+    change_validation_service._anchor_validation_evidence) is
+    deliberately NOT done here either -- every call site below wraps
+    this itself so one hook's unexpected failure can be logged with that
+    hook's own context, but a Fabric/evidence-layer error must never be
+    allowed to fail or roll back a deployment it has no authority over
+    (Section 1)."""
+    return fabric_service.anchor_evidence(
+        db,
+        evidence_type=evidence_type,
+        change_request=cr,
+        device=device,
+        actor_subject=actor_email,
+        deployment_id=deployment.id,
+        previous_evidence=previous_evidence,
+        configuration_hash=configuration_hash,
+        fields=fields,
+    )
+
+
 def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UUID, actor_email: str) -> Deployment:
     """Executes the full deploy -> monitor -> (rollback) pipeline for ONE
     device on an already-approved change request. Persists a Deployment
@@ -350,6 +405,23 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
 
     _log_deployment(db, deployment.id, "PRE-FLIGHT", f"Starting deployment pipeline for CR {str(cr.id)[:8]} on {device.hostname}")
+
+    # --- Evidence: DEPLOYMENT_STARTED (Section 8/12) ---
+    # Linked back to this CR's most recent validation evidence (Section
+    # 15's Validated -> Deployed lineage) when one exists. Best-effort:
+    # an evidence-layer failure here must never abort a deployment that
+    # has already been approved (Section 1).
+    validation_evidence = None
+    try:
+        validation_evidence = _latest_validation_evidence(db, cr)
+        _anchor_pipeline_evidence(
+            db, evidence_type=EvidenceType.DEPLOYMENT_STARTED, device=device, cr=cr, deployment=deployment,
+            actor_email=actor_email, previous_evidence=validation_evidence,
+            configuration_hash=evidence_service.hash_config(cr.proposed_config),
+            fields={"deployment_id": str(deployment.id), "device_id": str(device.id)},
+        )
+    except Exception:  # noqa: BLE001 -- evidence anchoring is additive, never blocking (Section 1)
+        logger.exception("Failed to anchor DEPLOYMENT_STARTED evidence for CR %s / deployment %s", cr.id, deployment.id)
 
     # --- 1. Automatic Configuration Snapshot (FR-7) ---
     _log_deployment(db, deployment.id, "SNAPSHOT", "Generating configuration snapshot...")
@@ -469,6 +541,73 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         return deployment
     _log_deployment(db, deployment.id, "VALIDATE", "Validation passed.")
 
+    # --- 2b. Final OPA + Batfish gate (policy + behavioral simulation) ---
+    # Runs on the same fresh inventory_config read as the syntax check
+    # above -- "validation_time != deployment_time" applies just as much
+    # to policy/behavior as it does to syntax, since a change on another
+    # device (or an OPA policy update) may have altered what's now
+    # policy-compliant or behaviorally safe since this CR was approved.
+    # Enforced here in the backend, not merely surfaced in the UI: a
+    # BLOCK from this gate fails the deployment exactly like a syntax
+    # failure above -- the deploy job below is never submitted.
+    _log_deployment(db, deployment.id, "VALIDATE", "Running OPA policy + Batfish behavior simulation before deploy...")
+    try:
+        uplink_interfaces = topology_service.uplink_interfaces_for_device(db, device.id)
+        final_validation = asyncio.run(
+            change_validation_service.validate_change(
+                db,
+                device=device,
+                change_request=cr,
+                current_config=inventory_config,
+                proposed_config=cr.proposed_config,
+                user_context={"id": str(cr.approved_by) if cr.approved_by else None, "roles": ["network_admin"]},
+                uplink_interfaces=uplink_interfaces,
+                mgmt_ip=device.ip_address,
+            )
+        )
+    except Exception:
+        logger.exception("OPA/Batfish final gate raised unexpectedly for CR %s -- treating as REVIEW-blocking failure", cr.id)
+        final_validation = None
+
+    if final_validation is None or final_validation.decision == change_validation_service.CombinedDecision.BLOCK:
+        reason = (
+            "; ".join(final_validation.reasons) if final_validation else "OPA/Batfish gate raised an unexpected error"
+        )
+        deployment.status = DeploymentStatus.FAILED
+        deployment.error_message = f"Pre-deployment policy/behavior gate blocked this change: {reason}"
+        db.commit()
+        _log_deployment(db, deployment.id, "VALIDATE", deployment.error_message, "ERROR")
+        audit_service.record_event(
+            db, actor="system", action="Pre-Deploy OPA/Batfish Gate", result="Blocked",
+            device_hostname=device.hostname, change_request_id=cr.id,
+            detail=reason,
+        )
+        notification_service.notify(
+            "Deployment Blocked",
+            f"{device.hostname}: blocked by pre-deployment policy/behavior gate — {reason}",
+            severity="critical",
+            device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
+        )
+        event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
+        _check_circuit_breaker(db, device)
+        return deployment
+
+    cr.combined_validation_status = final_validation.decision
+    cr.combined_validation_score = final_validation.overall_score
+    cr.policy_validation_status = final_validation.opa.decision if final_validation.opa else None
+    cr.batfish_validation_status = final_validation.batfish.status.value if final_validation.batfish else None
+    cr.validated_at = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+
+    if final_validation.decision == change_validation_service.CombinedDecision.REVIEW:
+        # A REVIEW result at this final gate does not by itself block
+        # deployment -- the change already cleared human approval earlier
+        # in the workflow (see approval_chain_service) -- but it must be
+        # visible on the record, which the commit above already ensures.
+        _log_deployment(db, deployment.id, "VALIDATE", "OPA/Batfish gate returned REVIEW; proceeding (already approved) with findings recorded.")
+    else:
+        _log_deployment(db, deployment.id, "VALIDATE", "OPA policy + Batfish behavior simulation passed.")
+
     # --- 3. Configuration Deployment (FR-8) via the Device Gateway ---
     # This is the mutating operation Section 3/8/9 is centrally about: the
     # worker process must not itself hold network-device connectivity or
@@ -479,6 +618,52 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
     # in-flight case), and was not self-approved, before it ever touches
     # the device. A compromised worker forging this call still can't push
     # an unapproved or self-approved change.
+    # --- 2c. Approved-configuration integrity check (Section 11, mandatory) ---
+    # Compares the hash of the EXACT configuration about to be pushed
+    # (cr.proposed_config, unchanged since approval -- ChangeRequest rows
+    # aren't editable after submission) against the configuration_hash
+    # recorded on this CR's own validation evidence. This guards against
+    # the evidence/approval record being tampered with (or a code path
+    # bug substituting a different config) between approval and deploy --
+    # not against cr.proposed_config itself changing, since there is no
+    # in-place edit path for an approved CR to begin with. Only enforced
+    # when Fabric evidence exists for this CR; skipped (not blocked) when
+    # FABRIC_ENABLED is false, so non-Fabric deployments are unaffected.
+    if settings.FABRIC_ENABLED:
+        try:
+            validation_evidence = [
+                e for e in fabric_service.get_evidence_for_change_request(db, cr.id)
+                if e.evidence_type == EvidenceType.CHANGE_VALIDATION and e.configuration_hash
+            ]
+            approved_hash = validation_evidence[-1].configuration_hash if validation_evidence else None
+            if approved_hash is not None:
+                ok, deployment_hash = fabric_service.check_configuration_integrity(approved_hash, cr.proposed_config)
+                if not ok:
+                    deployment.status = DeploymentStatus.FAILED
+                    deployment.error_message = (
+                        f"Approved configuration hash mismatch (approved={approved_hash}, "
+                        f"deployment={deployment_hash}); deployment blocked."
+                    )
+                    db.commit()
+                    _log_deployment(db, deployment.id, "DEPLOY", deployment.error_message, "ERROR")
+                    audit_service.record_event(
+                        db, actor="system", action="APPROVED_CONFIGURATION_MISMATCH", result="Blocked",
+                        device_hostname=device.hostname, change_request_id=cr.id,
+                        detail=f"approved={approved_hash} deployment={deployment_hash}",
+                    )
+                    notification_service.notify(
+                        "Deployment Blocked",
+                        f"{device.hostname}: approved-configuration integrity check failed — configuration was "
+                        "modified after validation.",
+                        severity="critical",
+                        device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
+                    )
+                    event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
+                    _check_circuit_breaker(db, device)
+                    return deployment
+        except Exception:  # noqa: BLE001 -- integrity check is additive; a service error here must not itself block deployment
+            logger.exception("Fabric configuration-integrity check raised unexpectedly for CR %s", cr.id)
+
     _log_deployment(db, deployment.id, "DEPLOY", "Deploying requested configuration lines...")
 
     try:
@@ -506,6 +691,14 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         db.commit()
         msg = f"Deployment failed over {deploy_protocol}: {deploy_error}"
         _log_deployment(db, deployment.id, "DEPLOY", msg, "ERROR")
+        try:
+            _anchor_pipeline_evidence(
+                db, evidence_type=EvidenceType.DEPLOYMENT_FAILED, device=device, cr=cr, deployment=deployment,
+                actor_email=actor_email, previous_evidence=validation_evidence,
+                fields={"deployment_id": str(deployment.id), "error": deploy_error, "protocol": deploy_protocol},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to anchor DEPLOYMENT_FAILED evidence for CR %s / deployment %s", cr.id, deployment.id)
         notification_service.notify(
             "Deployment Failed", f"{device.hostname}: {deploy_error}", severity="critical",
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
@@ -590,12 +783,103 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
             device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
         )
         event_bus.publish_event("deployment_status_changed", deployment_id=str(deployment.id), status=deployment.status.value, device=device.hostname)
+
+        # --- Evidence: DEPLOYMENT_COMPLETED (Section 12) ---
+        deployment_evidence = None
+        try:
+            deployment_evidence = _anchor_pipeline_evidence(
+                db, evidence_type=EvidenceType.DEPLOYMENT_COMPLETED, device=device, cr=cr, deployment=deployment,
+                actor_email=actor_email, previous_evidence=validation_evidence,
+                configuration_hash=evidence_service.hash_config(cr.proposed_config),
+                fields={
+                    "deployment_id": str(deployment.id), "deployment_status": deployment.status.value,
+                    "protocol": deploy_protocol, "validation_evidence_id": getattr(validation_evidence, "evidence_id", None),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to anchor DEPLOYMENT_COMPLETED evidence for CR %s / deployment %s", cr.id, deployment.id)
+
+        # --- Post-deployment verification (Section 13, mandatory) ---
+        # Re-reads the device's actual running config (independent of the
+        # health-check pass above, which only proves reachability/protocol
+        # health, not that the exact approved bytes landed) and compares
+        # its hash against the approved configuration_hash. A MISMATCH
+        # here does not itself trigger a rollback (the deployment already
+        # succeeded and is healthy) but is anchored as a high-severity
+        # POST_DEPLOYMENT_CONFIGURATION_MISMATCH audit event + evidence
+        # record, per spec Section 13, so it's visible even though the
+        # health checks alone didn't catch it.
+        try:
+            post_config_result = device_job_service.submit_job_sync(
+                tenant_id=str(device.tenant_id), device_id=str(device.id),
+                operation=DeviceOperation.GET_RUNNING_CONFIG, params={},
+                requested_by=actor_email, change_request_id=str(cr.id),
+            )
+            actual_config = post_config_result.output
+        except (device_job_service.DeviceJobTimeoutError, device_job_service.DeviceJobFailedError) as exc:
+            actual_config = None
+            logger.warning("Post-deployment verification: could not read live config for %s: %s", device.hostname, exc)
+
+        if actual_config is not None:
+            approved_hash = evidence_service.hash_config(cr.proposed_config)
+            actual_hash = evidence_service.hash_config(actual_config)
+            verify_result = "MATCH" if approved_hash == actual_hash else "MISMATCH"
+            try:
+                _anchor_pipeline_evidence(
+                    db, evidence_type=EvidenceType.POST_DEPLOYMENT_VERIFICATION, device=device, cr=cr,
+                    deployment=deployment, actor_email=actor_email, previous_evidence=deployment_evidence,
+                    configuration_hash=actual_hash,
+                    fields={
+                        "deployment_id": str(deployment.id), "result": verify_result,
+                        "approved_configuration_hash": approved_hash, "actual_configuration_hash": actual_hash,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to anchor POST_DEPLOYMENT_VERIFICATION evidence for CR %s / deployment %s", cr.id, deployment.id)
+
+            if verify_result == "MISMATCH":
+                _log_deployment(
+                    db, deployment.id, "VERIFY",
+                    "POST-DEPLOYMENT CONFIGURATION MISMATCH: live device config does not match the approved/deployed configuration.",
+                    "ERROR",
+                )
+                audit_service.record_event(
+                    db, actor="system", action="POST_DEPLOYMENT_CONFIGURATION_MISMATCH", result="Failed",
+                    device_hostname=device.hostname, change_request_id=cr.id,
+                    detail=f"approved={approved_hash} actual={actual_hash}",
+                )
+                notification_service.notify(
+                    "Post-Deployment Configuration Mismatch",
+                    f"{device.hostname}: live running-config does not match the approved/deployed configuration.",
+                    severity="critical",
+                    device_hostname=device.hostname, change_request_id=cr.id, deployment_id=deployment.id,
+                )
+
         return deployment
 
     # --- 5. Self-Healing Rollback Engine (FR-10) ---
     fail_reasons = "; ".join(o.detail for o in outcomes if not o.passed)
     _log_deployment(db, deployment.id, "VERIFY", f"Verification failed: {fail_reasons}", "ERROR")
     _log_deployment(db, deployment.id, "ROLLBACK", "Health checks failed. Self-healing rollback triggered.", "WARN")
+
+    validation_evidence = None
+    try:
+        validation_evidence = _latest_validation_evidence(db, cr)
+        _anchor_pipeline_evidence(
+            db, evidence_type=EvidenceType.ROLLBACK_STARTED, device=device, cr=cr, deployment=deployment,
+            actor_email="system", previous_evidence=validation_evidence,
+            configuration_hash=evidence_service.hash_config(
+                snapshot_service.decrypt_config(snapshot.running_config_encrypted)
+            ),
+            fields={
+                "original_change_request_id": str(cr.id),
+                "failed_deployment_id": str(deployment.id),
+                "rollback_snapshot_id": str(snapshot.id),
+                "reason": fail_reasons,
+            },
+        )
+    except Exception:  # noqa: BLE001 -- evidence anchoring is additive, never blocks rollback (Section 1)
+        logger.exception("Fabric ROLLBACK_STARTED evidence anchoring failed for change request %s", cr.id)
 
     audit_service.record_event(
         db, actor="system", action="Health Check", result="Failed",
@@ -640,6 +924,26 @@ def run_deployment_for_device(db: Session, cr: ChangeRequest, device_id: uuid.UU
         _log_deployment(db, deployment.id, "ROLLBACK", f"Rollback succeeded via {rollback_protocol}. Device returned to known-good state.", "WARN")
     else:
         _log_deployment(db, deployment.id, "ROLLBACK", f"CRITICAL: Rollback failed! {rollback_error}", "ERROR")
+
+    try:
+        _anchor_pipeline_evidence(
+            db,
+            evidence_type=EvidenceType.ROLLBACK_COMPLETED if rollback_success else EvidenceType.ROLLBACK_FAILED,
+            device=device, cr=cr, deployment=deployment, actor_email="system",
+            previous_evidence=validation_evidence,
+            configuration_hash=evidence_service.hash_config(restore_text),
+            fields={
+                "original_change_request_id": str(cr.id),
+                "failed_deployment_id": str(deployment.id),
+                "rollback_snapshot_id": str(snapshot.id),
+                "rollback_configuration_hash": evidence_service.hash_config(restore_text),
+                "result": "SUCCESS" if rollback_success else "FAILED",
+                "protocol": rollback_protocol,
+                "error": rollback_error,
+            },
+        )
+    except Exception:  # noqa: BLE001 -- evidence anchoring is additive, never blocks rollback (Section 1)
+        logger.exception("Fabric ROLLBACK_COMPLETED/FAILED evidence anchoring failed for change request %s", cr.id)
 
     notification_service.notify(
         "Automatic Rollback Triggered",

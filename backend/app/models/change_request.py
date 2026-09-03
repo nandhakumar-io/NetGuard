@@ -2,6 +2,7 @@ import enum
 import uuid
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -12,7 +13,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.core.database import Base
 
@@ -166,3 +167,26 @@ class ChangeRequest(Base):
     # timer crosses into its warning window, "overdue" fires once when it
     # breaches. NULL until the first reminder is sent.
     sla_last_notified_stage = Column(String, nullable=True)
+
+    # --- OPA / Batfish pre-deployment validation (opa_service.py,
+    # batfish_service.py, change_validation_service.py). Populated by the
+    # orchestrator, never written to directly by API handlers -- see
+    # POST /change-requests/{id}/validate.
+    policy_validation_status = Column(String, nullable=True)  # pass | review | block | unavailable
+    policy_validation_result = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
+    policy_violations = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
+    policy_warnings = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
+    policy_version = Column(String, nullable=True)
+
+    batfish_validation_status = Column(String, nullable=True)  # pass | review | critical | unavailable | unsupported
+    batfish_snapshot_id = Column(String, nullable=True)
+    batfish_result = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
+    batfish_findings = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
+    batfish_behavior_changes = Column(Integer, nullable=True)
+
+    combined_validation_status = Column(String, nullable=True)  # pass | review | block
+    combined_validation_score = Column(Integer, nullable=True)
+    combined_validation_summary = Column(Text, nullable=True)
+
+    validation_engine_version = Column(String, nullable=True)
+    validated_at = Column(DateTime(timezone=True), nullable=True)

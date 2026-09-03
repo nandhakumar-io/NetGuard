@@ -244,3 +244,65 @@ class ValidationReport(BaseModel):
     passed: bool
     errors: list[str]
     warnings: list[str]
+
+
+class OpaViolationReport(BaseModel):
+    policy: str
+    severity: str
+    message: str
+    details: dict = {}
+
+
+class OpaValidationReport(BaseModel):
+    passed: bool
+    decision: str
+    violations: list[OpaViolationReport]
+    warnings: list[str]
+    matched_policies: list[str]
+    policy_version: str | None = None
+    evaluation_time_ms: float
+    error: str | None = None
+
+
+class BatfishFindingReport(BaseModel):
+    query: str
+    source: str
+    destination: str
+    protocol: str | None = None
+    port: int | None = None
+    before: str
+    after: str
+    behavior_changed: bool
+    severity: str
+    explanation: str
+    affected_device: str | None = None
+
+
+class BatfishValidationReport(BaseModel):
+    status: str
+    snapshot_id: str | None = None
+    findings: list[BatfishFindingReport]
+    behavior_changes: int
+    duration_ms: float
+    batfish_version: str | None = None
+    reason: str | None = None
+
+
+class CombinedValidationReport(BaseModel):
+    """Response for GET/POST .../validation -- the full OPA + Batfish +
+    risk + blast-radius breakdown produced by
+    app.services.change_validation_service.validate_change."""
+
+    change_request_id: uuid.UUID
+    decision: str  # "block" | "review" | "pass"
+    overall_score: int | None = None
+    syntax_passed: bool
+    syntax_errors: list[str]
+    syntax_warnings: list[str]
+    opa: OpaValidationReport | None = None
+    batfish: BatfishValidationReport | None = None
+    risk_score: int | None = None
+    risk_classification: str | None = None
+    blast_radius_devices: int | None = None
+    reasons: list[str]
+

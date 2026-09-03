@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from celery import chain, chord
 
 from app.celery_app import celery_app
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.change_request import ChangeRequest, ChangeStatus
 from app.models.config_drift import DriftBaseline
@@ -34,6 +35,10 @@ from app.services import (
     event_bus,
     notification_service,
     pipeline_service,
+)
+from app.services.fabric_gateway_client import (
+    FabricGatewayError,
+    FabricUnconfiguredError,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +87,82 @@ def dispatch_alert_notification_task(
         alert_id=alert_id,
     )
     return "dispatched"
+
+
+@celery_app.task(
+    name="app.tasks.anchor_evidence_task",
+    bind=True,
+    # Fabric-side transport failures (sidecar down, ledger endorsement
+    # timeout, etc) are retried here with the SAME exponential backoff
+    # schedule described on settings.FABRIC_RETRY_BASE_SECONDS /
+    # FABRIC_RETRY_MAX_SECONDS (Section 19/20 of the spec), not Celery's
+    # default retry_backoff -- so FABRIC_MAX_RETRIES is the single source
+    # of truth for "how many attempts" regardless of whether this task is
+    # re-dispatched by Celery's own retry or by a NATS/worker redelivery
+    # calling anchor_evidence_task.delay() again for the same evidence_id.
+    # Either path is safe: fabric_service.submit_pending() is idempotent
+    # on evidence_id (Section 19) and immediately no-ops if the row is
+    # already ANCHORED.
+    acks_late=True,
+)
+def anchor_evidence_task(self, evidence_id: str) -> str:
+    """Celery worker side of fabric_service.anchor_evidence()'s async path
+    (FABRIC_ASYNC_ANCHOR=true, the default). Loads the PENDING/FAILED
+    BlockchainEvidence row and submits it to the fabric-gateway sidecar via
+    fabric_service.submit_pending(), which owns the PENDING -> ANCHORING ->
+    ANCHORED/PENDING state machine and the audit/metrics/NATS side effects.
+
+    A FabricGatewayError (sidecar unreachable, or the sidecar's own 5xx)
+    is treated as transient: the evidence row is left PENDING by
+    submit_pending() and this task retries with exponential backoff
+    (FABRIC_RETRY_BASE_SECONDS * 2**attempt, capped at
+    FABRIC_RETRY_MAX_SECONDS) up to FABRIC_MAX_RETRIES attempts, after
+    which submit_pending() itself marks the row FAILED and this task
+    stops retrying -- evidence is never silently lost (Section 18), it
+    just stops being retried automatically and needs an operator to
+    re-trigger anchoring (POST /evidence/{id}/verify or a manual
+    resubmit) once Fabric is back.
+
+    FabricUnconfiguredError (FABRIC_ENABLED=true but
+    FABRIC_GATEWAY_URL/API_KEY unset) is a deployment misconfiguration,
+    not a transient outage -- it is NOT retried; it surfaces immediately
+    as a task failure so it shows up in Celery/monitoring right away
+    instead of quietly retrying for FABRIC_MAX_RETRIES attempts against a
+    URL that will never work.
+    """
+    from app.models.blockchain_evidence import AnchorStatus, BlockchainEvidence
+    from app.services import fabric_service
+
+    db = SessionLocal()
+    try:
+        record = db.query(BlockchainEvidence).filter(BlockchainEvidence.evidence_id == evidence_id).first()
+        if record is None:
+            logger.error("anchor_evidence_task: evidence_id %s no longer exists", evidence_id)
+            return "evidence_missing"
+        if record.anchor_status == AnchorStatus.ANCHORED:
+            return "already_anchored"  # idempotent no-op (Section 19)
+
+        try:
+            fabric_service.submit_pending(db, record)
+            return "anchored"
+        except FabricUnconfiguredError:
+            logger.error("anchor_evidence_task: FABRIC_ENABLED=true but fabric-gateway is unconfigured")
+            raise
+        except FabricGatewayError as exc:
+            db.refresh(record)
+            if record.anchor_status == AnchorStatus.FAILED:
+                # submit_pending already exhausted FABRIC_MAX_RETRIES and
+                # marked this row FAILED -- stop retrying at the Celery
+                # level too, rather than retrying a row that will just
+                # immediately no-op-fail FABRIC_MAX_RETRIES more times.
+                return "failed_permanently"
+            delay = min(
+                settings.FABRIC_RETRY_BASE_SECONDS * (2 ** self.request.retries),
+                settings.FABRIC_RETRY_MAX_SECONDS,
+            )
+            raise self.retry(exc=exc, countdown=delay, max_retries=settings.FABRIC_MAX_RETRIES)
+    finally:
+        db.close()
 
 
 def _seconds_since(past: datetime | None, now: datetime) -> float | None:
