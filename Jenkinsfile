@@ -299,7 +299,7 @@ pipeline {
                             // itself needs to be synced.  Clean up any stale mount paths a prior
                             // failed run may have left as empty directories so Docker doesn't try
                             // to mount a directory over what should be a file path.
-                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "mkdir -p /opt/NetGuard"'
+                            sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "rm -rf /opt/NetGuard/docker-compose.yaml && mkdir -p /opt/NetGuard"'
                             sh 'scp -o StrictHostKeyChecking=no docker-compose.yaml kenpachi-prod@172.17.1.6:/opt/NetGuard/docker-compose.yaml'
                             sh 'ssh -o StrictHostKeyChecking=no kenpachi-prod@172.17.1.6 "test -f /opt/NetGuard/docker-compose.yaml && echo COMPOSE_OK || (echo COMPOSE_MISSING; exit 1)"'
                         }
