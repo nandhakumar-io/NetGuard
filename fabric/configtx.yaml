@@ -1,0 +1,166 @@
+# configtx.yaml
+#
+# Defines the consortium/orgs and the application channel profile used
+# to generate netguard-audit-channel's genesis block (spec Section 6).
+# Consumed by `configtxgen`, invoked from scripts/bootstrap.sh.
+
+Organizations:
+  - &OrdererOrg
+    Name: OrdererMSP
+    ID: OrdererMSP
+    MSPDir: ../organizations/ordererOrganizations/orderer.netguard.local/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('OrdererMSP.member')"
+      Writers:
+        Type: Signature
+        Rule: "OR('OrdererMSP.member')"
+      Admins:
+        Type: Signature
+        Rule: "OR('OrdererMSP.admin')"
+
+  - &NetGuardOrg
+    Name: NetGuardOrgMSP
+    ID: NetGuardOrgMSP
+    MSPDir: ../organizations/peerOrganizations/netguardorg.netguard.local/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('NetGuardOrgMSP.admin', 'NetGuardOrgMSP.peer', 'NetGuardOrgMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('NetGuardOrgMSP.admin', 'NetGuardOrgMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('NetGuardOrgMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('NetGuardOrgMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.netguardorg.netguard.local
+        Port: 7051
+
+  - &AuditOrg
+    Name: AuditOrgMSP
+    ID: AuditOrgMSP
+    MSPDir: ../organizations/peerOrganizations/auditorg.netguard.local/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('AuditOrgMSP.admin', 'AuditOrgMSP.peer', 'AuditOrgMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('AuditOrgMSP.admin', 'AuditOrgMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('AuditOrgMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('AuditOrgMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.auditorg.netguard.local
+        Port: 9051
+
+Capabilities:
+  Channel: &ChannelCapabilities
+    V2_0: true
+  Orderer: &OrdererCapabilities
+    V2_0: true
+  Application: &ApplicationCapabilities
+    V2_0: true
+
+Application: &ApplicationDefaults
+  Organizations:
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+    # Evidence writes require both orgs to endorse -- an evidence record
+    # anchored by NetGuardOrg alone (or AuditOrg alone) is not on the
+    # ledger. This is what makes AuditOrg's participation meaningful
+    # (Section 5: "demonstrate independent verification/audit
+    # participation") rather than cosmetic; it also gets overridden more
+    # tightly per-chaincode by the endorsement policy set at chaincode
+    # approval time (see scripts/deploy-chaincode.sh).
+    Endorsement:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Endorsement"
+  Capabilities:
+    <<: *ApplicationCapabilities
+
+Orderer: &OrdererDefaults
+  OrdererType: etcdraft
+  Addresses:
+    - orderer.orderer.netguard.local:7050
+  EtcdRaft:
+    Consenters:
+      - Host: orderer.orderer.netguard.local
+        Port: 7050
+        ClientTLSCert: ../organizations/ordererOrganizations/orderer.netguard.local/orderers/orderer.orderer.netguard.local/tls/server.crt
+        ServerTLSCert: ../organizations/ordererOrganizations/orderer.netguard.local/orderers/orderer.orderer.netguard.local/tls/server.crt
+  BatchTimeout: 2s
+  BatchSize:
+    MaxMessageCount: 100
+    AbsoluteMaxBytes: 10 MB
+    PreferredMaxBytes: 2 MB
+  Organizations:
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+    BlockValidation:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+
+Channel: &ChannelDefaults
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+  Capabilities:
+    <<: *ChannelCapabilities
+
+Profiles:
+  NetGuardOrdererGenesis:
+    <<: *ChannelDefaults
+    Orderer:
+      <<: *OrdererDefaults
+      Organizations:
+        - *OrdererOrg
+      Capabilities:
+        <<: *OrdererCapabilities
+    Consortiums:
+      NetGuardConsortium:
+        Organizations:
+          - *NetGuardOrg
+          - *AuditOrg
+
+  NetGuardAuditChannel:
+    <<: *ChannelDefaults
+    Consortium: NetGuardConsortium
+    Application:
+      <<: *ApplicationDefaults
+      Organizations:
+        - *NetGuardOrg
+        - *AuditOrg
+      Capabilities:
+        <<: *ApplicationCapabilities

@@ -1890,3 +1890,60 @@ export interface ImpactSimulationPreview {
   classification: "safe" | "caution" | "danger";
   summary: string;
 }
+
+export interface OpaViolationReport {
+  policy: string;
+  severity: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
+export interface OpaValidationReport {
+  passed: boolean;
+  decision: string;
+  violations: OpaViolationReport[];
+  warnings: string[];
+  matched_policies: string[];
+  policy_version: string | null;
+  evaluation_time_ms: number;
+  error: string | null;
+}
+
+export interface BatfishFindingReport {
+  query: string;
+  source: string;
+  destination: string;
+  protocol: string | null;
+  port: number | null;
+  before: string;
+  after: string;
+  behavior_changed: boolean;
+  severity: string;
+  explanation: string;
+  affected_device: string | null;
+}
+
+export interface BatfishValidationReport {
+  status: string;
+  snapshot_id: string | null;
+  findings: BatfishFindingReport[];
+  behavior_changes: number;
+  duration_ms: number;
+  batfish_version: string | null;
+  reason: string | null;
+}
+
+export interface CombinedValidationReport {
+  change_request_id: string;
+  decision: "block" | "review" | "pass" | string;
+  overall_score: number | null;
+  syntax_passed: boolean;
+  syntax_errors: string[];
+  syntax_warnings: string[];
+  opa: OpaValidationReport | null;
+  batfish: BatfishValidationReport | null;
+  risk_score: number | null;
+  risk_classification: string | null;
+  blast_radius_devices: number | null;
+  reasons: string[];
+}

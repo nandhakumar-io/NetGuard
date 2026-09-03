@@ -1,0 +1,210 @@
+# fabric/network/docker-compose.yaml
+#
+# Local dev topology (spec Section 6): one orderer, one peer per org
+# (NetGuardOrg, AuditOrg), CouchDB state DBs, and the fabric-gateway
+# sidecar. All Fabric images are pinned (not `latest` — Section 6) and
+# attached only to the internal netguard-fabric network; nothing here is
+# published to the host except the gateway sidecar's REST port, which
+# the main docker-compose.yaml's `api`/`worker` services reach over the
+# shared `netguard-internal` network (see Section 27: no Fabric admin
+# endpoints on the public API, least exposure).
+
+networks:
+  netguard-fabric:
+    name: netguard-fabric
+  netguard-internal:
+    external: true
+    name: netguard-internal
+
+volumes:
+  orderer_data:
+  peer0_netguardorg_data:
+  peer0_auditorg_data:
+  couchdb_netguardorg_data:
+  couchdb_auditorg_data:
+
+x-fabric-image: &fabric-version "2.5.9"
+x-couchdb-image: &couchdb-version "3.3.3"
+
+services:
+  orderer.orderer.netguard.local:
+    image: hyperledger/fabric-orderer:2.5.9
+    container_name: orderer.orderer.netguard.local
+    environment:
+      - FABRIC_LOGGING_SPEC=INFO
+      - ORDERER_GENERAL_LISTENADDRESS=0.0.0.0
+      - ORDERER_GENERAL_LISTENPORT=7050
+      - ORDERER_GENERAL_GENESISMETHOD=file
+      - ORDERER_GENERAL_GENESISFILE=/var/hyperledger/orderer/genesis.block
+      - ORDERER_GENERAL_LOCALMSPID=OrdererMSP
+      - ORDERER_GENERAL_LOCALMSPDIR=/var/hyperledger/orderer/msp
+      - ORDERER_GENERAL_TLS_ENABLED=true
+      - ORDERER_GENERAL_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_GENERAL_CLUSTER_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_ADMIN_TLS_ENABLED=true
+      - ORDERER_ADMIN_TLS_CERTIFICATE=/var/hyperledger/orderer/tls/server.crt
+      - ORDERER_ADMIN_TLS_PRIVATEKEY=/var/hyperledger/orderer/tls/server.key
+      - ORDERER_ADMIN_TLS_ROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_ADMIN_TLS_CLIENTROOTCAS=[/var/hyperledger/orderer/tls/ca.crt]
+      - ORDERER_ADMIN_LISTENADDRESS=0.0.0.0:7053
+    working_dir: /root
+    command: orderer
+    volumes:
+      - ../network/channel-artifacts/genesis.block:/var/hyperledger/orderer/genesis.block:ro
+      - ../organizations/ordererOrganizations/orderer.netguard.local/orderers/orderer.orderer.netguard.local/msp:/var/hyperledger/orderer/msp:ro
+      - ../organizations/ordererOrganizations/orderer.netguard.local/orderers/orderer.orderer.netguard.local/tls:/var/hyperledger/orderer/tls:ro
+      - orderer_data:/var/hyperledger/production/orderer
+    networks: [netguard-fabric]
+    # No ports published to the host on purpose (Section 27: not
+    # publicly exposed); only sidecar containers on netguard-fabric talk
+    # to the orderer.
+    healthcheck:
+      test: ["CMD", "sh", "-c", "exit 0"]
+      interval: 15s
+
+  peer0.netguardorg.netguard.local:
+    image: hyperledger/fabric-peer:2.5.9
+    container_name: peer0.netguardorg.netguard.local
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=netguard-fabric
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=true
+      - CORE_PEER_PROFILE_ENABLED=false
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+      - CORE_PEER_ID=peer0.netguardorg.netguard.local
+      - CORE_PEER_ADDRESS=peer0.netguardorg.netguard.local:7051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:7051
+      - CORE_PEER_CHAINCODEADDRESS=peer0.netguardorg.netguard.local:7052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:7052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.netguardorg.netguard.local:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.netguardorg.netguard.local:7051
+      - CORE_PEER_LOCALMSPID=NetGuardOrgMSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb.netguardorg:5984
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_USERNAME=admin
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_PASSWORD_FILE=/run/secrets/couchdb_netguardorg_password
+    working_dir: /root
+    command: peer node start
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../organizations/peerOrganizations/netguardorg.netguard.local/peers/peer0.netguardorg.netguard.local/msp:/etc/hyperledger/fabric/msp:ro
+      - ../organizations/peerOrganizations/netguardorg.netguard.local/peers/peer0.netguardorg.netguard.local/tls:/etc/hyperledger/fabric/tls:ro
+      - peer0_netguardorg_data:/var/hyperledger/production
+    secrets: [couchdb_netguardorg_password]
+    networks: [netguard-fabric]
+    depends_on: [orderer.orderer.netguard.local, couchdb.netguardorg]
+    healthcheck:
+      test: ["CMD", "peer", "node", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  peer0.auditorg.netguard.local:
+    image: hyperledger/fabric-peer:2.5.9
+    container_name: peer0.auditorg.netguard.local
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=netguard-fabric
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=true
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+      - CORE_PEER_ID=peer0.auditorg.netguard.local
+      - CORE_PEER_ADDRESS=peer0.auditorg.netguard.local:9051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:9051
+      - CORE_PEER_CHAINCODEADDRESS=peer0.auditorg.netguard.local:9052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:9052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.auditorg.netguard.local:9051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer0.auditorg.netguard.local:9051
+      - CORE_PEER_LOCALMSPID=AuditOrgMSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+      - CORE_LEDGER_STATE_STATEDATABASE=CouchDB
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS=couchdb.auditorg:5984
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_USERNAME=admin
+      - CORE_LEDGER_STATE_COUCHDBCONFIG_PASSWORD_FILE=/run/secrets/couchdb_auditorg_password
+    working_dir: /root
+    command: peer node start
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ../organizations/peerOrganizations/auditorg.netguard.local/peers/peer0.auditorg.netguard.local/msp:/etc/hyperledger/fabric/msp:ro
+      - ../organizations/peerOrganizations/auditorg.netguard.local/peers/peer0.auditorg.netguard.local/tls:/etc/hyperledger/fabric/tls:ro
+      - peer0_auditorg_data:/var/hyperledger/production
+    secrets: [couchdb_auditorg_password]
+    networks: [netguard-fabric]
+    depends_on: [orderer.orderer.netguard.local, couchdb.auditorg]
+    healthcheck:
+      test: ["CMD", "peer", "node", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  couchdb.netguardorg:
+    image: couchdb:3.3.3
+    container_name: couchdb.netguardorg
+    environment:
+      - COUCHDB_USER=admin
+      - COUCHDB_PASSWORD_FILE=/run/secrets/couchdb_netguardorg_password
+    secrets: [couchdb_netguardorg_password]
+    networks: [netguard-fabric]
+    # Internal only -- no host port published (Section 27).
+
+  couchdb.auditorg:
+    image: couchdb:3.3.3
+    container_name: couchdb.auditorg
+    environment:
+      - COUCHDB_USER=admin
+      - COUCHDB_PASSWORD_FILE=/run/secrets/couchdb_auditorg_password
+    secrets: [couchdb_auditorg_password]
+    networks: [netguard-fabric]
+
+  fabric-gateway:
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    container_name: netguard-fabric-gateway
+    environment:
+      - FABRIC_GATEWAY_LISTEN_PORT=8080
+      - FABRIC_CHANNEL=netguard-audit-channel
+      - FABRIC_CHAINCODE=netguard-evidence
+      - FABRIC_MSP_ID=NetGuardOrgMSP
+      - FABRIC_PEER_ENDPOINT=peer0.netguardorg.netguard.local:7051
+      - FABRIC_PEER_HOST_ALIAS=peer0.netguardorg.netguard.local
+      - FABRIC_API_KEY_FILE=/run/secrets/fabric_gateway_api_key
+      # Cert/key material is read from OpenBao at container start by
+      # gateway/src/loadIdentity.js (Section 26), not baked into the
+      # image or checked into Git. OPENBAO_ADDR/OPENBAO_TOKEN are
+      # injected the same way the `api`/`worker` services already get
+      # their OpenBao access (see docker/docker-compose.yaml `api`
+      # service env), not redefined here.
+      - OPENBAO_ADDR=${OPENBAO_ADDR:-http://openbao:8200}
+      - OPENBAO_FABRIC_IDENTITY_PATH=secret/data/fabric/netguardorg-gateway-identity
+    secrets: [fabric_gateway_api_key]
+    volumes:
+      - ../organizations/peerOrganizations/netguardorg.netguard.local/peers/peer0.netguardorg.netguard.local/tls/ca.crt:/etc/fabric/tls/ca.crt:ro
+    networks: [netguard-fabric, netguard-internal]
+    depends_on: [peer0.netguardorg.netguard.local]
+    # Reachable by the main stack's `api`/`worker` containers via
+    # netguard-internal at http://netguard-fabric-gateway:8080 -- never
+    # published to the host (Section 27).
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/healthz', r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+secrets:
+  couchdb_netguardorg_password:
+    file: ../organizations/secrets/couchdb_netguardorg_password.txt
+  couchdb_auditorg_password:
+    file: ../organizations/secrets/couchdb_auditorg_password.txt
+  fabric_gateway_api_key:
+    file: ../organizations/secrets/fabric_gateway_api_key.txt

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, ConfigTemplate, Device, ImpactSimulationPreview, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain, ThreeWayDiff } from "../lib/types";
+import { BlastRadiusPreview, ChangePriority, ChangeRequest, ChangeStatus, CombinedValidationReport, ConfigTemplate, Device, ImpactSimulationPreview, PendingApprovalItem, TemplateDiffPreviewResponse, ApprovalChain, ThreeWayDiff } from "../lib/types";
 import RiskBadge from "../components/RiskBadge";
 import ImpactSimulationPanel from "../components/ImpactSimulationPanel";
+import ValidationPipelinePanel from "../components/ValidationPipelinePanel";
+import EvidencePanel from "../components/EvidencePanel";
 import ConfigDiff from "../components/ConfigDiff";
 import SideBySideDiff from "../components/SideBySideDiff";
 import { useAuth } from "../lib/auth";
@@ -358,6 +360,51 @@ export default function ChangeRequests() {
       cancelled = true;
     };
   }, [selected?.id]);
+
+  // OPA + Batfish validation pipeline (Section 15) for the CR detail
+  // panel. Loads the last-computed result (GET .../validation, 404 if
+  // never run) and exposes a manual re-run (POST .../validate) so a
+  // reviewer can get a fresh read before acting on approval -- see
+  // ValidationPipelinePanel for rendering.
+  const [selectedValidation, setSelectedValidation] = useState<CombinedValidationReport | null>(null);
+  const [selectedValidationLoading, setSelectedValidationLoading] = useState(false);
+  const [validationRerunning, setValidationRerunning] = useState(false);
+
+  useEffect(() => {
+    if (!selected) {
+      setSelectedValidation(null);
+      return;
+    }
+    let cancelled = false;
+    setSelectedValidationLoading(true);
+    api
+      .get<CombinedValidationReport>(`/change-requests/${selected.id}/validation`)
+      .then((res) => {
+        if (!cancelled) setSelectedValidation(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedValidation(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSelectedValidationLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id]);
+
+  const rerunValidation = async () => {
+    if (!selected) return;
+    setValidationRerunning(true);
+    try {
+      const res = await api.post<CombinedValidationReport>(`/change-requests/${selected.id}/validate`);
+      setSelectedValidation(res.data);
+    } catch {
+      // Leave the last-known result in place; the button stays available to retry.
+    } finally {
+      setValidationRerunning(false);
+    }
+  };
 
   const [availableTemplates, setAvailableTemplates] = useState<ConfigTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -1303,8 +1350,15 @@ export default function ChangeRequests() {
                     )}
                 </div>
               )}
+              <ValidationPipelinePanel
+                report={selectedValidation}
+                loading={selectedValidationLoading}
+                onRerun={rerunValidation}
+                rerunning={validationRerunning}
+              />
               <ImpactSimulationPanel sim={selectedImpactSim} loading={selectedImpactSimLoading} />
               <ThreeWayDiffPanel diff={selectedThreeWayDiff} loading={selectedThreeWayDiffLoading} />
+              <EvidencePanel changeRequestId={selected.id} />
               <div className="space-y-3">
                 {selected.config_diff_summary && (
                   <div>

@@ -1,0 +1,42 @@
+{
+  "policy_version": "2026.09.0",
+  "vlans": {
+    "guest": ["50"],
+    "management": ["10"],
+    "infrastructure": ["20", "30"],
+    "approved_registry": ["1", "10", "20", "30", "40", "50", "60"]
+  },
+  "protected_subnets": {
+    "management": ["10.10.10.0/24", "10.10.10.0 255.255.255.0"]
+  },
+  "routing": {
+    "authorized_default_route_next_hops": ["10.0.0.1", "10.0.0.2"],
+    "critical_networks": ["10.10.10.0", "10.0.0.0"]
+  },
+  "thresholds": {
+    "high_blast_radius_devices": 5
+  },
+  "reachability_checks": [
+    {
+      "name": "guest_to_management",
+      "source": "10.50.0.0/24",
+      "destination": "10.10.0.0/24",
+      "expect_denied": true,
+      "severity": "critical"
+    },
+    {
+      "name": "guest_to_infrastructure",
+      "source": "10.50.0.0/24",
+      "destination": "10.20.0.0/16",
+      "expect_denied": true,
+      "severity": "critical"
+    },
+    {
+      "name": "internet_to_management",
+      "source": "0.0.0.0/0",
+      "destination": "10.10.0.0/24",
+      "expect_denied": true,
+      "severity": "critical"
+    }
+  ]
+}

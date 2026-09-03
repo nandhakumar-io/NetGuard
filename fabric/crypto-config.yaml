@@ -1,0 +1,35 @@
+# crypto-config.yaml
+#
+# Input to `cryptogen generate`, invoked by scripts/bootstrap.sh. Defines
+# the MSP/TLS identities for the dev network's three orgs (spec Section
+# 5/6): the ordering org, NetGuardOrg (submits evidence), and AuditOrg
+# (independent read/verify participant on netguard-audit-channel).
+#
+# This is a development-network topology only (single peer per org, no
+# HSM, no external CA). Section 34's "production considerations" doc
+# section calls out replacing cryptogen with Fabric CA + HSM-backed keys
+# before this ever runs anywhere but a laptop/CI.
+
+OrdererOrgs:
+  - Name: OrdererOrg
+    Domain: orderer.netguard.local
+    EnableNodeOUs: true
+    Specs:
+      - Hostname: orderer
+
+PeerOrgs:
+  - Name: NetGuardOrg
+    Domain: netguardorg.netguard.local
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+    Users:
+      Count: 1
+
+  - Name: AuditOrg
+    Domain: auditorg.netguard.local
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+    Users:
+      Count: 1

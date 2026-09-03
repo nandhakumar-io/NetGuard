@@ -237,9 +237,25 @@ services:
       NETFLOW_LISTENER_ENABLED: 'false'
       SFLOW_LISTENER_ENABLED: 'false'
       TOPOLOGY_SNAPSHOT_ENABLED: 'false'
+      OPA_ENABLED: ${OPA_ENABLED:-true}
+      OPA_URL: http://opa:8181
+      BATFISH_ENABLED: ${BATFISH_ENABLED:-true}
+      BATFISH_HOST: batfish
+      BATFISH_PORT: '9997'
+      # Hyperledger Fabric evidence layer (opt-in; sidecar runs only with --profile fabric)
+      FABRIC_ENABLED: ${FABRIC_ENABLED:-false}
+      FABRIC_GATEWAY_URL: ${FABRIC_GATEWAY_URL:-http://fabric-gateway:9000}
+      FABRIC_GATEWAY_API_KEY: ${FABRIC_GATEWAY_API_KEY:-}
+      FABRIC_CHANNEL: ${FABRIC_CHANNEL:-netguard-audit-channel}
+      FABRIC_CHAINCODE: ${FABRIC_CHAINCODE:-netguard-evidence}
+      FABRIC_MAX_RETRIES: ${FABRIC_MAX_RETRIES:-5}
+      FABRIC_RETRY_BASE_SECONDS: ${FABRIC_RETRY_BASE_SECONDS:-2.0}
+      FABRIC_RETRY_MAX_SECONDS: ${FABRIC_RETRY_MAX_SECONDS:-300.0}
+      FABRIC_REQUIRED_FOR_CRITICAL_CHANGES: ${FABRIC_REQUIRED_FOR_CRITICAL_CHANGES:-true}
     volumes:
     - netguard_backups:/app/data/backups
     - netguard_recordings:/app/data/terminal-recordings
+    - ./opa/data:/app/opa/data:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -250,6 +266,10 @@ services:
       nats:
         condition: service_healthy
       victoriametrics:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      batfish:
         condition: service_healthy
     deploy:
       replicas: ${API_REPLICAS:-3}
@@ -758,6 +778,23 @@ services:
       NATS_URL: nats://${NATS_API_USER:-api}:${NATS_API_PASSWORD}@nats:4222
       VICTORIAMETRICS_URL: http://victoriametrics:8428
       SKIP_MIGRATIONS: 'true'
+      OPA_ENABLED: ${OPA_ENABLED:-true}
+      OPA_URL: http://opa:8181
+      BATFISH_ENABLED: ${BATFISH_ENABLED:-true}
+      BATFISH_HOST: batfish
+      BATFISH_PORT: '9997'
+      # Hyperledger Fabric evidence layer (same settings as api service)
+      FABRIC_ENABLED: ${FABRIC_ENABLED:-false}
+      FABRIC_GATEWAY_URL: ${FABRIC_GATEWAY_URL:-http://fabric-gateway:9000}
+      FABRIC_GATEWAY_API_KEY: ${FABRIC_GATEWAY_API_KEY:-}
+      FABRIC_CHANNEL: ${FABRIC_CHANNEL:-netguard-audit-channel}
+      FABRIC_CHAINCODE: ${FABRIC_CHAINCODE:-netguard-evidence}
+      FABRIC_MAX_RETRIES: ${FABRIC_MAX_RETRIES:-5}
+      FABRIC_RETRY_BASE_SECONDS: ${FABRIC_RETRY_BASE_SECONDS:-2.0}
+      FABRIC_RETRY_MAX_SECONDS: ${FABRIC_RETRY_MAX_SECONDS:-300.0}
+      FABRIC_REQUIRED_FOR_CRITICAL_CHANGES: ${FABRIC_REQUIRED_FOR_CRITICAL_CHANGES:-true}
+    volumes:
+    - ./opa/data:/app/opa/data:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -768,6 +805,10 @@ services:
       nats:
         condition: service_healthy
       victoriametrics:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      batfish:
         condition: service_healthy
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
@@ -853,7 +894,132 @@ services:
     - traefik.http.routers.netguard-frontend.rule=Host(`netguard.notoriousdev.in`)
     - traefik.http.routers.netguard-frontend.priority=1
     - traefik.http.services.netguard-frontend.loadbalancer.server.port=6001
+  # --- OPA: policy-as-code decision engine (opa_service.py). Internal
+  # only -- reachable from api/celery workers on netguard-internal, never
+  # exposed to the public network or bound to a host port.
+  opa:
+    image: openpolicyagent/opa:0.68.0
+    restart: unless-stopped
+    command:
+    - run
+    - --server
+    - --addr=0.0.0.0:8181
+    - --set=decision_logs.console=false
+    - /policies
+    - /data
+    volumes:
+    - ./opa/policies:/policies:ro
+    - ./opa/data:/data/network_policies:ro
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - "wget -qO- --tries=1 http://127.0.0.1:8181/health || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    read_only: true
+    tmpfs:
+    - /tmp
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    networks:
+    - netguard-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  # --- Batfish: network behavior / pre-deployment simulation engine
+  # (batfish_service.py). Internal only, same as opa above.
+  batfish:
+    image: batfish/allinone:2024.10.14
+    restart: unless-stopped
+    volumes:
+    - netguard_batfishdata:/data
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - "wget -qO- --tries=1 http://127.0.0.1:9996/ || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
+    networks:
+    - netguard-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+
+  # --- Hyperledger Fabric Gateway sidecar (Section 3/19/20).
+  # Wraps the Fabric SDK and exposes the evidence REST API that
+  # fabric_gateway_client.py in the backend calls.  Gated behind
+  # `profiles: [fabric]` so a plain `docker compose up` doesn't try to start
+  # a Fabric sidecar that requires TLS certs/FABRIC_GATEWAY_API_KEY to be set.
+  # Enable with:  docker compose --profile fabric up
+  # In mock mode (FABRIC_MOCK_MODE=true, the default) no real Fabric network
+  # is needed -- records live in-process and transaction IDs are synthesized,
+  # letting every evidence feature work locally without a peer/orderer stack.
+  fabric-gateway:
+    build:
+      context: ./fabric/gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles:
+    - fabric
+    environment:
+      # Required in production (FABRIC_MOCK_MODE=false): sidecar startup validation
+      # will refuse to serve if the key is absent or shorter than 32 characters.
+      # In mock mode (default) it is optional but strongly recommended.
+      FABRIC_GATEWAY_API_KEY: ${FABRIC_GATEWAY_API_KEY:-}
+      FABRIC_MOCK_MODE: ${FABRIC_MOCK_MODE:-true}
+      FABRIC_PEER_ENDPOINT: ${FABRIC_PEER_ENDPOINT:-}
+      FABRIC_MSP_ID: ${FABRIC_MSP_ID:-Org1MSP}
+      FABRIC_CHANNEL: ${FABRIC_CHANNEL:-netguard-audit-channel}
+      FABRIC_CHAINCODE: ${FABRIC_CHAINCODE:-netguard-evidence}
+      FABRIC_TLS_CERT_PATH: ${FABRIC_TLS_CERT_PATH:-}
+      FABRIC_CERT_PATH: ${FABRIC_CERT_PATH:-}
+      FABRIC_KEY_PATH: ${FABRIC_KEY_PATH:-}
+      # Never set to true in production — exposes raw error details in HTTP 500s.
+      FABRIC_DEBUG_ERRORS: 'false'
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9000/healthz',timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    read_only: true
+    tmpfs:
+    - /tmp
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    networks:
+    - netguard-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
 volumes:
+  netguard_batfishdata: null
   netguard_pgdata: null
   netguard_natsdata: null
   netguard_vmdata: null
