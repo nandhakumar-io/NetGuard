@@ -38,6 +38,7 @@ pywebpush==2.0.1
 websockets==13.0
 pytest==8.3.3
 pytest-asyncio==0.24.0
+respx==0.23.1
 pysnmp==6.2.5
 pyasn1==0.4.8  # pysnmp 6.2.5 imports pyasn1.compat.octets directly; unpinned pyasn1
                 # can resolve to 0.6.1, a broken PyPI release that shipped without

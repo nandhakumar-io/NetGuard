@@ -2,6 +2,7 @@
 these run without a live Batfish coordinator (see BatfishService._get_session,
 which lazy-imports pybatfish for exactly this reason)."""
 import asyncio
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,11 @@ from app.services.batfish_service import (
     BatfishStatus,
     is_vendor_supported,
 )
+
+sys.modules["pybatfish"] = MagicMock()
+sys.modules["pybatfish.datamodel"] = MagicMock()
+sys.modules["pybatfish.client"] = MagicMock()
+sys.modules["pybatfish.client.session"] = MagicMock()
 
 DEVICE_CISCO = {"id": "dev-1", "hostname": "rtr-01", "vendor": "cisco", "platform": "ios", "role": "access"}
 DEVICE_UNSUPPORTED = {"id": "dev-2", "hostname": "sw-legacy", "vendor": "hp", "platform": "comware", "role": "access"}
@@ -66,7 +72,16 @@ def _fake_session(reachability_by_snapshot: dict[str, int]):
 
 
 def _run_validate(service, device, current_config, proposed_config, related_configs=None):
-    return asyncio.get_event_loop().run_until_complete(
+    # asyncio.run() rather than asyncio.get_event_loop().run_until_complete():
+    # get_event_loop() implicitly depends on there being a usable "current"
+    # event loop for the thread, which is deprecated and increasingly
+    # unreliable -- it raises RuntimeError("There is no current event loop")
+    # whenever nothing has set one up yet (e.g. running this file after
+    # another test module's async fixtures/tests have already run and torn
+    # their own loop down). asyncio.run() creates and cleanly closes a fresh
+    # loop for this call alone, so it behaves the same regardless of what
+    # other test modules ran before this one, in what order.
+    return asyncio.run(
         service.validate_configuration(
             change_request_id="cr-1",
             device=device,
@@ -151,7 +166,8 @@ class TestValidateConfiguration:
             )
             # Direct call to exercise the before/after query path with a
             # custom query list (not just the fixed reachability_checks set).
-            result_bq = asyncio.get_event_loop().run_until_complete(
+            # asyncio.run() -- see _run_validate's comment above for why.
+            result_bq = asyncio.run(
                 service.validate_configuration(
                     change_request_id="cr-2", device=DEVICE_CISCO,
                     current_config="! current\n", proposed_config="! proposed\n",
@@ -176,7 +192,8 @@ class TestValidateConfiguration:
         fake_session = _fake_session({"before": 0, "after": 1})
         with patch("app.services.batfish_service.BatfishService._get_session", return_value=fake_session), \
              patch("app.services.batfish_service.BatfishService._load_network_policies", return_value={"reachability_checks": []}):
-            result = asyncio.get_event_loop().run_until_complete(
+            # asyncio.run() -- see _run_validate's comment above for why.
+            result = asyncio.run(
                 service.validate_configuration(
                     change_request_id="cr-3", device=DEVICE_CISCO,
                     current_config="! current\n", proposed_config="! proposed\n",

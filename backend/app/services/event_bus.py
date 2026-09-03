@@ -151,8 +151,61 @@ class _PublisherLoop:
         except Exception:  # noqa: BLE001 - scheduling failure is still best-effort
             logger.warning("event_bus: could not schedule publish to %s", subject, exc_info=True)
 
+    def reset(self) -> None:
+        """Tear down the background loop/thread and NATS connection so a
+        fresh `publish()` call re-triggers `_ensure_started()` from a clean
+        state, instead of reusing (or endlessly retrying against) a
+        connection from a previous caller.
+
+        Primarily for tests: `publish_event()` is easy to leave unmocked by
+        accident (it has no return value and callers never `await` it), and
+        the first call in a process used to permanently start a daemon
+        thread that retries a real NATS connection forever
+        (`max_reconnect_attempts=-1`) even when nothing is listening for
+        it -- see tests/conftest.py's autouse `_reset_event_bus_publisher`
+        fixture, which calls this after every test module.
+        """
+        loop, thread, nc = self._loop, self._thread, self._nc
+        with self._start_lock:
+            self._loop = None
+            self._thread = None
+            self._nc = None
+            self._js = None
+            self._ready = threading.Event()
+        if loop is not None and loop.is_running():
+
+            async def _drain_and_close() -> None:
+                # Fire-and-forget publishes are scheduled onto this loop via
+                # run_coroutine_threadsafe without anyone waiting on them
+                # (that's the whole point of "best-effort"), so at the
+                # moment reset() is called there can be one legitimately
+                # in flight. Yield back to the loop briefly so any such
+                # task gets a chance to actually run to completion instead
+                # of being torn down mid-flight (which is harmless but
+                # produces noisy "Task was destroyed but it is pending"
+                # warnings on every reset).
+                pending = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+                if pending:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait(pending, timeout=1)
+                if nc is not None:
+                    with contextlib.suppress(Exception):
+                        await nc.close()
+
+            with contextlib.suppress(Exception):
+                asyncio.run_coroutine_threadsafe(_drain_and_close(), loop).result(timeout=2)
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None:
+            thread.join(timeout=2)
+
 
 _publisher = _PublisherLoop()
+
+
+def reset_publisher() -> None:
+    """Module-level helper so callers (tests) don't need to reach into the
+    private `_publisher` singleton directly."""
+    _publisher.reset()
 
 
 def publish_event(event_type: str, *, channel: str = DASHBOARD_CHANNEL, **payload) -> None:
