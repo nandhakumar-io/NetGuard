@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.deps import (
     get_current_user,
     get_tenant_scope,
+    require_opa_authz,
     require_pin_step_up,
     require_roles,
 )
@@ -318,9 +319,15 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), user=Dep
 
     # Same idea for reachability: don't leave a freshly-added device
     # showing UNKNOWN until the next REACHABILITY_POLL_INTERVAL_SECONDS
-    # sweep picks it up.
+    # sweep picks it up. Offloaded to Celery like the SNMP poll above --
+    # this used to call reachability_service.check_device(db, device)
+    # inline, which runs _tcp_probe's up to 4 sequential port timeouts
+    # (~4s) followed by an ICMP fallback (~3s) when a device's mgmt ports
+    # are ACL-filtered rather than actively refused, so the request could
+    # block for 5+ seconds before "Device.create" ever returned.
     try:
-        reachability_service.check_device(db, device)
+        from app.tasks import reachability_task
+        reachability_task.delay(str(device.id))
     except Exception:  # noqa: BLE001 - best-effort, same policy as the SNMP poll above
         pass
 
@@ -795,6 +802,7 @@ def update_device(
     payload: DeviceUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+    _opa: User = Depends(require_opa_authz("device:write")),
 ):
     """Partial update -- e.g. enabling SNMP monitoring on a device that was
     added before its community string / SNMPv3 credentials were set up, or
@@ -889,6 +897,7 @@ def delete_device(
     force: bool = Query(False, description="Also permanently delete this device's change/deployment/config history"),
     db: Session = Depends(get_db),
     current_user: User = Depends(INVENTORY_MANAGER_ROLES),
+    _opa: User = Depends(require_opa_authz("device:write")),
     _pin: User = Depends(require_pin_step_up),
 ):
     """Delete a device and ALL its related records.

@@ -171,7 +171,12 @@ def _generate_pkce_pair() -> tuple[str, str]:
 def build_authorization_url(state: str) -> tuple[str, str]:
     """Returns (authorization_url, code_verifier). Caller is responsible
     for putting code_verifier in the PKCE cookie -- kept out of this
-    function since cookie-setting needs the FastAPI Response object."""
+    function since cookie-setting needs the FastAPI Response object.
+
+    The `roles` scope is requested so Keycloak includes `realm_access.roles`
+    in the id_token -- needed for OIDC_SYNC_ROLES to work. It has no effect
+    on Keycloak realms that don't map it, so safe to request unconditionally.
+    """
     _require_configured()
     doc = _discovery_document()
     verifier, challenge = _generate_pkce_pair()
@@ -179,7 +184,7 @@ def build_authorization_url(state: str) -> tuple[str, str]:
         "client_id": settings.OIDC_CLIENT_ID,
         "redirect_uri": settings.OIDC_REDIRECT_URI,
         "response_type": "code",
-        "scope": "openid email profile",
+        "scope": "openid email profile roles",
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
@@ -239,17 +244,54 @@ def exchange_code_for_claims(code: str, code_verifier: str) -> dict:
     if claims.get("email_verified") is False:
         raise OidcLoginError("Keycloak account email is not verified")
 
+    # Keycloak places client roles in resource_access.<client_id>.roles inside
+    # the ACCESS token, NOT the id_token. Decode it (signature-verified but
+    # without audience check -- the access token audience is typically the
+    # Keycloak API, not the client_id) and merge role claims into the
+    # id_token claims dict so resolve_role_from_claims sees everything.
+    if access_token:
+        try:
+            at_key = _signing_key_for(access_token)
+            at_claims = jwt.decode(
+                access_token,
+                at_key,
+                algorithms=[at_key.get("alg", "RS256")],
+                issuer=settings.OIDC_ISSUER,
+                options={
+                    "verify_aud": False,   # access token audience ≠ client_id
+                    "require_exp": True,
+                },
+            )
+            # Merge resource_access (client roles) into the claims we return
+            if at_claims.get("resource_access"):
+                claims["resource_access"] = at_claims["resource_access"]
+            # Also backfill realm_access if the id_token omitted it
+            if at_claims.get("realm_access") and not claims.get("realm_access"):
+                claims["realm_access"] = at_claims["realm_access"]
+            # Merge groups claim too if present only in access token
+            if at_claims.get("groups") and not claims.get("groups"):
+                claims["groups"] = at_claims["groups"]
+        except JWTError as exc:
+            # Non-fatal: we still have the id_token claims; just log and proceed
+            logger.warning("oidc_service: could not decode access_token for role claims: %s", exc)
+
     return claims
+
 
 
 def resolve_role_from_claims(claims: dict) -> UserRole | None:
     """Maps Keycloak realm/client role or group claims to a NetGuard
-    UserRole via OIDC_GROUP_ROLE_MAP (same '{"claim-value": "role"}' JSON
-    shape as Google's SSO_GROUP_ROLE_MAP). Looks at both `groups` and
-    Keycloak's default `realm_access.roles` claim shapes since which one
-    a given realm emits depends on its client scope mapper configuration
-    -- checking both means this works without requiring the operator to
-    add a custom mapper just to match NetGuard's expectations."""
+    UserRole via OIDC_GROUP_ROLE_MAP.
+
+    Checks THREE locations in the token so this works regardless of how
+    the Keycloak realm is configured — no custom mapper required:
+      1. `groups[]`                              – group-based mappers
+      2. `realm_access.roles[]`                  – realm-level roles
+      3. `resource_access.<client_id>.roles[]`   – CLIENT roles (the role
+         shown as "netguard-api | netguard-admin" in Keycloak's UI)
+
+    The most-privileged matched role wins (precedence order below).
+    """
     if not settings.OIDC_GROUP_ROLE_MAP:
         return None
     try:
@@ -265,7 +307,19 @@ def resolve_role_from_claims(claims: dict) -> UserRole | None:
         UserRole.NOC_ENGINEER,
         UserRole.AUDITOR,
     ]
-    claim_values = set(claims.get("groups") or []) | set((claims.get("realm_access") or {}).get("roles") or [])
+
+    # Collect all role/group claim values from every location Keycloak may use
+    claim_values: set[str] = set()
+    claim_values.update(claims.get("groups") or [])
+    claim_values.update((claims.get("realm_access") or {}).get("roles") or [])
+
+    # Client roles: resource_access.<client_id>.roles
+    # Check both the configured client_id AND any key in resource_access so
+    # this works even when OIDC_CLIENT_ID differs from the mapper's client.
+    resource_access = claims.get("resource_access") or {}
+    for client_key, client_data in resource_access.items():
+        claim_values.update((client_data or {}).get("roles") or [])
+
     matched = {mapping[c] for c in claim_values if c in mapping}
     for role in role_precedence:
         if role.value in matched:
@@ -273,17 +327,27 @@ def resolve_role_from_claims(claims: dict) -> UserRole | None:
     return None
 
 
+
 def find_or_create_user(db: Session, *, claims: dict) -> User:
     """Same match order as sso_service.find_or_create_user: existing
     Keycloak link (sub) first, then existing account by email (link it),
     then create new. provider is always "keycloak" here so a user who
     also has a Google-linked account isn't ambiguous -- see
-    User.sso_provider/sso_subject, which together form the lookup key."""
+    User.sso_provider/sso_subject, which together form the lookup key.
+
+    Role re-sync (OIDC_SYNC_ROLES=True): if enabled, resolve the NetGuard
+    role from the Keycloak claims on *every* login and update User.role if
+    it changed -- this makes Keycloak the live source of truth for coarse
+    role assignment. Disabled by default so existing deployments that rely
+    on admin-managed NetGuard roles aren't silently overwritten until
+    OIDC_GROUP_ROLE_MAP is configured and validated. See config.py.
+    """
     subject = claims["sub"]
     email = claims["email"]
 
     user = db.query(User).filter(User.sso_provider == "keycloak", User.sso_subject == subject).first()
     if user:
+        _maybe_sync_role(db, user, claims)
         return user
 
     user = db.query(User).filter(User.email == email).first()
@@ -292,6 +356,7 @@ def find_or_create_user(db: Session, *, claims: dict) -> User:
         user.sso_subject = subject
         db.commit()
         db.refresh(user)
+        _maybe_sync_role(db, user, claims)
         return user
 
     role = resolve_role_from_claims(claims) or UserRole(settings.OIDC_DEFAULT_ROLE)
@@ -307,3 +372,27 @@ def find_or_create_user(db: Session, *, claims: dict) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+
+def _maybe_sync_role(db: Session, user: User, claims: dict) -> None:
+    """Re-sync User.role from Keycloak claims if OIDC_SYNC_ROLES is enabled.
+
+    Called on every login for existing users (new users already get the role
+    set from claims during provisioning). No-op when OIDC_SYNC_ROLES=False.
+    """
+    if not settings.OIDC_SYNC_ROLES:
+        return
+    new_role = resolve_role_from_claims(claims)
+    if new_role is None:
+        return  # no mapping defined for this user's Keycloak roles -- leave as-is
+    if user.role != new_role:
+        logger.info(
+            "oidc_service: syncing role for user %s: %s -> %s (OIDC_SYNC_ROLES=true)",
+            user.email,
+            user.role.value,
+            new_role.value,
+        )
+        user.role = new_role
+        db.commit()
+        db.refresh(user)
+

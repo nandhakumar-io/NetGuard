@@ -1,13 +1,18 @@
 """Keycloak login endpoints (Section 1).
 
-  GET /sso/keycloak/login    -> 302 to Keycloak's login page, sets a
+  GET  /sso/keycloak/login    -> 302 to Keycloak's login page, sets a
                                  short-lived httpOnly PKCE-verifier cookie
-  GET /sso/keycloak/callback -> Keycloak redirects back with ?code=&state=,
+  GET  /sso/keycloak/callback -> Keycloak redirects back with ?code=&state=,
                                  we verify PKCE + state, exchange the code,
                                  verify the id_token against Keycloak's
                                  JWKS, provision/link a NetGuard user, then
                                  issue NetGuard's own token pair exactly
                                  like local login does.
+  POST /sso/keycloak/logout   -> Keycloak backchannel logout. Called by
+                                 Keycloak when a session is revoked in the
+                                 admin panel or by account self-service.
+                                 Adds the token's jti to the Redis blocklist
+                                 so it stops working immediately.
 
 Deliberately separate from app.api.sso (Google) rather than a shared
 "generic OIDC" router: the two providers are allowed to be enabled
@@ -16,10 +21,11 @@ in different files/routes makes that overlap unambiguous rather than
 something one shared handler has to branch on.
 """
 import logging
+import time
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Cookie, Depends, Query, Request, Response
-from jose import JWTError
+from fastapi import APIRouter, Cookie, Depends, Form, Query, Request, Response
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -27,6 +33,7 @@ from app.core.database import get_db
 from app.core.security import create_sso_state_token, decode_sso_state_token
 from app.services import oidc_service
 from app.services.oidc_service import OidcLoginError, OidcNotConfigured
+from app.services.token_blocklist import revoke_jti
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +155,83 @@ def keycloak_discovery_health():
         return {"configured": True, "reachable": True}
     except OidcLoginError as exc:
         return {"configured": True, "reachable": False, "error": str(exc)}
+
+@router.post("/logout", status_code=204)
+def keycloak_backchannel_logout(
+    logout_token: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Keycloak Backchannel Logout endpoint (OIDC Back-Channel Logout 1.0).
+
+    Keycloak calls this when a session is revoked from the admin panel or
+    by the user signing out of all devices. We verify the logout_token,
+    find the NetGuard user by Keycloak subject (sub), and mark ALL their
+    active RefreshToken rows as revoked. The existing `sid` check in
+    get_current_user() then immediately returns 401 on the next API call.
+
+    Configure in Keycloak:
+      Clients -> netguard-api -> Settings -> Logout settings:
+        Backchannel logout URL: http://localhost:8000/api/v1/sso/keycloak/logout
+        Backchannel logout session required: ON
+    """
+    from fastapi import HTTPException
+    from app.models.refresh_token import RefreshToken
+    from app.models.user import User
+
+    if not settings.OIDC_ISSUER:
+        return
+
+    # 1. Verify logout_token signature
+    try:
+        key = oidc_service._signing_key_for(logout_token)
+        claims = jwt.decode(
+            logout_token,
+            key,
+            algorithms=[key.get("alg", "RS256")],
+            issuer=settings.OIDC_ISSUER,
+            options={"verify_aud": False, "require_exp": True},
+        )
+    except Exception as exc:
+        logger.warning("keycloak_backchannel_logout: invalid logout_token: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid logout_token")
+
+    # 2. Must be a backchannel-logout event
+    events = claims.get("events") or {}
+    if "http://schemas.openid.net/event/backchannel-logout" not in events:
+        logger.warning("keycloak_backchannel_logout: missing event claim")
+        return
+
+    # 3. Find NetGuard user by Keycloak subject
+    sub = claims.get("sub")
+    if not sub:
+        return
+
+    user = db.query(User).filter(
+        User.sso_provider == "keycloak",
+        User.sso_subject == sub,
+    ).first()
+
+    if not user:
+        logger.info("keycloak_backchannel_logout: no user for sub=%s", sub)
+        return
+
+    # 4. Revoke ALL active sessions for this user in the DB.
+    #    get_current_user() checks `session.revoked` on every request,
+    #    so this takes effect immediately on the next API call.
+    revoked_count = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked == False,  # noqa: E712
+        )
+        .update({"revoked": True}, synchronize_session=False)
+    )
+    db.commit()
+
+    logger.info(
+        "keycloak_backchannel_logout: revoked %d session(s) for user=%s sub=%s",
+        revoked_count, user.email, sub,
+    )
+    # 204 No Content = success per OIDC BCL spec
+
+

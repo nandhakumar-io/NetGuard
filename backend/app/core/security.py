@@ -1,5 +1,6 @@
 import hashlib
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -45,7 +46,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def _create_token(subject: str, token_type: str, expires_delta: timedelta, extra_claims: dict | None = None) -> str:
     expire = datetime.now(timezone.utc) + expires_delta
-    payload = {"sub": subject, "type": token_type, "exp": expire}
+    payload = {
+        "sub": subject,
+        "type": token_type,
+        "exp": expire,
+        "jti": str(uuid.uuid4()),  # unique ID for per-token revocation
+    }
     if extra_claims:
         payload.update(extra_claims)
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)

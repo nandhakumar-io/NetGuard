@@ -9,6 +9,7 @@ from app.core.database import get_db
 from app.core.security import decode_access_token, decode_push_action_token
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
+from app.services import token_blocklist
 
 # was:  tokenUrl="auth/login"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
@@ -54,10 +55,20 @@ def get_current_user(
         if session is None or session.revoked:
             raise credentials_exception
 
+    # Per-token revocation via jti blocklist (Redis). Populated by Keycloak
+    # backchannel logout (POST /sso/keycloak/logout) so that revoking a
+    # Keycloak session takes effect on the very next API request, not just
+    # after the access token naturally expires. Fail-open: if Redis is down,
+    # the check is skipped rather than locking everyone out.
+    jti = payload.get("jti")
+    if jti and token_blocklist.is_revoked(jti):
+        raise credentials_exception
+
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
     return user
+
 
 
 def get_push_action_user(alert_id: uuid.UUID, action: str, token: str, db: Session) -> User:
@@ -335,3 +346,49 @@ def check_pin_step_up_ws(pin_token: str | None, user: User) -> bool:
     if not (user.pin_required and user.security_pin_hash):
         return True
     return _valid_pin_step_up(pin_token, user)
+
+
+def require_opa_authz(action: str, get_resource=None):
+    """Dependency factory for OPA API-level authorization (Hybrid Auth – Phase 4).
+
+    Stacks on top of existing `require_roles` / `require_permission` guards --
+    never replaces them. Both must pass for a request to proceed.
+
+    Usage:
+        # Simple action, no resource context needed:
+        @router.delete("/{id}", dependencies=[Depends(require_roles(UserRole.NETWORK_ADMIN)),
+                                              Depends(require_opa_authz("device:write"))])
+
+        # With resource context (OPA uses device_tenant_id for cross-tenant check):
+        def _device_resource(device_id: uuid.UUID, db: Session = Depends(get_db)):
+            device = db.get(Device, device_id)
+            return {"device_id": str(device_id),
+                    "device_tenant_id": str(device.tenant_id) if device else None}
+
+        @router.get("/{id}/terminal",
+                    dependencies=[Depends(require_opa_authz("terminal:open", _device_resource))])
+
+    `get_resource` is an optional callable that receives the same kwargs FastAPI
+    would inject (path params + Depends) and returns a plain dict fed into
+    OPA's `input.resource`. If omitted, resource is {}.
+
+    Fail behaviour mirrors OPA_AUTHZ_FAIL_CLOSED (see authz_service.AuthzService):
+    - fail_closed=False (default): OPA down → allow, existing RBAC guard decides.
+    - fail_closed=True: OPA down → 403.
+    """
+    async def _check(
+        user: User = Depends(get_current_user),
+        resource: dict = Depends(get_resource) if get_resource else Depends(lambda: {}),
+    ) -> User:
+        from app.services.authz_service import authz_service  # local import: avoids cycle
+
+        allowed = await authz_service.check(user=user, action=action, resource=resource)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"OPA policy denied action '{action}' for role '{user.role.value}'",
+            )
+        return user
+
+    return _check
+

@@ -57,7 +57,7 @@ def upgrade() -> None:
             # create_type=False: enum already created by the DO block above;
             # prevents SQLAlchemy from emitting a second CREATE TYPE inside
             # op.create_table.
-            sa.Enum("none", "daily", "weekly", name="oncallrotationtype", create_type=False),
+            postgresql.ENUM("none", "daily", "weekly", name="oncallrotationtype", create_type=False),
             nullable=False,
             server_default="none",
         ),

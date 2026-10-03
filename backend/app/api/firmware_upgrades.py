@@ -17,7 +17,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, require_opa_authz, require_roles
 from app.models.device import Device
 from app.models.firmware_upgrade import FirmwareUpgrade, FirmwareUpgradeStatus
 from app.models.user import User, UserRole
@@ -129,6 +129,7 @@ def create_job(
     payload: FirmwareUpgradeCreate,
     db: Session = Depends(get_db),
     user: User = Depends(FIRMWARE_MANAGER_ROLES),
+    _opa: User = Depends(require_opa_authz("firmware:deploy")),
 ):
     try:
         job = firmware_upgrade_service.create_job(
@@ -159,6 +160,7 @@ def create_batch(
     payload: FirmwareUpgradeBatchCreate,
     db: Session = Depends(get_db),
     user: User = Depends(FIRMWARE_MANAGER_ROLES),
+    _opa: User = Depends(require_opa_authz("firmware:deploy")),
 ):
     if not payload.device_ids:
         raise HTTPException(status_code=400, detail="device_ids must not be empty")

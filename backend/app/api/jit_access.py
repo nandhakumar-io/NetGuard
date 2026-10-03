@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.rbac import PERMISSION_MATRIX
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, require_opa_authz, require_roles
 from app.models.device import Device
 from app.models.jit_elevation import JitElevation, JitElevationStatus
 from app.models.user import User, UserRole
@@ -221,6 +221,7 @@ def approve_jit_access(
     payload: JitDecisionRequest,
     db: Session = Depends(get_db),
     approver: User = Depends(_admin_only),
+    _opa: User = Depends(require_opa_authz("jit:approve")),
 ):
     elevation = _get_or_404(db, elevation_id)
     if elevation.status != JitElevationStatus.PENDING:

@@ -1,5 +1,7 @@
+from pathlib import Path
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 
 # pydantic-settings' env_file="./.env" below only populates the declared
 # fields on the Settings class -- it's a self-contained mechanism and does
@@ -10,6 +12,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # This module is imported first by both the FastAPI process (app.main) and
 # the Celery worker/beat process (app.celery_app), so loading it here covers
 # both rather than just the API process.
+_root_env = Path(__file__).resolve().parents[3] / ".env"
+load_dotenv(dotenv_path=_root_env)
 load_dotenv()
 
 
@@ -173,7 +177,16 @@ class Settings(BaseSettings):
 
     # Event bus (dashboard/topology/alerts/notifications live-update fan-out).
     # Replaces the old Redis pub/sub channels -- see app/services/event_bus.py.
-    NATS_URL: str = "nats://localhost:4222"
+    NATS_URL: str | None = None
+
+    @model_validator(mode="after")
+    def _construct_nats_url(self) -> "Settings":
+        if not self.NATS_URL:
+            if self.NATS_API_USER and self.NATS_API_PASSWORD:
+                self.NATS_URL = f"nats://{self.NATS_API_USER}:{self.NATS_API_PASSWORD}@localhost:4222"
+            else:
+                self.NATS_URL = "nats://localhost:4222"
+        return self
 
     # Section 5 hardening: the `api` account credentials nats-server.conf
     # grants to the app tier (api + all Celery workers). NATS_URL carries
@@ -890,6 +903,12 @@ class Settings(BaseSettings):
     OIDC_JWKS_CACHE_SECONDS: int = 3600
     OIDC_DEFAULT_ROLE: str = "network_engineer"
     OIDC_GROUP_ROLE_MAP: str | None = None
+    # When True, every SSO login re-syncs User.role from Keycloak realm_access
+    # claims via OIDC_GROUP_ROLE_MAP -- making Keycloak the live source of
+    # truth for coarse role assignment. Defaults False so existing deployments
+    # that rely on admin-managed NetGuard roles aren't silently overwritten
+    # until OIDC_GROUP_ROLE_MAP is fully configured and validated.
+    OIDC_SYNC_ROLES: bool = False
 
     # --- OPA (policy-as-code decision engine) -----------------------------
     OPA_ENABLED: bool = True
@@ -900,6 +919,17 @@ class Settings(BaseSettings):
     # allowing every change through unvalidated policy.
     OPA_FAIL_CLOSED: bool = True
     OPA_POLICY_DATA_PATH: str | None = None
+    # --- OPA API-level authorization (separate from config-compliance OPA) --
+    # Policy path for the netguard.authz package (authz.rego). Separate from
+    # OPA_POLICY_PATH which drives config-compliance checks -- different
+    # input shape, different decision semantics (allow/deny a REST call vs.
+    # allow/deny a config push).
+    OPA_AUTHZ_POLICY_PATH: str = "/v1/data/netguard/authz/allow"
+    # Fail-open by default for API authZ: if OPA is down, fall back to the
+    # existing require_roles RBAC check rather than locking everyone out.
+    # Set to True in high-security deployments where a missing OPA decision
+    # should be treated as an explicit deny.
+    OPA_AUTHZ_FAIL_CLOSED: bool = False
 
     # --- Batfish (network behavior / pre-deployment simulation engine) ----
     BATFISH_ENABLED: bool = True
@@ -960,7 +990,7 @@ class Settings(BaseSettings):
     FABRIC_CHANNEL: str = "netguard-audit-channel"
     FABRIC_CHAINCODE: str = "netguard-evidence"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
 
 settings = Settings()

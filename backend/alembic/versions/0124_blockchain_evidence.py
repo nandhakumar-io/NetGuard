@@ -35,11 +35,29 @@ ANCHOR_STATUSES = ("PENDING", "ANCHORING", "ANCHORED", "FAILED", "VERIFIED", "MI
 
 
 def upgrade() -> None:
-    evidence_type_enum = postgresql.ENUM(*EVIDENCE_TYPES, name="evidencetype")
-    anchor_status_enum = postgresql.ENUM(*ANCHOR_STATUSES, name="anchorstatus")
+    evidence_type_enum = postgresql.ENUM(*EVIDENCE_TYPES, name="evidencetype", create_type=False)
+    anchor_status_enum = postgresql.ENUM(*ANCHOR_STATUSES, name="anchorstatus", create_type=False)
     bind = op.get_bind()
-    evidence_type_enum.create(bind, checkfirst=True)
-    anchor_status_enum.create(bind, checkfirst=True)
+    
+    bind.execute(sa.text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'evidencetype') THEN
+                CREATE TYPE evidencetype AS ENUM (
+                    'CHANGE_REQUEST_CREATED', 'CHANGE_VALIDATION', 'OPA_DECISION', 'BATFISH_VALIDATION',
+                    'CHANGE_APPROVED', 'CHANGE_REJECTED', 'DEPLOYMENT_STARTED', 'DEPLOYMENT_COMPLETED',
+                    'DEPLOYMENT_FAILED', 'POST_DEPLOYMENT_VERIFICATION', 'ROLLBACK_STARTED',
+                    'ROLLBACK_COMPLETED', 'ROLLBACK_FAILED', 'CONFIGURATION_BASELINE',
+                    'CONFIGURATION_DRIFT', 'POLICY_VERSION'
+                );
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'anchorstatus') THEN
+                CREATE TYPE anchorstatus AS ENUM (
+                    'PENDING', 'ANCHORING', 'ANCHORED', 'FAILED', 'VERIFIED', 'MISMATCH'
+                );
+            END IF;
+        END$$;
+    """))
 
     op.create_table(
         "blockchain_evidence",

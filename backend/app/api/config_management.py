@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_tenant_id, get_current_user, require_roles
+from app.core.deps import get_current_tenant_id, get_current_user, require_opa_authz, require_roles
 from app.models.device import Device
 from app.models.golden_config import GoldenConfig
 from app.models.interface_alert_config import InterfaceAlertConfig
@@ -463,6 +463,7 @@ def backup_config(
     payload: BackupConfigRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(CONFIG_WRITE_ROLES),
+    _opa: User = Depends(require_opa_authz("config:backup")),
 ):
     """On-demand configuration backup (FR: Backup Config).
 
@@ -525,6 +526,7 @@ def restore_config(
     payload: RestoreConfigRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(CONFIG_WRITE_ROLES),
+    _opa: User = Depends(require_opa_authz("config:push")),
 ):
     """Restore a device directly to a prior backup (FR: Restore Config).
 
@@ -686,6 +688,7 @@ def set_golden_config(
     payload: GoldenConfigSet,
     db: Session = Depends(get_db),
     current_user: User = Depends(CONFIG_WRITE_ROLES),
+    _opa: User = Depends(require_opa_authz("config:golden")),
 ):
     """Sets (or replaces) the device's golden config -- the one
     authoritative, approved baseline used for manual comparison here and
